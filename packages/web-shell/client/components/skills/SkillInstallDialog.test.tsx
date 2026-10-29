@@ -137,6 +137,16 @@ describe('SkillInstallDialog failure diagnostics', () => {
       'GitHub request failed (HTTP 503)',
       'Check the URL or authentication',
     ],
+    [
+      'skill_package_too_large',
+      'Skill package exceeds the allowed size',
+      '32 MiB per file or 64 MiB total',
+    ],
+    [
+      'skill_too_many_files',
+      'Skill package has too many files (max 2000)',
+      'The skill package has too many files',
+    ],
   ])('retains %s details: %s', async (code, detail, hint) => {
     rejectWith(code, detail);
     await renderDialog();

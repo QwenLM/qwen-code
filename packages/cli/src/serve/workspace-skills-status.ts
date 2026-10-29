@@ -114,16 +114,37 @@ export function createWorkspaceSkillsStatusProvider(
   // fallback, so slight staleness between explicit invalidation points is
   // acceptable: the live child re-lists authoritatively once a session exists.
   const managers = new Map<string, WorkspaceSkillManagers>();
-  const provider = ((workspaceCwd: string) =>
-    buildWorkspaceSkillsStatus(
+  // An enumeration that overlaps an invalidation captured pre-invalidation
+  // settings, so it must not install its managers; the next read rebuilds.
+  const epochs = new Map<string, number>();
+  const inFlight = new Map<string, Promise<ServeWorkspaceSkillsStatus>>();
+  const provider = ((workspaceCwd: string) => {
+    const pending = inFlight.get(workspaceCwd);
+    if (pending) return pending;
+    const epoch = epochs.get(workspaceCwd) ?? 0;
+    const promise = buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
-    )) as WorkspaceSkillsStatusProvider & {
+      () => (epochs.get(workspaceCwd) ?? 0) === epoch,
+    ).finally(() => {
+      if (inFlight.get(workspaceCwd) === promise) {
+        inFlight.delete(workspaceCwd);
+      }
+    });
+    inFlight.set(workspaceCwd, promise);
+    return promise;
+  }) as WorkspaceSkillsStatusProvider & {
     snapshot(workspaceCwd: string): Promise<WorkspaceSkillsSnapshot>;
   };
-  provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
+  provider.invalidate = (workspaceCwd) => {
+    epochs.set(workspaceCwd, (epochs.get(workspaceCwd) ?? 0) + 1);
+    managers.delete(workspaceCwd);
+    // An enumeration that started before this invalidation must not answer a
+    // read issued after it; the caller needs its own observation.
+    inFlight.delete(workspaceCwd);
+  };
   provider.snapshot = async (workspaceCwd) => {
     if (options.workspaceTrusted === false)
       throw new Error('Skills snapshots require a trusted Workspace.');
@@ -179,6 +200,7 @@ async function buildWorkspaceSkillsStatus(
   managers: Map<string, WorkspaceSkillManagers>,
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
+  canInstall?: () => boolean,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
@@ -284,7 +306,7 @@ async function buildWorkspaceSkillsStatus(
         }
       }
       cached = { skillManager, extensionManager, extensionSkillStates };
-      managers.set(workspaceCwd, cached);
+      if (!canInstall || canInstall()) managers.set(workspaceCwd, cached);
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager, extensionSkillStates } = cached;

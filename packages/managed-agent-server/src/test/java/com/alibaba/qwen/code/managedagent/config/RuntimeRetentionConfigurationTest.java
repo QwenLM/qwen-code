@@ -32,7 +32,7 @@ class RuntimeRetentionConfigurationTest {
         source.setURL("jdbc:h2:mem:retention-config;MODE=MySQL");
         return new ApplicationContextRunner()
                 .withUserConfiguration(Properties.class, RuntimeRetentionConfiguration.class)
-                .withBean(DataSource.class, () -> source)
+                .withBean("managedAgentDataSource", DataSource.class, () -> source)
                 .withBean(RuntimeBindingRepository.class,
                         () -> new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32])))
                 .withBean(RuntimeSessionRepository.class, () -> new JdbcRuntimeSessionRepository(source))

@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -118,7 +119,7 @@ public class ManagedExtensionRecordStore {
     private final ManagedTaskEventStore taskEvents;
 
     @Autowired
-    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+    public ManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;

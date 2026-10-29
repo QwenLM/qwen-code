@@ -3952,8 +3952,9 @@ export class HostedWorkspaceToolTurn {
             backgroundIllFormed ||
             (backgroundRequested && !backgroundAdmitted)
           ) {
-            validationError =
-              'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+            validationError = this.backgroundShellAdmitted()
+              ? 'Hosted Shell is_background must be a boolean; correct the arguments before retrying.'
+              : 'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
           } else if (
             args['description'] !== undefined &&
             typeof args['description'] !== 'string'
@@ -3969,7 +3970,7 @@ export class HostedWorkspaceToolTurn {
               'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
           }
           if (
-            !backgroundAdmitted &&
+            !this.backgroundShellAdmitted() &&
             this.publication &&
             args['is_background'] !== undefined
           ) {
@@ -3979,7 +3980,7 @@ export class HostedWorkspaceToolTurn {
             hostedShellInputError(call.name, args) ?? validationError;
           input = backgroundAdmitted
             ? { ...args, is_background: true }
-            : this.publication
+            : this.publication && args['is_background'] === undefined
               ? { ...args }
               : { ...args, is_background: false };
         } else if (call.name === 'web_fetch') {

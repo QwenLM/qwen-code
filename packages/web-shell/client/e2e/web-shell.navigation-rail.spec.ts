@@ -31,7 +31,7 @@ test('click opens Home and functional pages while collapse retains the draft @sm
   await page.screenshot({ path: info.outputPath('expanded-dark.png') });
   await page
     .locator(homeColumn)
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .focus();
   await page.keyboard.press('ControlOrMeta+b');
   await expect(
@@ -43,7 +43,7 @@ test('click opens Home and functional pages while collapse retains the draft @sm
   await expect(preview).toBeVisible();
   await expect(preview.getByText('Qwen Code', { exact: true })).toBeVisible();
   await expect(
-    preview.getByRole('button', { name: 'New task', exact: true }),
+    preview.getByRole('button', { name: 'New session', exact: true }),
   ).toBeVisible();
   await expect(
     rail.getByRole('button', { name: 'Expand', exact: true }),
@@ -144,7 +144,7 @@ test('Home hover supports search and dismissal without persisting expansion', as
   await expect(preview).toHaveCount(0);
   await home.hover();
   await expect(preview).toBeVisible();
-  await preview.getByText('Project', { exact: true }).hover();
+  await preview.getByText('Workspaces', { exact: true }).hover();
   await preview
     .getByRole('button', { name: 'Search sessions', exact: true })
     .click();
@@ -309,7 +309,7 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await page.goto('/e2e/navigation-rail-harness.html?default');
   await expect(page.locator(railSelector)).toHaveCount(0);
   await expect(
-    page.getByRole('button', { name: 'New task', exact: true }),
+    page.getByRole('button', { name: 'New session', exact: true }),
   ).toBeVisible();
   await expect.poll(async () => (await sidebar.boundingBox())!.width).toBe(300);
   await page.goto('/e2e/navigation-rail-harness.html?plugin-only');
@@ -352,7 +352,7 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.goto('/e2e/navigation-rail-harness.html?split-only');
   await expect(
-    sidebar.getByRole('button', { name: 'New task', exact: true }),
+    sidebar.getByRole('button', { name: 'New session', exact: true }),
   ).toBeVisible();
   await expect(page.locator(railSelector)).toHaveCount(0);
   await page.setViewportSize({ width: 1000, height: 900 });

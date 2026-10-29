@@ -40,9 +40,9 @@ public final class ResidentWorkspaceRetirementMain {
 
     static void run(String[] args) throws Exception {
         var command = new DefaultApplicationArguments(args).getNonOptionArgs();
-        if (command.size() < 2 || !Set.of("inspect", "begin", "delete-pod").contains(command.getFirst())
-                || command.size() != ("delete-pod".equals(command.getFirst()) ? 3 : 2)) {
-            throw new IllegalArgumentException("Expected inspect|begin <request-json> or delete-pod <request-json> <resourceVersion>.");
+        if (command.size() < 2 || !Set.of("inspect", "begin", "delete-pod", "prepare-reclamation", "reclaim").contains(command.getFirst())
+                || command.size() != (Set.of("delete-pod", "prepare-reclamation").contains(command.getFirst()) ? 3 : 2)) {
+            throw new IllegalArgumentException("Expected inspect|begin|reclaim <request-json> or delete-pod|prepare-reclamation <request-json> <resourceVersion>.");
         }
         var json = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
                 .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
@@ -64,6 +64,12 @@ public final class ResidentWorkspaceRetirementMain {
                 case "inspect" -> store.inspect(request);
                 case "begin" -> store.begin(request);
                 case "delete-pod" -> store.deletePod(request, command.get(2), new KubernetesHttpRuntimeClient(
+                        URI.create(options.getResidentKubernetesApiUrl()), Path.of(options.getResidentKubernetesTokenFile()),
+                        Path.of(options.getResidentKubernetesCaFile())));
+                case "prepare-reclamation" -> store.prepareReclamation(request, command.get(2), new KubernetesHttpRuntimeClient(
+                        URI.create(options.getResidentKubernetesApiUrl()), Path.of(options.getResidentKubernetesTokenFile()),
+                        Path.of(options.getResidentKubernetesCaFile())));
+                case "reclaim" -> store.reclaim(request, new KubernetesHttpRuntimeClient(
                         URI.create(options.getResidentKubernetesApiUrl()), Path.of(options.getResidentKubernetesTokenFile()),
                         Path.of(options.getResidentKubernetesCaFile())));
                 default -> throw new IllegalArgumentException("Unknown maintenance action");

@@ -1,3 +1,8 @@
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
@@ -386,6 +391,8 @@ export function TasksStatusMessage({
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const documentMode = useTranscriptRenderMode() === 'document';
   const actions = useActions();
   const shouldIncludeWorkflows =
@@ -413,6 +420,7 @@ export function TasksStatusMessage({
   const [actionError, setActionError] = useState<string | null>(null);
   const panelIdRef = useRef(`tasks-${Math.random().toString(36).slice(2)}`);
   const refreshInFlightRef = useRef(false);
+  const pausedRef = useRef(false);
   const expectedSessionIdRef = useRef(message.snapshot.sessionId);
   expectedSessionIdRef.current = message.snapshot.sessionId;
   const initialDetailStatusRef = useRef<{
@@ -444,9 +452,17 @@ export function TasksStatusMessage({
   const blockingIds = useMemo(() => computeUserBlockingIds(tasks), [tasks]);
 
   useEffect(() => {
+    if (!available) {
+      pausedRef.current = true;
+      return;
+    }
     if (documentMode || !isOpen) return;
     const refresh = () => {
-      if (refreshInFlightRef.current) return;
+      if (
+        (availability && availability.getSnapshot() !== 'available') ||
+        refreshInFlightRef.current
+      )
+        return;
       refreshInFlightRef.current = true;
       const requestedSessionId = expectedSessionIdRef.current;
       loadTasks()
@@ -462,7 +478,12 @@ export function TasksStatusMessage({
           setRefreshError(false);
         })
         .catch((error: unknown) => {
-          if (expectedSessionIdRef.current !== requestedSessionId) return;
+          if (
+            expectedSessionIdRef.current !== requestedSessionId ||
+            isDaemonUnavailableError(error) ||
+            (availability && availability.getSnapshot() !== 'available')
+          )
+            return;
           if (isSessionDisconnectedError(error)) {
             setRefreshError(false);
             return;
@@ -474,9 +495,13 @@ export function TasksStatusMessage({
           refreshInFlightRef.current = false;
         });
     };
+    if (pausedRef.current) {
+      pausedRef.current = false;
+      refresh();
+    }
     const id = setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [documentMode, isOpen, loadTasks, onTasksChange]);
+  }, [availability, available, documentMode, isOpen, loadTasks, onTasksChange]);
 
   useEffect(() => {
     if (selectedIndex >= 0) return;

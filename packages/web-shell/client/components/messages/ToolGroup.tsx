@@ -1018,6 +1018,7 @@ function areToolLinePropsEqual(
   const b = next.tool;
   return (
     a.callId === b.callId &&
+    a.generatedUiToolCallId === b.generatedUiToolCallId &&
     a.toolName === b.toolName &&
     a.status === b.status &&
     a.subagentSessionReady === b.subagentSessionReady &&
@@ -1048,6 +1049,7 @@ function areSubToolsEqual(
     const b = next[i];
     if (
       a.callId !== b.callId ||
+      a.generatedUiToolCallId !== b.generatedUiToolCallId ||
       a.toolName !== b.toolName ||
       a.status !== b.status ||
       a.subagentSessionReady !== b.subagentSessionReady ||
@@ -1540,7 +1542,11 @@ export const ToolLine = memo(function ToolLine({
       {mcpApp &&
         (!summaryOnly || expanded) &&
         (mcpAppAllowed ? (
-          <McpApp display={mcpApp} />
+          <McpApp
+            display={mcpApp}
+            toolId={tool.generatedUiToolCallId}
+            visible={detailsVisible}
+          />
         ) : (
           <GeneratedUiFallback display={mcpApp} />
         ))}
