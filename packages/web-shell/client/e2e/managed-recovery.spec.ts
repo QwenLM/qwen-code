@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type {
   JavaAgentEvent,
   JavaAgentSession,
+  JavaAgentTranscript,
 } from '../components/managed/java-managed-agent-client';
 
 async function installRecovery(page: Page, running = false) {
@@ -145,7 +146,13 @@ async function installRecovery(page: Page, running = false) {
       });
     if (path.endsWith('/transcript/query'))
       return route.fulfill({
-        json: { items: [], events, lastSequence: 6, hasMore: false },
+        json: {
+          items: [],
+          events,
+          lastSequence: 6,
+          coveredSequence: 6,
+          hasMore: false,
+        } satisfies JavaAgentTranscript,
       });
     if (path.endsWith('/events/stream'))
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
