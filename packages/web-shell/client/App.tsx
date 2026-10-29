@@ -442,6 +442,7 @@ import {
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  WEB_SHELL_LANGUAGES,
   type WebShellLanguage,
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
@@ -1440,7 +1441,7 @@ export interface WebShellProps {
    */
   onThemeResolved?: (theme: WebShellTheme) => void;
   /** UI language for the web-shell. Defaults to `?language=` or browser language. */
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
@@ -18388,8 +18389,9 @@ export function App({
                     }),
                     t('language.usage'),
                     t('language.options'),
-                    '  - en: English',
-                    '  - zh-CN: 中文',
+                    ...WEB_SHELL_LANGUAGES.map(
+                      (l) => `  - ${l}: ${languageLabel(l)}`,
+                    ),
                   ].join('\n'),
                 },
               ]);
@@ -18407,22 +18409,20 @@ export function App({
                       t('language.usage'),
                       '',
                       t('language.options'),
-                      '  - en: English',
-                      '  - zh-CN: 中文',
+                      ...WEB_SHELL_LANGUAGES.map(
+                        (l) => `  - ${l}: ${languageLabel(l)}`,
+                      ),
                     ].join('\n'),
                   },
                 ]);
                 return true;
               }
-              const normalizedArg = languageArg.toLowerCase();
-              const valid = ['en', 'zh', 'zh-cn', 'zh_cn'].includes(
-                normalizedArg,
-              );
-              if (!valid) {
+              const nextLanguage =
+                languageSettingToWebShellLanguage(languageArg);
+              if (nextLanguage === undefined) {
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
               const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the

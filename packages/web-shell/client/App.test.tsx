@@ -27213,6 +27213,38 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('accepts /language ui ru, the locale this PR ships', async () => {
+    // The gate and the /language listings both derive from WEB_SHELL_LANGUAGES:
+    // a hand-rolled valid list missing ru rejects the locale, and a stale
+    // hardcoded listing hides it from the user.
+    const onLanguageChange = vi.fn();
+    const onToast = vi.fn();
+    renderApp({ onLanguageChange, onToast });
+    await flush();
+
+    let accepted: boolean | undefined;
+    await act(async () => {
+      expect(testState.latestChatEditorProps).toBeDefined();
+      accepted = testState.latestChatEditorProps?.onSubmit('/language ui ru');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language ui ru',
+      ),
+    ).toBe(true);
+    // The invalid-language toast is the gate rejecting the locale.
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Invalid language'),
+    );
+    // handleLanguageChange runs on the sendPrompt success path.
+    expect(onLanguageChange).toHaveBeenCalledWith('ru');
+  });
+
   it('refuses /rename --auto without a session', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
