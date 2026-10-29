@@ -354,6 +354,35 @@ describe('classifyRetryError', () => {
     expect(classifyRetryError(err).reason).toBe('empty-body-4xx');
   });
 
+  it('classifies an SDK-shaped bodyless 400 with a stamped request id as retryable', () => {
+    // The OpenAI SDK stamps `x-request-id` onto bodyless errors, which sets
+    // `providerMessage` to the marker text itself rather than a real provider
+    // body. Such an error must still retry (the gateway re-sent a well-formed
+    // request into an empty body); a genuine provider code keeps it fail-fast.
+    const withRequestId = Object.assign(
+      new Error('400 status code (no body)'),
+      {
+        status: 400,
+        requestID: 'req-stamped',
+      },
+    );
+    expectVerdict(withRequestId, EMPTY_BODY_400);
+    expect(classifyRetryError(withRequestId).reason).toBe('empty-body-4xx');
+
+    const withRequestIdAndCode = {
+      status: 400,
+      code: 'invalid_request_error',
+      requestID: 'req-stamped',
+      message: 'bad request (no body)',
+    };
+    expectVerdict(withRequestIdAndCode, {
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      reason: 'client-error',
+      statusCode: 400,
+    });
+  });
+
   it('keeps a 4xx with provider fields retryable-free even if it carries the no-body marker', () => {
     // A genuine client error carries provider fields; the empty-body marker is
     // only diagnostic when there is no provider code/type/message.
@@ -1069,5 +1098,17 @@ describe('toRetryDiagnostics', () => {
         reason: 'transport-error',
       }).kind,
     ).toBe('unknown');
+  });
+
+  it('carries the registered empty-body-4xx reason through diagnostics', () => {
+    expect(RETRY_DIAGNOSTIC_REASONS.has('empty-body-4xx')).toBe(true);
+    expect(
+      toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'empty-body-4xx',
+        statusCode: 400,
+      }).reason,
+    ).toBe('empty-body-4xx');
   });
 });
