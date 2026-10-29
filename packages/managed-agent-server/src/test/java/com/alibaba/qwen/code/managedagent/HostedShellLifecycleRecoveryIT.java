@@ -600,9 +600,7 @@ class HostedShellLifecycleRecoveryIT {
             environment.put("QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST);
             environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
             environment.put("TMPDIR", root.toString());
-            for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH", "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
-                environment.put(name, root.resolve(name + ".json").toString());
-            }
+            environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", root.resolve("QWEN_CODE_TRUSTED_FOLDERS_PATH.json").toString());
             harness = builder.start();
             await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> assertThat(http.send(
                     HttpRequest.newBuilder(harnessUri.resolve("/capabilities")).timeout(Duration.ofSeconds(2))

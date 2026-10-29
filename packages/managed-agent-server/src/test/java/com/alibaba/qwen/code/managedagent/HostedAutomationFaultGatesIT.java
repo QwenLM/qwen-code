@@ -2529,10 +2529,7 @@ class HostedAutomationFaultGatesIT {
                 config.toString(), "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY",
                 "fake-local-key", "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN,
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST, "TMPDIR", temporary.toString()));
-        for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
-            environment.put(name, temporary.resolve(name + ".json").toString());
-        }
+        environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", temporary.resolve("QWEN_CODE_TRUSTED_FOLDERS_PATH.json").toString());
         harness = builder.start();
         waiting().atMost(Duration.ofSeconds(60)).ignoreExceptions().untilAsserted(() -> {
             if (!harness.isAlive()) {

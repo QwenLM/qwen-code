@@ -624,11 +624,7 @@ class HostedMcpStreamGapIT {
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", CAPABILITY,
                 "QWEN_HOSTED_LIFECYCLE_V2_PROFILES", PROFILE,
                 "QWEN_CODE_MODELS_DEV_REFRESH", "off"));
-        for (String key : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH",
-                "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
-            env.put(key, home.resolve(key + ".json").toString());
-        }
+        env.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", home.resolve("QWEN_CODE_TRUSTED_FOLDERS_PATH.json").toString());
         harness = builder.start();
         waitFor(() -> {
             assertThat(harness.isAlive()).as("Harness log: %s",

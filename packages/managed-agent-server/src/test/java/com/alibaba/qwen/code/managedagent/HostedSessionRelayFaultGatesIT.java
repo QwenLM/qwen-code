@@ -2027,12 +2027,7 @@ class HostedSessionRelayFaultGatesIT {
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
-        for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH",
-                "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
-            environment.put(name,
-                    temporary.resolve(name + ".json").toString());
-        }
+        environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", temporary.resolve("QWEN_CODE_TRUSTED_FOLDERS_PATH.json").toString());
         harness = builder.start();
         waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
             if (!harness.isAlive()) {

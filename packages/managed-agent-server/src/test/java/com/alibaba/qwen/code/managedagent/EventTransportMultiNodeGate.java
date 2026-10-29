@@ -1212,10 +1212,6 @@ class EventTransportMultiNodeGate {
                     "QWEN_SERVER_TOKEN", TOKEN,
                     "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
             environment.put("TMPDIR", temporary.toString());
-            environment.put("QWEN_CODE_SYSTEM_SETTINGS_PATH",
-                    root.resolve("system-settings.json").toString());
-            environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                    root.resolve("system-defaults.json").toString());
             environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH",
                     root.resolve("trusted-folders.json").toString());
             harness = builder.start();

@@ -192,8 +192,6 @@ class HostedHarnessPoolMySqlIT {
                 "OPENAI_MODEL", model, "OPENAI_BASE_URL", "http://127.0.0.1:9/v1", "QWEN_SERVER_TOKEN", TOKEN,
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST, "QWEN_HOSTED_HARNESS_INSTANCE_ID", id,
                 "QWEN_CODE_MODELS_DEV_REFRESH", "off"));
-        environment.put("QWEN_CODE_SYSTEM_SETTINGS_PATH", dir.resolve("system-settings.json").toString());
-        environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", dir.resolve("system-defaults.json").toString());
         Process process = builder.start();
         children.add(process);
         URI[] base = new URI[1];
