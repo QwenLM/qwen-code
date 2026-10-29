@@ -427,6 +427,18 @@ describe('contextLengthError', () => {
       expect(info.promptTokens).toBeUndefined();
     });
 
+    it('does not read a count that follows the wording only in another field', () => {
+      // Joined, the two fields would read "prompt is too long:\n42 ...".
+      const body = JSON.stringify({
+        error: { message: 'prompt is too long:', detail: '42 requests queued' },
+      });
+
+      const info = getContextLengthExceededInfo(body);
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.promptTokens).toBeUndefined();
+    });
+
     it('leaves actualTokens as the reactive path has always read it', () => {
       const info = getContextLengthExceededInfo(
         new Error(

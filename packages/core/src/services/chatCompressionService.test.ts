@@ -3319,6 +3319,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
   let service: ChatCompressionService;
   let mockChat: LlmChat;
   let mockConfig: Config;
+  let capturedContents: Content[] | undefined;
   let capturedPromptTokens: number | undefined;
   let capturedMaxOutputTokens: number | undefined;
   let capturedModel: string | undefined;
@@ -3375,6 +3376,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
   ) {
     const generateText = vi.fn(async (opts: GenerateTextOptions) => {
       const contents = opts.contents as Content[];
+      capturedContents = contents;
       const systemText =
         typeof opts.systemInstruction === 'string'
           ? opts.systemInstruction
@@ -3512,6 +3514,13 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expect(capturedMaxOutputTokens).toBeGreaterThanOrEqual(
       MIN_COMPACTION_OUTPUT_TOKENS,
     );
+    // The reduction keeps 32,000 characters of the typed message.
+    const longestText = Math.max(
+      ...capturedContents!
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.text?.length ?? 0),
+    );
+    expect(longestText).toBeGreaterThanOrEqual(32_000);
     expect(
       capturedPromptTokens! + capturedMaxOutputTokens!,
     ).toBeLessThanOrEqual(WINDOW);
@@ -3871,6 +3880,17 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         if (part.functionCall?.id) calls.add(part.functionCall.id);
         if (part.functionResponse?.id) {
           expect(calls.has(part.functionResponse.id)).toBe(true);
+        }
+      }
+      // ...and every call is answered by the turn after it.
+      const answered = new Set(
+        (contents[index + 1]?.parts ?? []).flatMap((part) =>
+          part.functionResponse?.id ? [part.functionResponse.id] : [],
+        ),
+      );
+      for (const part of entry.parts ?? []) {
+        if (part.functionCall?.id) {
+          expect(answered.has(part.functionCall.id)).toBe(true);
         }
       }
     });

@@ -946,9 +946,11 @@ describe('compactionInputSlimming', () => {
         };
 
         it('keeps the prompt and caps the files when the prompt comes last (ACP)', () => {
-          const parts = slim([...fileBlock, prompt]);
+          // Longer than the attached cap, so only the mark keeps it whole.
+          const longPrompt = markTypedPrompt({ text: 'p'.repeat(5_000) });
+          const parts = slim([...fileBlock, longPrompt]);
 
-          expect(parts[4]).toBe(prompt);
+          expect(parts[4]).toBe(longPrompt);
           expectAttachedCapped(parts, 4);
         });
 
@@ -1786,6 +1788,79 @@ describe('compactionInputSlimming', () => {
       expect(quote).toBe('explain what this does');
     });
 
+    it('counts the omitted assistant and tool messages in the note', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first request' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+        { role: 'user', parts: [{ text: 'second request' }] },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      // Kept: the final model turn. Omitted: 'ok' and the tool round.
+      expect(blockText(condensed[0]!)).toContain(
+        ': 3 assistant and tool messages were omitted',
+      );
+    });
+
+    it('keeps a typed message whole in a kept turn it caps', () => {
+      const steer = markTypedPrompt({ text: 's'.repeat(2_000) });
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'original request' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+        { role: 'user', parts: [{ text: 'second request' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'c1', name: 'read_file', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'c1',
+                name: 'read_file',
+                response: { output: 'o'.repeat(40_000) },
+              },
+            },
+            steer,
+          ],
+        },
+      ];
+
+      const condensed = condenseToUserMessages(history, 20_000)!;
+
+      const lastTurn = condensed.at(-1)!.parts!;
+      expect(lastTurn[1]).toBe(steer);
+      expect(
+        String(lastTurn[0]!.functionResponse!.response!['output']).length,
+      ).toBeLessThan(1_000);
+    });
+
+    it('names attached content by its header parts only, not by lines inside it', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            markTypedPrompt({ text: 'explain this' }),
+            { text: `\n${REFERENCED_FILES_HEADER}` },
+            { text: '\nContent from src/app.ts:\n' },
+            { text: 'line one\nContent from fake.ts:\nline three' },
+            { text: '\n--- End of content ---' },
+          ],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const [quote] = quotesIn(blockText(condensed[0]!));
+      expect(quote).toBe('explain this\n[Attached, not quoted: src/app.ts]');
+    });
+
     it('counts the user turns read by position', () => {
       expect(
         countUnmarkedUserTurns([
@@ -2004,7 +2079,10 @@ describe('compactionInputSlimming', () => {
 
     it('returns undefined when no model turn can start the kept tail', () => {
       expect(
-        condenseToUserMessages([{ role: 'user', parts: [{ text: 'q' }] }], 10),
+        condenseToUserMessages(
+          [{ role: 'user', parts: [{ text: 'q' }] }],
+          100_000,
+        ),
       ).toBeUndefined();
     });
 

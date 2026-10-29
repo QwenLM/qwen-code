@@ -22275,6 +22275,10 @@ describe('Session', () => {
           expect(JSON.stringify(typed)).not.toContain(
             'Content from referenced files',
           );
+          // The file content is sent, just not marked.
+          expect(textParts(firstSentMessage()).join('')).toContain(
+            'export const answer = 42;',
+          );
         } finally {
           readManyFilesSpy.mockRestore();
           await fs.rm(targetDir, { recursive: true, force: true });
