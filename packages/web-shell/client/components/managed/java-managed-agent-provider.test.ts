@@ -1437,6 +1437,37 @@ describe('createJavaManagedAgentProvider', () => {
     );
   });
 
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])(
+    'rejects %s message coverage instead of resuming at the head',
+    async (_label, coverage) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          events: [],
+          items: [],
+          lastSequence: 400,
+          coveredSequence: coverage,
+          hasMore: false,
+        }),
+      );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider.getTranscript('session-1', {
+          clientId: 'client-1',
+          limit: 100,
+        }),
+      ).rejects.toThrow('Invalid message transcript coverage.');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

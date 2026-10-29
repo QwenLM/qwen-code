@@ -14,6 +14,8 @@ UI向更早记录翻页，导出按时间正向遍历；每页Item均按时间�
 
 每次响应在同一个数据库视图读取投影进度及消息内容，包括不加行锁的私有CSI检查。投影可能落后于事件head H；transcript的`lastSequence`返回S，使SSE从S之后继续，覆盖全部未投影事件。若S低于既有replay floor，明确返回可重试的503 `message_projection_pending`，不能跨越已不可读取的事件完成交接。不得把H声称为已包含、读尽完整事件尾部、要求writer停止，或把空投影证明为Session没有历史。只读取选中Turn最新相关生命周期/控制事件，受Item数及字节预算限制。任务、审批、恢复和资源状态仍使用既有接口。读取不新增持久快照、跨实例缓存或writer写入。
 
+Java Provider将覆盖序号缺失、负值或非整数视为transcript读取失败，不以事件head替代未知覆盖位置，也不返回undefined的续传位置使启动循环静默空转。测试响应使用transcript类型检查，防止遗漏该必填字段。
+
 ## WebShell与导出
 
 复用既有`getTranscript`/`loadOlder`路径、MessageList滚动触发、并发排除及前插滚动锚点。Java将返回transcript标记为Item分页历史。当一页覆盖某Item时，替换该页覆盖序号内该Item的投影/原始内容，同时保留更晚流帧，避免聚合正文与流式文本重复。为每个已加载Item记录覆盖序号，过滤稍后到达、已被页面包含的SSE内容帧，不跳过未返回的Item或非内容副作用。同序号Item沿用SQL的UTF-8二进制ID顺序。gap重同步替换当前Item窗口，同时重置历史页状态；既有raw provider保留规则不变。切会话和abort丢弃过期响应。

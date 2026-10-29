@@ -881,6 +881,12 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      if (
+        !Number.isSafeInteger(transcript.coveredSequence) ||
+        transcript.coveredSequence < 0
+      ) {
+        throw new Error('Invalid message transcript coverage.');
+      }
       const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
