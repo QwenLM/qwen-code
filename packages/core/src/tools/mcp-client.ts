@@ -1634,35 +1634,62 @@ async function discoverToolsWithMetadata(
     const listedTools: Array<
       Awaited<ReturnType<Client['listTools']>>['tools'][number]
     > = [];
-    const listedToolNames = new Set<string>();
-    const skippedDuplicateToolNames = new Set<string>();
+    let collidedToolNames: string[] = [];
     let didListTools = false;
-    const listTools = async (params?: { cursor?: string }) => {
-      // Clients without getProtocolEra (tests and the genai adapter) keep
-      // the typed helper. Modern sessions use it only when `tools` is
-      // declared; otherwise the v2 helper returns [] without a wire request.
-      const result =
-        typeof mcpClient.getProtocolEra !== 'function' ||
-        canUseModernTypedHelper(mcpClient, 'tools')
-          ? await mcpClient.listTools(params)
-          : await mcpClient.request(
-              { method: 'tools/list', params: params ?? {} },
-              ListToolsResultSchema,
-            );
-      didListTools = true;
-      // @google/genai rejects the whole conversion when two tools share a
-      // name, which discards every tool of an otherwise usable server
-      // (#15741). Keep the first declaration of each name and drop the rest.
-      const uniqueTools = result.tools.filter((mcpTool) => {
-        if (listedToolNames.has(mcpTool.name)) {
-          skippedDuplicateToolNames.add(mcpTool.name);
-          return false;
+    // Clients without getProtocolEra (tests and the genai adapter) keep the
+    // typed helper. Modern sessions use it only when `tools` is declared;
+    // otherwise the v2 helper returns [] without a wire request.
+    const requestTools = async (params?: { cursor?: string }) =>
+      typeof mcpClient.getProtocolEra !== 'function' ||
+      canUseModernTypedHelper(mcpClient, 'tools')
+        ? await mcpClient.listTools(params)
+        : await mcpClient.request(
+            { method: 'tools/list', params: params ?? {} },
+            ListToolsResultSchema,
+          );
+    // Walk the whole cursor chain inside one call: the duplicate counts have to
+    // span every page, and a retry (which restarts at the first page) must
+    // start from empty bookkeeping. @google/genai is then handed a single
+    // terminal page — its pager terminates by counting yielded tools, so a page
+    // filtered down to nothing would leave it issuing tools/list forever when a
+    // server repeats a cursor.
+    const listTools = async () => {
+      const tools: typeof listedTools = [];
+      const declarationCounts = new Map<string, number>();
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const result = await requestTools(
+          cursor === undefined ? undefined : { cursor },
+        );
+        for (const tool of result.tools) {
+          tools.push(tool);
+          declarationCounts.set(
+            tool.name,
+            (declarationCounts.get(tool.name) ?? 0) + 1,
+          );
         }
-        listedToolNames.add(mcpTool.name);
-        return true;
-      });
-      listedTools.push(...uniqueTools);
-      return { ...result, tools: uniqueTools };
+        const next = result.nextCursor;
+        // A server that ignores the cursor would otherwise loop here forever.
+        if (next !== undefined && seenCursors.has(next)) break;
+        if (next !== undefined) seenCursors.add(next);
+        cursor = next;
+      } while (cursor !== undefined);
+      didListTools = true;
+      listedTools.length = 0;
+      listedTools.push(...tools);
+      collidedToolNames = [...declarationCounts]
+        .filter(([, count]) => count > 1)
+        .map(
+          ([name, count]) => `'${name}' (${count} conflicting declarations)`,
+        );
+      // A duplicated name has no single command behind `tools/call`, so no
+      // declaration of it can be advertised safely: drop the whole group
+      // rather than electing an arbitrary one (#15741).
+      return {
+        tools: tools.filter((tool) => declarationCounts.get(tool.name) === 1),
+        nextCursor: undefined,
+      };
     };
     // @google/genai still types this structural adapter against SDK v1. Its
     // discovery path only calls listTools(); execution stays on the v2 client.
@@ -1682,14 +1709,11 @@ async function discoverToolsWithMetadata(
       return { tools: [], hadVisibilityFilteredTools: false };
     }
 
-    if (skippedDuplicateToolNames.size > 0) {
-      const names = [...skippedDuplicateToolNames]
-        .map((name) => `'${name}'`)
-        .join(', ');
+    if (collidedToolNames.length > 0) {
       debugLogger.warn(
-        `MCP server '${mcpServerName}' returned duplicate tool name${
-          skippedDuplicateToolNames.size === 1 ? '' : 's'
-        } ${names}. Keeping the first declaration of each duplicate.`,
+        `MCP server '${mcpServerName}' returned duplicate tool names ` +
+          `${collidedToolNames.join(', ')}. Skipping every declaration of ` +
+          `each duplicated name.`,
       );
     }
 

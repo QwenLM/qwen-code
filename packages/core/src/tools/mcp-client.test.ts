@@ -162,6 +162,36 @@ function mockToolDecls(...decls: Array<string | Obj>) {
   } as unknown as GenAiLib.CallableTool);
 }
 
+/**
+ * Makes `mcpToTool().tool()` convert one page of the adapter, rejecting a
+ * duplicated name the way @google/genai does.
+ */
+function mockGenAiDiscovery() {
+  return vi.mocked(GenAiLib.mcpToTool).mockImplementation(
+    ((client: { listTools: ClientLib.Client['listTools'] }) =>
+      ({
+        tool: async () => {
+          const { tools } = await client.listTools();
+          const names = new Set<string>();
+          for (const mcpTool of tools) {
+            if (names.has(mcpTool.name)) {
+              throw new Error(
+                `Duplicate function name ${mcpTool.name} found in MCP tools. Please ensure function names are unique.`,
+              );
+            }
+            names.add(mcpTool.name);
+          }
+          return {
+            functionDeclarations: tools.map((mcpTool) => ({
+              name: mcpTool.name,
+              description: mcpTool.description,
+            })),
+          };
+        },
+      }) as unknown) as typeof GenAiLib.mcpToTool,
+  );
+}
+
 /** An McpClient (stdio `test-command` by default), not in debug mode. */
 function newClient(
   name: string,
@@ -1427,7 +1457,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(tools[0].alwaysLoad).toBe(true);
     });
 
-    it('keeps the first tool of a duplicated name instead of discarding the server', async () => {
+    it('drops every declaration of a duplicated name instead of discarding the server', async () => {
       const listed = (name: string, description: string) => ({
         name,
         description,
@@ -1444,29 +1474,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       } as unknown as ClientLib.Client;
       // Mirror @google/genai: one duplicated declaration fails the whole
       // conversion, so the discovery adapter must never hand it a duplicate.
-      vi.mocked(GenAiLib.mcpToTool).mockImplementation(
-        ((client: ClientLib.Client) =>
-          ({
-            tool: async () => {
-              const { tools } = await client.listTools();
-              const names = new Set<string>();
-              for (const mcpTool of tools) {
-                if (names.has(mcpTool.name)) {
-                  throw new Error(
-                    `Duplicate function name ${mcpTool.name} found in MCP tools. Please ensure function names are unique.`,
-                  );
-                }
-                names.add(mcpTool.name);
-              }
-              return {
-                functionDeclarations: tools.map((mcpTool) => ({
-                  name: mcpTool.name,
-                  description: mcpTool.description,
-                })),
-              };
-            },
-          }) as unknown) as typeof GenAiLib.mcpToTool,
-      );
+      mockGenAiDiscovery();
 
       const tools = await discoverTools(
         'unity',
@@ -1475,13 +1483,105 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         cfgWithResources(),
       );
 
-      expect(tools.map((tool) => tool.serverToolName)).toEqual([
-        'create',
-        'other',
-      ]);
+      // No single command sits behind `tools/call` for a duplicated name, so
+      // none of its declarations may be offered.
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['other']);
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining("duplicate tool name 'create'"),
+        expect.stringContaining("'create' (2 conflicting declarations)"),
       );
+    });
+
+    it('counts duplicates across pages and requests each cursor once', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const listTools = vi.fn(async (params?: { cursor?: string }) =>
+        params?.cursor === 'c2'
+          ? {
+              tools: [
+                listed('create', 'create group B'),
+                listed('other', 'other tool'),
+              ],
+            }
+          : {
+              tools: [listed('create', 'create group A')],
+              nextCursor: 'c2',
+            },
+      );
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['other']);
+      expect(listTools).toHaveBeenNthCalledWith(1, undefined);
+      expect(listTools).toHaveBeenNthCalledWith(2, { cursor: 'c2' });
+    });
+
+    it('restarts the duplicate bookkeeping when a transient failure retries listing', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const listTools = vi
+        .fn()
+        .mockResolvedValueOnce({
+          tools: [listed('a', 'a tool')],
+          nextCursor: 'p2',
+        })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+        )
+        .mockResolvedValueOnce({
+          tools: [listed('a', 'a tool')],
+          nextCursor: 'p2',
+        })
+        .mockResolvedValueOnce({ tools: [listed('b', 'b tool')] });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      // The retry re-reads page 1; its names must not be treated as duplicates
+      // of the failed attempt's.
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['a', 'b']);
+      expect(listTools).toHaveBeenCalledTimes(4);
+    });
+
+    it('stops paging when a server repeats a cursor', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const listTools = vi.fn().mockResolvedValue({
+        tools: [listed('a', 'a tool')],
+        nextCursor: 'same',
+      });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      // Two declarations of the same name, both dropped; the important part is
+      // that discovery returned at all.
+      expect(tools).toEqual([]);
+      expect(listTools).toHaveBeenCalledTimes(2);
     });
 
     it('preserves App-only tools for the separate App registry', async () => {
