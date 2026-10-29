@@ -61,8 +61,7 @@ class Issue13180HardenedVerificationTest {
 
     @LocalServerPort private int publicPort;
     @Autowired private WriterCredentialPolicy credentials;
-    @Qualifier("managedJdbcTemplate")
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") private JdbcTemplate jdbc;
     private final HttpClient http = HttpClient.newHttpClient();
 
     @DynamicPropertySource

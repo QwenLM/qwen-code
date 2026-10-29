@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CopyIcon, WifiIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 import { useI18n } from '../../i18n';
 import {
   warnClipboardWriteFailure,
@@ -46,18 +48,29 @@ function reconcileSelection(
 
 export function LocalControlSettingsCard() {
   const { t } = useI18n();
-  const { baseUrl, token } = useWorkspace();
+  const translateRef = useRef(t);
+  translateRef.current = t;
+  const { baseUrl, token, client } = useWorkspace();
+  const available = useDaemonAvailability() === 'available';
   const [status, setStatus] = useState<LocalControlStatus>();
   const [selectedAddress, setSelectedAddress] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (!available) return;
     let ignore = false;
     // A re-run after a failed fetch must not keep rendering the stale
     // error next to fresh status; `toggle()` is the other clearing path.
     setError('');
-    requestLocalControl(baseUrl, token, 'GET', '/workspace/local-control')
+    requestLocalControl(
+      baseUrl,
+      token,
+      'GET',
+      '/workspace/local-control',
+      undefined,
+      client,
+    )
       .then((next) => {
         if (ignore) return;
         setStatus(next);
@@ -68,17 +81,21 @@ export function LocalControlSettingsCard() {
       .catch((failure: unknown) => {
         if (!ignore) {
           setError(
-            failure instanceof Error ? failure.message : String(failure),
+            isDaemonUnavailableError(failure)
+              ? translateRef.current('daemon.connection.unavailable')
+              : failure instanceof Error
+                ? failure.message
+                : String(failure),
           );
         }
       });
     return () => {
       ignore = true;
     };
-  }, [baseUrl, token]);
+  }, [available, baseUrl, token, client]);
 
   const toggle = async () => {
-    if (!status) return;
+    if (!status || !available) return;
     setBusy(true);
     setError('');
     try {
@@ -97,13 +114,20 @@ export function LocalControlSettingsCard() {
         'POST',
         path,
         body,
+        client,
       );
       setStatus(next);
       setSelectedAddress((current) =>
         reconcileSelection(next.interfaces, current),
       );
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(
+        isDaemonUnavailableError(failure)
+          ? translateRef.current('daemon.connection.unavailable')
+          : failure instanceof Error
+            ? failure.message
+            : String(failure),
+      );
       // The enable route attaches the fresh candidate list to 409s; reconcile
       // from it so a selection that outlived a network change can recover
       // without a page remount.
@@ -222,6 +246,7 @@ export function LocalControlSettingsCard() {
         variant={status?.active ? 'destructive' : 'default'}
         className="w-fit"
         disabled={
+          !available ||
           busy ||
           !status ||
           (!status.active && needsSelection && !selectedAddress)
