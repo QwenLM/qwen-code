@@ -43467,6 +43467,93 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('reconciles a header title rename with the daemon-stored name', async () => {
+    mockSessionActions.renameSession.mockResolvedValueOnce({
+      displayName: 'Clamped',
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Typed long name');
+
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      'Typed long name',
+    );
+    // The catalog must see the daemon-stored (possibly clamped) name, not the
+    // typed one — the pane twin pins this same arm.
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+      'Clamped',
+    );
+  });
+
+  it('invalidates the catalog and toasts when a header rename fails', async () => {
+    mockSessionActions.renameSession.mockRejectedValueOnce('boom');
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Failing name');
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).toHaveBeenCalledWith('error', 'Failed to rename session');
+  });
+
+  it('suppresses the header rename failure toast after an owner switch', async () => {
+    const failing = deferred<never>();
+    mockSessionActions.renameSession.mockReturnValueOnce(failing.promise);
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+
+    // Submit a rename that stays in flight; the owner is captured now.
+    await renameFromHeaderTitle(container, 'Mid-flight name');
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      failing.reject(new Error('late boom'));
+      await flush();
+    });
+
+    // The catalog is still invalidated, but the toast is suppressed for a
+    // session the user has already switched away from.
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('notifies the host exactly once after a header rename echo', async () => {
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Header title');
+
+    // No rename dispatch until the connection name actually changes.
+    expect(onSessionChange).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'rename' }),
+    );
+
+    act(() => {
+      mockConnection.displayName = 'Header title';
+      rerender({ onSessionChange });
+    });
+
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'rename',
+      sessionId: 'session-1',
+      newName: 'Header title',
+    });
+    // The echo must not re-reconcile the catalog row the write already set.
+    expect(sessionCatalogController.renamed).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects programmatic attachments in a standalone chat', async () => {
     mockConnection.sessionContext = { kind: 'standalone' };
     mockConnection.workspaceCwd = '';
