@@ -93,6 +93,11 @@ for is a file no round produces, and a check over an absent file is silent:
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
 
+Each prepared artifact directory keeps `context.json` containing only its
+`headRefOid`. The checker prefers that round's snapshot and names the source it
+uses. Older directories fall back to the shared per-PR snapshot; an unreadable
+or invalid round snapshot warns instead of using a later round's shared head.
+
 ## Design decisions
 
 1. **`--repo` is mandatory.** A script cannot distinguish a maintainer's clone
@@ -302,6 +307,9 @@ for is a file no round produces, and a check over an absent file is silent:
   did not, and when a review's state changed, and `guard --snapshot` refuses a
   list whose items carry no body or, for reviews, no state.
 - No script executes PR code.
+- A report with its own round snapshot keeps the same checked head after a
+  later preparation into a different artifact directory. Publishable round
+  snapshots contain no PR title or body.
 
 ## Open questions
 
