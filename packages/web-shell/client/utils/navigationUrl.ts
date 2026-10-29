@@ -9,6 +9,7 @@ export const WEB_SHELL_PAGES = [
   'channels',
   'live',
   'scheduled-tasks',
+  'pr-watches',
   'goals',
   'todos',
   'settings',

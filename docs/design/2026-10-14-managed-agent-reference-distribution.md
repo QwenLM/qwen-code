@@ -30,6 +30,7 @@ The release asset is `qwen-managed-agent-reference-<version>.tar.gz`. It contain
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-admin
 bin/qwen-managed-agent-bootstrap
 bin/qwen-managed-agent-bootstrap.mjs
 config/application.example.yml
@@ -109,7 +110,7 @@ Upgrade uses one stopped admission window on the accepted single-control-plane t
 - CI and a manual dry run produce the same named release assets without publishing.
 - The manifest identifies the exact source and every declared compatibility boundary.
 - A consumer can verify and extract the artifact without a repository checkout.
-- The bundled server and operator-recovery launchers use only bundle-relative files.
+- The bundled server, operator-recovery and admin launchers use only bundle-relative files.
 - The exact extracted server can start and complete the reference smoke path.
 - The production workflow publishes only an immutable experimental prerelease from `main`.
 - Public Shell execution remains disabled by default; canonical Shell v2 capability advertisement is enabled by default, and MCP lifecycle requires explicit enablement.

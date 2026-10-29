@@ -40,6 +40,19 @@ button {
 button:disabled {
   cursor: default;
 }
+footer {
+  margin-top: 16px;
+}
+footer button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+#continuation-help {
+  opacity: 0.75;
+}
+#continuation-status[data-state='unconfirmed'] {
+  color: light-dark(#785000, #f0ce89);
+}
 p {
   font-size: 13px;
   line-height: 1.5;

@@ -1,3 +1,12 @@
+import type {
+  ManagedExtensionManifest,
+  ManagedExtensionPin,
+  ManagedExtensionCatalog,
+  ManagedExtensionPackageOperation,
+  ManagedExtensionSettings,
+  ManagedExtensionSnapshot,
+  ManagedExtensionSelection,
+} from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
   ManagedMcpManagementCommand,
@@ -184,7 +193,6 @@ export interface ManagedAgentSessionSummary {
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
-    cwdChange?: boolean;
     modelChange?: boolean;
     contextCompression?: boolean;
     approvalModeChange?: boolean;
@@ -250,7 +258,6 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
-export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
 export type ManagedContextCompressionOperation =
   components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
@@ -306,6 +313,22 @@ export interface ManagedAgentPendingAction {
 }
 
 export interface ManagedAgentProvider {
+  readonly userMessages?: {
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >;
+    command(
+      sessionId: string,
+      command: import('./use-managed-user-messages').ManagedUserMessageCommand,
+      options: { idempotencyKey: string; signal?: AbortSignal },
+    ): Promise<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >;
+  };
+
   readonly lifecycle?: {
     submit(
       kind: ManagedLifecycleKind,
@@ -357,6 +380,58 @@ export interface ManagedAgentProvider {
       sessionId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
+  };
+  readonly extensions?: {
+    readonly storageScope?: string;
+    list(
+      workspaceId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionCatalog>;
+    publish(
+      workspaceId: string,
+      extensionId: string | undefined,
+      packageDigest: string,
+      manifest: ManagedExtensionManifest,
+      archive: Blob,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    settings(
+      workspaceId: string,
+      extensionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSettings>;
+    saveSettings(
+      workspaceId: string,
+      extensionId: string,
+      expectedRevision: number,
+      values: Record<string, string>,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    apply(
+      sessionId: string,
+      selection: ManagedExtensionSelection,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    operation(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    resume(
+      sessionId: string,
+      operationId: string,
+      recoverPrevious: boolean,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
+    package(
+      workspaceId: string,
+      pin: ManagedExtensionPin,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionCatalog['extensions'][number]>;
   };
   readonly mcpManagement?: {
     /** Explicit tenant/actor namespace for pending commands saved in this tab. */
@@ -425,18 +500,6 @@ export interface ManagedAgentProvider {
       ): Promise<ManagedTaskCancelOperation>;
     };
   };
-  readonly cwdChange?: {
-    submit(
-      sessionId: string,
-      request: { cwdRelative: string; expectedContextRevision: number },
-      options: ManagedAgentCommandOptions,
-    ): Promise<ManagedCwdOperation>;
-    query(
-      sessionId: string,
-      operationId: string,
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedCwdOperation>;
-  };
   readonly contextCompression?: {
     submit(
       sessionId: string,
@@ -485,6 +548,21 @@ export interface ManagedAgentProvider {
       request: components['schemas']['WebShellWorkspaceFileReadRequest'],
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
+    upload?(
+      request: {
+        workspaceId: string;
+        cwdRelative: string;
+        path: string;
+        expectedScopeRevision: string;
+        uploadId: string;
+      },
+      data: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadResult']>;
+    queryUpload?(
+      uploadId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadStatus']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
@@ -535,6 +613,7 @@ export interface ManagedAgentProvider {
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
         skills?: ManagedSessionSkill[];
+        extensionPins?: ManagedExtensionPin[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -549,6 +628,7 @@ export interface ManagedAgentProvider {
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
         skills?: ManagedSessionSkill[];
+        extensionPins?: ManagedExtensionPin[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;

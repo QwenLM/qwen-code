@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -69,7 +70,7 @@ public class ManagedTaskEventStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
-    public ManagedTaskEventStore(JdbcTemplate jdbc) {
+    public ManagedTaskEventStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(
                 java.util.Objects.requireNonNull(jdbc.getDataSource(), "dataSource")));

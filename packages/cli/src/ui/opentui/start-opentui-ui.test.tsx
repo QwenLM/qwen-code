@@ -59,6 +59,13 @@ const mocks = vi.hoisted(() => {
       callId: string;
       confirmationDetails?: { onConfirm: () => Promise<void> };
     }>,
+    foregroundShellControl: {
+      foregroundShell: { callId: 'live-shell', pid: 4300, turn: 7 },
+      promoteShellToBackground: vi.fn(),
+      writeShellInput: vi.fn(),
+      resizeShell: vi.fn(),
+      scrollShell: vi.fn(),
+    },
     streaming: false,
     interrupt: vi.fn(),
     keyboard: [] as Array<
@@ -185,6 +192,7 @@ vi.mock('./live-turn.js', async (importOriginal) => ({
   useOpenTuiLiveTurn: (options: unknown) => {
     mocks.state.liveOptions = options;
     return {
+      ...mocks.state.foregroundShellControl,
       items: mocks.state.items,
       isCurrentHistory: mocks.state.isCurrentHistory,
       streaming: mocks.state.streaming,
@@ -362,6 +370,14 @@ describe('startOpenTuiUI fallback contract', () => {
       write.mockRestore();
     }
   }
+
+  it('passes the actual live-turn shell owner and every control action to the app', async () => {
+    await withEntryApp(() => {
+      expect(mocks.state.appProps).toMatchObject({
+        foregroundShellControl: mocks.state.foregroundShellControl,
+      });
+    });
+  });
 
   it('starts a fresh command history without a replay reset', async () => {
     await withEntryApp(() => {
@@ -1090,6 +1106,7 @@ describe('startOpenTuiUI fallback contract', () => {
     config.isInteractive = () => true;
     const warning = 'tool.call and tool.check are not supported.';
     let host!: ModTerminalHost;
+    const setRenderInput = vi.fn();
     const factory = vi
       .spyOn(ModSession, 'create')
       .mockImplementation((_config, _settings, output) => {
@@ -1102,6 +1119,7 @@ describe('startOpenTuiUI fallback contract', () => {
               config.getSessionId(),
             ),
           flushLogs: () => {},
+          setRenderInput,
           close: async () => {},
         } as unknown as ModSession;
       });
@@ -1150,6 +1168,39 @@ describe('startOpenTuiUI fallback contract', () => {
       const calls = mocks.state.root.render.mock.calls;
       view = render(calls[calls.length - 1]?.[0] as ReactElement);
       expect(mocks.state.replayOrder).toEqual(['reset', 'info']);
+      // The band's input, as Ink reports it; OpenTUI has no survey.
+      expect(setRenderInput).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          component: 'AbovePrompt',
+          viewport: { columns: 120, rows: 40, isFullscreen: false },
+          props: expect.objectContaining({
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 13,
+            bodyColumns: 115,
+          }),
+        }),
+      );
+      // A turn in flight is working.
+      mocks.state.streaming = true;
+      const tree = calls[calls.length - 1]?.[0] as ReactElement<{
+        children: ReactElement<{ children: ReactElement }>;
+      }>;
+      const vim = tree.props.children;
+      act(() =>
+        view!.rerender(
+          cloneElement(
+            tree,
+            {},
+            cloneElement(vim, {}, cloneElement(vim.props.children)),
+          ),
+        ),
+      );
+      expect(setRenderInput).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          props: expect.objectContaining({ isWorking: true }),
+        }),
+      );
       expect(mocks.state.appProps?.startupHistory).toEqual([
         expect.objectContaining({
           type: 'user',

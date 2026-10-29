@@ -13,6 +13,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  lstatSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +25,31 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: stdout,
   writeStderrLineSafe: () => {},
 }));
+// What happens while cleanup reads the watch, and while it asks the remote
+// for the PR's head: a fix attempt that opens meanwhile.
+const hooks = vi.hoisted(() => ({
+  afterRead: null as (() => void) | null,
+  remoteHead: null as (() => string) | null,
+}));
+vi.mock('./state.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./state.js')>();
+  return {
+    ...actual,
+    readState: (...args: Parameters<typeof actual.readState>) => {
+      const state = actual.readState(...args);
+      hooks.afterRead?.();
+      return state;
+    },
+  };
+});
+vi.mock('./worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./worktree.js')>();
+  return {
+    ...actual,
+    remoteRef: (...args: Parameters<typeof actual.remoteRef>) =>
+      hooks.remoteHead ? hooks.remoteHead() : actual.remoteRef(...args),
+  };
+});
 
 import { runCleanup } from './cleanup.js';
 import {
@@ -85,6 +112,8 @@ describe('runCleanup (real git)', () => {
   });
 
   afterEach(() => {
+    hooks.afterRead = null;
+    hooks.remoteHead = null;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
@@ -234,6 +263,95 @@ describe('runCleanup (real git)', () => {
     });
   });
 
+  it('ends the watch it keeps, so resume does not start it again over the kept work', () => {
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      watch: { every: 2, reply: true, instructions: '' },
+    });
+    writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+    writeFileSync(paths.checkedPath, '');
+    runCleanup(7, false);
+    expect(lastReport()).toMatchObject({ removed: false });
+    const kept = readState(paths.statePath)!;
+    expect(kept.watch).toBeUndefined();
+    // No check of its gate looks recent: the gate answers watch_ended now.
+    expect(existsSync(paths.checkedPath)).toBe(false);
+    // The rounds' helpers refuse it until a start resumes it.
+    expect(kept.ended).toEqual({
+      at: expect.any(String),
+      reason: expect.stringMatching(/uncommitted changes/),
+    });
+    expect(kept.lastKnownHeadSha).toBe(headSha);
+  });
+
+  describe('a fix attempt that opens while it runs', () => {
+    const openAttempt = () =>
+      writeFileSync(
+        paths.fixPath,
+        JSON.stringify({
+          version: 1,
+          attempt: '0123456789ab',
+          task: 'aaaaaaaaaaaa',
+          head: headSha,
+          startedAt: new Date().toISOString(),
+        }),
+      );
+    const refused = /a fix agent is working in PR #7's worktree/;
+
+    it('keeps the worktree it was about to remove', () => {
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      const pushed = run(paths.worktreePath, 'rev-parse', 'HEAD');
+      // The commit is on the PR: nothing would be lost.
+      hooks.remoteHead = () => {
+        openAttempt();
+        return pushed;
+      };
+      expect(() => runCleanup(7, false)).toThrow(refused);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(branchExists()).toBe(true);
+      expect(existsSync(paths.statePath)).toBe(true);
+    });
+
+    it('leaves the watch it would end with the work it keeps running', () => {
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        watch: { every: 2, reply: true, instructions: '' },
+      });
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      hooks.remoteHead = () => {
+        openAttempt();
+        return headSha;
+      };
+      expect(() => runCleanup(7, false)).toThrow(refused);
+      expect(readState(paths.statePath)).toMatchObject({
+        watch: { every: 2 },
+      });
+      expect(readState(paths.statePath)).not.toHaveProperty('ended');
+    });
+
+    it('names the running fix before anything else, an unreadable watch too', () => {
+      // Before it reads the watch: a state file it cannot read would
+      // otherwise send the user to --force, which then refuses the same.
+      writeFileSync(paths.statePath, '{');
+      openAttempt();
+      for (const force of [false, true]) {
+        expect(() => runCleanup(7, force)).toThrow(refused);
+      }
+      expect(existsSync(paths.worktreePath)).toBe(true);
+    });
+
+    it('keeps the worktree --force would discard', () => {
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      hooks.afterRead = () => {
+        hooks.afterRead = null;
+        openAttempt();
+      };
+      expect(() => runCleanup(7, true)).toThrow(refused);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(existsSync(paths.statePath)).toBe(true);
+    });
+  });
+
   it('keeps everything when the worktree has unpushed commits', () => {
     run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
     runCleanup(7, false);
@@ -337,6 +455,63 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.statePath)).toBe(false);
   });
 
+  it("takes another session's watch over to end it, still keeping its work", () => {
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+    runCleanup(7, false, true);
+    expect(lastReport()).toMatchObject({ removed: false });
+    // Ended under its new owner, as a stop of its own would.
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-b',
+      ended: { reason: expect.stringMatching(/uncommitted changes/) },
+    });
+    rmSync(join(paths.worktreePath, 'wip.txt'));
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-c';
+    runCleanup(7, false, true);
+    expect(lastReport()).toMatchObject({ removed: true });
+    expect(existsSync(paths.statePath)).toBe(false);
+  });
+
+  it('leaves a watch it failed to take over to end with the session that owns it', () => {
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    // A ref lock git leaves behind: the branch cannot be deleted.
+    writeFileSync(
+      join(repo, '.git', 'refs', 'heads', `${paths.branch}.lock`),
+      '',
+    );
+    expect(() => runCleanup(7, false, true)).toThrow(/lock/);
+    // Its owner's gate still finds the watch its own.
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-a',
+    });
+    expect(readState(paths.statePath)!.ended).toBeUndefined();
+  });
+
+  // A shell script stands in for the remote.
+  it.skipIf(process.platform === 'win32')(
+    'does not end a watch a third session took over while it looked',
+    () => {
+      process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'wip');
+      // Asking the remote for the PR head is when session-c takes it.
+      const script = join(repo, 'take-over.sh');
+      writeFileSync(
+        script,
+        `#!/bin/sh\nsed 's/"session-a"/"session-c"/' '${paths.statePath}' > '${paths.statePath}.new'\nmv '${paths.statePath}.new' '${paths.statePath}'\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      run(repo, 'remote', 'add', 'origin', repo);
+      run(repo, 'config', 'remote.origin.uploadpack', script);
+      expect(() => runCleanup(7, false, true)).toThrow(
+        /watched by another session \(session-c\)/,
+      );
+      expect(readState(paths.statePath)).toMatchObject({
+        sessionId: 'session-c',
+      });
+      expect(readState(paths.statePath)!.ended).toBeUndefined();
+    },
+  );
+
   it('keeps a leftover worktree with uncommitted changes even without state', () => {
     rmSync(paths.statePath);
     writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
@@ -386,6 +561,54 @@ describe('runCleanup (real git)', () => {
     expect(() => runCleanup(7, false)).toThrow();
     expect(branchExists()).toBe(true);
     expect(existsSync(paths.statePath)).toBe(true);
+  });
+
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'discards a state that is not a regular file with --force, without blocking on it',
+    () => {
+      rmSync(paths.statePath);
+      execFileSync('mkfifo', [paths.statePath]);
+      expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+      runCleanup(7, true);
+      expect(existsSync(paths.statePath)).toBe(false);
+      // A directory or a link to nothing in its place goes the same way.
+      mkdirSync(paths.statePath);
+      expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+      runCleanup(7, true);
+      expect(existsSync(paths.statePath)).toBe(false);
+      symlinkSync(join(repo, 'nowhere'), paths.statePath);
+      expect(() => runCleanup(7, false)).toThrow(/not a regular file/);
+      runCleanup(7, true);
+      expect(
+        lstatSync(paths.statePath, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+    },
+  );
+
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a history that is not a regular file, and replaces it',
+    () => {
+      const history = historyPath(paths, readState(paths.statePath)!);
+      execFileSync('mkfifo', [history]);
+      runCleanup(7, true);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(readHistory(history)).toMatchObject({ prNumber: 7 });
+    },
+  );
+
+  it('replaces a directory planted at the history, and with --force one at the cursor', () => {
+    const history = historyPath(paths, readState(paths.statePath)!);
+    mkdirSync(history);
+    mkdirSync(paths.gatePath);
+    runCleanup(7, false);
+    expect(lastReport()).toMatchObject({ removed: true });
+    expect(readHistory(history)).toMatchObject({ prNumber: 7 });
+    // The cursor stays without --force: it belongs to the scheduled task.
+    expect(existsSync(paths.gatePath)).toBe(true);
+    runCleanup(7, true);
+    expect(existsSync(paths.gatePath)).toBe(false);
   });
 
   it('discards an unreadable state file only with --force', () => {

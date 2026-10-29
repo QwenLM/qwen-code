@@ -9,6 +9,7 @@ import {
 import {
   BotIcon,
   CableIcon,
+  ArchiveIcon,
   DatabaseIcon,
   FlaskConicalIcon,
   PaletteIcon,
@@ -101,9 +102,22 @@ interface SettingsMessageProps {
   modelManagementSectionProps?: ModelManagementProps;
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
+  archivedSessions?: ReactNode;
+  /**
+   * Extra-directory management for the selected workspace. Rendered only on
+   * the Workspace scope tab; omitted when the daemon cannot manage them.
+   */
+  workspaceDirectoriesSection?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
+  /**
+   * Whether the active session may write workspace settings. Standalone
+   * sessions cannot: their `/language ui --project` is refused, so the UI
+   * language row is offered only under the User tab, the one scope it can
+   * persist.
+   */
+  workspaceSettingsWritable?: boolean;
 }
 
 export interface SettingsMessageSettingsState {
@@ -274,6 +288,8 @@ type SettingsPageItem =
   | { type: 'local-control' }
   | { type: 'live' }
   | { type: 'connections' }
+  | { type: 'archived-sessions' }
+  | { type: 'workspace-directories' }
   | { type: 'model-management' };
 
 interface SettingsPageCategory {
@@ -300,25 +316,28 @@ function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
 
 function CategoryIcon({ category }: { category: string }) {
   const normalized = category.toLowerCase();
-  const Icon = normalized.includes('ui')
-    ? PaletteIcon
-    : normalized.includes('tool')
-      ? WrenchIcon
-      : normalized.includes('context')
-        ? DatabaseIcon
-        : normalized.includes('privacy')
-          ? ShieldIcon
-          : normalized.includes('model')
-            ? BotIcon
-            : normalized.includes('connection')
-              ? CableIcon
-              : normalized.includes('daemon')
-                ? ServerIcon
-                : normalized.includes('advanced')
-                  ? SlidersHorizontalIcon
-                  : normalized.includes('experimental')
-                    ? FlaskConicalIcon
-                    : Settings2Icon;
+  const Icon =
+    normalized === 'archived'
+      ? ArchiveIcon
+      : normalized.includes('ui')
+        ? PaletteIcon
+        : normalized.includes('tool')
+          ? WrenchIcon
+          : normalized.includes('context')
+            ? DatabaseIcon
+            : normalized.includes('privacy')
+              ? ShieldIcon
+              : normalized.includes('model')
+                ? BotIcon
+                : normalized.includes('connection')
+                  ? CableIcon
+                  : normalized.includes('daemon')
+                    ? ServerIcon
+                    : normalized.includes('advanced')
+                      ? SlidersHorizontalIcon
+                      : normalized.includes('experimental')
+                        ? FlaskConicalIcon
+                        : Settings2Icon;
   return <Icon data-icon="inline-start" aria-hidden="true" />;
 }
 
@@ -697,8 +716,11 @@ export function SettingsMessage({
   onChatWidthModeChange,
   modelManagementSectionProps,
   connections,
+  archivedSessions,
+  workspaceDirectoriesSection,
   embedded = false,
   initialCategory,
+  workspaceSettingsWritable = true,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
@@ -709,7 +731,12 @@ export function SettingsMessage({
   }, [refreshNotificationPermission]);
   const { status, settings, loading, error, reload, setValue, liveSetup } =
     settingsState;
-  const [scope, setScope] = useState<Scope>('workspace');
+  // A standalone session has no workspace to write, so opening the panel on
+  // the Workspace tab would only offer rows whose session-routed writes are
+  // refused (the UI language row). Start on the User tab there instead.
+  const [scope, setScope] = useState<Scope>(
+    workspaceSettingsWritable ? 'workspace' : 'user',
+  );
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -799,6 +826,22 @@ export function SettingsMessage({
         items: [{ type: 'connections' }],
       });
     }
+    if (archivedSessions) {
+      groups.push({
+        id: 'Archived',
+        label: formatSettingCategory('Archived', t),
+        items: [{ type: 'archived-sessions' }],
+      });
+    }
+    // Extra directories are a workspace-scope concept; the User tab has no
+    // equivalent list to show.
+    if (workspaceDirectoriesSection && scope === 'workspace') {
+      groups.push({
+        id: 'Workspace',
+        label: t('workspaceDirectories.title'),
+        items: [{ type: 'workspace-directories' }],
+      });
+    }
     return groups
       .map((group) => ({
         ...group,
@@ -817,7 +860,11 @@ export function SettingsMessage({
                   ? 'builtin:local-control'
                   : item.type === 'connections'
                     ? 'builtin:connections'
-                    : 'builtin:model-management';
+                    : item.type === 'archived-sessions'
+                      ? 'builtin:archived-sessions'
+                      : item.type === 'workspace-directories'
+                        ? 'builtin:workspace-directories'
+                        : 'builtin:model-management';
           return isItemVisible(id, presentation);
         }),
       }))
@@ -829,6 +876,9 @@ export function SettingsMessage({
     hasNotifications,
     modelManagementSectionProps,
     connections,
+    archivedSessions,
+    workspaceDirectoriesSection,
+    scope,
     presentation,
     showInitialLoading,
   ]);
@@ -894,13 +944,21 @@ export function SettingsMessage({
 
   const activeRows =
     activeGroup?.items.filter(
-      (item) => item.type !== 'model-management' && item.type !== 'connections',
+      (item) =>
+        item.type !== 'model-management' &&
+        item.type !== 'connections' &&
+        item.type !== 'archived-sessions' &&
+        item.type !== 'workspace-directories',
     ) ?? [];
   const showModelManagement = activeGroup?.items.some(
     (item) => item.type === 'model-management',
   );
+  const showArchivedSessions = activeGroup?.id === 'Archived';
   const showConnections = activeGroup?.items.some(
     (item) => item.type === 'connections',
+  );
+  const showWorkspaceDirectories = activeGroup?.items.some(
+    (item) => item.type === 'workspace-directories',
   );
 
   const renderSelect = (
@@ -1094,7 +1152,13 @@ export function SettingsMessage({
           setScope(next as Scope);
         }}
       >
-        {activeGroup?.id !== 'Connections' && (
+        {restartPending &&
+          (activeGroup?.id === 'Connections' || showArchivedSessions) && (
+            <div className="border-b border-border px-3 py-2">
+              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
+            </div>
+          )}
+        {activeGroup?.id !== 'Connections' && !showArchivedSessions && (
           <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
             <TabsList className="p-0">
               <TabsTrigger value="workspace">
@@ -1133,14 +1197,16 @@ export function SettingsMessage({
                 <span className="min-w-0 flex-1 truncate text-left">
                   {category.label}
                 </span>
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {Math.max(
-                    1,
-                    category.items.filter(
-                      (item) => item.type !== 'model-management',
-                    ).length,
-                  )}
-                </span>
+                {category.id !== 'Archived' && (
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {Math.max(
+                      1,
+                      category.items.filter(
+                        (item) => item.type !== 'model-management',
+                      ).length,
+                    )}
+                  </span>
+                )}
               </Button>
             ))}
           </nav>
@@ -1296,6 +1362,17 @@ export function SettingsMessage({
                           }
 
                           if (
+                            item.setting.key === LANGUAGE_SETTING_KEY &&
+                            scope === 'workspace' &&
+                            !workspaceSettingsWritable
+                          ) {
+                            // `/language ui --project` is refused in a
+                            // standalone session, so a workspace row here
+                            // could only fail after the user picked a value.
+                            return null;
+                          }
+
+                          if (
                             item.setting.key === OUTPUT_LANGUAGE_SETTING_KEY &&
                             scope === 'workspace'
                           ) {
@@ -1362,6 +1439,16 @@ export function SettingsMessage({
                   </div>
                 )}
                 {showConnections && connections}
+                {showArchivedSessions && (
+                  <div>
+                    <h2 className="mb-4 flex items-center gap-2 text-base font-semibold">
+                      <ArchiveIcon size={18} aria-hidden="true" />
+                      {activeGroup.label}
+                    </h2>
+                    {archivedSessions}
+                  </div>
+                )}
+                {showWorkspaceDirectories && workspaceDirectoriesSection}
               </div>
             )}
           </section>

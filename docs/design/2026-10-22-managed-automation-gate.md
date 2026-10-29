@@ -8,7 +8,10 @@
   gate for managed automations. §4.4 and the scanner-capacity figures in §10
   were added on 2026-10-24; their timings come from a rig run with the PR
   watch probes and from local runs of the same probes. The §2 Policy bullet
-  and the §10 scanner-capacity item were corrected the same day.
+  and the §10 scanner-capacity item were corrected the same day. §4.4's
+  measurement notes and the §10 scanner-capacity item were updated on
+  2026-10-26 for the scanner row pool (#15442), and the §10 item was updated
+  on 2026-10-28 for the decision on the shared-Session queue (#15667).
 - **Related**: [managed automation (H6)](2026-10-04-managed-automation.md),
   [managed automation runtime (H6b)](2026-10-07-managed-automation-runtime.md),
   [managed runtime tool contract](2026-09-24-managed-runtime-tool-contract.md),
@@ -317,7 +320,7 @@ and each gate run is a Runtime Session of its own. On a Managed Session the
 probe serves as the gate alone: a gate that names no `--session` makes no
 owner check.
 
-Measured on a local hosted rig on 2026-10-24, before #15385: main `9e16932bee`, one Session
+Measured on a local hosted rig on 2026-10-24, before #15385 and #15442: main `9e16932bee`, one Session
 and one definition per probe, all due every minute, four slots, with the rig's
 `scan-delay` of 1 s:
 
@@ -327,14 +330,16 @@ and one definition per probe, all due every minute, four slots, with the rig's
 | `snapshot`, open PR with 437 review threads | fired every slot with 11.4–11.9 KiB; `deferred` 459, 446, 433, 419      | 9.5–10.4 s  |
 | `watch-repo`                                | quiet: the first run records silently, and no watched PR moved after it | 2.5–2.9 s   |
 
-The gates ran one after another in each slot, so each time is the gap between
-its execution's settle time and the previous one's (for the first, the tick's
-start). So each after the first also includes the previous gate's release and
-settle, and each includes its own Runtime Session acquire. The merged PR's
-probe then read every page of its head's 569 check contexts; it now makes one
-call. Every probe holds its
-node's scanner thread while it runs, which bounds how many watches one node
-serves (§10, scanner capacity).
+At the time, the scanner worked its rows on one thread, so the gates ran one
+after another in each slot, and each time is the gap between its execution's
+settle time and the previous one's (for the first, the tick's start). So each
+after the first also includes the previous gate's release and settle, and each
+includes its own Runtime Session acquire. The merged PR's probe then read
+every page of its head's 569 check contexts; it now makes one call. A gated
+fire from the scanner holds a scanner thread on its control-plane node until
+the fire answers, probe included, and a Session's probes run one at a time in
+the Harness; these bound how many watches one node can serve, and how many one
+Session can carry (§10, scanner capacity).
 
 ## 5. Design
 
@@ -722,49 +727,85 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   about an expired credential without polling `gate_status`.
 - The `per_run` arm, once H4 gives it a child intent: the probe would run
   before the child Session is created, in the parent's Runtime.
-- Scanner capacity. A gated `fire_run` now holds the scanner thread while the
-  probe runs, for up to the relay's 30 s, and the scanner works its rows one
-  after another. The `automation.concurrency` setting (4 by default) does not
-  change this: it caps the non-terminal runs of one `allow` definition and
-  bounds how many blocking runs one decision reconciles (concurrency + 1, at
-  least 2), one at a time on the same thread; it is not a scanner thread
-  count. Enough slow gates make ticks run late, until later slots of every
-  definition on the node are recorded `missed`. Rows are leased one by one, so
-  working them on a bounded pool (or answering a gated fire asynchronously) is
-  the natural fix; it changes the scanner's threading and is left to its own
-  change (#15418). The Harness side has the same shape: a probe runs inside
-  the automation funnel's serial queue, so a slow gate also delays the
-  Session's other automation operations (define, cancel, the settle of a
-  finished automation turn) for its duration.
+- Scanner capacity. Two fixes were open here: working the scanner's rows on a
+  bounded pool, or answering a gated fire asynchronously. The
+  [automation scanner row pool](2026-10-24-automation-scanner-row-pool.md)
+  (#15442) took the first: a tick works its rows on a pool sized by
+  `automation.scanner-threads` (4 by default), each task claims its row and
+  leases it from the claim time, and the tick joins every task before it
+  returns. The second, the asynchronous fire answer, stays open there. The
+  `automation.concurrency` setting (4 by default) is not a thread count: it
+  caps the non-terminal runs of one `allow` definition and bounds how many
+  blocking runs one decision reconciles (concurrency + 1, at least 2), one at
+  a time within the row. Among the residual ceilings that design accepts are
+  that a Session's automation funnel stays serial, that definitions sharing a
+  Session are admitted and fired concurrently, and that one fire can outlive
+  its lease. Traced through the scanner's and the funnel's code, these mean
+  for gates:
+  - Probes on different Sessions can run in parallel, up to the node's scanner
+    threads; one Session's probes run one at a time in its funnel queue, and
+    that Session's other automation operations (define, retire, cancel, the
+    settle of a finished automation turn) wait behind the gates queued ahead
+    of them. Public create, revise and retire calls relay those define and
+    retire operations, and a public manual run's fire queues there as well;
+    each waits under its own 30 s relay timeout.
+  - One node can now send, concurrently, the fires of definitions that share a
+    Session and fall due together. Their wait in the queue counts against the
+    relay's 30 s, so a fire whose wait and own work together run past those 30
+    s loses its answer, though the Harness still finishes the fire: the
+    occurrence row stays `firing`, and a later tick re-drives it with backoff,
+    as for any lost answer. Each holds a scanner thread while it waits. In a
+    Harness pool, a lost answer also takes that Harness out of selection until
+    the pool's next successful refresh, which affects the other calls for
+    Sessions placed on it, not only fires: the public automation routes can
+    then answer `409 harness_owner_still_live` (#15666). §5.2 sets the probe's
+    20 s so that one acquire and one probe fit in the relay's 30 s; that
+    sizing leaves no room for this wait. The row pool design records this
+    queueing, and the lost answers it causes, as intended (#15667, decided in
+    #15724): the funnel is shared with public relays and other nodes, so
+    serializing one node's rows by Session would not remove the queue. That
+    design's guidance is to give a gated definition whose probe is slow its
+    own Session.
+  - A row's work (its re-drives, slots and reconciles) runs one call after
+    another under one lease that is not renewed, so it can outlast the lease;
+    a single fire can do so during a long takeover load (below). If another
+    node or a manual run claims the row meanwhile, the fence denies the stale
+    holder's ledger writes, the occurrence stays `firing`, and a later tick
+    re-drives it; the derived run id keeps the stale holder's call and that
+    re-drive idempotent.
 
-  Measured with the PR watch probes (§4.4), with the rig's `scan-delay` of 1
-  s: in the first of the four slots, the three gates finished their probes
-  13.0, 23.1 and 25.7 s after the slot, one after another. A tick judges
-  lateness from its own start, gives each admitted slot due since a
-  definition's last tick its own gate run, then waits `scan-delay` (10 s by
-  default, `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY`) before the next tick.
-  So the probes due at one slot, plus `scan-delay`, have to fit before the
-  next slot. With gate runs of 10–13 s, as on PRs that take five or six
-  GraphQL calls to read, that is about four PR watches due every minute (five
-  at 10 s, three at 13 s), or about nine due every two minutes. A whole run
-  on a PR read in one call (a merged or closed PR always is) takes about 4 s,
-  process start and `gh auth status` included (estimated from the call
-  trace), which allows about twelve a minute. An open PR's run starts no new
-  read after 15 s but can still take 15 s or more on a large PR, which brings
-  the per-minute count to two or three. Within the bound, a slot fires
-  within about a minute of its time (about two when two-minute watches all
-  fall due together).
+  Before #15442 the scanner worked its rows one after another on its only
+  thread, and a gated `fire_run` held that thread while the probe ran, for up
+  to the relay's 30 s. Measured then with the PR watch probes (§4.4, with the
+  rig's `scan-delay` of 1 s): in the first of the four slots, the three gate
+  executions settled 13.0, 23.1 and 25.7 s after the slot, one after another.
+  A tick judges lateness from its own start, gives each admitted slot due
+  since a definition's last tick its own gate run, then waits `scan-delay` (10
+  s by default, `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY`) before the next
+  tick. So the probes due at one slot, plus `scan-delay`, had to fit before
+  the next slot. With gate runs of 10–13 s, as measured on PRs that took five
+  or six GraphQL calls to read, the condition bounded a node at about four PR
+  watches due every minute (five at 10 s, three at 13 s), or about nine due
+  every two minutes.
 
-  Past the bound, ticks grow longer and fires land minutes after their slots.
-  Once one slot's probes take the whole period, slots pass the 5-minute late
-  tolerance and are recorded `missed`, for every definition alike, unless a
-  definition's catch-up policy fires them late. These effects are worked out
-  from the scanner's code, not observed. The bound is per scanner thread: each
-  control-plane node runs one. Any fire, gated or not, can hold the thread
-  longer when the Harness first has to load the Session, before the relay's 30
-  s starts: up to 30 s for an ordinary load, up to `load-timeout` (120 s) for
-  a takeover load, which a node runs when it holds no attachment for a Session
-  that a Harness has already served (after a control-plane or Harness restart,
-  for example). And a tick longer than the 60 s `lease` hands out leases that
-  have already expired, since they run from the tick's start, so another node
-  can take those rows (#15418).
+  The tick works the same way, so that condition still applies, but the probes
+  due at one slot are now spread over the pool's threads: when the gated
+  definitions are on different Sessions, the bound grows with
+  `scanner-threads`; one tick reads at most `SCAN_LIMIT` (100) armed
+  definitions, due or not, and leaves the rest to a later tick. Per thread the
+  old arithmetic applies: a whole run on a PR read in one call (a merged or
+  closed PR always is) takes about 4 s, process start and `gh auth status`
+  included (estimated from the call trace), about twelve a minute, while a
+  large open PR's run, though it starts no new read after 15 s (§4.4), can
+  take 15 s or more, two or three a minute. A tick lasts at least as long as
+  its slowest row, so one slow row delays the next tick for every definition
+  the node works. Any fire, gated or not, whose Session the Harness first has
+  to load holds its thread before the relay's 30 s starts: up to 30 s for an
+  ordinary load, up to `load-timeout` (120 s) for a takeover load, which a
+  node runs when it holds no attachment for a Session that a Harness has
+  already served (after a control-plane or Harness restart, for example). Past
+  the bound, ticks grow longer, fires land late, and slots that pass the
+  5-minute late tolerance are recorded `missed`, for every definition the node
+  works, unless a definition's catch-up policy fires them late. These effects,
+  and the bound under the pool, are worked out from the scanner's and the
+  Harness funnel's code, not measured.
