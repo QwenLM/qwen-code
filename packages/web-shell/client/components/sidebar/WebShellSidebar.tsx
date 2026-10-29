@@ -1,3 +1,4 @@
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
   useCallback,
@@ -1344,6 +1345,7 @@ export function WebShellSidebar({
       ? sessionSource
       : 'default'
     : undefined;
+  const daemonAvailable = useDaemonAvailability() === 'available';
   const [archiveSessionSource, setArchiveSessionSource] =
     useState<SidebarSessionSource>('default');
   const archiveSourceType = sourceMetadataEnabled
@@ -2867,7 +2869,7 @@ export function WebShellSidebar({
   // without a source switch.
   const channelCatalogPollInFlightRef = useRef(false);
   useEffect(() => {
-    if (!channelGroupingEnabled) return;
+    if (!daemonAvailable || !channelGroupingEnabled) return;
     // Back off on the channels hook's OWN failures too — a persistently
     // failing channels endpoint must not be re-requested every 2s.
     const pollInterval =
@@ -2883,6 +2885,7 @@ export function WebShellSidebar({
     }, pollInterval);
     return () => window.clearInterval(intervalId);
   }, [
+    daemonAvailable,
     channelCatalogError,
     channelGroupingEnabled,
     error,
@@ -7358,50 +7361,6 @@ export function WebShellSidebar({
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
                       {!channelView && managedWorkspaces}
-                      {standaloneSessionsVisible &&
-                        onLoadStandaloneSession &&
-                        onStandaloneNotice && (
-                          <StandaloneRecents
-                            archiveState="active"
-                            currentSessionId={connection.sessionId}
-                            currentSessionReady={
-                              connection.status === 'connected' &&
-                              !connection.error &&
-                              !connection.loadingTranscript &&
-                              !connection.catchingUp
-                            }
-                            refreshKey={standaloneRefreshKey}
-                            searchQuery={searchQuery}
-                            renderSession={(session, standalone) =>
-                              renderSessionRow(session, {
-                                isArchived: standalone.isArchived,
-                                standalone,
-                              })
-                            }
-                            onNewSession={
-                              onNewStandaloneSession
-                                ? () => {
-                                    void Promise.resolve(
-                                      onNewStandaloneSession(),
-                                    ).then((created) => {
-                                      if (created) handleStandaloneMutation();
-                                    });
-                                  }
-                                : undefined
-                            }
-                            onLoadSession={onLoadStandaloneSession}
-                            onRenameSession={(sessionId, displayName) =>
-                              onSessionRenameConfirmed?.(
-                                undefined,
-                                sessionId,
-                                displayName,
-                              )
-                            }
-                            onMutated={handleStandaloneMutation}
-                            onError={onError}
-                            onNotice={onStandaloneNotice}
-                          />
-                        )}
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
@@ -7811,6 +7770,51 @@ export function WebShellSidebar({
                   />
                 )}
               </div>
+              {!liveView &&
+                standaloneSessionsVisible &&
+                onLoadStandaloneSession &&
+                onStandaloneNotice && (
+                  <StandaloneRecents
+                    archiveState="active"
+                    currentSessionId={connection.sessionId}
+                    currentSessionReady={
+                      connection.status === 'connected' &&
+                      !connection.error &&
+                      !connection.loadingTranscript &&
+                      !connection.catchingUp
+                    }
+                    refreshKey={standaloneRefreshKey}
+                    searchQuery={searchQuery}
+                    renderSession={(session, standalone) =>
+                      renderSessionRow(session, {
+                        isArchived: standalone.isArchived,
+                        standalone,
+                      })
+                    }
+                    onNewSession={
+                      onNewStandaloneSession
+                        ? () => {
+                            void Promise.resolve(onNewStandaloneSession()).then(
+                              (created) => {
+                                if (created) handleStandaloneMutation();
+                              },
+                            );
+                          }
+                        : undefined
+                    }
+                    onLoadSession={onLoadStandaloneSession}
+                    onRenameSession={(sessionId, displayName) =>
+                      onSessionRenameConfirmed?.(
+                        undefined,
+                        sessionId,
+                        displayName,
+                      )
+                    }
+                    onMutated={handleStandaloneMutation}
+                    onError={onError}
+                    onNotice={onStandaloneNotice}
+                  />
+                )}
               {!sectionView &&
                 !hideProjectHeader &&
                 workspaceQualifiedRestCoreEnabled && (
