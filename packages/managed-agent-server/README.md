@@ -874,8 +874,7 @@ Then **Workspace → Choose existing directory** browses this computer directly,
 without a pre-registered parent or grant. Import keeps the project in place,
 automatically registers its projects parent outside Git worktrees, grants the
 current actor OWNER access, and sets the project as the initial working directory.
-The parent shares file access and its physical-owner lease across projects; this
-is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+The parent shares file access and catalog-local leases across projects; this is not a filesystem sandbox or a global parent-directory claim. New imports use `imported-<receipt key>` storage IDs and private registration metadata below `runtime-broker.state-directory/imported-projects/<storage ID>`. Independent local catalogs may import the same project while leaving any global storage marker untouched. Whole-storage migration, physical recovery and exclusive file-history rewind are unavailable for these shared imports; own-process Runtime recovery remains available. Existing owned roots are reused while sessions run.
 Private Runtime state and creation roots must stay outside imported parents.
 Remote listeners cannot enable this local feature, including with the insecure
 bind override. Signed mode retains signature validation and does not accept a
@@ -888,7 +887,7 @@ and idempotency key. These fields are exclusive with Workspace-relative source
 fields. `localDirectoryImport` advertises the capability independently; pending
 receipts pin native root identity and completed receipts resolve imported roots
 after restart or disabling further imports. Neither retry nor restart repairs a
-missing/foreign marker or restores revoked access. See the
+missing or mismatched registration metadata or restores revoked access. Legacy `created-` imports and application-owned roots keep their global marker contract; no existing receipt or marker is converted automatically. See the
 [local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
 
 For other deployments, the existing authorized-root flow remains available.
@@ -1173,7 +1172,8 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay` and `wake-recovery.scan-delay` — also read a bare number as milliseconds,
+`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
 
@@ -1419,7 +1419,10 @@ mvn -q -DskipTests compile exec:java \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
-The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
+In the reference distribution, run it as
+`bin/qwen-managed-agent-admin storage-registration register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed`;
+`bin/qwen-managed-agent-admin` with no arguments lists every maintenance entry it
+wraps. The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
 
 ```bash
 java -cp /path/to/app.jar \
@@ -1893,7 +1896,7 @@ See the [English design](../../docs/design/workspace-storage-migration.md) and [
 
 The current baseline includes the Workspace migration schema. Earlier development catalogs require fresh disposable fixtures; do not edit Flyway history to reuse them.
 
-The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`; the reference distribution runs the same entry as `bin/qwen-managed-agent-admin workspace-migration`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 
 Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
 
