@@ -1454,6 +1454,9 @@ describe('ContentGenerationPipeline', () => {
       ],
       [TOKEN_PLAN_URL, 'enable_thinking'],
       [DASHSCOPE_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
     ])(
       'sends built-in DeepSeek selection and defaults through %s',
       async (baseUrl, field) => {
@@ -1490,6 +1493,7 @@ describe('ContentGenerationPipeline', () => {
     it.each([
       ['https://api.deepseek.com/v1', 'thinking'],
       [TOKEN_PLAN_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
     ])(
       'preserves static overrides with built-in and legacy capabilities on %s',
       async (baseUrl, field) => {
@@ -1653,21 +1657,28 @@ describe('ContentGenerationPipeline', () => {
       expect(wire.reasoning).toBeUndefined();
     });
 
-    it('keeps explicit other profiles ahead of the built-in DeepSeek serializer', async () => {
-      const wire = await deepSeekWire(
-        {
-          samplingParams: { reasoning: { effort: 'medium' } },
-        },
-        {
-          profile: 'openai-reasoning',
-          efforts: ['low', 'medium', 'high'],
-          defaultEffort: 'medium',
-        },
-      );
-      expect(wire.reasoning).toEqual({ effort: 'medium' });
-      expect(wire.reasoning_effort).toBeUndefined();
-      expect(wire.thinking).toBeUndefined();
-    });
+    it.each([
+      'https://api.deepseek.com/v1',
+      'https://model-proxy.alibaba-inc.com/v1',
+    ])(
+      'keeps explicit profiles ahead of built-in DeepSeek on %s',
+      async (baseUrl) => {
+        const wire = await deepSeekWire(
+          {
+            baseUrl,
+            samplingParams: { reasoning: { effort: 'medium' } },
+          },
+          {
+            profile: 'openai-reasoning',
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+          },
+        );
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
 
     it('honors legacy capability tier subsets after normalizing a DeepSeek alias', async () => {
       const wire = await deepSeekWire(

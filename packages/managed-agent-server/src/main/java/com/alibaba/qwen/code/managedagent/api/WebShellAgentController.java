@@ -9,6 +9,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeModelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
@@ -43,6 +45,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
+import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -131,6 +134,10 @@ public class WebShellAgentController {
     @PostMapping("/sessions/export/query")
     public ApiModels.WebShellExportPage export(TenantContext tenant,
             @Valid @RequestBody ApiModels.WebShellExportRequest request) {
+        if ("messages".equals(request.view())) {
+            return service.messageExportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                    request.cursor(), request.limit() == null ? 100 : request.limit(), false);
+        }
         return service.exportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
                 request.cursor(), request.limit() == null ? 100 : request.limit());
     }
@@ -172,10 +179,25 @@ public class WebShellAgentController {
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
+        if ("messages".equals(request.view())) {
+            return service.messageTranscript(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                    request.cursor(), request.limit() == null ? 100 : request.limit());
+        }
         return service.transcript(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(),
                 request.cursor(),
                 request.limit() == null ? 100 : request.limit());
+    }
+
+    @PostMapping("/transcript/items/query")
+    public WebShellExportPage recentTranscriptItems(TenantContext tenant,
+            @Valid @RequestBody WebShellExportRequest request) {
+        if ("messages".equals(request.view())) {
+            return service.messageExportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                    request.cursor(), request.limit() == null ? 100 : request.limit(), true);
+        }
+        return service.recentTranscriptItems(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.cursor(), request.limit() == null ? 100 : request.limit());
     }
 
     @PostMapping(value = "/events/stream",
@@ -229,6 +251,10 @@ public class WebShellAgentController {
         if (selection == null && request.extensionPins() != null) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Extension packages require a bound Workspace.");
         }
+        var worktree = SessionWorktreeService.parse(request.worktree(), true);
+        if (selection == null && worktree != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Session worktrees require a bound Workspace.");
+        }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
         // clientId-only contract is asserted here and immediately
@@ -237,10 +263,13 @@ public class WebShellAgentController {
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
-                : service.createWorkspaceSession(tenant.tenantId(),
+                : worktree == null ? service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins())
+                : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), request.idempotencyKey(),
+                        request.agentId(), null, request.title(), null, request.input(), selection,
+                        request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins(), worktree));
         return ResponseEntity.accepted().body(admission);
     }
 
