@@ -1,5 +1,7 @@
 # Release 任务迁出 GitHub 托管池
 
+> 启用方案以[release runner 槽位](2026-10-28-release-queue-optimization.zh-CN.md)为准：在现有共享机器上预留 runner 进程，不要求独占整机。
+
 [English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
 
 ## 问题与范围
