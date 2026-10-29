@@ -45,6 +45,7 @@ import type {
   Usage,
 } from '../types.js';
 import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
+import { sanitizeTerminalText } from '../../ui/utils/textUtils.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
 import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
@@ -126,7 +127,7 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
   ): void;
   processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
-  emitResult(options: ResultOptions): void;
+  emitResult(options: ResultOptions): CLIResultMessage;
 
   startSubagentAssistantMessage?(parentToolUseId: string): void;
   processSubagentToolCall?(
@@ -170,6 +171,14 @@ export abstract class BaseJsonOutputAdapter {
    * success (#15704).
    */
   protected preSendRefusalMessage: string | null = null;
+
+  /**
+   * Set once the current turn streams assistant text. A refusal can fire
+   * mid-turn (the hook runs on `ToolResult` sends, the token gate reads the
+   * previous request's count), and converting such a turn to the error
+   * envelope would drop the text it already produced.
+   */
+  protected turnProducedText = false;
 
   // Track permission denials (execution denied tool calls)
   protected permissionDenials: CLIPermissionDenial[] = [];
@@ -616,8 +625,9 @@ export abstract class BaseJsonOutputAdapter {
    * This is a shared implementation used by both streaming and non-streaming adapters.
    */
   startAssistantMessage(): void {
-    // The refusal latch describes the stream of the turn being started.
+    // The refusal latch and text flag describe the turn being started.
     this.preSendRefusalMessage = null;
+    this.turnProducedText = false;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -686,6 +696,9 @@ export abstract class BaseJsonOutputAdapter {
 
     switch (event.type) {
       case LlmEventType.Content:
+        if (event.value.length > 0) {
+          this.turnProducedText = true;
+        }
         this.appendText(state, event.value, null);
         break;
       case LlmEventType.Citation:
@@ -737,7 +750,9 @@ export abstract class BaseJsonOutputAdapter {
         this.preSendRefusalMessage ??= event.value.message;
         break;
       case LlmEventType.UserPromptSubmitBlocked:
-        this.preSendRefusalMessage ??= `Blocked by a UserPromptSubmit hook: ${event.value.reason}`;
+        // The reason is model-generated for prompt/HTTP-backed hooks and is
+        // written to stderr in text mode, so keep ESC/OSC bytes out of it.
+        this.preSendRefusalMessage ??= `Blocked by a UserPromptSubmit hook: ${sanitizeTerminalText(event.value.reason)}`;
         break;
       default:
         break;
@@ -1279,18 +1294,24 @@ export abstract class BaseJsonOutputAdapter {
     // A turn the client refused before sending has nothing of its own to
     // report, and `lastAssistantMessage` still holds the previous turn's
     // message. Convert the would-be success into the matching error result so
-    // the refused turn is not reported as an answer (#15704). An error the
-    // caller already classified keeps its own subtype and message.
-    const resultOptions: ResultOptions =
-      this.preSendRefusalMessage !== null && !options.isError
-        ? {
-            ...options,
-            isError: true,
-            subtype: 'error_during_execution',
-            errorMessage: options.errorMessage ?? this.preSendRefusalMessage,
-          }
-        : options;
+    // the refused turn is not reported as an answer (#15704). A turn that
+    // already streamed text keeps its success envelope, and an error the
+    // caller classified keeps its subtype but reports the real refusal.
+    const refusal = this.preSendRefusalMessage;
     this.preSendRefusalMessage = null;
+    let resultOptions = options;
+    if (refusal !== null) {
+      if (options.isError) {
+        resultOptions = { ...options, errorMessage: refusal };
+      } else if (!this.turnProducedText) {
+        resultOptions = {
+          ...options,
+          isError: true,
+          subtype: 'error_during_execution',
+          errorMessage: options.errorMessage ?? refusal,
+        };
+      }
+    }
     const usage = resultOptions.usage ?? createExtendedUsage();
     const resultText =
       resultOptions.summary ??

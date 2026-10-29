@@ -418,6 +418,69 @@ describe('JsonOutputAdapter', () => {
       expect(resultMessage.num_turns).toBe(1);
     });
 
+    it('should emit a refusal instead of the previous answer in text mode', () => {
+      const stderrWriteSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: {
+          currentTokens: 120,
+          limit: 100,
+          message: 'Session token limit exceeded: 120 tokens > 100 limit.',
+        },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      expect(stdoutWriteSpy).not.toHaveBeenCalled();
+      expect(stderrWriteSpy).toHaveBeenCalledWith(
+        'Session token limit exceeded: 120 tokens > 100 limit.\n',
+      );
+
+      stderrWriteSpy.mockRestore();
+    });
+
+    it('should emit a blocked prompt as an error result', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const resultMessage = JSON.parse(output).find(
+        (msg: unknown) =>
+          typeof msg === 'object' &&
+          msg !== null &&
+          'type' in msg &&
+          msg.type === 'result',
+      );
+
+      expect(resultMessage.is_error).toBe(true);
+      expect(resultMessage.error.message).toBe(
+        'Blocked by a UserPromptSubmit hook: policy',
+      );
+    });
+
     it('should emit success result as text to stdout in text mode', () => {
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
 
