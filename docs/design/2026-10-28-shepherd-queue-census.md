@@ -60,7 +60,9 @@ they describe. Unknown age is not evidence of an aged run.
 **Trend state.** The previous tick's queued run-id set rides in the dashboard
 body as `<!-- fleet-shepherd queue-sample: ts=… ids=… -->`, parsed the same way as
 the existing liveness watermark. The marker is written only for a complete,
-readable enumeration; otherwise the previous marker is carried forward verbatim.
+readable enumeration **that read at least one run**; otherwise the previous
+marker is carried forward verbatim, so a complete-but-empty tick cannot erase
+the baseline.
 
 ## Self-starvation and the rescue lane
 
@@ -72,7 +74,17 @@ That bound is what the fixes target, within a limit worth stating plainly: the l
 
 The fleet cadence drops from fifteen to thirty minutes and the concurrency key becomes an expression with three groups — `fleet-shepherd` for ticks, `fleet-shepherd-watchdog` for the rescue watch, and `fleet-shepherd-rescue` for rescued runs. Replacement, per this file's own model, applies to runs that have not started; a rescue is protected not by the group alone but by the guard that keeps at most one outstanding, so there is normally no newer pending arrival to replace it. What shortens recovery is that second serialized lane, not the cadence: doubling the interval halves the arrival rate — and with it pending churn against a shared queue — while changing the landing rate not at all. A second cron (`10,40 * * * *`) runs the same job in a watch mode that ends before any dashboard work: it reads this workflow's own run history and, when no fleet tick has completed for `SHEPHERD_STALE_MINUTES` (240) and no tick is in progress, sends one `repository_dispatch` of type `shepherd-rescue`.
 
-Four decisions in that watch are load-bearing. It counts **fleet ticks only, by run title** — the history it reads necessarily contains its own run (`in_progress`) and every earlier watch (which exited success), and counting either made both gates permanently true, so the rescue branch was unreachable and the log blamed a phantom in-flight tick; the run id excludes itself as a second defence. Staleness is measured from `updatedAt` of the last **completion**, never `createdAt` and never success alone: a run that waited two hours for a runner and finished a minute ago is fresh, and counting successes would re-dispatch a shepherd that fails on every tick. A `pending` run does not defer the rescue — pending is the state that dies here — while an `in_progress` tick always does. At most one `repository_dispatch` run may be unresolved, and an unreadable _or empty_ history takes no action at all: reading an empty answer as "nothing running, never succeeded" would dispatch on no evidence. A history with runs but no tick inside it is different, and still fires — that is evidence the tick lane produced nothing.
+One table decides the watch, and the code applies it once. A run belongs to a **live lane** if it is a scheduled tick, a live manual dispatch, or a rescue; the watch itself and a _dry_ manual run belong to neither column:
+
+| run                                   | in flight (defers) | progress (resets the clock) |
+| ------------------------------------- | ------------------ | --------------------------- |
+| live lane, `status != completed`      | yes                | —                           |
+| live lane, completed, not `cancelled` | —                  | yes, by `updatedAt`         |
+| watch, or dry manual run              | never              | never                       |
+
+Each row is a defect that was shipped and fixed. Counting the watch's own run made both gates permanently true and the rescue branch unreachable. Counting successes rather than completions re-dispatched a shepherd that fails on every tick. Ignoring a completed rescue re-armed another one every watch interval while the log said "none in window". Treating `queued` as neither state dispatched a second full tick beside one that had already passed the concurrency gate and was certain to start — two dashboards assembled from the same stale reads, the later blind edit discarding the other's watermark. And titling every manual dispatch like a dry run made a maintainer's documented recovery invisible, earning it a duplicate rescue minutes later; `dry_run` defaults to false, so only an explicitly dry manual run is excluded.
+
+The title is the only field that separates the lanes, since both crons arrive as `event: schedule`. Runs created before this PR carry the workflow name, so that legacy title counts as a tick too — without it the first watch after merge would find no tick in the window and dispatch on the sentinel age. That arm can be dropped once the window rolls past this change. An unreadable _or empty_ history takes no action at all; a history with runs but no live lane inside it still fires, because that is evidence the lane produced nothing.
 
 **The 240-minute threshold is derived from measurement, not from the interval.** Ordinary completions are 80-150 minutes apart here (live median wait 146 minutes; 120-135 minutes queueing for this job), so a threshold of two or three intervals would double a working shepherd — and did, in an earlier revision set at 75. 240 clears the worst measured gap. It accepts a detection window of 240-275 minutes (threshold plus up to one watch interval) and then roughly one further pool wait while the watch and the rescue are themselves scheduled; slower detection is the price of never firing on a merely slow loop.
 
@@ -126,7 +138,10 @@ queue section is emitted before the liveness watermark that the next tick
 recovers with `head -1`, so a name carrying a newline could end its row early and
 place a forged watermark above the real one — and that watermark gates the
 liveness dispatch. Workflow names therefore have CR, LF and TAB collapsed to
-spaces and pipes escaped, and the rows join on real newlines and print with
+spaces, pipes escaped, and the comment delimiter broken (`<!--` becomes
+`<\!--`) — that third step is what stops a name from opening an HTML comment
+that would swallow the marker and everything below it. The rows join on real
+newlines and print with
 `printf '%s'` rather than `'%b'`, so no escape sequence is interpreted anywhere
 downstream. The other dashboard tables keep `'%b'` with escaped separators
 because their inputs cannot carry a newline; this one cannot, and the difference
@@ -137,9 +152,13 @@ without a `workflow_runs` array reads as a short final page, which would stamp a
 truncated enumeration complete — the fail-open the completeness gate exists to
 prevent — so an unexpected shape voids the sample. And because a run can leave
 the already-read range between two page requests, the merge applies
-`unique_by(.id)`: a duplicated boundary run inflates every count and the stored
-id set, and a skipped one reads as digested, manufacturing drainage with no cap
-involved. The previous id set is de-duplicated at the read site too, so a marker
+`unique_by(.id)`. It repairs **one direction only**: an arrival between two
+page requests duplicates the boundary run, inflating every count and the stored
+id set, and de-duplication removes it. A _departure_ shifts rows forward so one
+run is never read; that run is present in the previous set and absent here, so
+the trend counts it as digested while it sits in the queue. De-duplication
+cannot repair that, which is why the dashboard's trend line carries the caveat
+instead. The previous id set is de-duplicated at the read site too, so a marker
 written before this fix cannot double-count today.
 
 **A positive depth with nothing enumerated is a disagreement, not an empty
@@ -172,8 +191,9 @@ GitHub's listing limit.
 - The aged tail is identified by age alone. The list carries no job state, so the
   banner tells the reader to check `gh run view <id> --json jobs` before deleting
   anything — an offline runner pool keeps live jobs queued just as long.
-- A workflow name containing `|` would break a table row. No current name does;
-  the failure is cosmetic.
+- A workflow name containing `|` is escaped, so it cannot split the row; the
+  residual backslash-before-pipe renders as an extra cell rather than a broken
+  table. Cosmetic either way.
 
 ## Validation
 

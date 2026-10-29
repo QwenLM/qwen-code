@@ -3098,7 +3098,7 @@ exit 1`;
       `head \`${HEAD}\` 与 \`main\`（以 \`abc123456\` 为准`,
     );
     expect(r.writes[0]).toContain(
-      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 40 (one tick interval, assuming the next tick runs promptly; a congested runner pool stretches this).',
+      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 40 (grace plus one tick interval, assuming the next tick runs promptly; a congested runner pool stretches this).',
     );
     expect(r.writes[0]).toContain(
       'or the per-tick close cap postpones it, and the `autofix/needs-human` label parks it for a human. To keep it open, add the `autofix/skip` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.',
@@ -3107,7 +3107,7 @@ exit 1`;
       '带有 `autofix/needs-human` 标签则交由人工处理。如需保留，请添加 `autofix/skip` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。',
     );
     expect(r.writes[0]).toContain(
-      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 40 分钟内（一个节拍间隔，前提是下一跳能及时起跑；runner 池拥堵时会更久）。',
+      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 40 分钟内（宽限期加一个节拍间隔，前提是下一跳能及时起跑；runner 池拥堵时会更久）。',
     );
     expect(r.writes[0]).not.toContain('on its next tick');
     expect(r.writes[0]).not.toContain('%s');
@@ -3621,11 +3621,17 @@ exit 1`;
       "github.event_name == 'repository_dispatch' && 'shepherd rescue'",
     );
     expect(workflow).toContain("&& 'shepherd watch'");
-    expect(workflow).toContain("|| 'shepherd tick'");
-    // A manual dispatch must NOT fall through to the tick title: the staleness
-    // clock keys off it, so a dry run would silence the rescue lane for a whole
-    // threshold while exercising no lever at all.
-    expect(workflow).toContain("|| 'shepherd manual'");
+    // The whole expression, verbatim. Fragment assertions on its literals
+    // survive a `==` → `!=` flip, which puts the watch back under the tick
+    // title and makes the rescue branch unreachable with a green suite.
+    expect(workflow).toContain(
+      'run-name: >-\n' +
+        "  ${{ github.event_name == 'repository_dispatch' && 'shepherd rescue'\n" +
+        "  || (github.event_name == 'schedule'\n" +
+        "      && (github.event.schedule == '10,40 * * * *' && 'shepherd watch'\n" +
+        "          || 'shepherd tick'))\n" +
+        "  || (inputs.dry_run && 'shepherd manual dry' || 'shepherd manual') }}",
+    );
     // The literal-to-lane MAPPING is pinned exactly, not just for presence:
     // flipping either comparison swaps the lanes in production (every tick
     // would run the watch mode and exit, while the other cron ran the full
@@ -3665,6 +3671,10 @@ exit 1`;
     expect(watch).toContain(
       '--json event,status,conclusion,updatedAt,displayTitle',
     );
+    // Scope and window: without --workflow the read is the repo's 40 newest
+    // runs, and a smaller --limit can hide the only completion inside a
+    // 240-minute threshold.
+    expect(watch).toContain('--workflow qwen-fleet-shepherd.yml --limit 40');
     const NOW = Math.floor(Date.parse('2026-10-28T08:30:00Z') / 1000);
     const at = (minutesAgo) =>
       new Date((NOW - minutesAgo * 60) * 1000)
@@ -3719,6 +3729,7 @@ exit 1`;
           join(dir, 'gh'),
           `#!/bin/bash
 if [[ "$1" == 'run' && "$2" == 'list' ]]; then
+  [[ "$GITHUB_TOKEN" == 'workflow-token-value' ]] || exit 1
   cat '${dir}/fixture.json' || exit 1
   exit 0
 fi
@@ -3780,8 +3791,9 @@ ACTIONS_TOKEN='workflow-token-value'
     // Stale (300m > 240m) and idle → exactly one dispatch, through the event
     // type the workflow declares.
     const stale = replay({ runs: [staleTick] });
-    expect(stale.dispatch).toContain('event_type=shepherd-rescue');
-    expect(stale.dispatch).toContain('/dispatches');
+    expect(stale.dispatch).toBe(
+      'api -X POST repos/QwenLM/qwen-code/dispatches -f event_type=shepherd-rescue',
+    );
     expect(stale.log).toContain('dispatched a rescue');
 
     // THE defect this revision exists for: the watch's own run is in the list
@@ -3825,17 +3837,77 @@ ACTIONS_TOKEN='workflow-token-value'
       ],
     });
     expect(running.dispatch).toBe('');
-    expect(running.log).toContain('a tick is in progress');
+    expect(running.log).toContain('a live run is queued or running');
 
-    // `pending` is the state that dies here — it must NOT defer the rescue.
+    // A QUEUED tick has already passed the concurrency gate and is certain to
+    // start — this block's own measurement is 120-135 minutes of queueing then
+    // 22 seconds of work. Dispatching beside it ran two full ticks against the
+    // same stale reads. (Round 1 asserted the opposite here, on a starvation
+    // model that round 2 retracted.)
+    const queuedTick = replay({
+      runs: [
+        staleTick,
+        tick({ status: 'queued', conclusion: null, updatedAt: at(1) }),
+      ],
+    });
+    expect(queuedTick.dispatch).toBe('');
+    expect(queuedTick.log).toContain('a live run is queued or running');
+
+    // A LIVE manual dispatch is a full tick — `dry_run` defaults to false — so
+    // it is both progress and in flight. Titling it like a dry run made a
+    // maintainer's documented recovery invisible and earned it a duplicate.
     expect(
       replay({
         runs: [
           staleTick,
-          tick({ status: 'pending', conclusion: null, updatedAt: at(1) }),
+          manual({
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(5),
+          }),
         ],
       }).dispatch,
-    ).toContain('event_type=shepherd-rescue');
+    ).toBe('');
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          manual({ status: 'in_progress', conclusion: null, updatedAt: at(1) }),
+        ],
+      }).dispatch,
+    ).toBe('');
+
+    // A DRY manual run exercises no lever, so it is neither.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          {
+            event: 'workflow_dispatch',
+            displayTitle: 'shepherd manual dry',
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(5),
+          },
+        ],
+      }).dispatch,
+    ).toContain('-f event_type=shepherd-rescue');
+
+    // Runs created before this PR carry the workflow name; without the legacy
+    // arm the first watch after merge dispatches on the sentinel age.
+    expect(
+      replay({
+        runs: [
+          {
+            event: 'schedule',
+            displayTitle: 'Fleet Shepherd',
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(5),
+          },
+        ],
+      }).dispatch,
+    ).toBe('');
 
     // At most one outstanding rescue: it keeps its queue position in its own
     // group, so a second would only add pressure.
@@ -3846,7 +3918,10 @@ ACTIONS_TOKEN='workflow-token-value'
       ],
     });
     expect(queued.dispatch).toBe('');
-    expect(queued.log).toContain('already queued or running');
+    // A pending rescue is itself a live run, so the first gate defers it; the
+    // dedicated counter still names it in the diagnostic line.
+    expect(queued.log).toContain('unresolved rescues 1');
+    expect(queued.log).toContain('no rescue');
 
     // A rescue that COMPLETED is progress — it is a full fleet tick by
     // construction — so it resets the clock. Counting the tick lane alone
@@ -3864,21 +3939,6 @@ ACTIONS_TOKEN='workflow-token-value'
     });
     expect(rescued.dispatch).toBe('');
     expect(rescued.log).toContain('the shepherd is current');
-
-    // A manual run is NOT a tick: it exercises no lever, so letting it carry
-    // the tick title would silence the lane for a whole threshold.
-    expect(
-      replay({
-        runs: [
-          staleTick,
-          manual({
-            status: 'completed',
-            conclusion: 'success',
-            updatedAt: at(5),
-          }),
-        ],
-      }).dispatch,
-    ).toContain('event_type=shepherd-rescue');
 
     // A shepherd that keeps FAILING is broken, not starved. Completion is what
     // the clock counts, so a failure five minutes ago is current — and does not
@@ -3904,7 +3964,7 @@ ACTIONS_TOKEN='workflow-token-value'
           }),
         ],
       }).dispatch,
-    ).toContain('event_type=shepherd-rescue');
+    ).toContain('-f event_type=shepherd-rescue');
 
     // An EMPTY answer is not evidence: `jq -r '@tsv'` over `[]` would hand the
     // decision "0 0 " and approve a rescue on nothing.
@@ -3929,7 +3989,7 @@ ACTIONS_TOKEN='workflow-token-value'
           }),
         ],
       }).dispatch,
-    ).toContain('event_type=shepherd-rescue');
+    ).toContain('-f event_type=shepherd-rescue');
 
     // A failed dispatch is surfaced for the next watch, not swallowed.
     expect(replay({ runs: [staleTick], dispatchFails: true }).log).toContain(
@@ -3948,7 +4008,7 @@ ACTIONS_TOKEN='workflow-token-value'
         ],
         stale: '10',
       }).dispatch,
-    ).toContain('event_type=shepherd-rescue');
+    ).toContain('-f event_type=shepherd-rescue');
     expect(
       replay({
         runs: [
@@ -4000,9 +4060,16 @@ ACTIONS_TOKEN='workflow-token-value'
       censusBlock.split('env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api').length -
         1,
     ).toBe(2);
-    // Bounded by a page cap, never an open-ended --paginate.
+    // Bounded by a page cap, never an open-ended --paginate. The page SIZE is
+    // part of that contract: the short-page test below reads `-lt 100`, so a
+    // halved per_page would stamp a truncated enumeration complete.
     expect(censusBlock).toContain('QUEUE_PAGE <= QUEUE_MAX_PAGES');
+    expect(censusBlock).toContain('per_page=100');
+    expect(censusBlock).toContain('-lt 100');
     expect(censusBlock).not.toContain('--paginate');
+    // The census is read-only, and the denylist has to name the mutating shape
+    // this workflow uses five lines away in another mode.
+    expect(censusBlock).not.toContain('/dispatches');
     // An unreadable queue is UNKNOWN, never an empty one.
     expect(censusBlock).toContain('queue census skipped this tick');
     expect(workflow).toContain('depth, waits and trend are UNKNOWN, not zero');
@@ -4145,6 +4212,14 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
     // An empty queue is a KNOWN empty queue: complete, zero, and no waits.
     expect(replay({ pages: [page([], 0)] }).summary).toBe(
       'true|true|0|19|0|0|0|',
+    );
+
+    // A zero-length page with a POSITIVE depth is the disagreement case, and
+    // it must not compute a trend: diffing the previous set against an empty
+    // one reports the whole previous queue as digested — total drainage on the
+    // very tick that read nothing.
+    expect(replay({ pages: [page([], 233)], prev: '1,2,3' }).summary).toBe(
+      'true|true|233|19|0|0|0|',
     );
 
     // A payload jq cannot read voids the census instead of aborting the tick.
