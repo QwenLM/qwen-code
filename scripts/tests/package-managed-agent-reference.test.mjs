@@ -77,6 +77,10 @@ async function fixture(root) {
       '#!/usr/bin/env sh\n',
     'packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs':
       'export {};\n',
+    'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade':
+      '#!/usr/bin/env sh\nupgrade\n',
+    'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs':
+      'export {};\n',
     'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json':
       JSON.stringify({ info: { version: '1.46.0' } }),
     'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
@@ -189,6 +193,21 @@ test('packages an independently verifiable reference distribution', async () => 
       ),
       '#!/usr/bin/env sh\n',
     );
+    const upgrade = path.join(bundle, 'bin/qwen-managed-agent-upgrade');
+    assert.equal(
+      await readFile(upgrade, 'utf8'),
+      '#!/usr/bin/env sh\nupgrade\n',
+    );
+    assert.equal((await stat(upgrade)).mode & 0o777, 0o755);
+    for (const module of [
+      'qwen-managed-agent-bootstrap.mjs',
+      'qwen-managed-agent-upgrade.mjs',
+    ]) {
+      assert.equal(
+        await readFile(path.join(bundle, 'bin', module), 'utf8'),
+        'export {};\n',
+      );
+    }
     execFileSync('sha256sum', ['--check', 'SHA256SUMS.txt'], {
       cwd: output,
       stdio: 'pipe',
@@ -410,6 +429,8 @@ test('ships systemd units with the documented kill modes', async () => {
   );
 
   assert.match(server, /^KillMode=process$/m);
+  // A JVM stopped by SIGTERM exits 143; without this the stopped unit fails.
+  assert.match(server, /^SuccessExitStatus=143$/m);
   assert.match(server, /^StateDirectory=qwen-managed-agent$/m);
   assert.match(
     server,

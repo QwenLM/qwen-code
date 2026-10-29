@@ -36,13 +36,15 @@ const EN = {
   'help.fix':
     'Review a message with this error before sending it to this session. The assistant can then show a corrected view.',
   'help.continue':
-    'Apply your changes, then review the captured parameters before sending them to this session.',
+    'Sends the applied values to this session to continue the analysis.',
+  'help.continueChat':
+    'Sends the applied values to this session. You can also just keep chatting: after you change values, they are attached to your next message.',
   'continuation.notReady':
-    'Parameters are not ready. Wait for the view’s update, then apply any changed parameters before reviewing.',
+    'Parameters are not ready. Wait for the view’s update, then apply any changed parameters before sending.',
   'continuation.tooLarge':
-    'The complete parameter message exceeds 16 KiB. Reduce parameter content and apply the update before reviewing. Nothing was sent for this attempt.',
+    'The complete parameter message exceeds 16 KiB. Reduce parameter content and apply the update before sending. Nothing was sent for this attempt.',
   'continuation.waiting':
-    'Waiting for session confirmation… Review the captured parameters in the host. Later edits do not change this message.',
+    'Sending the applied values to the session… Later edits do not change this message.',
   'continuation.waitingFix':
     'Waiting for session confirmation… Review the message in the host.',
   'continuation.accepted':
@@ -85,13 +87,15 @@ const ZH_CN: Record<MessageKey, string> = {
     '继续分析需要连接到支持消息审阅的 Qwen Code 宿主。本地交互仍然可用。',
   'help.fix':
     '发送前会先让你审阅包含此错误的消息，助手随后可以展示修正后的视图。',
-  'help.continue': '应用修改后，先审阅捕获的参数，再发送到此会话。',
+  'help.continue': '把已应用的参数发送到此会话继续分析。',
+  'help.continueChat':
+    '把已应用的参数发送到此会话。也可以直接继续聊天：修改参数后，最新参数会附带在你的下一条消息里。',
   'continuation.notReady':
-    '参数尚未就绪。请等待视图更新，并应用修改后的参数后再审阅。',
+    '参数尚未就绪。请等待视图更新，并应用修改后的参数后再发送。',
   'continuation.tooLarge':
-    '完整参数消息超过 16 KiB。请减少参数内容并应用更新后再审阅。本次没有发送任何内容。',
+    '完整参数消息超过 16 KiB。请减少参数内容并应用更新后再发送。本次没有发送任何内容。',
   'continuation.waiting':
-    '正在等待会话确认… 请在宿主中审阅捕获的参数。之后的修改不会改变这条消息。',
+    '正在把已应用的参数发送到会话… 之后的修改不会改变这条消息。',
   'continuation.waitingFix': '正在等待会话确认… 请在宿主中审阅消息。',
   'continuation.accepted':
     '会话已接受请求，分析可能仍在进行，请在原会话中查看。',

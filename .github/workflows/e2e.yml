@@ -429,9 +429,14 @@ jobs:
       matrix:
         # Two shards, not three: the macOS runner is the slowest to install and
         # build, so a third shard would add more fixed cost than it removes.
-        shard:
-          - '1/2'
-          - '2/2'
+        # Exception: on main pushes the org-level macos-latest pool is so
+        # contended that the two shards serialize anyway (#15052 measured
+        # 2.4–6h waits per shard, with runs cancelled after five legs had
+        # already gone green). One unsharded leg keeps full coverage at the
+        # same runner-minute cost and halves slot acquisitions per push.
+        shard: >-
+          ${{ github.event_name == 'push' && github.ref_name == 'main'
+          && fromJSON('["1/1"]') || fromJSON('["1/2","2/2"]') }}
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

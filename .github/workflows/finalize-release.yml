@@ -17,7 +17,7 @@ concurrency:
 jobs:
   finalize:
     name: 'Finalize Stable Release'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false) }}
     environment:
@@ -29,6 +29,8 @@ jobs:
       RELEASE_TAG: '${{ github.event.release.tag_name || inputs.tag }}'
 
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - name: 'Validate stable release tag'
         id: 'meta'
         env:
@@ -57,7 +59,7 @@ jobs:
 
       - name: 'Setup Node.js'
         if: |-
-          ${{ steps.meta.outputs.is_stable == 'true' }}
+          ${{ runner.environment != 'self-hosted' && steps.meta.outputs.is_stable == 'true' }}
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'

@@ -322,6 +322,9 @@ public final class StoreModels {
 
     public record SnapshotPage(List<ItemRecord> items, boolean hasMore, String nextCursor, long coveredSequence) {}
 
+    public record MessagePage(List<ItemRecord> items, List<EventRecord> events,
+            boolean hasMore, String nextCursor, long coveredSequence, long throughSequence) {}
+
     public record SnapshotRecord(String tenantId, String sessionId,
             long version, long coveredSequence, List<ItemRecord> items,
             long createdAt, long updatedAt) {
