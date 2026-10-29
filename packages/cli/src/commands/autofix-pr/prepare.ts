@@ -475,8 +475,6 @@ function reconcileHistory(
       ),
       handledChecks: union(merged.handledChecks, history.handledChecks),
       rerunChecks: union(merged.rerunChecks, history.rerunChecks),
-      handledConflictSha:
-        merged.handledConflictSha ?? history.handledConflictSha ?? null,
     };
   }
   const newest = copies.reduce((a, b) =>
@@ -485,6 +483,11 @@ function reconcileHistory(
   const settledFloors = new Set(merged.rerunChecks ?? []);
   return {
     ...merged,
+    // The conflict marker is a scalar settlement, not an accumulating list:
+    // the most recent copy wins, so a stale main-root marker cannot override a
+    // newer linked-root settlement (which would re-fix a conflict already left
+    // to a human).
+    handledConflictSha: newest.handledConflictSha ?? null,
     heldChecks: (newest.heldChecks ?? []).filter(
       (hold) => !settledFloors.has(hold.replace(/^\d+:/, '')),
     ),
@@ -599,6 +602,9 @@ export function runPrepare(args: PrepareArgs): void {
           ...rest,
           sessionId: currentSessionId(),
           authorCanPush: canPush,
+          // A legacy watch predates the recorded anchor; populate it on resume
+          // so it stops relying on the cwd-derived fallback.
+          trustRoot: current.trustRoot ?? repoRoot(),
           ...remotes,
         };
         if (JSON.stringify(next) !== JSON.stringify(current)) {

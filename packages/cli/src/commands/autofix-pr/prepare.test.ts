@@ -434,21 +434,67 @@ describe('runPrepare (real git)', () => {
     }
   });
 
-  it('anchors trust to the recorded genuine clone, not a cwd-derived root', () => {
+  it('requires the recorded anchor and the cwd clone to agree, failing closed', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const state = readState(autofixPrPaths(clone, 7).statePath)!;
     const genuine = realpathSync(clone);
     expect(state.trustRoot).toBe(genuine);
-    // Move cwd to an unrelated clone: repoRoot() now resolves to it, but the
-    // production anchor (trustAnchor) must stay the recorded genuine clone.
+    // Agreement: cwd in the genuine clone -> the anchor resolves.
+    expect(trustAnchor(state)).toBe(genuine);
     const other = join(dir, 'other-clone');
     run(dir, 'init', '-q', '-b', 'main', other);
+    // cwd repointed to a different clone: the recorded anchor and repoRoot()
+    // disagree, so the anchor fails closed rather than trusting either source.
     process.chdir(other);
     try {
       expect(realpathSync(repoRoot())).not.toBe(genuine);
-      expect(trustAnchor(state)).toBe(genuine);
+      expect(() => trustAnchor(state)).toThrow(/does not match the clone/);
     } finally {
       process.chdir(clone);
+    }
+    // State tampered to a foreign root while cwd stays genuine: disagreement
+    // again fails closed — the round-writable field is not an authority.
+    expect(() => trustAnchor({ ...state, trustRoot: other })).toThrow(
+      /does not match the clone/,
+    );
+  });
+
+  it('keeps the latest handled conflict marker across a two-hop migration', () => {
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const headA = 'a'.repeat(40);
+    const headB = 'b'.repeat(40);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledConflictSha: headA,
+    });
+    runCleanup(7, false);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(historyPath(mainPaths, repository), old, old);
+    const linkedL = join(dir, 'linkedL');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherL', linkedL, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedL);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const lPaths = autofixPrPaths(linkedL, 7);
+    writeState(lPaths.statePath, {
+      ...readState(lPaths.statePath)!,
+      handledConflictSha: headB,
+    });
+    runCleanup(7, false);
+    const linkedN = join(dir, 'linkedN');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherN', linkedN, 'origin/main');
+    process.chdir(linkedN);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      // The newer linked settlement (B) wins over the stale main marker (A).
+      expect(
+        readState(autofixPrPaths(linkedN, 7).statePath)!.handledConflictSha,
+      ).toBe(headB);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
     }
   });
 

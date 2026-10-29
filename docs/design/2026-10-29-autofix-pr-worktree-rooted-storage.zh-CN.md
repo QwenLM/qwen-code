@@ -109,16 +109,18 @@ watch，但兄弟检出的 `.git` 是一个 gitfile，在其中运行过的代�
 指向一个替换仓库——所以绝不能把发现来的 worktree 当作信任根，否则它会为自己
 嵌套的 watch 担保，`status` 就会执行替换仓库的 `core.fsmonitor`。
 
-锚还必须独立于 helper **当前的** cwd：`repoRoot()` 从该 cwd 跑 git，所以一个
-`.git` 已被改指向替换仓库的 cwd 会让 `repoRoot()` 返回替换仓库、而非 genuine
-clone。因此 `prepare` 在会话工作目录还可信时，把 genuine clone 记入 state 的
-`trustRoot` 字段，每个 helper 都按 `trustAnchor(state)` 校验——即记录的根，
-仅对该字段存在之前 prepare 的 watch 才回退到 `repoRoot()`。state 文件在修复
-agent 的 worktree 之外，daemon 下 agent 改不了这个字段。列表把每个 watch 的
-信任检查（及 `unsavedWork`）锚定到 `trustAnchor(state)`；写路径的
-`requireWorktree` 接收独立的 `trustRoot`（genuine clone），与其 `root`（watch
-根，仍作为符号链接 walk 的停止点）分开，`push`/`sync` 传入
-`trustAnchor(state)`。发现来的 watch 根、或从 cwd 推导的根，都绝不作信任锚。
+锚也不能只靠单一来源。`repoRoot()` 从 helper 的 cwd 跑 git，所以一个 `.git`
+被改指向替换仓库的 cwd 会让它失真；而 state 文件**并非** round 够不到——
+`working_dir` 只是 cwd pin、不是文件系统沙箱，修复 worktree 里的命令能写兄弟
+文件 `../autofix-pr-<n>-state.json`，所以单凭记录的 `trustRoot` 也可被篡改。
+`prepare` 在会话 cwd 还可信时把 genuine clone 记入 `state.trustRoot`（resume
+会为旧 watch 补填），但 `trustAnchor(state)` 要求记录的根与 cwd 推导的
+`repoRoot()` **一致**——按 realpath 比较，不在可能敌意的锚里跑 git。不一致即
+说明有一处被篡改，fail-closed 拒绝、两个都不信；没有记录根的旧 watch 回退到
+cwd 推导的 clone。列表把每个 watch 的信任检查（及 `unsavedWork`）锚定到
+`trustAnchor(state)`；写路径的 `requireWorktree` 接收独立的 `trustRoot`，与其
+`root`（watch 根，仍作为符号链接 walk 的停止点）分开，`push`/`sync` 传入
+`trustAnchor(state)`。任何单一的可被 round 改写的来源都不作锚。
 
 ### 3. 按 clone 全量列出 watch
 
@@ -188,8 +190,9 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
   已结算的内容。已结算列表（已处理评论、已发回复、已花费的检查/重跑）取并集；
   pending 列表（重跑 hold、deferred run、已宣告的回复）是结算态，取最近写入的
   副本，并丢弃 floor 已被花费的 hold——迁移绝不复活后续 watch 已花费的 hold
-  （否则会重跑一个已结算的检查）。cleanup 会保留持有工作的 worktree；不会静默
-  丢失数据。
+  （否则会重跑一个已结算的检查）。已处理冲突标记是标量结算，同样取最新副本：
+  陈旧的主根标记不能覆盖较新的 linked 根结算、把一个已留给人的冲突再修一遍。
+  cleanup 会保留持有工作的 worktree；不会静默丢失数据。
 - **跨环境操作。** 在 daemon 下于 linked worktree prepare 的 watch 就落在
   那里；从该 worktree 操作它。plain-CLI 的 `status` 仍通过按 clone 全量扫描
   发现它。

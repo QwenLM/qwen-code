@@ -123,20 +123,22 @@ rewrite to point at a replacement repository — so a discovered worktree must
 never be passed as the trust root, or it would vouch for its own nested
 watches and `status` would execute the replacement's `core.fsmonitor`.
 
-The anchor must also be independent of the helper's _current_ cwd:
-`repoRoot()` runs git from that cwd, so a cwd whose `.git` has been repointed
-at a replacement repository makes `repoRoot()` return the replacement, not
-the genuine clone. `prepare` therefore records the genuine clone in the
-state's `trustRoot` field while the session's working directory is still
-trusted, and every helper validates against `trustAnchor(state)` — the
-recorded root, falling back to `repoRoot()` only for a watch prepared before
-the field existed. The state file sits outside the fix agent's worktree, so
-under the daemon the agent cannot rewrite the field. The listing anchors each
-watch's trust check (and `unsavedWork`) to `trustAnchor(state)`; the write
-path's `requireWorktree` takes a separate `trustRoot` (the genuine clone)
-distinct from its `root` (the watch root, which stays the stop of the symlink
-walk), and `push`/`sync` pass `trustAnchor(state)`. Neither a discovered watch
-root nor a cwd-derived root is ever the trust anchor.
+The anchor must not rest on a single source either. `repoRoot()` runs git
+from the helper's cwd, so a cwd whose `.git` was repointed at a replacement
+repository skews it; and the state file is **not** beyond the round's reach —
+`working_dir` is a cwd pin, not a filesystem sandbox, and a command in the fix
+worktree can write the sibling `../autofix-pr-<n>-state.json`, so a recorded
+`trustRoot` alone is tamperable too. `prepare` records the genuine clone in
+`state.trustRoot` while the session cwd is trusted (a resume populates it for a
+legacy watch), but `trustAnchor(state)` requires the recorded root and the
+cwd-derived `repoRoot()` to **agree** — compared by realpath, with no git
+command run in a possibly hostile anchor. A disagreement means one source was
+tampered with and fails closed rather than trusting either; a legacy watch
+with no recorded root falls back to the cwd-derived clone. The listing anchors
+each watch's trust check (and `unsavedWork`) to `trustAnchor(state)`; the write
+path's `requireWorktree` takes a separate `trustRoot` distinct from its `root`
+(the watch root, which stays the stop of the symlink walk), and `push`/`sync`
+pass `trustAnchor(state)`. No single round-writable source is the anchor.
 
 ### 3. Clone-wide watch listing
 
@@ -218,8 +220,11 @@ to prepare from.
   unioned; the pending lists (rerun holds, deferred runs, announced posts) are
   settlement state, taken from the most recently written copy with any hold
   whose floor was already spent dropped — a relocation never resurrects a hold
-  a later watch spent (which would re-run an already-settled check). `cleanup`
-  keeps a worktree that holds work; no silent data loss.
+  a later watch spent (which would re-run an already-settled check). The
+  handled-conflict marker is a scalar settlement, so the most recent copy wins
+  too: a stale main-root marker cannot override a newer linked-root settlement
+  and re-fix a conflict already left to a human. `cleanup` keeps a worktree
+  that holds work; no silent data loss.
 - **Cross-environment operation.** A watch prepared under the daemon in a
   linked worktree lives there; operate it from that worktree. Plain-CLI
   `status` still discovers it via the clone-wide scan.

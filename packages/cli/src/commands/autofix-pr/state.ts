@@ -365,15 +365,35 @@ export function resolveWatchRoot(prNumber: number): string {
 }
 
 /**
- * The genuine clone a watch's gitfile is validated against. Prefers the root
- * recorded when the watch was prepared (the session's working directory was
- * trusted then); a helper must not re-derive it from its own cwd, whose `.git`
- * a round's code can repoint at a replacement repository — `repoRoot()` run
- * from such a cwd returns the replacement, not the genuine clone. Falls back
- * to `repoRoot()` only for a watch prepared before the field existed.
+ * The genuine clone a watch's gitfile is validated against. Neither candidate
+ * source is authoritative on its own: a round can rewrite the state file
+ * (`working_dir` is a cwd pin, not a filesystem sandbox), and a cwd whose
+ * `.git` was repointed at a replacement repository skews `repoRoot()`. So the
+ * root recorded at prepare time and the clone the helper actually runs in must
+ * **agree**; a disagreement means one of them was tampered with, and the anchor
+ * fails closed rather than trusting either. A legacy watch with no recorded
+ * root falls back to the cwd-derived clone. Resolving the paths is lexical
+ * (realpath) — no git command runs in a possibly hostile anchor.
  */
 export function trustAnchor(state: { trustRoot?: string }): string {
-  return state.trustRoot ?? repoRoot();
+  const cwdRoot = repoRoot();
+  if (state.trustRoot === undefined) return cwdRoot;
+  let recorded: string;
+  let cwdReal: string;
+  try {
+    recorded = realpathSync(state.trustRoot);
+    cwdReal = realpathSync(cwdRoot);
+  } catch {
+    throw new Error(
+      `cannot resolve the watch's trust anchor (recorded ${state.trustRoot}, cwd ${cwdRoot}); refusing to validate the worktree against an unresolved clone`,
+    );
+  }
+  if (recorded !== cwdReal) {
+    throw new Error(
+      `the watch's recorded trust root (${state.trustRoot}) does not match the clone this helper runs in (${cwdRoot}); one of them was tampered with, so no git command runs in the watch worktree`,
+    );
+  }
+  return cwdRoot;
 }
 
 /**
