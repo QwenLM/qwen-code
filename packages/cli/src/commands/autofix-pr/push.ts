@@ -23,13 +23,15 @@ import {
   autofixPrPaths,
   isBranchName,
   isCommandSafeName,
-  repoRoot,
+  trustAnchor,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 import {
   hasUncommittedChanges,
   isAncestor,
@@ -212,7 +214,7 @@ function pushRef(
 }
 
 export function runPush(prNumber: number, task?: string): PushOutcome {
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () =>
     pushLocked(paths, prNumber, root, task),
@@ -227,8 +229,9 @@ function pushLocked(
 ): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root);
+  requireWorktree(paths, prNumber, root, false, trustAnchor(state));
   if (hasUncommittedChanges(worktree)) {
     throw new Error(
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,

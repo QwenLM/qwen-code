@@ -21,7 +21,9 @@ import type { AutofixPrPaths } from './state.js';
  * any git command in the worktree, the file must name this clone's own
  * admin entry for a worktree, and that entry must point back at it. Read
  * from the files, not asked of git, which would read the config in
- * question; `root` is the clone's main worktree, whose git is the user's.
+ * question; `root` is the genuine clone (its main worktree), whose git is the
+ * user's — never a linked worktree the calling round could repoint at a
+ * replacement repository, which would vouch for itself.
  */
 export function untrustedGitfile(
   worktreePath: string,
@@ -207,16 +209,25 @@ function untrustedSubmodulesIn(
  * Throws unless the watch's worktree is a git worktree of its own, at its
  * own path, with the watch's branch checked out. Inside a directory that is
  * not a worktree, git finds the enclosing clone; through a symlink — the
- * worktree's own path or a directory above it, up to the clone's `root` —
- * another checkout; on another branch — the user's copy of the PR branch,
- * say — a push would publish that branch's commits and a reset would
- * discard them.
+ * worktree's own path or a directory above it, up to `root` — another
+ * checkout; on another branch — the user's copy of the PR branch, say — a
+ * push would publish that branch's commits and a reset would discard them.
+ *
+ * `root` is the watch's root worktree, the stop of the symlink walk. `trustRoot`
+ * is the genuine clone the gitfile is validated against — the clone's main
+ * worktree (`repoRoot()`), the stable identity of the clone, never a linked
+ * worktree a round could repoint at a replacement repository. They differ
+ * whenever a watch is rooted in a linked worktree, so the trust anchor is a
+ * separate parameter, not `root`. This is defense-in-depth against the
+ * git-level gitfile rewrite, not a boundary against a round that can write any
+ * same-user file (see `anchorStoreRoot` in state.ts).
  */
 export function requireWorktree(
   paths: AutofixPrPaths,
   prNumber: number,
   root: string,
   switchBack = false,
+  trustRoot: string = root,
 ): void {
   const worktreePath = paths.worktreePath;
   if (!existsSync(worktreePath)) {
@@ -233,7 +244,7 @@ export function requireWorktree(
       `${worktreePath} resolves through the symlink ${redirected}; it is not the watch's worktree.`,
     );
   }
-  const untrusted = untrustedGitfile(worktreePath, root);
+  const untrusted = untrustedGitfile(worktreePath, trustRoot);
   if (untrusted !== null) {
     throw new Error(
       `${untrusted}: no git command runs in ${worktreePath} until the worktree is checked and removed.`,

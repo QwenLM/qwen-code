@@ -592,6 +592,20 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(proof.predecessorSequence()).isEqualTo(41);
         assertThat(proof.terminalSequence()).isEqualTo(42);
         assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
+        var journal = baseline.table("ma_session_journal_tx");
+        var activationRow = journal.rows().stream().filter(row -> List.of("installActivation", "renewActivation")
+                .contains(row.text("operation"))).max(java.util.Comparator.comparingLong(row -> row.number("journal_revision"))).orElseThrow();
+        Map<String, byte[]> renewedFields = new java.util.LinkedHashMap<>();
+        activationRow.fields().forEach((field, cell) -> renewedFields.put(field, cell.bytes()));
+        renewedFields.put("activation_lease_until", Long.toString(proof.predecessorActivation().expiresAt()).getBytes(StandardCharsets.UTF_8));
+        renewedFields.put("activation_renewal_seq", Long.toString(proof.predecessorActivation().renewalSequence() + 100).getBytes(StandardCharsets.UTF_8));
+        var renewedRow = WorkspaceCsiApplicationInventory.expectedRow(journal.name(), renewedFields, activationRow.membership());
+        var compactTables = baseline.tables().stream().map(table -> table != journal ? table
+                : new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(),
+                        table.rows().stream().map(row -> row == activationRow ? renewedRow : row).toList())).toList();
+        var compactProof = WorkspaceCsiApplicationHistory.preparedTerminal(WorkspaceCsiApplicationInventory.expectedImage(compactTables), original, body);
+        assertThat(compactProof.predecessorActivation().renewalSequence()).isEqualTo(proof.predecessorActivation().renewalSequence() + 100);
+        assertThat(compactProof.terminalSequence()).isEqualTo(proof.terminalSequence());
         for (var fault : List.of(
                 List.of("ma_resource", "workspace_id", "other"),
                 List.of("ma_resource", "session_scope_key", "b".repeat(64)),
@@ -600,6 +614,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 List.of("ma_resource_ref", "workspace_id", "other"),
                 List.of("ma_resource_ref", "journal_revision", "32"),
                 List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
+                List.of("ma_session_journal_tx", "activation_lease_until", "1"),
                 List.of("ma_session_head", "activation_head_revision", "2"),
                 List.of("ma_session_head", "activation_head_revision", "3"),
                 List.of("ma_session_head", "activation_head_revision", "33"),
@@ -770,7 +785,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(807);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(824);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -782,6 +797,17 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
+    }
+
+    @Test
+    void sessionWorktreeRowsBlockCsiRetirementInsteadOfBeingOmitted() throws Exception {
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
+                + " VALUES ('tenant', ?, 'workspace', 'storage', ?, ?, ?, 'PREPARING', 1, '{}', 'worktree', 1, 1)",
+                session, "a".repeat(64), "b".repeat(32), ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        var snapshot = inspect();
+        assertThat(snapshot.table("ma_session_worktree").rows()).hasSize(1);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_worktree"));
     }
 
     @Test

@@ -2568,6 +2568,13 @@ export interface DaemonWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /** Sanitized Skill and MCP snapshots built from one live session's Config. */
@@ -3736,7 +3743,7 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose output arrived in more than one chunk.
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
@@ -3921,6 +3928,7 @@ export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  /** For workflow_mode, confirms session persistence; reasoning_effort retains settings persistence semantics. */
   persisted: boolean;
 }
 
@@ -4538,6 +4546,10 @@ export interface DaemonSessionRecapResult {
   sessionId: string;
   recap: string | null;
 }
+
+export type DaemonSessionBtwStreamEvent =
+  | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }
+  | { v: 1; type: 'error'; requestId: string; code: string; message: string };
 
 export type DaemonSessionGenerationEvent =
   | {
@@ -5407,6 +5419,7 @@ export interface DaemonDeleteMessageGroupsResult {
 
 export interface DaemonRewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };

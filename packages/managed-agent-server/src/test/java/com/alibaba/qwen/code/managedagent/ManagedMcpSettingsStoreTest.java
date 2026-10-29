@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -39,8 +40,10 @@ import static org.mockito.Mockito.when;
 class ManagedMcpSettingsStoreTest {
     @Autowired private ManagedSessionStore store;
     @Autowired private AgentStateStore sessions;
+    @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager transactionManager;
 
     @Test

@@ -12,6 +12,7 @@ import {
 import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as path from 'node:path';
 import { promises as dns } from 'node:dns';
 
 // Mock dependencies
@@ -351,14 +352,37 @@ describe('parseInstallSource', () => {
     it('should throw error for non-existent path that is not valid format', async () => {
       statMissing();
 
-      await expect(
-        parseInstallSource('invalid-format-no-slash'),
-      ).rejects.toThrow('Install source not found: invalid-format-no-slash');
+      await expect(parseInstallSource('invalid package name')).rejects.toThrow(
+        'Install source not found: invalid package name',
+      );
     });
 
     // The colon after C should not be treated as plugin separator.
     it('should handle Windows drive letter correctly', () =>
       local('C:\\path\\to\\extension'));
+  });
+
+  describe('unscoped npm package parsing', () => {
+    it.each([
+      'some-package',
+      'some-package@1.2.0',
+      'some-package@latest',
+      'some-package@beta',
+    ])('parses %s', async (source) => {
+      await expectParsed(source, { source, type: 'npm' });
+    });
+    it('preserves plugin selectors', () =>
+      expectParsed('some-package:my-plugin', {
+        source: 'some-package',
+        type: 'npm',
+        pluginName: 'my-plugin',
+      }));
+    it('keeps an existing bare local path local', () =>
+      expectParsed(
+        'some-package',
+        { source: 'some-package', type: 'local' },
+        true,
+      ));
   });
 
   describe('scoped npm package parsing', () => {
@@ -553,6 +577,79 @@ describe('parseInstallSource', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('explicit local cwd', () => {
+    it.each([
+      [
+        'https://owned.invalid/repo.git:chosen',
+        'https://owned.invalid/repo.git',
+        'git',
+        'chosen',
+      ],
+      [
+        'git@owned.invalid:owner/repo.git:chosen',
+        'git@owned.invalid:owner/repo.git',
+        'git',
+        'chosen',
+      ],
+      ['@owned/package', '@owned/package', 'npm', undefined],
+    ] as const)(
+      'does not replace remote syntax %s with a resolved filesystem candidate',
+      async (input, source, type, pluginName) => {
+        vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+        const parsed = await parseInstallSource(input, {
+          cwd: path.resolve('/owned-captured'),
+        });
+        expect(parsed).toMatchObject({ source, type });
+        expect(parsed.pluginName).toBe(pluginName);
+        expect(http.get).not.toHaveBeenCalled();
+        expect(https.get).not.toHaveBeenCalled();
+      },
+    );
+
+    it('uses the captured root for the stat, metadata source and marketplace read', async () => {
+      const captured = path.resolve('/owned-captured');
+      const local = path.join(captured, 'market');
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+      const fileFs = await import('node:fs');
+      vi.mocked(fileFs.promises.readFile).mockResolvedValueOnce(
+        JSON.stringify(marketplace('captured', 'Owned', 'chosen')),
+      );
+
+      const parsed = await parseInstallSource('./market:chosen', {
+        cwd: captured,
+      });
+
+      expect(fs.stat).toHaveBeenCalledWith(local);
+      expect(fileFs.promises.readFile).toHaveBeenCalledWith(
+        path.join(local, '.claude-plugin', 'marketplace.json'),
+        'utf-8',
+      );
+      expect(parsed).toMatchObject({
+        source: local,
+        type: 'local',
+        pluginName: 'chosen',
+        marketplaceConfig: { name: 'captured' },
+      });
+    });
+
+    it('does not fall back to an ambient relative file when the captured path is absent', async () => {
+      const captured = path.resolve('/owned-captured');
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+      const fileFs = await import('node:fs');
+      const before = vi.mocked(fileFs.promises.readFile).mock.calls.length;
+
+      await expect(
+        parseInstallSource('./missing/market', { cwd: captured }),
+      ).rejects.toThrow('Install source not found');
+
+      expect(fs.stat).toHaveBeenCalledTimes(1);
+      expect(fs.stat).toHaveBeenCalledWith(
+        path.join(captured, 'missing', 'market'),
+      );
+      expect(fileFs.promises.readFile).toHaveBeenCalledTimes(before);
     });
   });
 });
