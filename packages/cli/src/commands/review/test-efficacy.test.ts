@@ -1220,9 +1220,7 @@ describe('classifyProbeRun', () => {
     { failureMessages: [] },
     { failureMessages: ['Error: fixture setup failed'] },
     {
-      failureMessages: [
-        'Error: AssertionError is mentioned in an ordinary error',
-      ],
+      failureMessages: ['Error: AssertionError: reported by a dependency'],
     },
   ])(
     'does not call a failed test with $failureMessages GATED',
