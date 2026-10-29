@@ -257,6 +257,11 @@ final class WorkspaceCsiApplicationInventory {
                     + "hook_occurrence_hash:CHAR,hook_ordinal:BIGINT,hook_definition_hash:CHAR,record_kind:VARCHAR,"
                     + "state:VARCHAR,action_id:VARBINARY,action_version:BIGINT,decision_receipt_id:VARBINARY,"
                     + "decision_digest:CHAR,prompt_id:VARBINARY,turn_id:VARBINARY,options_json:LONGTEXT"),
+            declaration("ma_session_worktree", "tenant_id,session_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,workspace_id:VARBINARY,storage_id:VARBINARY,"
+                    + "physical_key:CHAR,worktree_id:CHAR,owner_actor_key:VARBINARY,state:VARCHAR,revision:BIGINT,"
+                    + "plan_json:LONGTEXT,identity_json:LONGTEXT,operation_id:VARBINARY,failure_code:VARCHAR,"
+                    + "gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_snapshot", "tenant_id,session_id,snapshot_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,snapshot_id:VARBINARY,snapshot_version:BIGINT,"
                     + "covered_sequence:BIGINT,projection_version:INT,manifest_resource_key:CHAR,manifest_sha256:CHAR,"
@@ -2348,6 +2353,8 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_agent_definition" -> query(table, "tenant_id=T&agent_id=agent&revision=agentRevision");
                 case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
                         "ma_extension_settings" -> query(table, "tenant_id=T&workspace_id=W");
+                case "ma_session_worktree" -> query(table, "tenant_id=T&session_id=sessions",
+                        "tenant_id=T&workspace_id=W", "physical_key=F");
                 case "ma_workspace" -> query(table, "tenant_id=T&workspace_id=W", "tenant_id=T&storage_id=D",
                         "tenant_id=T&parent_session_id=sessions");
                 case "ma_storage" -> query(table, "alias_key=A", "physical_key=F", "tenant_id=T&storage_id=D");
