@@ -23,8 +23,10 @@ writable. Two gaps follow:
 2. When an update exists but one-click is not possible (`canInstall: false`),
    the API already returns manual `instructions`, but the Web Shell renders
    nothing: the update control only appears in the `ready` state. Users of
-   development, Homebrew, npx, and Windows installations see a stale version
-   with no guidance.
+   Homebrew, npx, and local installations see a stale version with no
+   guidance. (Windows and development-mode daemons report `unavailable`
+   rather than `available`, so they show nothing before and after this
+   change.)
 
 This increment closes both gaps. It does not add Windows process replacement,
 embedded-host restart, or any new route.
@@ -66,6 +68,18 @@ All other states keep their current behavior: silent check and prepare,
 button only when `ready`, explicit restart with downtime tolerance and
 return-to-URL. Strings are added to both locales.
 
+The affordance covers installations whose check reports an `available` update
+with manual instructions, such as Homebrew, npx, and local installs. Windows
+daemons have no restart callback and development-mode checks are skipped, so
+both report `unavailable` and intentionally keep showing nothing; this
+increment does not change those exclusions.
+
+In the rail layout the manual panel opens from inside the More menu. Its
+focus and pointer interactions are exempted from the More popover's
+outside-interaction dismissal, alongside the existing local-files and
+desktop-relay panels, so both layers stay open while the user reads or
+selects the instructions.
+
 ## Ownership and impact surface
 
 Both changes stay process-global to the daemon, with the existing
@@ -87,9 +101,12 @@ scenario alongside the existing one-click scenarios.
 
 Acceptance: a global pnpm/yarn/bun or root-owned npm installation with the
 published launcher gets the same one-click flow as a writable npm
-installation; an installation that cannot be updated from the Web Shell shows
-the manual steps next to its version instead of nothing; installations without
-instructions and all non-`available` states render exactly as before.
+installation; an installation whose check returns an available update with
+manual instructions shows those steps next to its version instead of nothing,
+and in the rail layout both the More menu and the manual panel stay open while
+the instructions are read or selected; installations without instructions and
+all non-`available` states — including Windows and development-mode daemons —
+render exactly as before.
 
 ## Open questions
 

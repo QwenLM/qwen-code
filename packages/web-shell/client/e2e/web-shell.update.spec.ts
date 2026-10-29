@@ -226,11 +226,23 @@ test('shows manual update instructions when one-click is unavailable @smoke', as
   await expect(entry).toHaveAttribute('title', 'Update to v0.24.6 (manual)');
   await entry.click();
   const panel = page.locator('[data-web-shell-update-manual]');
+  const more = page.locator('[data-web-shell-sidebar-more]');
   await expect(panel).toBeVisible();
   await expect(panel).toContainText(
     'npm install -g @qwen-code/qwen-code@0.24.6',
   );
   await expect(panel).toContainText('cannot be updated from the Web Shell');
+  // The panel takes focus when it opens; an immediate visibility assertion
+  // can observe the exit animation while the rail More menu dismisses both
+  // layers. Wait past that window and require both to stay open.
+  await page.waitForTimeout(500);
+  await expect(panel).toBeVisible();
+  await expect(more).toBeVisible();
+  // Selecting the command text is an outside interaction for More too.
+  await panel.locator('pre').selectText();
+  await page.waitForTimeout(200);
+  await expect(panel).toBeVisible();
+  await expect(more).toBeVisible();
   expect(preparations).toBe(0);
   expect(restarts).toBe(0);
   await page.screenshot({ path: testInfo.outputPath('update-manual.png') });
