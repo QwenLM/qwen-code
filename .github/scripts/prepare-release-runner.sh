@@ -82,12 +82,6 @@ mkdir "${release_state}/gh" || exit 1
   echo "DOCKER_CONFIG=${release_state}/docker"
   echo "GH_CONFIG_DIR=${release_state}/gh"
 } >> "${GITHUB_ENV:?}"
-mkdir -p "${release_state}/bin" "${release_state}/maven"
-{
-  echo "RELEASE_RUNNER_STATE=${release_state}"
-  echo "NPM_CONFIG_PREFIX=${release_state}"
-  echo "MAVEN_OPTS=-Dmaven.repo.local=${release_state}/maven"
-} >> "${GITHUB_ENV}"
+mkdir "${release_state}/bin"
+echo "NPM_CONFIG_PREFIX=${release_state}" >> "${GITHUB_ENV}"
 echo "${release_state}/bin" >> "${GITHUB_PATH:?}"
-node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
-bash "$(dirname -- "$0")/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"

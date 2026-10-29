@@ -56,15 +56,17 @@ lane、workspace tests、两个 integration lane）——这些机器是双标�
   `ecs-qwen-release-host`，由新的 opt-in 仓库变量
   `ECS_RELEASE_HOST_RUNNER_ENABLED` 控制：
   `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
+  这是 `publish` 继续使用的表达式。音频复用后续改动仅移除 `collect` 的
+  `x64`，因为汇总任务不执行目标平台二进制。
   变量未设置（默认）时两个 job 与本变更之前完全一样派发到
   `ubuntu-latest`。运维准备好只挂 `ecs-qwen-release-host` 标签的专用机器后，
   拨开变量即可。
 - `publish` 补上 `release_disk_floor_gate` 锚点（在它的 checkout 之后、安装
   之前），纳入与其他池路由 job 相同的 ENOSPC 快速失败机制（#10035）。
-- `collect` 在合并制品前新增 fail-closed 的 `rm -rf prebuilds` 步骤：在持久
-  工作区上，`download-artifact` 的 `merge-multiple: true` 会合并进已存在的
-  路径，上一轮 release 残留的目录会把陈旧 prebuild 一并重新上传。`rm` 失败
-  （如残留 root 属主文件）会让 job 失败，而不是发布脏制品。
+- `collect` 和 release workflow 的清理锚点都在 checkout 或合并制品前调用
+  共享的 `prepare-release-runner` action。在持久工作区上，
+  `download-artifact` 会合并进已存在的路径，因此必须先经过工作区边界检查
+  再删除残留文件。清理失败会让 job 停止，而不是发布脏制品。
 - `.github/actionlint.yaml` 登记新标签。
 
 ## 设计决策与理由

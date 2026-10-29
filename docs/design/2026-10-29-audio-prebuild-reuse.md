@@ -68,6 +68,7 @@ Every step that can fail on a cache miss is non-fatal, and the reuse ID is only
 published after a _trial download and payload validation_ succeed:
 
 - lookup API failure → no candidate
+- fingerprint or temporary-directory failure → no key, so the native matrix runs
 - download failure → acceptance skipped (keyed on `outcome`, since
   `continue-on-error` rewrites `conclusion`)
 - payload validation failure → the step fails before writing the output
@@ -99,9 +100,16 @@ whatever `packages` happened to be on the host: with a leftover symlink it
 deleted an external tree and exited 0, and the following download wrote through
 the same symlink.
 
-The collector also invoked `node` with no Node contract at all, inheriting Node
-from the hosted image by accident. It now asserts Node 22 on self-hosted and
-pins a hosted `setup-node`, both before the validator.
+The existing release workflow wipe anchor calls the same action, so workspace
+containment and Git/npm/Docker/gh state isolation have one implementation. The
+action downloads that script at the workflow SHA into the runner's temporary
+directory before checkout; it never executes a stale workspace copy. Node setup
+and the existing disk-floor gates remain separate from workspace cleanup.
+
+The collector now uses the existing pre-installed Node preflight on self-hosted
+runners and pins hosted `setup-node` to 22.22.3 before the validator. Native
+compilation always uses Node 22.22.3. Workspace cleanup itself requires no Node
+and adds no stricter version gate than the existing self-hosted preflight.
 
 Its release-only label drops the `x64` component: the runners carrying
 `ecs-qwen-release-host` are ARM64, and an architecture component in that label
@@ -114,6 +122,10 @@ None of this depends on `ECS_RELEASE_HOST_RUNNER_ENABLED`. The reuse decision
 happens in `prepare`, which already runs on its own pool, and the consumer is
 the existing publisher. The switch stays unset and this change takes effect
 anyway.
+
+Publisher runner routing is unchanged, including its existing `x64` label.
+The isolated build lane and hosted npm publication boundary belong to #15832;
+this PR does not establish that enabling that lane is safe.
 
 ## Validation
 

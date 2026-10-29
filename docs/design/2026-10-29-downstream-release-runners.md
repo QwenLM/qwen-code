@@ -29,8 +29,8 @@ at the running commit: a `./` reference would need a prior checkout and, on a
 persistent machine, would execute whatever action tree the previous job left on
 disk. The preflight canonicalises and wipes the workspace, refusing paths that
 resolve through a symlinked component or outside the runner workspace, then
-isolates Git, npm, gh, Docker and Maven state in runner temp and asserts
-Node 22. Routed jobs use preinstalled Node 22 and job-local npm/OSS tools.
+isolates Git, npm, gh and Docker state in runner temp and asserts
+Node 22. Routed jobs use preinstalled Node 22 and a job-local npm prefix.
 
 Release credentials must never run on hosts shared with untrusted PR jobs.
 A label alone is not a security boundary; the release-labelled runner processes

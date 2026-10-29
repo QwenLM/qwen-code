@@ -1,5 +1,5 @@
 name: 'Prepare isolated release runner'
-description: 'Wipes the workspace and isolates Git/npm/Docker/gh/Maven state before a release job checks out on a persistent self-hosted machine. No-op on GitHub-hosted runners.'
+description: 'Wipes the workspace and isolates Git/npm/Docker/gh state before a release job checks out on a persistent self-hosted machine. No-op on GitHub-hosted runners.'
 
 runs:
   using: 'composite'
@@ -23,3 +23,5 @@ runs:
           gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script"
         done
         bash "$bootstrap/prepare-release-runner.sh"
+        node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+        bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"

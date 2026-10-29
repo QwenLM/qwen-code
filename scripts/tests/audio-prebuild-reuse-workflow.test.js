@@ -25,11 +25,16 @@ describe('audio prebuild reuse wiring', () => {
     expect(releaseYaml.jobs.prepare.permissions.actions).toBe('read');
 
     const lookup = step('prepare', 'Find reusable audio prebuilds');
+    const fingerprint = step('prepare', 'Fingerprint audio build inputs');
     const download = step('prepare', 'Try reusable audio prebuilds');
     const accept = step('prepare', 'Accept complete audio prebuilds');
-    // All three tolerate failure; none of them may fail the release.
-    for (const entry of [lookup, download, accept])
+    // Failure before acceptance must leave the fresh-build path available.
+    for (const entry of [fingerprint, lookup, download, accept])
       expect(entry['continue-on-error']).toBe(true);
+    expect(fingerprint.run).toContain('echo "directory=$directory"');
+    expect(fingerprint.run.indexOf('echo "directory=$directory"')).toBeLessThan(
+      fingerprint.run.indexOf('audio-prebuilds.mjs key'),
+    );
     expect(download.if).toBe(
       "${{ steps.audio_candidate.outputs.artifact_id != '' }}",
     );

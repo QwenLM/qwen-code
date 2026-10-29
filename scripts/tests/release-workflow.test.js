@@ -288,7 +288,7 @@ describe('CUA release workflow', () => {
 });
 
 // The canonical workspace restoration script shared by all nine
-// 'Restore workspace ownership' copies in release.yml. The full wipe (vs
+// 'Restore workspace ownership' action calls in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
 // checkouts persist credentials and the publish job can mint the npm OIDC
 // id-token, so no pre-existing repo state may survive into them. Pin the
@@ -296,7 +296,9 @@ describe('CUA release workflow', () => {
 // pins its sweep copies: a commented-out find, an inserted early exit, or a
 // uniformly dropped ownership ladder all ship green under substring pins,
 // and each of those mutants reopens the incident class this step exists for.
-const canonicalWipe = `set -uo pipefail
+const canonicalWipe = `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
 # Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
 while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
@@ -377,7 +379,15 @@ mkdir "\${release_state}/gh" || exit 1
   echo "NPM_CONFIG_USERCONFIG=\${release_state}/npmrc"
   echo "DOCKER_CONFIG=\${release_state}/docker"
   echo "GH_CONFIG_DIR=\${release_state}/gh"
-} >> "\${GITHUB_ENV:?}"`;
+} >> "\${GITHUB_ENV:?}"
+mkdir "\${release_state}/bin"
+echo "NPM_CONFIG_PREFIX=\${release_state}" >> "\${GITHUB_ENV}"
+echo "\${release_state}/bin" >> "\${GITHUB_PATH:?}"
+`;
+const releaseRunnerScript = readFileSync(
+  '.github/scripts/prepare-release-runner.sh',
+  'utf8',
+);
 
 describe('release workflow', () => {
   // The shard-completeness pin and the zero-test ratchet must gate on the
@@ -439,12 +449,13 @@ describe('release workflow', () => {
         String(step.uses ?? '').includes('actions/checkout'),
       );
       expect(checkoutIndex, id).toBeGreaterThan(0);
-      // Full-string equality against the shared constant: commenting out
-      // the find, inserting an early exit, or dropping the chown/chmod
-      // ladder uniformly from all nine copies keeps every substring and
-      // equality-across-copies pin green while reopening the incident.
-      expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
+      // Every caller must reach the same pinned cleanup implementation.
+      expect(job.steps[restoreIndex]?.uses, id).toBe(
+        '$/.github/actions/prepare-release-runner',
+      );
     }
+    // Full-body equality also catches early exits or a commented-out wipe.
+    expect(releaseRunnerScript).toBe(canonicalWipe);
     // Pool-routed jobs inherit root-owned leftovers whether or not they
     // check out, so the exemption above must never extend to them.
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
@@ -452,6 +463,7 @@ describe('release workflow', () => {
         continue;
       }
       expect(wipesWorkspace(job), id).toBe(true);
+      expect(['read', 'write'], id).toContain(job.permissions?.contents);
     }
   });
 
@@ -1908,7 +1920,7 @@ describe('release workflow', () => {
   it.skipIf(
     !hasGnuRealpath || process.getuid?.() === 0 || process.platform === 'win32',
   )('executes the workspace wipe against guard branches', () => {
-    const wipeScript = canonicalWipe;
+    const wipeScript = releaseRunnerScript;
 
     const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
       const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
@@ -1922,6 +1934,7 @@ describe('release workflow', () => {
         RUNNER_TEMP: join(base, 'temp'),
         RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
         GITHUB_ENV: join(base, 'github-env'),
+        GITHUB_PATH: join(base, 'github-path'),
         HOME: join(base, 'home'),
         XDG_CONFIG_HOME: join(base, 'home', '.config'),
         ...envOverrides,
@@ -2067,6 +2080,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(runnerRoot, 'temp'),
           RUNNER_TOOL_CACHE: join(runnerRoot, '_work', '_tool'),
           GITHUB_ENV: join(runnerRoot, 'github-env'),
+          GITHUB_PATH: join(runnerRoot, 'github-path'),
           HOME: join(runnerRoot, 'home'),
           XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
         };
@@ -2111,6 +2125,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2149,6 +2164,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2188,6 +2204,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2226,6 +2243,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2271,6 +2289,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2315,6 +2334,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(runnerRoot, 'temp'),
           RUNNER_TOOL_CACHE: join(runnerRoot, 'tool-cache'),
           GITHUB_ENV: join(runnerRoot, 'github-env'),
+          GITHUB_PATH: join(runnerRoot, 'github-path'),
           HOME: join(runnerRoot, 'home'),
           XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
         };
@@ -2359,6 +2379,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(runnerRoot, 'temp'),
           RUNNER_TOOL_CACHE: join(runnerRoot, 'tool-cache'),
           GITHUB_ENV: join(runnerRoot, 'github-env'),
+          GITHUB_PATH: join(runnerRoot, 'github-path'),
           HOME: join(runnerRoot, 'home'),
           XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
         };
@@ -2401,6 +2422,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };

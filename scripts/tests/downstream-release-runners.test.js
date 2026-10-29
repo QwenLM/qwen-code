@@ -104,6 +104,8 @@ describe('downstream release pool', () => {
     expect(step.run).toContain('export GH_CONFIG_DIR="$bootstrap/gh"');
     expect(step.run).toContain('?ref=${WORKFLOW_SHA}');
     expect(step.run).toContain('bash "$bootstrap/prepare-release-runner.sh"');
+    expect(step.run).toContain('Release hosts require Node 22');
+    expect(step.run).toContain('bash "$bootstrap/check-disk-floor.sh"');
 
     for (const [file, id] of routes) {
       const steps = workflow(file).jobs[id].steps;
@@ -155,7 +157,6 @@ describe('downstream release pool', () => {
       'NPM_CONFIG_PREFIX',
       'DOCKER_CONFIG',
       'GH_CONFIG_DIR',
-      'MAVEN_OPTS',
     ])
       expect(script).toContain(setting);
   });

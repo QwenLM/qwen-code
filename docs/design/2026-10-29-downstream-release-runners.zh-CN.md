@@ -23,8 +23,8 @@ checkout 前，使用任务 token 从固定 workflow revision 下载预检脚本
 从而在当前 commit 解析：用 `./` 需要先 checkout，而在持久机器上还会执行上一个
 任务残留在磁盘上的 action 目录。预检会规范化并清空工作区，拒绝经由符号链接
 组件解析或落在 runner 工作区之外的路径，然后在 runner temp 隔离 Git、npm、
-gh、Docker 和 Maven 状态，并断言 Node 22。迁移的任务使用预装 Node 22 和任务
-私有的 npm/OSS 工具。
+gh 和 Docker 状态，并断言 Node 22。迁移的任务使用预装 Node 22 和任务
+私有的 npm 安装目录。
 
 发布凭据不能运行在与不可信 PR 共享的机器上；label 本身不是安全边界。目前带
 release label 的 runner 进程仍然挂着共享池 label，所以启用开关的前提是机器级
