@@ -14,6 +14,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.AopTestUtils;
@@ -37,8 +38,10 @@ import static org.assertj.core.api.Assertions.*;
 class ManagedExtensionConfigurationAdmissionTest {
     @Autowired private ManagedSessionStore store;
     @Autowired private AgentStateStore sessions;
+    @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager transactionManager;
 
     @BeforeEach

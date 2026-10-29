@@ -16,6 +16,8 @@ export const McpAppSessionContext = createContext<string | undefined>(
 export interface McpAppMessageRequest {
   serverName: string;
   resourceUri: string;
+  /** Set only for the bundled Generated UI server, as core marks it. */
+  requiredFeature?: 'generated-ui';
   text: string;
   signal: AbortSignal;
 }
@@ -27,13 +29,37 @@ export interface McpAppMessageRequest {
  */
 export const MCP_APP_MESSAGE_REVIEW_META = 'qwen-code/message-review';
 
+/** The reason a message failed before the session accepted it. */
+export const MCP_APP_MESSAGE_ERROR_META = 'qwen-code/message-error';
+
 export interface McpAppMessageResult {
   isError?: boolean;
   _meta?: {
     [MCP_APP_MESSAGE_REVIEW_META]?: 'cancelled' | 'expired' | 'failed';
+    [MCP_APP_MESSAGE_ERROR_META]?: string;
   };
   [key: string]: unknown;
 }
+
+/** Composer tag kind for values a Generated UI card attaches to a message. */
+export const GENERATED_UI_CONTEXT_TAG_KIND = 'generated-ui';
+
+export function generatedUiContextTagId(documentId: string): string {
+  return `generated-ui:${documentId}`;
+}
+
+/**
+ * Lets the built-in Generated UI attach a card's current values to the
+ * user's next message in the session that owns the card.
+ */
+export interface McpAppModelContext {
+  sessionId: string;
+  attach(context: { id: string; title: string; text: string }): void;
+}
+
+export const McpAppModelContextContext = createContext<
+  McpAppModelContext | undefined
+>(undefined);
 
 export interface McpAppMessages {
   sessionId: string;
@@ -106,13 +132,29 @@ export const McpAppGeneratedUiOwnerContext = createContext<
 
 export const McpAppVisibilityContext = createContext(true);
 
+const BUNDLED_GENERATED_UI_RESOURCE =
+  'ui://qwen-code-generated-ui/view-v1.html';
+
+/**
+ * Whether core marked this App as the bundled Generated UI server's. Unlike
+ * {@link isBuiltInGeneratedUi}, the resource URI alone does not count: any
+ * server can claim it, so presentation that hides the App's origin keys on
+ * this instead.
+ */
+export function isBundledGeneratedUi(display?: {
+  requiredFeature?: 'generated-ui';
+}): boolean {
+  return display?.requiredFeature === 'generated-ui';
+}
+
+// Admission errs toward the feature gate, so a claimed URI also counts.
 export function isBuiltInGeneratedUi(display?: {
   resourceUri: string;
   requiredFeature?: 'generated-ui';
 }): boolean {
   return (
     display?.requiredFeature === 'generated-ui' ||
-    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html'
+    display?.resourceUri === BUNDLED_GENERATED_UI_RESOURCE
   );
 }
 

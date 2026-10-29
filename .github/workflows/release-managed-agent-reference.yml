@@ -10,6 +10,7 @@ on:
       - 'scripts/contract-version-utils.js'
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/tests/package-managed-agent-reference.test.mjs'
+      - 'scripts/tests/managed-agent-upgrade.test.mjs'
       - 'packages/sdk-java/qwencode/**'
       - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
@@ -313,8 +314,8 @@ jobs:
             mysql -uroot -proot \
             --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
 
-      - name: 'Test the packager'
-        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
+      - name: 'Test the packager and the upgrade command'
+        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs scripts/tests/managed-agent-upgrade.test.mjs'
 
       - name: 'Build Java components'
         run: |-
