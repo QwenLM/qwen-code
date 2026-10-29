@@ -29,6 +29,7 @@ import {
   vi,
 } from 'vitest';
 import supertest from 'supertest';
+import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { SessionAttachmentStore } from '@qwen-code/acp-bridge/sessionAttachments';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
@@ -1514,6 +1515,7 @@ interface FakeBridge extends AcpSessionBridge {
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
+    context?: BridgeClientRequestContext;
   }>;
   setLanguageCalls: Array<{
     sessionId: string;
@@ -2828,9 +2830,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
     },
-    async setSessionConfigOption(sessionId, req) {
-      setConfigOptionCalls.push({ sessionId, req });
-      return setConfigOptionImpl(sessionId, req);
+    async setSessionConfigOption(sessionId, req, context) {
+      setConfigOptionCalls.push({
+        sessionId,
+        req,
+        ...(context ? { context } : {}),
+      });
+      return setConfigOptionImpl(sessionId, req, context);
     },
     async setSessionLanguage(sessionId, params, context) {
       setLanguageCalls.push({
@@ -7192,7 +7198,16 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`);
 
         expect(skillsRes.status).toBe(200);
-        expect(skillsRes.body).toEqual(skills);
+        expect(skillsRes.body).toEqual({
+          ...skills,
+          snapshot: {
+            observedAt: expect.any(Number),
+            ageMs: expect.any(Number),
+            stale: expect.any(Boolean),
+            refreshing: false,
+          },
+        });
+        expect(skillsRes.body.snapshot.ageMs).toBeGreaterThanOrEqual(0);
         expect(providersRes.status).toBe(200);
         expect(providersRes.body).toMatchObject({
           v: 1,
@@ -10371,7 +10386,59 @@ describe('createServeApp', () => {
       },
     );
 
-    it('rejects an npm extension install with ref before queuing', async () => {
+    it.each(['some-package', 'some-package@beta', '@scope/ext:plugin'])(
+      'installs npm source %s with a registry override',
+      async (source) => {
+        let installMetadata: ExtensionInstallMetadata | undefined;
+        const restore = mockExtensionManagerMethods({
+          async prepareExtensionInstall(options) {
+            installMetadata = options.installMetadata;
+            return testExtension('npm-extension');
+          },
+        });
+        try {
+          const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+          const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+          const app = createServeApp(
+            { ...tokenOpts, workspace: WS_BOUND },
+            undefined,
+            { bridge },
+          );
+          const res = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source,
+              registry: 'https://registry.npmjs.org',
+              consent: true,
+            });
+          expect(res.status).toBe(202);
+          await vi.waitFor(() => {
+            expect(bridge.extensionEvents.at(-1)).toMatchObject({
+              status: 'installed',
+              name: 'npm-extension',
+            });
+          });
+          expect(installMetadata).toMatchObject({
+            source: source.split(':')[0],
+            type: 'npm',
+            registryUrl: 'https://registry.npmjs.org',
+            ...(source.endsWith(':plugin') ? { pluginName: 'plugin' } : {}),
+          });
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it.each([
+      '@scope/ext',
+      'some-package',
+      'some-package@beta',
+      '@scope/ext:plugin',
+    ])('rejects npm source %s with ref before queuing', async (source) => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -10385,7 +10452,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
-        .send({ source: '@scope/ext', ref: 'v1', consent: true });
+        .send({ source, ref: 'v1', consent: true });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe(
@@ -27128,6 +27195,279 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/config-option', () => {
+    it('uses the trusted live owner for Workflow mode when the primary is untrusted', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 's-secondary')
+            throw new SessionNotFoundError(sessionId);
+          return {
+            sessionId,
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-10-25T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              trusted: false,
+              bridge: primaryBridge,
+            }),
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'secondary-id',
+              workspaceCwd: WS_DIFFERENT,
+              primary: false,
+              trusted: true,
+              bridge: secondaryBridge,
+            }),
+          ]),
+        },
+      );
+      const res = await request(app)
+        .post('/session/s-secondary/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ configId: 'workflow_mode', value: 'on' });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(primaryBridge.setConfigOptionCalls).toHaveLength(0);
+      expect(secondaryBridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 's-secondary',
+          req: {
+            sessionId: 's-secondary',
+            configId: 'workflow_mode',
+            value: 'on',
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it.each([false, true])(
+      'shapes Workflow mode state and pushes for owner trust %s without blocking reasoning',
+      async (trusted) => {
+        const configOptions = [
+          { id: 'model', currentValue: 'qwen' },
+          {
+            id: 'workflow_mode',
+            currentValue: 'off',
+            _meta: {
+              'qwen.workflowMode': { available: false, effective: false },
+            },
+          },
+          { id: 'reasoning_effort', currentValue: 'high' },
+        ];
+        const update = {
+          sessionUpdate: 'config_option_update',
+          configOptions,
+          _meta: { marker: 'preserved' },
+        };
+        const event: BridgeEvent = {
+          v: 1,
+          type: 'session_update',
+          data: { sessionId: 'session-A', update },
+        };
+        const bridge = fakeBridge({
+          sessionContextImpl: async (sessionId) => ({
+            v: 1,
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            state: { configOptions },
+          }),
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: true,
+            clientId: 'client-load',
+            state: { configOptions },
+            compactedReplay: [event],
+            lifecycleReplay: [event],
+            liveJournal: [event],
+          }),
+          setConfigOptionImpl: async () => ({ configOptions }),
+          async *subscribeImpl() {
+            yield event;
+          },
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          {
+            bridge,
+            workspaceRegistry: createWorkspaceRegistry([
+              makeWorkspaceRuntimeForTest({
+                workspaceId: 'primary-id',
+                workspaceCwd: WS_BOUND,
+                primary: true,
+                trusted,
+                bridge,
+              }),
+            ]),
+          },
+        );
+        const expected = trusted
+          ? configOptions
+          : [configOptions[0], configOptions[2]];
+        const context = await request(app)
+          .get('/session/session-A/context')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(context.status).toBe(200);
+        expect(context.body.state.configOptions).toEqual(expected);
+
+        const loaded = await request(app)
+          .post('/session/session-A/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+        expect(loaded.status).toBe(200);
+        expect(loaded.body.state.configOptions).toEqual(expected);
+        for (const lane of [
+          'compactedReplay',
+          'lifecycleReplay',
+          'liveJournal',
+        ]) {
+          expect(loaded.body[lane][0].data.update).toEqual({
+            ...update,
+            configOptions: expected,
+          });
+        }
+
+        const changed = await request(app)
+          .post('/session/session-A/config-option')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ configId: 'reasoning_effort', value: 'high' });
+        expect(changed.status).toBe(200);
+        expect(changed.body.configOptions).toEqual(expected);
+        expect(bridge.setConfigOptionCalls).toHaveLength(1);
+
+        const events = await request(app)
+          .get('/session/session-A/events')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(events.status).toBe(200);
+        const frame = events.text
+          .split('\n')
+          .filter((line) => line.startsWith('data: '))
+          .map((line) => JSON.parse(line.slice('data: '.length)) as BridgeEvent)
+          .find((candidate) => candidate.type === 'session_update');
+        expect(frame?.data).toEqual({
+          sessionId: 'session-A',
+          update: { ...update, configOptions: expected },
+        });
+        expect(configOptions).toHaveLength(3);
+        expect(update.configOptions).toBe(configOptions);
+      },
+    );
+
+    it.each(['on', 'off'])(
+      'rejects Workflow mode %s for an untrusted primary owner',
+      async (value) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          {
+            bridge,
+            workspaceRegistry: createWorkspaceRegistry([
+              makeWorkspaceRuntimeForTest({
+                workspaceId: 'primary-id',
+                workspaceCwd: WS_BOUND,
+                primary: true,
+                trusted: false,
+                bridge,
+              }),
+            ]),
+          },
+        );
+        const res = await request(app)
+          .post('/session/session-A/config-option')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ configId: 'workflow_mode', value });
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('untrusted_workspace');
+        expect(bridge.setConfigOptionCalls).toHaveLength(0);
+      },
+    );
+
+    it('writes session Workflow mode with the bound client and confirms durable session persistence', async () => {
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({
+          configOptions: [
+            {
+              id: 'workflow_mode',
+              name: 'Workflow mode',
+              type: 'select',
+              currentValue: 'off',
+              options: [],
+              _meta: {
+                'qwen.workflowMode': { available: false, effective: false },
+              },
+            },
+          ],
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          sessionId: 'spoofed',
+          configId: 'workflow_mode',
+          value: 'off',
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(res.body.configOptions[0]).toMatchObject({
+        id: 'workflow_mode',
+        currentValue: 'off',
+        _meta: {
+          'qwen.workflowMode': { available: false, effective: false },
+        },
+      });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'workflow_mode',
+            value: 'off',
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it.each([
+      { value: true },
+      { value: 'invalid' },
+      { value: 'on', persist: true },
+      { value: 'off', persist: false },
+    ])('rejects invalid Workflow mode request %j', async (input) => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ configId: 'workflow_mode', ...input });
+      expect(res.status).toBe(400);
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+    });
+
     it('routes reasoning effort to the session owner and returns its current options', async () => {
       const configOptions = [
         {
@@ -41734,6 +42074,66 @@ describe('runQwenServe SIGINT handler', () => {
 });
 
 describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  it.each([true, false, undefined])(
+    'authorizes default bridge workflow mode writes from its live owner (trusted=%s)',
+    (trusted) => {
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 'owned-session') {
+            throw new SessionNotFoundError(sessionId);
+          }
+          return {
+            sessionId,
+            workspaceCwd: process.cwd(),
+            createdAt: '2026-10-25T00:00:00Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const createBridge = vi
+        .spyOn(acpBridge, 'createAcpSessionBridge')
+        .mockReturnValue(bridge);
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          ...(trusted !== undefined
+            ? { primaryWorkspaceTrusted: trusted }
+            : {}),
+        });
+        const registry = app.locals['workspaceRegistry'] as WorkspaceRegistry;
+        const options = createBridge.mock.calls[0]![0];
+        expect(options.isWorkflowModeWriteAllowed).toBeTypeOf('function');
+        expect(options.isWorkflowModeWriteAllowed!('missing-session')).toBe(
+          false,
+        );
+        options.sessionLifecycle!({
+          type: 'registered',
+          sessionId: 'owned-session',
+          workspaceCwd: registry.primary.workspaceCwd,
+          reason: 'spawn',
+        });
+        expect(options.isWorkflowModeWriteAllowed!('owned-session')).toBe(
+          trusted === true,
+        );
+        const resolveOwner = vi.spyOn(registry, 'resolveLiveSessionOwner');
+        resolveOwner.mockReturnValue({
+          kind: 'found',
+          runtime: { ...registry.primary, bridge: fakeBridge(), trusted: true },
+        });
+        expect(options.isWorkflowModeWriteAllowed!('owned-session')).toBe(
+          false,
+        );
+        resolveOwner.mockRestore();
+        registry.primaryEntry.current!.guard.close();
+        expect(options.isWorkflowModeWriteAllowed!('owned-session')).toBe(
+          false,
+        );
+      } finally {
+        createBridge.mockRestore();
+      }
+    },
+  );
+
   function makeInjectedWorkspaceRuntime() {
     const bridge = fakeBridge();
     const fsFactory = {

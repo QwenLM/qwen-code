@@ -177,7 +177,7 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
@@ -195,7 +195,7 @@ instead of `--jre-home`:
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -207,7 +207,7 @@ The lightweight builder needs no Java input. For an optional complete distributi
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```
@@ -239,16 +239,25 @@ CLI release tag, using the SDK and server from that exact source revision. A
 manual run must be dispatched from `main` and defaults to a dry run. It verifies
 the CLI and Java module, builds the `central-release` profile, and retains the
 JAR and checksum as workflow artifacts without changing public repositories.
+The workflow selects the `-exec.jar` build output when present and falls back to
+the main JAR for older tags; the public versioned JAR name stays unchanged.
 
 After verifying the dry run, release operators can run the same tag with
 `dry_run=false` through the protected `production-release` environment. The
 workflow sets the server artifact version to the CLI version, publishes
-`com.alibaba:qwen-managed-agent-server:<cli-version>` to Maven Central with
-sources, Javadoc and signatures, and distributes the same primary JAR plus its
-`.sha256` through that GitHub Release and the existing versioned OSS mirror.
-Auxiliary operator JARs are not attached to the Central publication. Existing
-assets are compared byte-for-byte and never replaced with different content.
-Published CLI release events also run this workflow automatically.
+the verified executable JAR plus its `.sha256` through that GitHub Release and the
+existing versioned OSS mirror, and checks both public download channels against
+the staged bytes. Existing assets are compared byte-for-byte and never replaced
+with different content. Published CLI release events also run this workflow
+automatically.
+
+Runtime distribution requires the existing OSS upload credentials and GitHub
+release access. It does not need Central publishing credentials or a GPG private
+key, and does not check, publish or wait for the server coordinate on Central.
+Maven still builds and fully verifies the SDK and server, including normal
+dependency resolution. The existing `central-release` profile can
+be used separately for signed Maven publication when required; that operation
+does not gate runtime delivery.
 
 The CLI downloads from OSS/GitHub, not Maven Central. It does not resolve the
 SDK as a separate user dependency: the executable server JAR includes its Java

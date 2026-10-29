@@ -153,10 +153,7 @@ import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useModBand } from './hooks/use-mod-band.js';
-import {
-  MOD_BAND_RESERVED_COLUMNS,
-  modBandMaxRows,
-} from './components/ModBand.js';
+import { modBandInput } from './utils/mod-band-tree.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import { rewindSession } from './utils/session-rewind.js';
 import { isRewindableUserTurn } from './utils/historyMapping.js';
@@ -2679,6 +2676,14 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  useEffect(
+    () =>
+      config.onWorkflowModeChange?.(() => {
+        if (config.hasWorkflowModeContext()) abortPromptSuggestion();
+      }),
+    [config, abortPromptSuggestion],
+  );
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const llmClient = config.getLlmClient();
 
@@ -3467,7 +3472,8 @@ export const AppContainer = (props: AppContainerProps) => {
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
         spec.status === 'completed' &&
-        !needsWorkflowIntent
+        !needsWorkflowIntent &&
+        !config.hasWorkflowModeContext()
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3564,7 +3570,11 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Automatic speculation never received the current human intent.
-      if (spec.status === 'running' || needsWorkflowIntent) {
+      if (
+        spec.status === 'running' ||
+        needsWorkflowIntent ||
+        (spec.status !== 'idle' && config.hasWorkflowModeContext())
+      ) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
@@ -3714,7 +3724,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // the strip only pops trailing user entries, and a responded prompt is
       // not trailing.
       if (info?.wasGoalTurn) {
-        llmClient?.stripOrphanedUserEntriesFromHistory?.();
+        llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -3880,7 +3890,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // contradict what the UI told the user was rewound. Mirrors the
       // existing strip in the Retry submit path
       // (LlmClient.sendMessageStream).
-      llmClient?.stripOrphanedUserEntriesFromHistory?.();
+      llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       // Also undo the cross-session ↑-history disk entry written by
       // useLlmStream's `logger.logMessage` — otherwise
       // getPreviousUserMessages would resurrect the cancelled prompt next
@@ -4114,9 +4124,16 @@ export const AppContainer = (props: AppContainerProps) => {
           if (result.suggestion) {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
-            if (settings.merged.ui?.enableSpeculation) {
+            if (
+              settings.merged.ui?.enableSpeculation &&
+              !config.hasWorkflowModeContext()
+            ) {
               startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
+                  if (ac.signal.aborted || config.hasWorkflowModeContext()) {
+                    void abortSpeculation(state).catch(() => {});
+                    return;
+                  }
                   speculationRef.current = state;
                 })
                 .catch(() => {
@@ -4355,27 +4372,17 @@ export const AppContainer = (props: AppContainerProps) => {
   // The Mods' band above the prompt: its input, and its tree, whose height
   // the controls measurement below takes in.
   const modBand = useModBand(config);
-  const modBandRows = modBandMaxRows(terminalHeight);
   const isModWorking = streamingState !== StreamingState.Idle;
   useEffect(() => {
-    getInteractiveModSession(config)?.setRenderInput({
-      surface: 'terminal',
-      component: 'AbovePrompt',
-      requestId: 'above-prompt',
-      viewport: {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
         columns: terminalWidth,
         rows: terminalHeight,
         isFullscreen: useTerminalBuffer,
-      },
-      props: {
         hasSurvey: isFeedbackDialogOpen,
         isWorking: isModWorking,
-        maxRows: modBandRows,
-        bodyColumns: Math.max(0, terminalWidth - MOD_BAND_RESERVED_COLUMNS),
-        scroll: { offset: 0, bodyRows: Math.max(0, modBandRows - 1) },
-        view: {},
-      },
-    });
+      }),
+    );
   }, [
     config,
     terminalWidth,
@@ -4383,7 +4390,6 @@ export const AppContainer = (props: AppContainerProps) => {
     useTerminalBuffer,
     isFeedbackDialogOpen,
     isModWorking,
-    modBandRows,
   ]);
 
   // Re-measure the footer whenever the LiveAgentPanel's height can change

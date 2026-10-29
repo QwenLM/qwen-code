@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -88,13 +89,16 @@ public final class WorkspaceCsiReservationStore {
                     + " VALUES (?, 'CSI') ON DUPLICATE KEY UPDATE storage_key = storage_key",
                     registration.physicalKey());
             readReservation(registration.physicalKey());
+            requireDataTenant(registration);
         });
     }
 
     public Reservation inspect(WorkspaceCsiRegistration registration) {
         return transaction.execute(status -> {
             verifyRegistration(registration);
-            return readReservation(registration.physicalKey());
+            var reservation = readReservation(registration.physicalKey());
+            requireDataTenant(registration);
+            return reservation;
         });
     }
 
@@ -139,15 +143,22 @@ public final class WorkspaceCsiReservationStore {
             if (!"RELEASED".equals(current.phase())) {
                 throw busy();
             }
-            long revision = nextRevision(current.revision());
+            requireDataTenant(registration);
+            long revision;
+            try {
+                revision = ResidentWorkspaceProfile.selects(original.getRequest().getScope())
+                        ? Math.addExact(current.revision(), 1) : nextRevision(current.revision());
+            } catch (ArithmeticException error) {
+                throw unavailable();
+            }
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET csi_phase = 'RESERVED', csi_revision = ?,"
                     + " csi_reservation_id = ?, csi_registration_key = ?, csi_registration_revision = ?,"
-                    + " binding_id = ?, runtime_generation = ?, csi_provision_request_id = ?"
+                    + " binding_id = ?, runtime_generation = ?, csi_provision_request_id = ?, tenant_id = ?"
                     + " WHERE storage_key = ? AND storage_kind = 'CSI' AND csi_phase = 'RELEASED'"
                     + " AND csi_revision = ? AND holder_key IS NULL AND runtime_session_id IS NULL",
                     revision, reservationId, registration.aliasKey(), registration.revision(), original.getBindingId(),
-                    original.getGeneration(), requestId, registration.physicalKey(), current.revision());
+                    original.getGeneration(), requestId, registration.tenantId(), registration.physicalKey(), current.revision());
             if (changed != 1) {
                 throw unavailable();
             }
@@ -525,11 +536,17 @@ public final class WorkspaceCsiReservationStore {
                             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "csi_reservation_id"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "csi_registration_key"),
                             row.getObject("csi_registration_revision", Long.class), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "binding_id"),
                             row.getObject("runtime_generation", Long.class), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "csi_provision_request_id"));
-                    boolean released = "RELEASED".equals(value.phase()) && CsiOwnershipRevision.released(value.revision())
+                    String tenant = row.getString("tenant_id");
+                    boolean cyclic = tenant != null && !tenant.isBlank();
+                    boolean released = "RELEASED".equals(value.phase())
+                            && (CsiOwnershipRevision.released(value.revision())
+                                    || cyclic && CsiOwnershipRevision.residentReleased(value.revision()))
                             && value.reservationId() == null && value.registrationKey() == null
                             && value.registrationRevision() == null && value.bindingId() == null
                             && value.runtimeGeneration() == null && value.provisionRequestId() == null;
-                    boolean reserved = ("RESERVED".equals(value.phase()) && CsiOwnershipRevision.reserved(value.revision())
+                    boolean reserved = ("RESERVED".equals(value.phase())
+                            && (CsiOwnershipRevision.reserved(value.revision())
+                                    || cyclic && CsiOwnershipRevision.residentReserved(value.revision()))
                             || "DRAINING".equals(value.phase()) && CsiOwnershipRevision.draining(value.revision()))
                             && uuid(value.reservationId()) && value.registrationKey() != null
                             && value.registrationRevision() != null && value.registrationRevision() > 0
@@ -545,6 +562,26 @@ public final class WorkspaceCsiReservationStore {
             throw unavailable();
         }
         return rows.getFirst();
+    }
+
+    private void requireDataTenant(WorkspaceCsiRegistration registration) {
+        var owners = jdbc.query("SELECT tenant_id, csi_revision, csi_registration_key FROM ma_storage_owner"
+                + " WHERE storage_key = ? AND storage_kind = 'CSI' FOR UPDATE", (row, index) -> {
+                    String tenant = row.getString("tenant_id");
+                    if (tenant == null && row.getLong("csi_revision") > 0) {
+                        var retained = jdbc.queryForList("SELECT tenant_id FROM ma_storage WHERE alias_key = ?"
+                                + " AND storage_kind = 'CSI' AND registration_state = 'REGISTERED'", String.class,
+                                row.getString("csi_registration_key"));
+                        if (retained.size() != 1) {
+                            throw unavailable();
+                        }
+                        tenant = retained.getFirst();
+                    }
+                    return tenant == null || tenant.equals(registration.tenantId());
+                }, registration.physicalKey());
+        if (!owners.equals(List.of(true))) {
+            throw unavailable();
+        }
     }
 
     private static long nextRevision(long revision) {
