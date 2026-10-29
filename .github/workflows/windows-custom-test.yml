@@ -12,13 +12,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Enable pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack pnpm --version
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: pnpm
-      - name: Enable pnpm
-        shell: pwsh
-        run: corepack enable
       - name: Install dependencies
         shell: pwsh
         run: corepack pnpm install --frozen-lockfile
