@@ -13,7 +13,7 @@ The main release optimization alone does not remove those waits.
 Reuse ECS_RELEASE_HOST_RUNNER_ENABLED and ecs-qwen-release-host. Keep default
 hosted execution when the switch is unset. Do not create a pool per workflow or
 serialize independent releases with a global concurrency group: GitHub replaces
-older pending runs in such groups. A small isolated pool can queue independent
+older pending runs in such groups. A small release-labelled pool can queue independent
 jobs normally. Size it from actual queue and execution times; one runner slot
 does not make downstream work intrinsically serial.
 
@@ -32,10 +32,12 @@ resolve through a symlinked component or outside the runner workspace, then
 isolates Git, npm, gh and Docker state in runner temp and asserts
 Node 22. Routed jobs use preinstalled Node 22 and a job-local npm prefix.
 
-Release credentials must never run on hosts shared with untrusted PR jobs.
-A label alone is not a security boundary; the release-labelled runner processes
-still carry the shared pool label today, so enabling the switch requires
-machine-level isolation first, not just labels and a workspace wipe.
+Reserve release-labelled runner processes on existing shared ECS hosts, starting
+with hz1-17 and hz1-18. Remove their ordinary `ecs-qwen` label; leave the other
+runners and machines in service. This reserves scheduling slots, not an entire
+machine. Labels and preflight cleanup do not prevent sibling PR processes from
+accessing the host or release credentials; the chosen shared-host deployment
+accepts that limitation rather than claiming machine isolation.
 
 Route VSCode prepare/publish and the universal build leg, finalize, desktop
 publication, Chrome build/publication, GHCR builds and the audio prebuild
@@ -76,7 +78,7 @@ unchanged.
 Specified separately in [audio prebuild reuse](./2026-10-29-audio-prebuild-reuse.md),
 which this change builds on. That mechanism is independent of
 ECS_RELEASE_HOST_RUNNER_ENABLED and takes effect with the switch unset; the
-isolated build job here consumes the same reused artifact when one was
+ECS build job here consumes the same reused artifact when one was
 selected.
 
 ## Validation and rollout
@@ -86,7 +88,7 @@ lint, focused tests, build, typecheck and bundle. Review the full diff. No real
 publication, runner mutation or switch enablement is part of this local change.
 
 Enabling the switch requires, in order: release-labelled runner processes that
-no longer share a pool with PR work, on a host that never runs PR code; the
+no longer match the ordinary shared-pool selector; the build/publish split on main; the
 tooling those jobs assume (Node 22, corepack/pnpm, gh, GNU realpath, unzip, zip,
 jq, Docker for the image builds); and a real Actions dry run. Native desktop
 migration needs a compatible image first. Audio reuse needs none of this.
@@ -99,7 +101,7 @@ scripts/tests, and the workflow size baseline.
 
 ## Open questions
 
-Isolated capacity and live dry-run results are operational checks; there is no
+Reserved runner capacity and live dry-run results are operational checks; there is no
 automatic hosted fallback after an enabled ECS job starts failing. Making the
 OSS mirrors and managed-runtime publisher arch-aware is deferred, so that part
 of the fanout keeps paying the hosted queue until then.

@@ -10,9 +10,9 @@ v0.26.3 的 Linux x64 音频预构建排队 74 分钟，执行仅 50 秒；产�
 
 该机制在[音频预构建复用](./2026-10-29-audio-prebuild-reuse.zh-CN.md)中单独描述，
 本改动基于它：指纹、来源与保留期规则、选择与消费的分段，以及未命中时的回退，
-都在那份文档里。下面的隔离构建任务消费该机制选中的产物。
+都在那份文档里。下面的ECS 构建任务消费该机制选中的产物。
 
-## 可选的隔离构建交接
+## 可选的ECS 构建交接
 
 最终 npm 发布保留在 GitHub-hosted runner：npm OIDC trusted publishing 和
 provenance 不支持普通 self-hosted runner。当
@@ -33,10 +33,17 @@ PAT 创建 release 事件来触发下游 workflow 的机制。构建与音频预
 
 ## 范围与启用条件
 
-生产构建主机不能运行 PR 任务。artifact ID 和哈希无法使共享的持久主机变得
-可信。目前带标签的 hz1 runner 尚未完成隔离，因此本次变更不启用开关，也不
-调整 runner 标签。下游迁移见[下游设计](./2026-10-29-downstream-release-runners.zh-CN.md)。专用 hosted 容量及机器池调整，
-继续作为 #15461 和 #15465 的运维后续事项。
+在现有 ECS 机器上预留少量 runner 进程用于 release 调度。先使用 hz1-17 和
+hz1-18，保留 `ecs-qwen-release-host`，移除 `ecs-qwen`，避免普通共享池任务
+占用这两个槽位。同机其他 runner 继续使用；选定部署方式不要求重装或独占整机。
+
+label 和工作区清理不是机器级安全边界。同机其他 runner 执行的 PR 代码仍可能
+影响主机、发布产物和凭据。这是共享主机部署接受的信任取舍，不能表述成整机隔离。
+npm 发布保留 hosted，现有 workflow/environment 保护和产物校验继续保留。
+
+构建与发布拆分进入 main、runner 标签和工具验证完成，并核对正在运行的发布后，
+再启用开关。主流程与下游分别执行 dry-run。参见[下游设计](./2026-10-29-downstream-release-runners.zh-CN.md)
+及 #15461、#15465。
 
 改动覆盖两个发布 workflow、固定到 workflow 提交的辅助脚本、相关 workflow
 和打包测试，以及 workflow 大小基线。公开 CLI 行为和发布产物名称保持兼容。
@@ -45,7 +52,7 @@ PAT 创建 release 事件来触发下游 workflow 的机制。构建与音频预
 
 验证指纹失效、不可信来源运行的拒绝、完整及不完整产物、查询或下载未命中、
 精确 ref 传递，以及五目标完整性检查。使用真实临时 Git 仓库和 tar 压缩包验证
-隔离构建交接，包括版本未变化时的提交处理和可执行权限。验证开关启用与关闭、
+ECS 构建交接，包括版本未变化时的提交处理和可执行权限。验证开关启用与关闭、
 dry-run、跳过测试的限制、同一次运行重试、发布凭据范围和失败报告。运行相关
 发布测试、build、typecheck 和 bundle。真实 Actions dry-run 与一次实际 npm
 发布仍是启用时的验收检查；本地测试无法证明 hosted 调度容量或真实 npm OIDC

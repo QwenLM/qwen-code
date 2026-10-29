@@ -584,7 +584,7 @@ jobs:
 
   build_release:
     name: 'Build Release Artifacts'
-    # Enable only after the entire host is isolated from PR jobs.
+    # Reserve release-labelled runner slots before enabling this lane.
     runs-on: ['self-hosted', 'linux', 'ecs-qwen-release-host']
     timeout-minutes: 90
     needs:

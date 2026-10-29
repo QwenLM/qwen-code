@@ -55,7 +55,7 @@
 22345 release-sdk-python.yml
 31270 release-sdk.yml
 17941 release-vscode-companion.yml
-45264 release.yml
+45269 release.yml
 44285 repo-hygiene.yml
 1079 scorecard-monthly.yml
 9751 sdk-java-contract-open-prs.yml
