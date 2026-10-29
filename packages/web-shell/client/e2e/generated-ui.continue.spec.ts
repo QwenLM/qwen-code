@@ -125,7 +125,7 @@ async function openCards(page: Page, testInfo: TestInfo, count = 1) {
   const workers: string[] = [];
   page.on('worker', (worker) => workers.push(worker.url()));
   await page.goto(`/session/${scenario.sessionId}?language=en`);
-  const cards = page.locator('iframe[title="generated-ui MCP App"]');
+  const cards = page.locator('iframe[title="Interactive view"]');
   await expect(cards).toHaveCount(count);
   const app = (index = 0) =>
     cards.nth(index).contentFrame().frameLocator('iframe');
@@ -185,7 +185,9 @@ test('reviews normalized parameters, freezes the message, and sends only after c
   await app().locator('#continue-analysis').focus();
   await page.keyboard.press('Enter');
 
-  const review = page.getByRole('dialog', { name: 'Review App message' });
+  const review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   await expect(review).toBeVisible();
   const frozenText = (await review.locator('pre').textContent())!;
   expect(parameters(frozenText)).toMatchObject({
@@ -217,7 +219,7 @@ test('reviews normalized parameters, freezes the message, and sends only after c
   });
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'dirty');
   await expect(review.locator('pre')).toHaveText(frozenText);
-  await review.getByRole('button', { name: 'Send to session' }).click();
+  await review.getByRole('button', { name: 'Continue analysis' }).click();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
   const request = daemon.promptRequests()[0];
   expect(request.path).toBe(`/session/${scenario.sessionId}/prompt`);
@@ -258,7 +260,9 @@ test('cancels without dispatch and keeps identical cards independent @smoke', as
   const { app, daemon, cards } = await openCards(page, testInfo, 2);
   await cards.nth(0).scrollIntoViewIfNeeded();
   await app(0).locator('#continue-analysis').click();
-  let review = page.getByRole('dialog', { name: 'Review App message' });
+  let review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   const first = parameters((await review.locator('pre').textContent())!);
   await review.getByRole('button', { name: /^cancel$/i }).click();
   await expect(review).not.toBeVisible();
@@ -274,7 +278,7 @@ test('cancels without dispatch and keeps identical cards independent @smoke', as
 
   await cards.nth(1).scrollIntoViewIfNeeded();
   await app(1).locator('#continue-analysis').click();
-  review = page.getByRole('dialog', { name: 'Review App message' });
+  review = page.getByRole('dialog', { name: 'Continue with these parameters' });
   const second = parameters((await review.locator('pre').textContent())!);
   expect(second.snapshot.documentId).toBe(first.snapshot.documentId);
   expect(second.snapshot.activationId).not.toBe(first.snapshot.activationId);
@@ -304,13 +308,15 @@ test('rechecks the DOM at capture before opening a review @smoke', async ({
   await app().locator('#continue-analysis').click();
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'dirty');
   await expect(
-    page.getByRole('dialog', { name: 'Review App message' }),
+    page.getByRole('dialog', { name: 'Continue with these parameters' }),
   ).not.toBeVisible();
   expect(daemon.promptRequests()).toHaveLength(0);
   await view.getByRole('button', { name: 'Calculate' }).click();
   await expect(view.locator('#answer')).toHaveText('16');
   await app().locator('#continue-analysis').click();
-  const review = page.getByRole('dialog', { name: 'Review App message' });
+  const review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   expect(
     parameters((await review.locator('pre').textContent())!).snapshot.inputs[
       'rate'
@@ -338,14 +344,16 @@ test('keeps the real App RPC pending across both host review and admission windo
   });
   try {
     await app().locator('#continue-analysis').click();
-    const review = page.getByRole('dialog', { name: 'Review App message' });
+    const review = page.getByRole('dialog', {
+      name: 'Continue with these parameters',
+    });
     await expect(review).toBeVisible();
     await page.clock.fastForward(89_000);
     await expect(app().locator('#continuation-status')).toHaveAttribute(
       'data-state',
       'pending',
     );
-    await review.getByRole('button', { name: 'Send to session' }).click();
+    await review.getByRole('button', { name: 'Continue analysis' }).click();
     await expect.poll(() => dispatched).toBe(true);
     await page.clock.fastForward(61_000);
     await expect(app().locator('#continuation-status')).toHaveAttribute(
@@ -403,8 +411,10 @@ test('times out an unanswered App RPC at 210 seconds without resending an unknow
   });
   try {
     await app().locator('#continue-analysis').click();
-    const review = page.getByRole('dialog', { name: 'Review App message' });
-    await review.getByRole('button', { name: 'Send to session' }).click();
+    const review = page.getByRole('dialog', {
+      name: 'Continue with these parameters',
+    });
+    await review.getByRole('button', { name: 'Continue analysis' }).click();
     await expect.poll(() => attempts).toBe(1);
     await page.clock.fastForward(90_000);
     await expect(review).toContainText('Acceptance could not be confirmed.');
@@ -413,7 +423,7 @@ test('times out an unanswered App RPC at 210 seconds without resending an unknow
       'pending',
     );
     const proxy = page
-      .locator('iframe[title="generated-ui MCP App"]')
+      .locator('iframe[title="Interactive view"]')
       .contentFrame();
     await page.clock.fastForward(119_999);
     await expect(app().locator('#continuation-status')).toHaveAttribute(
