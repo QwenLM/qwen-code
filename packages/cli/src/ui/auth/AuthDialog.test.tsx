@@ -388,6 +388,72 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     },
   );
 
+  // Deliberately render-only and NOT behind itWhenTuiInputReliable: it needs no
+  // stdin, so it still runs under CI=true, where the input-driven case above is
+  // skipped and would otherwise leave the row budget unexercised.
+  // The shape contentGenerator validation actually produces: several failures
+  // joined with newlines, then wrapped by useAuth. Ink splits on source newlines
+  // before it truncates, so a 3-line error costs three rows, not one.
+  const multiLineAuthError = [
+    'Failed to authenticate. Message: Missing API key for anthropic auth.',
+    "Missing baseUrl for modelProviders model '(unknown)'.",
+    "Set the environment variable 'ANTHROPIC_MODEL'.",
+  ].join('\n');
+
+  it.each([
+    // Enough room for every error line plus a menu row.
+    { height: 14, errorVisible: true },
+    // No room: the error is dropped rather than pushing the dialog past its
+    // budget, and the menu must survive instead of vanishing on a NaN viewport.
+    { height: 3, errorVisible: false },
+  ])(
+    'keeps a 3-line auth error inside a $height-row dialog budget',
+    async ({ height, errorVisible }) => {
+      const width = 80;
+      const empty = { path: '', settings: {}, originalSettings: {} };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const config = {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+      const actions = createMockUIActions();
+      const state = createMockUIState({
+        mainAreaWidth: width,
+        authError: multiLineAuthError,
+      });
+      const { lastFrame, unmount } = renderWithProviders(
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <Box width={width} flexDirection="column">
+              <AuthDialog availableTerminalHeight={height} />
+            </Box>
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { settings, config },
+      );
+
+      await waitForSelectedOption(lastFrame, 'QwenCloud');
+
+      const frame = lastFrame() ?? '';
+      const painted = frame.split('\n').length;
+      // An empty frame also satisfies a bare rows<=budget assertion, so pin that
+      // the dialog really painted its menu, and that the error is shown exactly
+      // when it fits.
+      expect(painted).toBeGreaterThan(2);
+      expect(frame).toContain('QwenCloud');
+      expect(frame.includes('ANTHROPIC_MODEL')).toBe(errorVisible);
+      expect(painted).toBeLessThanOrEqual(height);
+      unmount();
+    },
+  );
+
   it('should show an error if the initial auth type is invalid', () => {
     process.env['GEMINI_API_KEY'] = '';
 

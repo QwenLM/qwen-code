@@ -179,17 +179,21 @@ function ProviderMenu<T>({
   const compact = !framed || fullHeight > height;
   const showTitle = height >= (framed ? 4 : 2);
   const chromeRows = (framed ? 2 : 0) + (showTitle ? 1 : 0);
-  const showError = !!error && height > chromeRows + 1;
+  // Ink splits text on source newlines before it applies wrap="truncate", so a
+  // multi-line error paints one row per source line, not one row in total.
+  const errorRows = error ? error.split('\n').length : 0;
+  // The pre-existing "no room, no error" rule, now charged at the rows the error
+  // actually paints and still leaving one row for the menu. Without the +1 the
+  // list budget can reach 0, which divides by a 0 itemHeight and yields a NaN
+  // maxItemsToShow.
+  const showError = !!error && height > chromeRows + errorRows;
+  const errorBudget = showError ? errorRows : 0;
   const compactFooterRows = showTerms ? rows(TERMS_URL) : 1;
   const showFooter =
-    !compact ||
-    height >= chromeRows + Number(showError) + compactFooterRows + 1;
+    !compact || height >= chromeRows + errorBudget + compactFooterRows + 1;
   const gap = compact ? 0 : 1;
   const listHeight = compact
-    ? height -
-      chromeRows -
-      Number(showError) -
-      (showFooter ? compactFooterRows : 0)
+    ? height - chromeRows - errorBudget - (showFooter ? compactFooterRows : 0)
     : height - 6 - footerRows - (error ? 1 + rows(error) : 0);
   const maxItemHeight = Math.max(1, ...itemHeights);
   // Only truncate when even one complete option cannot fit in the viewport.
