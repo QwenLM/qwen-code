@@ -212,7 +212,12 @@ test('disables the sidebar split action when six panes are open', async ({
     exact: true,
   });
   await expect(add).toBeDisabled();
-  await expect(add).toHaveAttribute('title', /6/);
+  // The sidebar-specific capacity message (not the overview's "select at
+  // most N"): it names the cause and the remedy.
+  await expect(add).toHaveAttribute(
+    'title',
+    /Split View already shows 6 sessions/,
+  );
   await expect(split.getByTestId('chat-pane')).toHaveCount(6);
 });
 

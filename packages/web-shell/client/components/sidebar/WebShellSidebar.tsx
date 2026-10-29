@@ -5141,6 +5141,17 @@ export function WebShellSidebar({
       const splitAtCapacity =
         (splitSessionIds?.length ?? 0) >= MAX_SPLIT_PANES &&
         !splitSessionIds?.includes(session.sessionId);
+      // A pane that is already in the open split: adding it again is a
+      // no-op, so offer the same disabled treatment as the capacity case.
+      const splitAlreadyOpen = Boolean(
+        splitSessionIds?.includes(session.sessionId),
+      );
+      // Current session with the split closed: the click would seed a
+      // one-pane split of the session being viewed — a dead end, so disable
+      // it like the archive sibling does for the current session. While the
+      // split is open (splitSessionIds set), appending the current session
+      // is a legitimate add and stays enabled.
+      const splitCurrentDisabled = isCurrent && !splitSessionIds;
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
         Number(showRename && inlineActionItems.has('rename')) +
@@ -5464,13 +5475,22 @@ export function WebShellSidebar({
                           <DropdownMenuGroup>
                             {showSplit && (
                               <DropdownMenuItem
-                                disabled={busy || splitAtCapacity}
+                                disabled={
+                                  busy ||
+                                  splitAtCapacity ||
+                                  splitAlreadyOpen ||
+                                  splitCurrentDisabled
+                                }
                                 title={
                                   splitAtCapacity
-                                    ? t('sessionsOverview.splitLimit', {
+                                    ? t('sidebar.splitAtCapacity', {
                                         max: MAX_SPLIT_PANES,
                                       })
-                                    : undefined
+                                    : splitAlreadyOpen
+                                      ? t('sidebar.splitAlreadyOpen')
+                                      : splitCurrentDisabled
+                                        ? t('sidebar.splitCurrentDisabled')
+                                        : undefined
                                 }
                                 onSelect={() =>
                                   onAddSessionToSplitView?.(session.sessionId)
