@@ -6,12 +6,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setTimeout as settleInput } from 'node:timers/promises';
+import { Box } from 'ink';
 import { AuthDialog } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
@@ -298,6 +299,183 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   afterEach(() => {
     process.env = originalEnv;
   });
+
+  itWhenTuiInputReliable.each([36, 100])(
+    'keeps provider navigation readable in a 14-row dialog at width %i',
+    async (width) => {
+      const empty = { path: '', settings: {}, originalSettings: {} };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const config = {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+      const actions = createMockUIActions();
+      const state = createMockUIState({ mainAreaWidth: width });
+      // Unclipped on purpose: a fixed height plus overflow="hidden" would make
+      // the rows<=height assertion below hold for any output the dialog paints.
+      const dialog = (height: number) => (
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <Box width={width} flexDirection="column">
+              <AuthDialog availableTerminalHeight={height} />
+            </Box>
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>
+      );
+      const { stdin, lastFrame, rerender, unmount } = renderWithProviders(
+        dialog(14),
+        { settings, config },
+      );
+      const expectReadableSelection = (label: string, height = 14) => {
+        const frame = lastFrame() ?? '';
+        expect(frame.split('\n').length).toBeLessThanOrEqual(height);
+        const selectedLine = frame
+          .split('\n')
+          .find((line) => line.includes('›'));
+        expect(selectedLine?.replaceAll('│', '').trim()).toBe(`› ${label}`);
+      };
+
+      await waitForSelectedOption(lastFrame, 'QwenCloud');
+      expectReadableSelection('QwenCloud');
+      for (const label of [
+        'Alibaba ModelStudio',
+        'Third-party Providers',
+        'Custom Provider',
+      ]) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        expectReadableSelection(label);
+      }
+      expect(lastFrame()?.replace(/[│\s]/g, '')).toContain(
+        'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
+      );
+
+      rerender(withProviders(dialog(1), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Custom Provider');
+      expectReadableSelection('Custom Provider', 1);
+      stdin.write('\u001b[A');
+      await waitForSelectedOption(lastFrame, 'Third-party Providers');
+      expectReadableSelection('Third-party Providers', 1);
+      rerender(withProviders(dialog(14), { settings, config }));
+      await pressEnterAndWaitFor(stdin, lastFrame, 'DeepSeek API Key');
+      stdin.write('\u001b[A');
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      expectReadableSelection('Requesty');
+
+      rerender(withProviders(dialog(40), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      rerender(withProviders(dialog(14), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      expectReadableSelection('Requesty');
+      // The multi-step form has its own layout; expand before entering it.
+      rerender(withProviders(dialog(40), { settings, config }));
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Requesty · Step 1/2 · API Key',
+      );
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Third-party Providers');
+      unmount();
+    },
+  );
+
+  // Deliberately render-only and NOT behind itWhenTuiInputReliable: it needs no
+  // stdin, so it still runs under CI=true, where the input-driven case above is
+  // skipped and would otherwise leave the row budget unexercised.
+  // The shape contentGenerator validation actually produces: several failures
+  // joined with newlines, then wrapped by useAuth.
+  const multiLineAuthError = [
+    'Failed to authenticate. Message: Missing API key for anthropic auth.',
+    "Missing baseUrl for modelProviders model '(unknown)'.",
+    "Set the environment variable 'ANTHROPIC_MODEL'.",
+  ].join('\n');
+
+  it.each([
+    // Enough room for every error line plus a menu row.
+    {
+      width: 80,
+      height: 14,
+      error: multiLineAuthError,
+      expectedError: multiLineAuthError,
+    },
+    // No room: the error is dropped rather than pushing the dialog past its
+    // budget, and the menu must survive instead of vanishing on a NaN viewport.
+    { width: 80, height: 2, error: multiLineAuthError, expectedError: '' },
+    {
+      width: 36,
+      height: 14,
+      error:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+      expectedError:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+    },
+    {
+      width: 36,
+      height: 5,
+      error:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+      expectedError: 'You must connect',
+    },
+  ])(
+    'keeps an auth error inside a $width-column, $height-row dialog budget',
+    async ({ width, height, error, expectedError }) => {
+      const empty = { path: '', settings: {}, originalSettings: {} };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const config = {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+      const actions = createMockUIActions();
+      const state = createMockUIState({
+        mainAreaWidth: width,
+        authError: error,
+      });
+      const { lastFrame, unmount } = renderWithProviders(
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <Box width={width} flexDirection="column">
+              <AuthDialog availableTerminalHeight={height} />
+            </Box>
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { settings, config },
+      );
+
+      await waitForSelectedOption(lastFrame, 'QwenCloud');
+
+      const frame = lastFrame() ?? '';
+      const painted = frame.split('\n').length;
+      // An empty frame also satisfies a bare rows<=budget assertion, so pin that
+      // the dialog really painted its menu, and that the error is shown exactly
+      // when it fits.
+      expect(painted).toBeGreaterThan(0);
+      expect(frame).toContain('QwenCloud');
+      const normalizedFrame = frame.replace(/[│\s]/g, '');
+      if (expectedError) {
+        expect(normalizedFrame).toContain(expectedError.replace(/\s/g, ''));
+      } else {
+        expect(normalizedFrame).not.toContain('Failedtoauthenticate');
+      }
+      expect(painted).toBeLessThanOrEqual(height);
+      unmount();
+    },
+  );
 
   it('should show an error if the initial auth type is invalid', () => {
     process.env['GEMINI_API_KEY'] = '';
