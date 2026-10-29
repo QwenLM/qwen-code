@@ -215,6 +215,8 @@ describe('runNonInteractiveStreamJson', () => {
   };
   let mockDispatcher: {
     dispatch: ReturnType<typeof vi.fn>;
+    sendSuccess: ReturnType<typeof vi.fn>;
+    sendError: ReturnType<typeof vi.fn>;
     handleControlResponse: ReturnType<typeof vi.fn>;
     handleCancel: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
@@ -262,6 +264,8 @@ describe('runNonInteractiveStreamJson', () => {
 
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue(undefined),
+      sendSuccess: vi.fn(),
+      sendError: vi.fn(),
       handleControlResponse: vi.fn(),
       handleCancel: vi.fn(),
       shutdown: vi.fn(),
@@ -380,6 +384,8 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('initializes session and processes initialize control request', async () => {
     const initRequest = createControlRequest('initialize');
+    const initResponse = { sessionId: 'test-session' };
+    mockDispatcher.dispatch.mockResolvedValue(initResponse);
 
     mockInputReader.read = async function* () {
       yield initRequest;
@@ -387,7 +393,58 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      initRequest,
+      true,
+      true,
+    );
+    expect(mockDispatcher.sendSuccess).toHaveBeenCalledWith(
+      'req-1',
+      initResponse,
+    );
+  });
+
+  it('replies to initialize only after config initialization finishes', async () => {
+    let releaseInitialization!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    config = createConfig({ initialize: vi.fn(() => initialization) });
+    mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+    };
+
+    const run = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => expect(mockDispatcher.dispatch).toHaveBeenCalled());
+    // The reply is the readiness signal: it must not go out while config
+    // initialization (and its extension-store load) is still running.
+    expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+
+    releaseInitialization();
+    await run;
+
+    expect(mockDispatcher.sendSuccess).toHaveBeenCalledWith('req-1', {
+      ready: true,
+    });
+  });
+
+  it('replies to initialize with an error when SDK mode initialization fails', async () => {
+    config = createConfig({
+      initialize: vi.fn().mockRejectedValue(new Error('extension store busy')),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(mockDispatcher.sendError).toHaveBeenCalledWith(
+      'req-1',
+      'extension store busy',
+    );
   });
 
   it('keeps MCP responses flowing while a Workflow mode getter awaits readiness', async () => {
@@ -493,6 +550,7 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockDispatcher.dispatch).toHaveBeenCalledExactlyOnceWith(
       first,
       true,
+      true,
     );
     expect(mockDispatcher.handleCancel).toHaveBeenCalledWith(
       duplicate.request_id,
@@ -539,6 +597,7 @@ describe('runNonInteractiveStreamJson', () => {
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledExactlyOnceWith(
       initialRequest,
+      true,
       true,
     );
     expect(mockOutputAdapter.send.mock.calls.map(([frame]) => frame)).toEqual([
@@ -1705,6 +1764,7 @@ describe('runNonInteractiveStreamJson', () => {
       1,
       initRequest,
       true,
+      true,
     );
     expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(2, controlRequest);
   });
@@ -1912,7 +1972,11 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     // Verify initialization happened
-    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      initRequest,
+      true,
+      true,
+    );
     expect(mockDispatcher.shutdown).toHaveBeenCalled();
   });
 

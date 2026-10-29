@@ -415,9 +415,11 @@ class Session {
   private async initializeSdkMode(request: CLIControlRequest): Promise<void> {
     this.ensureInitializationPromise();
     try {
-      // Dispatch the initialize request first
-      // This registers SDK MCP servers in the control context
-      await this.dispatcher?.dispatch(request, true);
+      // Handle the initialize request first: it registers the SDK MCP servers
+      // and stages the SDK-only config that `ensureConfigInitialized` consumes.
+      // Its reply is withheld until config initialization finishes, so clients
+      // can treat `initialize` as a readiness signal instead of an ack.
+      const initResponse = await this.dispatcher?.dispatch(request, true, true);
 
       // Get sendSdkMcpMessage callback from SdkMcpController
       // This callback is used by McpClientManager to send MCP messages
@@ -428,9 +430,18 @@ class Session {
       // Initialize config with SDK MCP message support
       await this.ensureConfigInitialized({ sendSdkMcpMessage });
 
+      if (initResponse) {
+        this.dispatcher?.sendSuccess(request.request_id, initResponse);
+      }
+
       // Initialization complete!
       this.completeInitialization();
     } catch (error) {
+      // The deferred initialize reply would otherwise never arrive.
+      this.dispatcher?.sendError(
+        request.request_id,
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.error('[Session] SDK mode initialization failed:', error);
       this.failInitialization(
         error instanceof Error ? error : new Error(String(error)),

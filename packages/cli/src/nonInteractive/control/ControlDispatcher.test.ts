@@ -145,6 +145,51 @@ describe('ControlDispatcher', () => {
       });
     });
 
+    it('returns the response without sending it when deferred', async () => {
+      const request: CLIControlRequest = {
+        type: 'control_request',
+        request_id: 'req-deferred',
+        request: {
+          subtype: 'initialize',
+        } as CLIControlInitializeRequest,
+      };
+      const mockResponse = { ready: true };
+      vi.mocked(mockSystemController.handleRequest).mockResolvedValue(
+        mockResponse,
+      );
+
+      const response = await dispatcher.dispatch(request, true, true);
+
+      expect(response).toEqual(mockResponse);
+      expect(mockContext.streamJson.send).not.toHaveBeenCalled();
+    });
+
+    it('sends a deferred reply through sendSuccess', () => {
+      dispatcher.sendSuccess('req-deferred', { ready: true });
+
+      expect(mockContext.streamJson.send).toHaveBeenCalledWith({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: 'req-deferred',
+          response: { ready: true },
+        },
+      });
+    });
+
+    it('sends a deferred failure through sendError', () => {
+      dispatcher.sendError('req-deferred', 'boom');
+
+      expect(mockContext.streamJson.send).toHaveBeenCalledWith({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: 'req-deferred',
+          error: 'boom',
+        },
+      });
+    });
+
     it('should route interrupt request to system controller', async () => {
       const request: CLIControlRequest = {
         type: 'control_request',
