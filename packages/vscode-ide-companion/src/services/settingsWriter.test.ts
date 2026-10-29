@@ -35,6 +35,7 @@ import {
   getModelsForProviderProtocol,
   ModelRegistry,
   type ModelProvidersConfig,
+  CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_GLOBAL_BASE_URL,
   type ProviderInstallPlan,
 } from '@qwen-code/qwen-code-core';
@@ -259,6 +260,71 @@ describe('settingsWriter', () => {
     });
   });
 
+  type ModelSettings = {
+    name?: string;
+    baseUrl?: string;
+    reasoningEffort?: string;
+    maxSessionTurns?: number;
+  };
+
+  const writeCliManagedModelSettings = () => {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        model: {
+          name: 'cli-model',
+          baseUrl: 'https://old.example/v1',
+          reasoningEffort: 'high',
+          maxSessionTurns: 40,
+        },
+      }),
+    );
+  };
+
+  const readModelSettings = () =>
+    (
+      JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+        model: ModelSettings;
+      }
+    ).model;
+
+  it('preserves sibling model settings when writing a Coding Plan', () => {
+    writeCliManagedModelSettings();
+
+    writeCodingPlanConfig('china', 'coding-plan-key');
+
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      model: ModelSettings;
+      modelProviders: Record<string, Array<{ id: string; baseUrl: string }>>;
+    };
+
+    // Only name and its paired baseUrl change; the CLI-owned keys survive.
+    expect(settings.model).toEqual({
+      name: settings.modelProviders[AuthType.USE_OPENAI]?.[0]?.id,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
+  it('preserves sibling model settings when writing api-key providers', () => {
+    writeCliManagedModelSettings();
+
+    writeModelProvidersConfig({
+      apiKey: 'manual-key',
+      modelProviders: { 'gpt-4o': 'https://api.openai.com/v1' },
+      activeModel: 'gpt-4o',
+    });
+
+    expect(readModelSettings()).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
   it('clears stale coding plan metadata when writing api-key providers', () => {
     writeCodingPlanConfig('china', 'coding-plan-key');
 
@@ -282,7 +348,10 @@ describe('settingsWriter', () => {
     expect(env.OPENAI_API_KEY).toBe('manual-key');
     expect(env[CODING_PLAN_ENV_KEY]).toBeUndefined();
     expect(settings.codingPlan).toBeUndefined();
-    expect(settings.model).toEqual({ name: 'gpt-4o' });
+    expect(settings.model).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+    });
     // The new entry must be present
     expect(openaiModels[0]).toEqual({
       id: 'gpt-4o',
