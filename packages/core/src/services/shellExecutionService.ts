@@ -5,7 +5,7 @@
  */
 
 import stripAnsi from 'strip-ansi';
-import { isUtf8 } from 'node:buffer';
+import { isAscii, isUtf8 } from 'node:buffer';
 import type { PtyImplementation } from '../utils/getPty.js';
 import { getPty } from '../utils/getPty.js';
 import { spawn as cpSpawn, spawnSync } from 'node:child_process';
@@ -364,35 +364,31 @@ function hasLegacyCodePage(): boolean {
 }
 
 /**
- * Decodes one stream's complete output: UTF-8 when it is UTF-8, otherwise
- * the code page unless the output is mostly UTF-8. Output cut off at the
- * capture limit or by a cancel or kill can end partway through a UTF-8
- * character; it still counts as UTF-8 when the bytes before that character
- * are UTF-8 and hold a multibyte character.
+ * Decodes one stream's complete output with the usual detection: UTF-8 when
+ * it is UTF-8, otherwise the code page. Output that was cut off can end
+ * partway through a UTF-8 character; it still counts as UTF-8 when the
+ * bytes before that character are UTF-8 and hold a multibyte character.
  */
 function decodeCompleteOutput(bytes: Buffer, wasCut: boolean): string {
-  if (!isUtf8(bytes)) {
-    if (wasCut) {
-      try {
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes, {
-          stream: true,
-        });
-        if (/[\u0080-\uffff]/.test(text)) {
-          return new TextDecoder('utf-8').decode(bytes);
-        }
-      } catch {
-        // Not UTF-8 before the cut either.
-      }
+  if (wasCut && !isUtf8(bytes)) {
+    // A cut-off character is its lead byte and at most two more bytes, and
+    // a streaming decoder holds it back without output. The bytes are
+    // checked in place rather than decoded just to test them.
+    let start = bytes.length - 1;
+    while (
+      start > 0 &&
+      start > bytes.length - 3 &&
+      (bytes[start] & 0xc0) === 0x80
+    ) {
+      start--;
     }
-    // A few stray bytes in UTF-8 text (a Latin-1 file name in a git log)
-    // keep it UTF-8: it decodes to more characters than replacement
-    // characters, while code page text such as GBK decodes to mostly
-    // replacement characters.
-    const text = new TextDecoder('utf-8').decode(bytes);
-    const replacements = text.match(/\ufffd/g)?.length ?? 0;
-    const characters = text.match(/[^\p{ASCII}\ufffd]/gu)?.length ?? 0;
-    if (characters > replacements) {
-      return text;
+    const cutOff =
+      new TextDecoder('utf-8').decode(bytes.subarray(start), {
+        stream: true,
+      }) === '';
+    const beforeCut = bytes.subarray(0, start);
+    if (cutOff && isUtf8(beforeCut) && !isAscii(beforeCut)) {
+      return new TextDecoder('utf-8').decode(bytes);
     }
   }
   return decodeBufferedOutput(bytes);

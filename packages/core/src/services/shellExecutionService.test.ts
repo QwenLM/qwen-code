@@ -2563,6 +2563,16 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toBe('目浣');
     });
 
+    it('decodes complete GBK output with the code page when some of its characters are also UTF-8', async () => {
+      useSystemEncoding('gbk');
+      // 目录路径 in GBK (C4 BF C2 BC C2 B7 BE B6): 目, 录 and 路 are also the
+      // UTF-8 characters Ŀ, ¼ and ·, but the whole output is not UTF-8.
+      const { result } = await runChunks('pwd', [
+        Buffer.from('c4bfc2bcc2b7beb6', 'hex'),
+      ]);
+      expect(result.output).toBe('目录路径');
+    });
+
     it.each([
       [
         'the capture limit',
@@ -2657,14 +2667,29 @@ describe('ShellExecutionService child_process fallback', () => {
 
     it('decodes cut-off output that is not UTF-8 before the cut with the code page', async () => {
       useSystemEncoding('gbk');
-      // 管理员 in GBK (B9 DC C0 ED D4 B1) is not UTF-8 even before the cut,
-      // so the UTF-8 check gives up and the code page decodes it.
+      // 管理员 in GBK (B9 DC C0 ED D4 B1) is cut inside 员. Its lead byte D4
+      // could start a UTF-8 character, but the bytes before it are not
+      // UTF-8, so the code page decodes the output.
       const { result } = await simulateExecution('dir', () => {
         emitOut('C:\\Users\\');
-        emitOut(Buffer.from('b9dcc0edd4b1', 'hex'));
+        emitOut(Buffer.from('b9dcc0edd4', 'hex'));
         finish(null, 'SIGKILL');
       });
-      expect(result.output).toBe('C:\\Users\\管理员');
+      expect(result.output).toBe('C:\\Users\\管理\ufffd');
+    });
+
+    it('decodes cut-off output that does not end inside a UTF-8 character with the code page', async () => {
+      useSystemEncoding('gbk');
+      // 目李 in GBK (C4 BF C0 EE) is cut after the lead byte of 李. 目 is also
+      // the UTF-8 character Ŀ, but C0 cannot start a UTF-8 character.
+      const { result } = await runChunks(
+        'type notes.txt',
+        ['C:\\Users\\', Buffer.from('c4bfc0ee', 'hex')],
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 12 },
+      );
+      expect(result.output).toMatch(
+        /^C:\\Users\\目\ufffd\n\n\[Output exceeded/,
+      );
     });
 
     it('decodes buffered stderr from its complete output on a legacy code page', async () => {
@@ -2694,7 +2719,6 @@ describe('ShellExecutionService child_process fallback', () => {
       ['unknown', null],
       ['plain ASCII (macOS with no locale set)', 'us-ascii'],
       ['plain ASCII (a locale that reports the ascii label)', 'ascii'],
-      ['GBK (the UTF-8 output outweighs one stray byte)', 'gbk'],
     ])(
       'still picks the decoder from the first chunk when the system encoding is %s',
       async (_label, encoding) => {
@@ -2712,6 +2736,22 @@ describe('ShellExecutionService child_process fallback', () => {
         expect(result.output).toBe('Build log\ncaf\ufffd 你好\n世界');
       },
     );
+
+    it('decodes complete output that is not UTF-8 with the code page even when most of it is UTF-8', async () => {
+      useSystemEncoding('gbk');
+      // One Latin-1 byte makes the complete output invalid UTF-8, so the
+      // code page decodes all of it, as it decodes complete output on the
+      // pseudo-terminal path.
+      const { result } = await runChunks('grep -rn x .', [
+        'Build log\n',
+        Buffer.concat([
+          Buffer.from('caf\xe9 ', 'latin1'),
+          Buffer.from('你好\n'),
+        ]),
+        '世界\n',
+      ]);
+      expect(result.output).toBe('Build log\ncaf\ufffd 浣犲ソ\n涓栫晫');
+    });
 
     it.each([
       [
