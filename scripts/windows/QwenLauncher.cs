@@ -9,6 +9,9 @@ internal static class Program
         string directory = AppDomain.CurrentDomain.BaseDirectory;
         string node = Path.Combine(directory, "node.exe");
         string cli = Path.Combine(directory, "dist", "cli.js");
+        // Trust the Windows certificate store for HTTPS connections, including
+        // enterprise or local TLS inspection certificates installed by the user.
+        Environment.SetEnvironmentVariable("NODE_USE_SYSTEM_CA", "1");
         if (!File.Exists(node) || !File.Exists(cli))
         {
             Console.Error.WriteLine("Qwen files missing. Extract the complete ZIP before launching.");
