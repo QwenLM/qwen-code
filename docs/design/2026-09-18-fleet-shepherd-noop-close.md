@@ -133,12 +133,14 @@ A push between the two steps moves the head, which voids the notice and
 starts the pair over. A head that regains a diff simply never re-enters the
 lever.
 
-**The notice's age window.** Tick spacing is not a contract: over 399 gaps
-between 400 consecutive scheduled ticks the median was about 950 s and the
-minimum 427 s, and the review measured a queued successor released 75 s after a
-delayed tick ended — about 2 minutes from notice to close. So the reaction
+**The notice's age window.** Tick spacing is not a contract, so the reaction
 window the notice promises is enforced on the notice's own timestamp rather
-than assumed from the schedule. The close waits until the notice is at least
+than assumed from the schedule. (The original justification quoted a 399-gap
+study — median about 950 s, minimum 427 s, and a successor released 75 s after a
+delayed tick, "about 2 minutes from notice to close". Those figures belong to
+the 900 s cadence and are retired with it: a 950 s median is impossible under an
+1800 s cron, and a two-minute close is unreachable while the grace forbids any
+notice younger than 600 s.) The close waits until the notice is at least
 `NOOP_NOTICE_GRACE_SEC` (600) old. The grace must stay below one tick period
 so a close lands on the first eligible tick rather than the one after it. The
 44%-under-900 s study that originally argued 600 over 900 was taken against a

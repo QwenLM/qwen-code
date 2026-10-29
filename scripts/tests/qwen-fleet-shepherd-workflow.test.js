@@ -3647,7 +3647,7 @@ exit 1`;
     // Exceeds the measured completion gap, so a merely slow loop is not
     // doubled; the detection bound it implies is stated at the definition.
     expect(workflow).toContain("SHEPHERD_STALE_MINUTES: '240'");
-    expect(workflow).toContain('240-275');
+    expect(workflow).toContain('240-270');
     expect(workflow).toContain('repository_dispatch:');
     expect(workflow).toContain("- 'shepherd-rescue'");
     // The literal appears in the schedule, the group expression, the run-name
@@ -3669,7 +3669,7 @@ exit 1`;
     // looks like no evidence and the watch rescues a healthy shepherd forever;
     // without `conclusion` a cancelled lane reads as progress.
     expect(watch).toContain(
-      '--json event,status,conclusion,updatedAt,displayTitle',
+      '--json event,status,conclusion,createdAt,updatedAt,displayTitle',
     );
     // Scope and window: without --workflow the read is the repo's 40 newest
     // runs, and a smaller --limit can hide the only completion inside a
@@ -3687,6 +3687,7 @@ exit 1`;
       event: 'schedule',
       displayTitle: 'shepherd tick',
       databaseId: 10_000 + seq++,
+      createdAt: at(1),
       ...fields,
     });
     const watchRun = (fields) => ({
@@ -3699,12 +3700,14 @@ exit 1`;
       event: 'repository_dispatch',
       displayTitle: 'shepherd rescue',
       databaseId: 30_000 + seq++,
+      createdAt: at(1),
       ...fields,
     });
     const manual = (fields) => ({
       event: 'workflow_dispatch',
       displayTitle: 'shepherd manual',
       databaseId: 40_000 + seq++,
+      createdAt: at(1),
       ...fields,
     });
     // The posted event type must exist in on.repository_dispatch.types: GitHub
@@ -3847,11 +3850,51 @@ ACTIONS_TOKEN='workflow-token-value'
     const queuedTick = replay({
       runs: [
         staleTick,
-        tick({ status: 'queued', conclusion: null, updatedAt: at(1) }),
+        tick({
+          status: 'queued',
+          conclusion: null,
+          createdAt: at(1),
+          updatedAt: at(1),
+        }),
       ],
     });
     expect(queuedTick.dispatch).toBe('');
     expect(queuedTick.log).toContain('a live run is queued or running');
+
+    // …but a queued run OLDER than the threshold is the wedge this file
+    // documents at ZOMBIE_QUEUED_MINUTES: created, never started, 81 of them
+    // still queued two months later. Counting it forever silenced the lane in
+    // the one dead state it exists for.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          tick({
+            status: 'queued',
+            conclusion: null,
+            createdAt: at(600),
+            updatedAt: at(600),
+          }),
+        ],
+      }).dispatch,
+    ).toContain('-f event_type=shepherd-rescue');
+
+    // `pending` has NOT passed the concurrency gate: it waits behind the holder
+    // and the next arrival cancels it, so it can never make progress on its own
+    // and must not suppress the rescue.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          tick({
+            status: 'pending',
+            conclusion: null,
+            createdAt: at(1),
+            updatedAt: at(1),
+          }),
+        ],
+      }).dispatch,
+    ).toContain('-f event_type=shepherd-rescue');
 
     // A LIVE manual dispatch is a full tick — `dry_run` defaults to false — so
     // it is both progress and in flight. Titling it like a dry run made a
@@ -3911,17 +3954,23 @@ ACTIONS_TOKEN='workflow-token-value'
 
     // At most one outstanding rescue: it keeps its queue position in its own
     // group, so a second would only add pressure.
+    // The rescue must be IN PROGRESS here, not merely pending: a pending
+    // rescue is no longer counted by the in-flight gate, so only a running one
+    // makes the gate ORDER observable. With a pending fixture, moving the
+    // rescue gate back to second stays green — the mutation this case exists
+    // for would survive.
     const queued = replay({
       runs: [
         staleTick,
-        rescue({ status: 'pending', conclusion: null, updatedAt: at(1) }),
+        rescue({ status: 'in_progress', conclusion: null, updatedAt: at(1) }),
       ],
     });
     expect(queued.dispatch).toBe('');
-    // A pending rescue is itself a live run, so the first gate defers it; the
-    // dedicated counter still names it in the diagnostic line.
+    // The rescue gate runs FIRST: an outstanding rescue is also a live run, so
+    // ordering it second made this branch unreachable and its message
+    // unprintable — an operator could not tell a stuck rescue from a stuck tick.
+    expect(queued.log).toContain('a rescue is already queued or running');
     expect(queued.log).toContain('unresolved rescues 1');
-    expect(queued.log).toContain('no rescue');
 
     // A rescue that COMPLETED is progress — it is a full fleet tick by
     // construction — so it resets the clock. Counting the tick lane alone

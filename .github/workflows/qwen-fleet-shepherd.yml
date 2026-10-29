@@ -226,7 +226,7 @@ env:
   # interval-bound: this PR measured a live median wait of 146 minutes and its
   # own ticks queueing 120-135 minutes, so ordinary completions are 80-150
   # minutes apart. 75 would have doubled a working shepherd; 240 clears the
-  # worst measured gap with room, and accepts a detection window of 240-275
+  # worst measured gap with room, and accepts a detection window of 240-270
   # minutes (the threshold plus up to one watch interval) — plus roughly one
   # pool wait for the watch and the rescue to be scheduled. Slower detection is
   # the price of never firing on a merely slow loop.
@@ -319,16 +319,32 @@ jobs:
           # scheduled tick, a live manual dispatch, or a rescue; the watch and a
           # dry manual run belong to neither column:
           #
-          #   live lane, status != completed  -> IN FLIGHT, defer the rescue
-          #   live lane, completed, !cancelled -> PROGRESS, resets the clock
-          #   watch / dry manual               -> neither, ever
+          #   live lane, in_progress            -> IN FLIGHT, defer
+          #   live lane, queued, younger than
+          #     SHEPHERD_STALE_MINUTES          -> IN FLIGHT, defer
+          #   live lane, completed, !cancelled  -> PROGRESS, resets the clock
+          #   live lane, pending                -> neither (see below)
+          #   live lane, queued and older than
+          #     SHEPHERD_STALE_MINUTES          -> neither (wedged)
+          #   watch / dry manual                -> neither, ever
           #
-          # `queued` counts as in flight. A queued tick has already passed the
-          # concurrency gate, holds the lane, and is guaranteed to start — this
-          # block's own measurement is 120-135 minutes of queueing and then 22
-          # seconds of work. Dispatching beside it ran two full ticks against
-          # the same stale reads, and the later blind dashboard edit discarded
-          # the other's watermark.
+          # The three non-completed states are NOT interchangeable, and getting
+          # this wrong has now broken the lane in both directions:
+          #
+          #   * `queued` has passed the concurrency gate and is waiting for a
+          #     runner. It will start — measured 120-135 minutes of queueing then
+          #     22 seconds of work — so dispatching beside it ran two full ticks
+          #     against the same stale reads (round 3's defect).
+          #   * `pending` has NOT passed the gate. It waits behind the holder and
+          #     the next arrival cancels it, so it can never make progress on its
+          #     own and must not suppress the rescue.
+          #   * a `queued` run older than the threshold is the wedge this file
+          #     documents at ZOMBIE_QUEUED_MINUTES: created, never started, 81 of
+          #     them still queued two months later. Counting it forever is what
+          #     round 3's fix did, and it silenced the lane in exactly the dead
+          #     state the lane exists for. Age is the only separator available
+          #     here, and the threshold is already above the measured normal
+          #     queue wait, so an ordinary slow tick is never mistaken for one.
           #
           # Completion, not success: a shepherd that fails on every tick is
           # broken, not starved, and re-dispatching it each watch would multiply
@@ -350,14 +366,14 @@ jobs:
           if [[ "${WATCHDOG_MODE}" == 'true' ]]; then
             if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" \
               --workflow qwen-fleet-shepherd.yml --limit 40 \
-              --json event,status,conclusion,updatedAt,displayTitle > /tmp/self-runs.json 2> /dev/null; then
+              --json event,status,conclusion,createdAt,updatedAt,displayTitle > /tmp/self-runs.json 2> /dev/null; then
               echo "::warning::shepherd run history unreadable; rescue watch takes no action this tick"
               exit 0
             fi
             # `-e` plus `empty` makes an empty ARRAY a failure: jq -r '@tsv' over
             # [] would print "0<TAB>0<TAB>" and hand the decision three zeroes,
             # approving a rescue on no evidence.
-            if ! WATCH_STATE="$(jq -er '
+            if ! WATCH_STATE="$(jq -er --arg now "${NOW_EPOCH}" --arg stale "${SHEPHERD_STALE_MINUTES}" '
               if length == 0 then empty
               else
                 ([ .[] | select(.displayTitle == "shepherd tick"
@@ -365,7 +381,11 @@ jobs:
                                 or .displayTitle == "Fleet Shepherd") ]) as $live
                 | ([ .[] | select(.event == "repository_dispatch") ]) as $rescues
                 | ($live + $rescues) as $lane
-                | [ ($lane | map(select(.status != "completed")) | length),
+                | [ ($lane | map(select(
+                        .status == "in_progress"
+                        or (.status == "queued"
+                            and ((($now | tonumber) - (.createdAt | fromdateiso8601))
+                                 < (($stale | tonumber) * 60))))) | length),
                     ([ $rescues[] | select(.status != "completed") ] | length),
                     ([ $lane[]
                        | select(.status == "completed" and .conclusion != "cancelled")
@@ -383,10 +403,13 @@ jobs:
               WATCH_AGE=$(( (NOW_EPOCH - $(date -u -d "${WATCH_LAST}" +%s)) / 60 ))
             fi
             echo "⛑ rescue watch: last completion ${WATCH_LAST:-none in window} (${WATCH_AGE}m ago), threshold ${SHEPHERD_STALE_MINUTES}m, live runs not completed ${WATCH_INPROGRESS}, unresolved rescues ${WATCH_RESCUE}"
-            if [[ "${WATCH_INPROGRESS}" -gt 0 ]]; then
-              echo "⛑ a live run is queued or running; no rescue"
-            elif [[ "${WATCH_RESCUE}" -gt 0 ]]; then
+            # Rescue first: an outstanding rescue is also a live run, so the
+            # in-flight gate below would otherwise shadow this branch and an
+            # operator could not tell a stuck rescue from a stuck tick.
+            if [[ "${WATCH_RESCUE}" -gt 0 ]]; then
               echo "⛑ a rescue is already queued or running; no second one"
+            elif [[ "${WATCH_INPROGRESS}" -gt 0 ]]; then
+              echo "⛑ a live run is queued or running; no rescue"
             elif [[ "${WATCH_AGE}" -lt "${SHEPHERD_STALE_MINUTES}" ]]; then
               echo "⛑ the shepherd is current; no rescue"
             elif gh api -X POST "repos/${REPO}/dispatches" \

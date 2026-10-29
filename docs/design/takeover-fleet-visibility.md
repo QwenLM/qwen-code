@@ -150,7 +150,7 @@ re-checked immediately before the mutation, mirroring every existing lever.
   latest label-apply (a stale unlabel from an earlier takeover cycle must
   never heal this cycle's label), and clears the stale label — bounded per
   tick, skip-vetoed, and never triggered by the bot's own auto-release.
-- **Shepherd timing:** 15-minute tick with a per-tick release cap — a backlog
+- **Shepherd timing:** 30-minute tick with a per-tick release cap — a backlog
   of expired PRs drains over a few ticks rather than one burst.
 
 ## Files affected
