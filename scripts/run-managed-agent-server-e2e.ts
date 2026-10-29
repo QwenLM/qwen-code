@@ -245,7 +245,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
-const springTarget = path.join(springModule, 'target');
+const springTarget = path.join(springModule, 'server', 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several
 // artifacts. Read the project version from the
@@ -256,7 +256,7 @@ const springTarget = path.join(springModule, 'target');
 // re-indenting the element cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
-  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
+  /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
 )?.[1];
 if (!pomVersion) {
   throw new Error(
@@ -1740,7 +1740,7 @@ try {
       [
         '-cp',
         springJar,
-        '-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'org.springframework.boot.loader.launch.PropertiesLauncher',
         'register',
         tenant,
