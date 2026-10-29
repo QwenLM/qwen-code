@@ -119,6 +119,21 @@ describe('board CLI', () => {
     },
   );
 
+  it.each([
+    ['CaseJson', 'casejson'],
+    ['CASEJSON', 'casejson'],
+    ['casejson', 'casejson'],
+    ['Board_42-A', 'board_42-a'],
+  ])(
+    'reports the canonical storage name in the plain-text heading for board %s',
+    async (name, canonical) => {
+      await parse(`board show --board ${name}`);
+      expect(written(stdout).split('\n')[0]).toBe(`board: ${canonical}`);
+      expect(core.listBoardTasks).toHaveBeenCalledWith(canonical);
+      expect(core.listAsks).toHaveBeenCalledWith(canonical);
+    },
+  );
+
   it('normalizes the board without changing actor or suggested owner spelling', async () => {
     core.createBoardTask.mockResolvedValue({ id: TASK_ID, subject: 'check' });
     await parse(
