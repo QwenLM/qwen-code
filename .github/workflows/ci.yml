@@ -1781,6 +1781,9 @@ jobs:
         run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
+        env:
+          # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
+          TMPDIR: '${{ runner.temp }}'
         # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
         # job would start browsers for half the host's cores while the host
         # runs its other jobs.

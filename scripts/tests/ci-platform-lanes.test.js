@@ -259,6 +259,7 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
     (step) => step.name === 'Run web-shell browser smoke',
   );
   expect(smoke.run).toMatch(/ -- --workers=2$/);
+  expect(smoke.env.TMPDIR).toBe('${{ runner.temp }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
