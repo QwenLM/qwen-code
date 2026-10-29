@@ -16,6 +16,8 @@ The remaining workspace group obtains all declared `test:ci` scripts from npm's 
 
 Keep the original `Test (macos-latest, Node 22.x)` name as an aggregate check. It succeeds only when the entire matrix succeeds; failed, skipped, or cancelled groups cannot yield a green aggregate. The scripts group executes both standalone and helper suites and retains either failure. Workspace discovery failure or an empty remaining group fails closed.
 
+Record the additional five-minute aggregate job in the workflow budget (nine declared jobs, 305 declared timeout minutes). This budget counts job definitions, not matrix expansion; each macOS execution group still has its original 60-minute limit.
+
 ## Validation and limits
 
 CI contract checks pin the complete shard partition, automatic inclusion of new workspace suites, failure propagation, and the aggregate result. No local tests or builds were run. The complete workflow must demonstrate that all groups finish within their existing limits; the previous hook timeout still requires investigation if it recurs. Seven installations cost more runner time, trading repeated setup for completion and independent failure reports. Existing trigger, permission, and checkout rules remain in place.
