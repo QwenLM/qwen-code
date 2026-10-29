@@ -70,6 +70,7 @@ import {
 import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
+  type ManagedSessionActivationLease,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionJournalStore,
@@ -466,7 +467,11 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   };
   const journal: ManagedSessionJournalHandle = {
     sessionKey,
-    read: async () => scanManagedSessionJournal(journalBytes, sessionKey),
+    read: async () =>
+      applyActivationLease(
+        scanManagedSessionJournal(journalBytes, sessionKey),
+        head.activationLease,
+      ),
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
@@ -543,6 +548,14 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
         this.client.stopWriterRenewal();
       throw error;
     }
+  }
+
+  renewActivation(
+    request: Parameters<
+      NonNullable<ManagedSessionJournalHandle['renewActivation']>
+    >[0],
+  ): Promise<ManagedSessionActivationLease | undefined> {
+    return this.client.renewActivation(request);
   }
 
   async settleAppend(): Promise<'landed' | 'absent'> {
@@ -707,6 +720,8 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 }
 
 interface WriterGrant {
+  readonly activationLeaseRenewal: boolean;
+  readonly activationLease?: ManagedSessionActivationLease;
   readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -717,6 +732,7 @@ interface WriterGrant {
 }
 
 interface RestoreHead {
+  readonly activationLease?: ManagedSessionActivationLease;
   readonly state: string;
   readonly storageVersion: number;
   readonly writerGeneration: number;
@@ -1176,9 +1192,78 @@ class ManagedSessionStoreHttpClient {
       lastCommitDigest: head.lastCommitDigest,
       activationEpoch: head.activationEpoch,
     };
-    return usesSnapshot && maxBytes !== undefined
-      ? scanManagedSessionJournal(bytes, this.sessionKey, maxBytes)
-      : scan;
+    const result =
+      usesSnapshot && maxBytes !== undefined
+        ? scanManagedSessionJournal(bytes, this.sessionKey, maxBytes)
+        : scan;
+    return maxBytes === undefined
+      ? applyActivationLease(result, head.activationLease)
+      : result;
+  }
+
+  async renewActivation(
+    activation: Parameters<
+      NonNullable<ManagedSessionJournalHandle['renewActivation']>
+    >[0],
+  ): Promise<ManagedSessionActivationLease | undefined> {
+    if (!this.requireGrant().activationLeaseRenewal) return undefined;
+    let reacquiring = false;
+    try {
+      if (this.requireGrant().leaseUntil <= Date.now()) {
+        reacquiring = true;
+        await this.reacquireWriter();
+        reacquiring = false;
+      }
+      await this.ensureWriter();
+      const grant = this.requireGrant();
+      const renewed = parseWriterGrant(
+        await this.json('/writers:renew', 'POST', {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          leaseMillis: this.leaseDurationMs,
+          activation,
+        }),
+      );
+      if (
+        renewed.writerGeneration !== grant.writerGeneration ||
+        renewed.journalRevision !== grant.journalRevision ||
+        renewed.committedSequence !== grant.committedSequence ||
+        renewed.lastCommitDigest !== grant.lastCommitDigest ||
+        renewed.activationEpoch !== grant.activationEpoch ||
+        !renewed.activationLease
+      )
+        throw corrupt('activation renewal changed the journal head.');
+      this.grant = renewed;
+      this.scheduleRenewal();
+      return renewed.activationLease;
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        ((error.status === 409 &&
+          [
+            'workspace_lifecycle_admission_closed',
+            'workspace_lifecycle_claim_fenced',
+          ].includes(error.remoteCode)) ||
+          (this.lifecycleAuthority &&
+            (error.status === 403 ||
+              (error.status === 409 &&
+                (error.remoteCode.startsWith('workspace_lifecycle_') ||
+                  error.remoteCode === 'workspace_unavailable')))))
+      )
+        throw new ManagedSessionCommitRejectedError(error);
+      if (
+        isUncertainStoreFailure(error) ||
+        (!reacquiring &&
+          this.requireGrant().leaseUntil <= Date.now() &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          error.remoteCode === 'managed_session_writer_conflict')
+      )
+        throw new ManagedSessionAppendUnsettledError(asError(error));
+      this.stopWriterRenewal();
+      throw error;
+    }
   }
 
   private async readNativeSnapshot(
@@ -3071,6 +3156,10 @@ export function requireStoredTransactionMatches(
 function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
+    activationLeaseRenewal: record['activationLeaseRenewal'] === true,
+    ...(record['activationLease'] == null
+      ? {}
+      : { activationLease: parseActivationLease(record['activationLease']) }),
     supportedStorageVersion:
       record['supportedStorageVersion'] === undefined
         ? 1
@@ -3099,6 +3188,9 @@ function parseWriterGrant(value: unknown): WriterGrant {
 function parseRestoreHead(value: unknown): RestoreHead {
   const record = asRecord(value, 'restore head');
   return {
+    ...(record['activationLease'] == null
+      ? {}
+      : { activationLease: parseActivationLease(record['activationLease']) }),
     state: string(record['state'], 'state'),
     storageVersion: safeCounter(record['storageVersion'], 'storageVersion'),
     writerGeneration: safeCounter(
@@ -3129,6 +3221,37 @@ function parseRestoreHead(value: unknown): RestoreHead {
       'recoveryDetailCode',
     ),
   };
+}
+
+function parseActivationLease(value: unknown): ManagedSessionActivationLease {
+  const lease = asRecord(value, 'activation lease');
+  return {
+    activationId: assertManagedSessionStableId(
+      string(lease['activationId'], 'activationId'),
+      'activationId',
+    ),
+    epoch: safeCounter(lease['epoch'], 'activation epoch'),
+    renewalSeq: safeCounter(lease['renewalSeq'], 'activation renewalSeq'),
+    expiresAt: safeCounter(lease['expiresAt'], 'activation expiresAt'),
+  };
+}
+
+function applyActivationLease(
+  scan: ManagedSessionJournalScan,
+  lease?: ManagedSessionActivationLease,
+): ManagedSessionJournalScan {
+  if (!lease) return scan;
+  const activation = scan.activation;
+  if (
+    !activation ||
+    activation.phase !== 'active' ||
+    activation.activationId !== lease.activationId ||
+    activation.epoch !== lease.epoch ||
+    lease.renewalSeq < activation.renewalSeq ||
+    lease.expiresAt < activation.expiresAt
+  )
+    throw corrupt('activation lease conflicts with the journal.');
+  return { ...scan, activation: { ...activation, ...lease } };
 }
 
 /**

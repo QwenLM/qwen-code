@@ -9,6 +9,8 @@ PR #15274 现在承载的是剩余的加固：缓存写回期间保留失败套�
 排除可变的解析器元数据，以及保持缓存播种尽力而为且故障可见。
 下文的历史锁设计作为背景，不代表本次 PR 新交付了一次锁范围迁移。
 
+数据库集成现仅运行 MySQL。下文原 MariaDB 集成站点的相关内容保留历史测量记录；其未变的锁、缓存写回和预算规则适用于保留的 MySQL 任务。参见[当前数据库验证范围](managed-runtime-broker-jdbc.zh-CN.md#数据库验证范围)。
+
 ## 问题
 
 `.github/workflows/sdk-java.yml` 通过 `flock --wait` 把所有 self-hosted 的

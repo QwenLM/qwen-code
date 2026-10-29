@@ -10,6 +10,8 @@ failed-suite status through cache write-back, excluding mutable resolver
 metadata, and keeping cache seeding best-effort and observable. The historical
 lock design below is context, not a new relocation delivered by this PR.
 
+Database integration now runs on MySQL only. References below to the former MariaDB integration site retain historical measurements; its unchanged lock, cache write-back and budget rules apply to the retained MySQL job. See the [current database verification scope](managed-runtime-broker-jdbc.md#database-verification-scope).
+
 ## Problem
 
 `.github/workflows/sdk-java.yml` serializes every self-hosted Maven step on one

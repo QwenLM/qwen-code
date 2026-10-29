@@ -146,6 +146,7 @@ final class WorkspaceCsiApplicationHistory {
             JsonNode saved = metadata(row);
             java.util.function.Function<JsonNode, byte[]> reader = nativeCheckpointReader(resources, references, revision);
             if (index == 0) {
+                require(row.number("activation_lease_until") == null && row.number("activation_renewal_seq") == null);
                 String command = "session.create:" + original.getIsolationKey();
                 require(command.equals(row.text("transaction_id")) && command.equals(row.text("command_id"))
                         && "session.create".equals(row.text("operation")) && hash(raw).equals(row.text("content_digest"))
@@ -168,7 +169,10 @@ final class WorkspaceCsiApplicationHistory {
                     require(activation != null || revision == 2);
                     activation = CsiNativeActivationProof.activation(transaction, saved, original,
                             row.text("writer_id"), genesis.definitionDigest(), activation, reader);
+                    activation = CsiNativeActivationProof.renewed(activation,
+                            row.number("activation_lease_until"), row.number("activation_renewal_seq"));
                 } else {
+                    require(row.number("activation_lease_until") == null && row.number("activation_renewal_seq") == null);
                     prefix = CsiNativeActivationProof.advance(transaction, saved, original, row.text("writer_id"),
                             genesis, activation, revision - 1, sequence, prefix, reader);
                 }

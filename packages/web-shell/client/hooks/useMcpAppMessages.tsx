@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import {
+  GENERATED_UI_CONTEXT_TAG_KIND,
+  generatedUiContextTagId,
+  MCP_APP_MESSAGE_ERROR_META,
   MCP_APP_MESSAGE_REVIEW_META,
   type McpAppMessageRequest,
   type McpAppMessages,
@@ -9,7 +13,7 @@ import {
   isMcpAppPromptAdmissionRejected,
   PromptDispatchCancelledError,
 } from '../utils/promptAdmission';
-import { useI18n } from '../i18n';
+import { getTranslator, useI18n } from '../i18n';
 import { Button } from '../components/ui/button';
 import {
   Dialog,
@@ -21,6 +25,8 @@ import {
 } from '../components/ui/dialog';
 
 export interface McpAppPromptSubmission {
+  /** Shows the message as a labelled reference in the transcript. */
+  inputAnnotations?: DaemonInputAnnotation[];
   signal: AbortSignal;
   isCurrent(): boolean;
   onDispatched(): void;
@@ -33,6 +39,8 @@ interface MessageHost {
   clientId?: string;
   captureOwner(): DaemonSessionOwnerSnapshot;
   submit(text: string, options: McpAppPromptSubmission): Promise<unknown>;
+  /** The host's translator; the hook runs outside its I18nProvider. */
+  translate?: ReturnType<typeof getTranslator>;
 }
 
 type Phase =
@@ -49,6 +57,12 @@ interface Review extends McpAppMessageRequest {
   sessionId: string;
   clientId: string;
   phase: Phase;
+  /**
+   * Built-in Generated UI parameter messages are sent by the card's own
+   * explicit action, carry only captured values and show in the transcript
+   * as a labelled reference, so they skip the review dialog.
+   */
+  direct?: { inputAnnotations: DaemonInputAnnotation[] };
   promptId?: string;
   error?: string;
 }
@@ -72,6 +86,7 @@ export function useMcpAppMessages(host: MessageHost) {
   const pendingRef = useRef<Pending | undefined>(undefined);
   const mountedRef = useRef(true);
   const [review, setReview] = useState<Review>();
+  const sendRef = useRef<() => void>(() => undefined);
 
   const isOwnerCurrent = useCallback((request: Pending) => {
     const current = hostRef.current;
@@ -119,6 +134,12 @@ export function useMcpAppMessages(host: MessageHost) {
               : 'cancelled',
           );
           request.settle();
+          // A direct send has no dialog to dismiss: once the App stops
+          // waiting, its own warning asks the user to check the session.
+          if (request.direct && pendingRef.current === request) {
+            pendingRef.current = undefined;
+            if (mountedRef.current) setReview(undefined);
+          }
         };
         let timeout: ReturnType<typeof setTimeout>;
         const request: Pending = {
@@ -150,10 +171,16 @@ export function useMcpAppMessages(host: MessageHost) {
                 : request.phase === 'cancelled' ||
                     request.phase === 'expired' ||
                     request.phase === 'failed'
-                  ? // None reached the session, so the App can say nothing was sent.
+                  ? // None of these was accepted, so the App can say nothing
+                    // was sent; a failure also carries its reason.
                     {
                       isError: true,
-                      _meta: { [MCP_APP_MESSAGE_REVIEW_META]: request.phase },
+                      _meta: {
+                        [MCP_APP_MESSAGE_REVIEW_META]: request.phase,
+                        ...(request.phase === 'failed' && request.error
+                          ? { [MCP_APP_MESSAGE_ERROR_META]: request.error }
+                          : {}),
+                      },
                     }
                   : { isError: true },
             );
@@ -168,6 +195,12 @@ export function useMcpAppMessages(host: MessageHost) {
               setReview({ ...request });
             }
             if (phase !== 'unknown') request.settle();
+            if (request.direct && phase !== 'unknown') {
+              // No dialog to close: free the slot for the next request.
+              if (pendingRef.current === request)
+                pendingRef.current = undefined;
+              if (mountedRef.current) setReview(undefined);
+            }
           },
         };
         pendingRef.current = request;
@@ -176,6 +209,33 @@ export function useMcpAppMessages(host: MessageHost) {
         if (!isOwnerCurrent(request)) {
           request.finish('cancelled');
           controller.abort();
+          return;
+        }
+        const parameters = readGeneratedUiParameters(input);
+        if (parameters) {
+          const reference = {
+            id: generatedUiContextTagId(parameters.documentId),
+            kind: GENERATED_UI_CONTEXT_TAG_KIND,
+            // References with a kind display their value.
+            value: (hostRef.current.translate ?? getTranslator('en'))(
+              'mcpApp.generatedUi.contextTag',
+              { title: parameters.title },
+            ),
+            serialized: input.text,
+          };
+          request.direct = {
+            inputAnnotations: [
+              {
+                type: 'reference',
+                start: 0,
+                end: input.text.length,
+                text: input.text,
+                reference,
+              },
+            ],
+          };
+          setReview({ ...request });
+          sendRef.current();
           return;
         }
         setReview({ ...request });
@@ -228,6 +288,9 @@ export function useMcpAppMessages(host: MessageHost) {
       .then(() => {
         if (!isCurrent()) throw new DOMException('Cancelled', 'AbortError');
         return hostRef.current.submit(request.text, {
+          ...(request.direct
+            ? { inputAnnotations: request.direct.inputAnnotations }
+            : {}),
           signal: request.signal,
           isCurrent,
           onDispatched: () => {
@@ -266,6 +329,7 @@ export function useMcpAppMessages(host: MessageHost) {
         request.settle();
       });
   }, [isOwnerCurrent]);
+  sendRef.current = send;
 
   const close = useCallback(() => {
     const request = pendingRef.current;
@@ -292,10 +356,49 @@ export function useMcpAppMessages(host: MessageHost) {
 
   return {
     context,
-    review: review ? (
-      <McpAppMessageReview review={review} onSend={send} onClose={close} />
-    ) : null,
+    review:
+      review && !review.direct ? (
+        <McpAppMessageReview review={review} onSend={send} onClose={close} />
+      ) : null,
   };
+}
+
+interface GeneratedUiParameters {
+  title: string;
+  documentId: string;
+}
+
+/**
+ * Recognizes the parameter message the built-in Generated UI App sends for
+ * its explicit continue action. Any other message keeps the review dialog.
+ */
+export function readGeneratedUiParameters(
+  review: Pick<McpAppMessageRequest, 'requiredFeature' | 'text'>,
+): GeneratedUiParameters | undefined {
+  if (review.requiredFeature !== 'generated-ui') return undefined;
+  const start = review.text.indexOf('\n{');
+  if (start < 0) return undefined;
+  let message: unknown;
+  try {
+    message = JSON.parse(review.text.slice(start + 1));
+  } catch {
+    return undefined;
+  }
+  if (!message || typeof message !== 'object') return undefined;
+  const { kind, title, snapshot } = message as Record<string, unknown>;
+  const documentId =
+    snapshot && typeof snapshot === 'object'
+      ? (snapshot as Record<string, unknown>)['documentId']
+      : undefined;
+  if (
+    kind !== 'qwen.generated-ui.parameters' ||
+    typeof title !== 'string' ||
+    typeof documentId !== 'string' ||
+    !documentId
+  ) {
+    return undefined;
+  }
+  return { title, documentId };
 }
 
 function McpAppMessageReview({
