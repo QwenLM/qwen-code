@@ -5365,6 +5365,14 @@ public class ManagedAgentStore implements AgentStateStore {
         return new StoreModels.SnapshotPage(page.items(), page.hasMore(), page.nextCursor(), page.coveredSequence());
     }
 
+    @Override
+    public StoreModels.SnapshotPage findRecentSnapshotPage(String tenantId, String sessionId,
+            String cursor, int limit) {
+        requireSession(tenantId, sessionId);
+        ManagedSnapshotStore.Page page = snapshots.recentPage(tenantId, sessionId, cursor, limit);
+        return new StoreModels.SnapshotPage(page.items(), page.hasMore(), page.nextCursor(), page.coveredSequence());
+    }
+
     /** The snapshot's covered sequence of each given Session, in one read. */
     public Map<String, Long> findSnapshotCoveredSequences(String tenantId,
             List<String> sessionIds) {

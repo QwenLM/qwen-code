@@ -35,6 +35,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DeadlockLoserDataAccessException;
@@ -1621,6 +1622,120 @@ public class ManagedSessionStore {
                 : transactions.get(transactions.size() - 1)
                         .journalRevision();
         return new TransactionPage(transactions, nextRevision, hasMore);
+    }
+
+    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    public ManagedSessionStoreModels.RecentTransactionPage recentTransactions(String tenantId, String workspaceId,
+            String sessionId, String writerToken, Long throughRevision, Long beforeRevision, int limit) {
+        long through = historyRevision(tenantId, workspaceId, sessionId, writerToken, throughRevision);
+        if (limit < 1 || limit > 100 || beforeRevision != null && (beforeRevision < 1 || beforeRevision > through)) {
+            throw invalid("History page position or limit is outside its bounds.");
+        }
+        long upper = beforeRevision == null ? through : beforeRevision - 1;
+        List<TransactionSize> candidates = jdbc.query("SELECT journal_revision, byte_length FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND journal_revision <= ?"
+                        + " ORDER BY journal_revision DESC LIMIT ?",
+                (row, index) -> new TransactionSize(row.getLong("journal_revision"), row.getLong("byte_length")),
+                tenantId, sessionId, upper, limit + 1);
+        int selected = 0;
+        long bytes = 0;
+        long expected = upper;
+        for (TransactionSize candidate : candidates) {
+            if (candidate.journalRevision() != expected-- || candidate.byteLength() < 1
+                    || candidate.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                throw journalCorrupt();
+            }
+            if (selected == limit || selected > 0 && bytes + candidate.byteLength()
+                    > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                break;
+            }
+            bytes += candidate.byteLength();
+            selected++;
+        }
+        if (upper > 0 && (candidates.isEmpty() || candidates.size() < limit + 1
+                && candidates.getLast().journalRevision() != 1)) {
+            throw journalCorrupt();
+        }
+        List<TransactionRow> rows = selected == 0 ? List.of() : jdbc.query(
+                "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND journal_revision <= ?"
+                        + " ORDER BY journal_revision DESC LIMIT ?", transactionMapper, tenantId, sessionId, upper, selected);
+        if (rows.size() != selected) {
+            throw journalCorrupt();
+        }
+        List<StoredTransaction> transactions = new ArrayList<>();
+        for (int index = 0; index < rows.size(); index++) {
+            TransactionRow row = rows.get(index);
+            if (row.journalRevision() != candidates.get(index).journalRevision()
+                    || row.byteLength() != candidates.get(index).byteLength()) {
+                throw journalCorrupt();
+            }
+            requireTransactionWorkspace(row, workspaceId);
+            transactions.add(storedTransaction(row));
+        }
+        boolean more = candidates.size() > selected;
+        Long next = more ? transactions.getLast().journalRevision() : null;
+        java.util.Collections.reverse(transactions);
+        restore(tenantId, workspaceId, sessionId, writerToken);
+        return new ManagedSessionStoreModels.RecentTransactionPage(List.copyOf(transactions), through, next, more);
+    }
+
+    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    public ManagedSessionStoreModels.CommandTransaction commandTransaction(String tenantId, String workspaceId,
+            String sessionId, String writerToken, Long throughRevision, String operation, String commandId) {
+        long through = historyRevision(tenantId, workspaceId, sessionId, writerToken, throughRevision);
+        if (StringUtils.isBlank(operation) || operation.length() > 4096
+                || StringUtils.isBlank(commandId) || commandId.length() > 512) {
+            throw invalid("History command identity is invalid.");
+        }
+        String key = commandKeyHash(operation, commandId);
+        var sizes = jdbc.query("SELECT journal_revision, byte_length FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND command_key_hash = ? AND journal_revision <= ?",
+                (row, index) -> new TransactionSize(row.getLong("journal_revision"), row.getLong("byte_length")),
+                tenantId, sessionId, key, through);
+        StoredTransaction transaction = null;
+        if (!sizes.isEmpty()) {
+            TransactionSize size = sizes.getFirst();
+            if (sizes.size() != 1 || size.byteLength() < 1
+                    || size.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                throw journalCorrupt();
+            }
+            TransactionRow row = findTransactionByCommand(tenantId, sessionId, key);
+            if (row == null || row.journalRevision() != size.journalRevision() || row.byteLength() != size.byteLength()) {
+                throw journalCorrupt();
+            }
+            requireTransactionWorkspace(row, workspaceId);
+            if (!operation.equals(row.operation()) || !commandId.equals(row.commandId())
+                    || row.byteLength() < 1 || row.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                throw journalCorrupt();
+            }
+            transaction = storedTransaction(row);
+        }
+        restore(tenantId, workspaceId, sessionId, writerToken);
+        return new ManagedSessionStoreModels.CommandTransaction(through, transaction);
+    }
+
+    private long historyRevision(String tenantId, String workspaceId, String sessionId, String writerToken,
+            Long throughRevision) {
+        RestoreHead head = restore(tenantId, workspaceId, sessionId, writerToken);
+        if (head.compactedThroughRevision() != 0) {
+            throw conflict(ManagedSessionStoreModels.ERROR_RECOVERY_CONFLICT, "History prefix is no longer retained.");
+        }
+        if (throughRevision != null && (throughRevision < 0
+                || throughRevision > ManagedSessionStoreModels.MAX_SAFE_COUNTER
+                || throughRevision > head.journalRevision())) {
+            throw invalid("History prefix is outside its committed bounds.");
+        }
+        long through = throughRevision == null ? head.journalRevision() : throughRevision;
+        if (through > 0) {
+            var prefix = jdbc.query("SELECT workspace_id FROM ma_session_journal_tx"
+                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                    (row, index) -> row.getString("workspace_id"), tenantId, sessionId, through);
+            if (prefix.size() != 1 || !workspaceId.equals(prefix.getFirst())) {
+                throw journalCorrupt();
+            }
+        }
+        return through;
     }
 
     /** Proves only an untouched initial journal; it never opens or fences a writer. */

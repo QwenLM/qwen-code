@@ -1558,6 +1558,10 @@ class SurfaceAdmissionAcceptanceTest {
                 && "GET".equals(entry.method())) {
             query.add("workspaceId=ws");
         }
+        if (path.endsWith("/transactions:lookup")) {
+            query.add("operation=session.create");
+            query.add("commandId=command-genesis");
+        }
         if (!query.isEmpty()) {
             path += "?" + String.join("&", query);
         }

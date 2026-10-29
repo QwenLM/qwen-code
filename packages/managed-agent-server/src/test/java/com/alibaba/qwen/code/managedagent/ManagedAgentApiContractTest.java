@@ -1101,6 +1101,12 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellExportSession", 404,
                 post(WEB_SHELL + "/sessions/export/query").header(TENANT, otherTenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        exchange(drift, "webShellRecentTranscriptItems", 200,
+                post(WEB_SHELL + "/transcript/items/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId));
+        exchange(drift, "webShellRecentTranscriptItems", 404,
+                post(WEB_SHELL + "/transcript/items/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
         String renameBody = """
                 {"requestId":"contract-rename","sessionId":"%s",
                  "idempotencyKey":"contract-web-rename","title":"renamed web"}
