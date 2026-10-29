@@ -1115,6 +1115,14 @@ export class ShellExecutionService {
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
+        // Which streams had ended when the shell was stopped: at a cancel,
+        // before the kill, or else at the exit. A kill makes the streams it
+        // cuts end before the exit is reported, so by then the flags above
+        // no longer show which streams it cut.
+        let endedAtStop: { stdout: boolean; stderr: boolean } | undefined;
+        const recordStop = () => {
+          endedAtStop ??= { stdout: stdoutEnded, stderr: stderrEnded };
+        };
         let stdoutWrite: Promise<void> = Promise.resolve();
         let stderrWrite: Promise<void> = Promise.resolve();
 
@@ -1389,7 +1397,7 @@ export class ShellExecutionService {
             // UTF-8; decode each stream again from its complete bytes, as
             // the PTY path does at exit.
             // A stream that ended delivered every byte. A cancel or a signal
-            // cuts only the streams still open when it ended the shell, the
+            // cuts only the streams still open when it stopped the shell, the
             // capture limit only the streams it dropped bytes from, and the
             // post-exit drain only the streams it stopped waiting for. A
             // background promote that finds the shell already exited cut
@@ -1398,13 +1406,17 @@ export class ShellExecutionService {
               (abortSignal.aborted &&
                 getShellAbortReasonKind(abortSignal.reason) !== 'background') ||
               signal !== null;
+            const ended = endedAtStop ?? {
+              stdout: stdoutEnded,
+              stderr: stderrEnded,
+            };
             stdout = decodeCompleteOutput(
               Buffer.concat(stdoutBytes),
-              stdoutCut || stdoutHeld || (endedEarly && !stdoutEnded),
+              stdoutCut || stdoutHeld || (endedEarly && !ended.stdout),
             );
             stderr = decodeCompleteOutput(
               Buffer.concat(stderrBytes),
-              stderrCut || stderrHeld || (endedEarly && !stderrEnded),
+              stderrCut || stderrHeld || (endedEarly && !ended.stderr),
             );
           }
           // Ensure we don't add an extra newline if stdout already ends with one.
@@ -1510,6 +1522,7 @@ export class ShellExecutionService {
           if (child.pid) {
             this.activeChildProcesses.delete(child.pid);
           }
+          recordStop();
           if (!streamStdout && !rawCapture) {
             void handleExit(code, signal);
             return;
@@ -1874,6 +1887,7 @@ export class ShellExecutionService {
 
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
+          recordStop();
           if (isWindows) {
             const killer = cpSpawn(
               WINDOWS_TASKKILL,

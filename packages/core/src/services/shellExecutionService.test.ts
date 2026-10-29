@@ -2386,6 +2386,57 @@ describe('ShellExecutionService child_process fallback', () => {
     expect(result.output).toBe('目浣');
   });
 
+  it.each([
+    [
+      'a cancel',
+      (abortController: AbortController) => {
+        abortController.abort();
+        // The kill ends both streams before the exit is reported.
+        mockChildProcess.stdout!.emit('end');
+        mockChildProcess.stderr!.emit('end');
+        finish(1);
+      },
+    ],
+    [
+      'a kill',
+      () => {
+        mockChildProcess.emit('exit', null, 'SIGKILL');
+        mockChildProcess.stdout!.emit('end');
+        mockChildProcess.stderr!.emit('end');
+        mockChildProcess.emit('close', null, 'SIGKILL');
+      },
+    ],
+  ])(
+    'keeps raw-capture stdout that %s cut inside a character as UTF-8 on a legacy code page',
+    async (_label, stop) => {
+      useSystemEncoding('gbk');
+      for (const pipe of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
+        Object.assign(pipe, { pause: vi.fn(), resume: vi.fn() });
+      }
+      const capture = {
+        write: vi.fn(async () => {}),
+        finish: vi.fn(async () => {}),
+        setStarted: vi.fn(),
+        setProcessResult: vi.fn(),
+      };
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'build',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+        { rawCapture: capture },
+      );
+      // 目 (E7 9B AE) and the lead byte of the next character.
+      emitOut(Buffer.from('e79baee5', 'hex'));
+      stop(abortController);
+      const result = await handle.result;
+      expect(result.output).toBe('目\ufffd');
+    },
+  );
+
   it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
     const { result, capture } = await runCaptured(
       'failing build',
@@ -2588,6 +2639,9 @@ describe('ShellExecutionService child_process fallback', () => {
         (bytes: Buffer, ac: AbortController) => {
           emitOut(bytes.subarray(8, 10));
           ac.abort();
+          // The kill ends both streams before the exit is reported.
+          mockChildProcess.stdout!.emit('end');
+          mockChildProcess.stderr!.emit('end');
           finish(1);
         },
       ],
