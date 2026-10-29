@@ -33,7 +33,7 @@ import {
   type CliArgs,
   resetOutputStyleWarningsForTesting,
 } from './config.js';
-import type { Settings } from './settings.js';
+import { LoadedSettings, type Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
@@ -4681,6 +4681,30 @@ describe('mergeExcludeTools', () => {
       undefined,
       [],
     );
+
+    expect(config.getToolMode()).toBe(ToolMode.CodeModeOnly);
+    expect(config.getWarnings()).toContain(
+      'tools.codeModeOnly is deprecated; use tools.mode = "code_mode_only".',
+    );
+  });
+
+  it('should keep an operator legacy mode over a lower-scope tools.mode', async () => {
+    const file = (settings: Settings) => ({
+      settings,
+      originalSettings: settings,
+      path: 'fixture',
+    });
+    const loaded = new LoadedSettings(
+      file({ tools: { codeModeOnly: true } } as unknown as Settings),
+      file({}),
+      file({ tools: { mode: ToolMode.Direct } }),
+      file({}),
+      true,
+      new Set(),
+    );
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(loaded.merged, argv, undefined, []);
 
     expect(config.getToolMode()).toBe(ToolMode.CodeModeOnly);
     expect(config.getWarnings()).toContain(

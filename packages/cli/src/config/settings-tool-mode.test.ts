@@ -9,11 +9,13 @@ import {
   getEffectiveValue,
   saveModifiedSettings,
 } from './settingsUtils.js';
-import {
-  SettingScope,
-  type LoadedSettings,
-  type Settings,
-} from './settings.js';
+import { LoadedSettings, SettingScope, type Settings } from './settings.js';
+
+const file = (settings: Settings) => ({
+  settings,
+  originalSettings: settings,
+  path: 'fixture',
+});
 
 describe('legacy tool mode settings', () => {
   const legacy = { tools: { codeModeOnly: true } } as unknown as Settings;
@@ -54,5 +56,54 @@ describe('legacy tool mode settings', () => {
       'direct',
     );
     expect(getEffectiveValue('tools.mode', settings, settings)).toBe('direct');
+  });
+
+  it('resolves an operator legacy mode over a lower-precedence tools.mode', () => {
+    const loaded = new LoadedSettings(
+      file({ tools: { codeModeOnly: true } } as unknown as Settings),
+      file({}),
+      file({ tools: { mode: 'direct' } }),
+      file({}),
+      true,
+      new Set(),
+    );
+
+    expect(
+      (loaded.merged.tools as { codeModeOnly?: unknown })?.codeModeOnly,
+    ).toBe(true);
+    expect(loaded.merged.tools?.mode).toBeUndefined();
+    expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe(
+      'code_mode_only',
+    );
+  });
+
+  it('keeps an explicit mode over the legacy key in the same scope', () => {
+    const loaded = new LoadedSettings(
+      file({}),
+      file({}),
+      file({
+        tools: { codeModeOnly: true, mode: 'direct' },
+      } as unknown as Settings),
+      file({}),
+      true,
+      new Set(),
+    );
+
+    expect(loaded.merged.tools?.mode).toBe('direct');
+    expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe('direct');
+  });
+
+  it('keeps a higher-precedence tools.mode over a lower legacy mode', () => {
+    const loaded = new LoadedSettings(
+      file({ tools: { mode: 'direct' } }),
+      file({ tools: { codeModeOnly: true } } as unknown as Settings),
+      file({}),
+      file({}),
+      true,
+      new Set(),
+    );
+
+    expect(loaded.merged.tools?.mode).toBe('direct');
+    expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe('direct');
   });
 });
