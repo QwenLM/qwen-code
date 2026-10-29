@@ -308,6 +308,29 @@ describe('toolFormatting', () => {
     ).toBe('Found 1 matching file(s)');
   });
 
+  it('keeps permission-aware glob summaries unchanged', () => {
+    const rawOutput =
+      'No permitted files found [1 file omitted by permission rules]';
+
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'glob',
+          rawOutput,
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'No permitted files found\n---\n[1 file omitted by permission rules]',
+              },
+            },
+          ],
+        }),
+      ),
+    ).toBe(rawOutput);
+  });
+
   it('matches CLI-style grep_search result summaries', () => {
     expect(
       getToolResultSummary(
