@@ -656,7 +656,9 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # Read-only fetch; the bot PAT is only exported to the write steps.
+          # Read-only fetch with the job token; the bot PAT is only exported
+          # to the write steps.
+          token: '${{ github.token }}'
           ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
           persist-credentials: false
@@ -712,13 +714,6 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
-
-      - name: 'Verify bot PAT (dry run)'
-        if: "${{ needs.prepare.outputs.is_dry_run == 'true' }}"
-        env:
-          PAT: '${{ secrets.CI_BOT_PAT }}'
-        run: |-
-          GH_TOKEN="$PAT" gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push' | grep -qx true || echo "::warning::CI_BOT_PAT cannot push to ${GITHUB_REPOSITORY}"
 
       - name: 'Download audio capture prebuilds'
         if: |-

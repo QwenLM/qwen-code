@@ -666,8 +666,6 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    // 930, raised from 920 for the dry-run CI_BOT_PAT probe: one step that
-    // only calls gh — orchestration; the token logic stays in the shell.
     // 920, raised from 880 for reconcile_failure: the success-gated sibling of
     // notify_failure, one job carrying a single script step, because the close
     // path cannot live inside notify_failure — that job is skipped on a
@@ -690,7 +688,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(940);
+    expect(workflow.split('\n').length).toBeLessThan(930);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -3487,7 +3485,7 @@ exit 0`,
     // Checkout (#15726). The PAT stays exported to the steps that write.
     const steps = releaseYaml.jobs.publish.steps;
     const checkout = steps.find((step) => step.name === 'Checkout');
-    expect(checkout.with.token).toBeUndefined();
+    expect(checkout.with.token).toBe('${{ github.token }}');
     expect(checkout.with['persist-credentials']).toBe(false);
     expect(
       steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,

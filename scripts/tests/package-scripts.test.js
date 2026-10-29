@@ -2229,6 +2229,7 @@ describe('package scripts', () => {
     expect(checkoutStep).toContain('persist-credentials: false');
     // The checkout only reads the release commit; a missing or rejected bot
     // PAT must not abort the release before the push step that needs it.
+    expect(checkoutStep).toContain("token: '${{ github.token }}'");
     expect(checkoutStep).not.toContain('secrets.');
     // Nothing before the push step may reintroduce the bot PAT either: the
     // job legitimately holds it later, so stop the slice at that step.
@@ -2242,21 +2243,6 @@ describe('package scripts', () => {
     expect(pushReleaseBranchStep).toContain(
       "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",
     );
-    // A dry run skips every live PAT consumer, so it probes write capability
-    // instead of learning about a rotated token on the next live release.
-    const patProbeStep = getWorkflowStep(
-      publishJob,
-      'Verify bot PAT (dry run)',
-    );
-    expect(patProbeStep).toContain(
-      'if: "${{ needs.prepare.outputs.is_dry_run == \'true\' }}"',
-    );
-    expect(patProbeStep).toContain("PAT: '${{ secrets.CI_BOT_PAT }}'");
-    const patProbeRun = patProbeStep.slice(patProbeStep.indexOf('run: |-'));
-    expect(patProbeRun).toContain('GH_TOKEN="$PAT"');
-    expect(patProbeRun).toContain('.permissions.push');
-    expect(patProbeRun).toContain('::warning::CI_BOT_PAT cannot push');
-    expect(patProbeRun).not.toContain('secrets.');
     expect(releaseStepScript).toContain('git config core.hooksPath .husky');
     expect(releaseStepScript).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
     expect(releaseStepScript).toContain('gh auth setup-git');
