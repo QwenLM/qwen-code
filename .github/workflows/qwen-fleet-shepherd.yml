@@ -231,16 +231,6 @@ env:
   # pool wait for the watch and the rescue to be scheduled. Slower detection is
   # the price of never firing on a merely slow loop.
   SHEPHERD_STALE_MINUTES: '240'
-  # How long a `queued` run may sit before it stops counting as in flight. This
-  # MUST NOT reuse the threshold above: the two answer opposite questions, and
-  # sharing one number reintroduces the duplicate-tick defect. A tick queued
-  # 300 minutes in a saturated pool is not lost — it passed the concurrency gate
-  # and will start, and the last completion is old BECAUSE it is waiting; cutting
-  # it at 240 dispatched a rescue beside it. The wedge this file documents at
-  # ZOMBIE_QUEUED_MINUTES is a different order of magnitude entirely (runs
-  # created 2026-08-19 were still queued seventy days later), so a day separates
-  # the two populations with room to spare on both sides.
-  SHEPHERD_WEDGED_HOURS: '24'
 
 jobs:
   shepherd:
@@ -329,38 +319,26 @@ jobs:
           # scheduled tick, a live manual dispatch, or a rescue; the watch and a
           # dry manual run belong to neither column:
           #
-          #   live lane, in_progress            -> IN FLIGHT, defer
-          #   live lane, queued, younger than
-          #     SHEPHERD_WEDGED_HOURS           -> IN FLIGHT, defer
+          #   live lane, status != completed    -> IN FLIGHT, defer the rescue
           #   live lane, completed, !cancelled  -> PROGRESS, resets the clock
-          #   live lane, pending                -> neither (see below)
-          #   live lane, queued and older than
-          #     SHEPHERD_WEDGED_HOURS           -> neither (wedged)
           #   watch / dry manual                -> neither, ever
           #
-          # The three non-completed states are NOT interchangeable, and getting
-          # this wrong has now broken the lane in both directions:
+          # Deliberately the simple rule. Three rounds of trying to separate
+          # `pending`, `queued` and a WEDGED `queued` produced a fix-induced
+          # critical each time: counting too little dispatched a rescue beside a
+          # tick that was about to start (two full ticks, one blind dashboard
+          # write overwriting the other's watermark); counting too much silenced
+          # the lane; and an age cutoff could not tell a saturated pool from a
+          # wedge without borrowing the very threshold that triggers the rescue.
           #
-          #   * `queued` has passed the concurrency gate and is waiting for a
-          #     runner. It will start — measured 120-135 minutes of queueing then
-          #     22 seconds of work — so dispatching beside it ran two full ticks
-          #     against the same stale reads (round 3's defect).
-          #   * `pending` has NOT passed the gate. It waits behind the holder and
-          #     the next arrival cancels it, so it can never make progress on its
-          #     own and must not suppress the rescue.
-          #   * a `queued` run older than SHEPHERD_WEDGED_HOURS is the wedge this
-          #     file documents at ZOMBIE_QUEUED_MINUTES: created, never started,
-          #     81 of them still queued two months later. Counting it forever is
-          #     what round 3's fix did, and it silenced the lane in exactly the
-          #     dead state the lane exists for.
-          #
-          # The wedge cutoff is a DAY, not SHEPHERD_STALE_MINUTES. Reusing the
-          # staleness threshold made one number answer two opposite questions:
-          # a tick queued 300 minutes in a saturated pool would be declared dead
-          # at 240 while the last completion was old precisely because it was
-          # waiting, and the rescue ran beside it. The two populations are orders
-          # of magnitude apart — measured queue waits are 120-135 minutes, the
-          # documented wedge is seventy days — so they get separate constants.
+          # KNOWN LIMITATION, accepted deliberately: a wedged holder — a run
+          # GitHub created and never started, the class documented at
+          # ZOMBIE_QUEUED_MINUTES — suppresses the rescue for as long as it sits
+          # there. The remedy is the one this file already documents: check
+          # `gh run view <id> --json jobs` and delete the wedged run, which the
+          # dashboard's wedge banner names. Automating that was judged worse than
+          # the manual step, because the automatic version kept misreading a
+          # merely slow pool as a dead one.
           #
           # Completion, not success: a shepherd that fails on every tick is
           # broken, not starved, and re-dispatching it each watch would multiply
@@ -382,14 +360,14 @@ jobs:
           if [[ "${WATCHDOG_MODE}" == 'true' ]]; then
             if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" \
               --workflow qwen-fleet-shepherd.yml --limit 40 \
-              --json event,status,conclusion,createdAt,updatedAt,displayTitle > /tmp/self-runs.json 2> /dev/null; then
+              --json event,status,conclusion,updatedAt,displayTitle > /tmp/self-runs.json 2> /dev/null; then
               echo "::warning::shepherd run history unreadable; rescue watch takes no action this tick"
               exit 0
             fi
             # `-e` plus `empty` makes an empty ARRAY a failure: jq -r '@tsv' over
             # [] would print "0<TAB>0<TAB>" and hand the decision three zeroes,
             # approving a rescue on no evidence.
-            if ! WATCH_STATE="$(jq -er --arg now "${NOW_EPOCH}" --arg wedge "${SHEPHERD_WEDGED_HOURS}" '
+            if ! WATCH_STATE="$(jq -er '
               if length == 0 then empty
               else
                 ([ .[] | select(.displayTitle == "shepherd tick"
@@ -397,11 +375,7 @@ jobs:
                                 or .displayTitle == "Fleet Shepherd") ]) as $live
                 | ([ .[] | select(.event == "repository_dispatch") ]) as $rescues
                 | ($live + $rescues) as $lane
-                | [ ($lane | map(select(
-                        .status == "in_progress"
-                        or (.status == "queued"
-                            and ((($now | tonumber) - (.createdAt | fromdateiso8601))
-                                 < (($wedge | tonumber) * 3600))))) | length),
+                | [ ($lane | map(select(.status != "completed")) | length),
                     ([ $rescues[] | select(.status != "completed") ] | length),
                     ([ $lane[]
                        | select(.status == "completed" and .conclusion != "cancelled")

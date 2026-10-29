@@ -76,16 +76,15 @@ The fleet cadence drops from fifteen to thirty minutes and the concurrency key b
 
 One table decides the watch, and the code applies it once. A run belongs to a **live lane** if it is a scheduled tick, a live manual dispatch, or a rescue; the watch itself and a _dry_ manual run belong to neither column:
 
-| run                                                       | in flight (defers) | progress (resets the clock) |
-| --------------------------------------------------------- | ------------------ | --------------------------- |
-| live lane, `in_progress`                                  | yes                | —                           |
-| live lane, `queued`, younger than `SHEPHERD_WEDGED_HOURS` | yes                | —                           |
-| live lane, `pending`                                      | never              | —                           |
-| live lane, `queued`, older than `SHEPHERD_WEDGED_HOURS`   | never (wedged)     | —                           |
-| live lane, completed, not `cancelled`                     | —                  | yes, by `updatedAt`         |
-| watch, or dry manual run                                  | never              | never                       |
+| run                                   | in flight (defers) | progress (resets the clock) |
+| ------------------------------------- | ------------------ | --------------------------- |
+| live lane, `status != completed`      | yes                | —                           |
+| live lane, completed, not `cancelled` | —                  | yes, by `updatedAt`         |
+| watch, or dry manual run              | never              | never                       |
 
-The wedge cutoff is a **separate constant** (`SHEPHERD_WEDGED_HOURS`, a day), not the staleness threshold. Sharing one number made it answer two opposite questions: a tick queued 300 minutes in a saturated pool was declared dead at 240 while the last completion was old precisely because it was waiting, and the rescue ran beside it. The populations are orders of magnitude apart — measured queue waits of 120-135 minutes against a documented wedge of seventy days — so a day separates them with room on both sides.
+**The rule is deliberately simple, and it carries one accepted cost.** Three rounds of trying to separate `pending`, `queued` and a _wedged_ `queued` produced a fix-induced critical each time: counting too little dispatched a rescue beside a tick that was about to start; counting too much silenced the lane; and an age cutoff could not tell a saturated pool from a wedge without borrowing the very threshold that triggers the rescue.
+
+So: **a wedged holder suppresses the rescue for as long as it sits there.** That is a decision, not an oversight. The remedy is the one this file already documents — inspect `gh run view <id> --json jobs` and delete the wedged run, which the dashboard's wedge banner names. Automating it was judged worse than the manual step, because every automatic version tried so far misread a merely slow pool as a dead one.
 
 Each row is a defect that was shipped and fixed. Counting the watch's own run made both gates permanently true and the rescue branch unreachable. Counting successes rather than completions re-dispatched a shepherd that fails on every tick. Ignoring a completed rescue re-armed another one every watch interval while the log said "none in window". Treating `queued` as neither state dispatched a second full tick beside one that had already passed the concurrency gate and was certain to start — two dashboards assembled from the same stale reads, the later blind edit discarding the other's watermark. And titling every manual dispatch like a dry run made a maintainer's documented recovery invisible, earning it a duplicate rescue minutes later; `dry_run` defaults to false, so only an explicitly dry manual run is excluded.
 

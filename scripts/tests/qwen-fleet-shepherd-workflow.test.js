@@ -3647,10 +3647,11 @@ exit 1`;
     // Exceeds the measured completion gap, so a merely slow loop is not
     // doubled; the detection bound it implies is stated at the definition.
     expect(workflow).toContain("SHEPHERD_STALE_MINUTES: '240'");
-    // The wedge cutoff is a SEPARATE constant: sharing the staleness threshold
-    // made one number decide both "the lane went quiet" and "this queued run is
-    // dead", which dispatches a rescue beside a tick that is merely waiting.
-    expect(workflow).toContain("SHEPHERD_WEDGED_HOURS: '24'");
+    // The simple rule is deliberate, and its cost is written down: a wedged
+    // holder suppresses the rescue until someone deletes it. Three rounds of
+    // age-based wedge detection each produced a fix-induced critical.
+    expect(workflow).not.toContain('SHEPHERD_WEDGED_HOURS');
+    expect(workflow).toContain('KNOWN LIMITATION, accepted deliberately');
     expect(workflow).toContain('240-270');
     expect(workflow).toContain('repository_dispatch:');
     expect(workflow).toContain("- 'shepherd-rescue'");
@@ -3673,7 +3674,7 @@ exit 1`;
     // looks like no evidence and the watch rescues a healthy shepherd forever;
     // without `conclusion` a cancelled lane reads as progress.
     expect(watch).toContain(
-      '--json event,status,conclusion,createdAt,updatedAt,displayTitle',
+      '--json event,status,conclusion,updatedAt,displayTitle',
     );
     // Scope and window: without --workflow the read is the repo's 40 newest
     // runs, and a smaller --limit can hide the only completion inside a
@@ -3721,12 +3722,7 @@ exit 1`;
       JSON.stringify(parse(workflow).on.repository_dispatch.types),
     );
     expect(declared).toEqual(['shepherd-rescue']);
-    const replay = ({
-      runs,
-      dispatchFails = false,
-      stale = '240',
-      wedged = '24',
-    }) => {
+    const replay = ({ runs, dispatchFails = false, stale = '240' }) => {
       const dir = mkdtempSync(join(tmpdir(), 'shepherd-watch-'));
       try {
         // `runs: null` is the unreadable arm (no fixture at all); `runs: []`
@@ -3769,7 +3765,6 @@ set -eo pipefail
 WATCHDOG_MODE='true'
 NOW_EPOCH='${NOW}'
 SHEPHERD_STALE_MINUTES='${stale}'
-SHEPHERD_WEDGED_HOURS='${wedged}'
 REPO='QwenLM/qwen-code'
 # exported, not just set: the stub is a child process and reads it from the
 # environment, exactly as the step env supplies it in production.
@@ -3873,8 +3868,6 @@ ACTIONS_TOKEN='workflow-token-value'
 
     // A tick queued 300 minutes in a SATURATED pool is not lost: it passed the
     // gate and will start, and the last completion is old because it is waiting.
-    // Cutting it at the staleness threshold dispatched a rescue beside it — the
-    // round-3 defect, reintroduced above a different line.
     expect(
       replay({
         runs: [
@@ -3889,9 +3882,10 @@ ACTIONS_TOKEN='workflow-token-value'
       }).dispatch,
     ).toBe('');
 
-    // Past a DAY it is the wedge this file documents at ZOMBIE_QUEUED_MINUTES:
-    // created, never started, 81 of them still queued two months later. Counting
-    // that forever silenced the lane in the one dead state it exists for.
+    // A WEDGED holder defers too, and that is the accepted cost of the simple
+    // rule rather than an oversight: no age heuristic could tell this apart from
+    // the saturated pool above without borrowing the rescue's own threshold. The
+    // remedy is the documented manual one — inspect the run's jobs and delete it.
     expect(
       replay({
         runs: [
@@ -3899,32 +3893,15 @@ ACTIONS_TOKEN='workflow-token-value'
           tick({
             status: 'queued',
             conclusion: null,
-            createdAt: at(1500),
-            updatedAt: at(1500),
+            createdAt: at(100_000),
+            updatedAt: at(100_000),
           }),
         ],
       }).dispatch,
-    ).toContain('-f event_type=shepherd-rescue');
+    ).toBe('');
 
-    // The cutoff is the env value, not a hardcoded day.
-    expect(
-      replay({
-        runs: [
-          staleTick,
-          tick({
-            status: 'queued',
-            conclusion: null,
-            createdAt: at(300),
-            updatedAt: at(300),
-          }),
-        ],
-        wedged: '1',
-      }).dispatch,
-    ).toContain('-f event_type=shepherd-rescue');
-
-    // `pending` has NOT passed the concurrency gate: it waits behind the holder
-    // and the next arrival cancels it, so it can never make progress on its own
-    // and must not suppress the rescue.
+    // A pending sibling defers as well: it is a live run that has not completed,
+    // and the simple rule does not try to guess whether it will ever be admitted.
     expect(
       replay({
         runs: [
@@ -3937,7 +3914,7 @@ ACTIONS_TOKEN='workflow-token-value'
           }),
         ],
       }).dispatch,
-    ).toContain('-f event_type=shepherd-rescue');
+    ).toBe('');
 
     // A LIVE manual dispatch is a full tick — `dry_run` defaults to false — so
     // it is both progress and in flight. Titling it like a dry run made a
