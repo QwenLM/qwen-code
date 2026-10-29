@@ -191,12 +191,13 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
-  it('translates the warnings file path before forwarding it on Windows', async () => {
+  it.each([
+    'QWEN_CODE_WARNINGS_FILE',
+    'QWEN_CODE_MCP_APPROVALS_PATH',
+    'QWEN_CODE_HOOK_APPROVALS_PATH',
+  ])('translates %s before forwarding it on Windows', async (name) => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
-    vi.stubEnv(
-      'QWEN_CODE_WARNINGS_FILE',
-      'C:\\Users\\test\\Temp\\qwen-code-warnings-test.txt',
-    );
+    vi.stubEnv(name, 'C:\\Users\\test\\Temp\\qwen-code-test.txt');
     vi.spyOn(os, 'platform').mockReturnValue('win32');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
@@ -227,13 +228,9 @@ describe('start_sandbox', () => {
 
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
-    const warningsFlagIndex = args.indexOf(
-      'QWEN_CODE_WARNINGS_FILE=/c/Users/test/Temp/qwen-code-warnings-test.txt',
-    );
-    expect(args.slice(warningsFlagIndex - 1, warningsFlagIndex + 1)).toEqual([
-      '--env',
-      'QWEN_CODE_WARNINGS_FILE=/c/Users/test/Temp/qwen-code-warnings-test.txt',
-    ]);
+    const flag = `${name}=/c/Users/test/Temp/qwen-code-test.txt`;
+    const flagIndex = args.indexOf(flag);
+    expect(args.slice(flagIndex - 1, flagIndex + 1)).toEqual(['--env', flag]);
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);

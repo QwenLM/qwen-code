@@ -37,6 +37,8 @@ export interface HookConfigDisplayInfo {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Withheld because the user rejected the project hooks block. */
+  rejected?: boolean;
 }
 
 export const HOOKS_MANAGEMENT_STEPS = {

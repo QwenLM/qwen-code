@@ -242,6 +242,10 @@ function disabledReasonText(reason: HooksListingDisabledReason): string {
       return t('disabled (disableAllHooks)');
     case 'untrusted':
       return t('disabled (folder not trusted)');
+    case 'pendingApproval':
+      return t('disabled (not approved)');
+    case 'rejected':
+      return t('disabled (rejected)');
     case 'registryDisabled':
       return t('disabled (turned off for this session)');
     default: {

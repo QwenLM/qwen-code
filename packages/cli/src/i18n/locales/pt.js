@@ -1149,6 +1149,8 @@ export default {
   'disabled (bare mode)': 'desativado (modo mínimo)',
   'disabled (safe mode)': 'desativado (modo seguro)',
   'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (not approved)': 'desativado (não aprovado)',
+  'disabled (rejected)': 'desativado (rejeitado)',
   'disabled (folder not trusted)': 'desativado (pasta não confiável)',
   'disabled (turned off for this session)':
     'desativado (desligado nesta sessão)',

@@ -28,6 +28,8 @@ export type HooksListingDisabledReason =
   | 'safeMode'
   | 'allHooksDisabled'
   | 'untrusted'
+  | 'pendingApproval'
+  | 'rejected'
   | 'registryDisabled';
 
 /** One configured hook, flattened for display. */
@@ -110,7 +112,8 @@ export type HooksListingConfig = Pick<
   | 'getUserHooks'
   | 'getProjectHooks'
   | 'getExtensions'
->;
+> &
+  Partial<Pick<Config, 'getWithheldProjectHooks' | 'isProjectHooksRejected'>>;
 
 const PROMPT_DISPLAY_LIMIT = 50;
 
@@ -164,6 +167,8 @@ interface RowPlacement {
   /** The entry's own switch; `true` for entries that have none. */
   entryEnabled: boolean;
   trustGated?: boolean;
+  /** A project hook the approval gate keeps out of the registry. */
+  pendingApproval?: boolean | 'rejected';
   agentScope?: string;
   hookId?: string;
   skillRoot?: string;
@@ -180,10 +185,15 @@ export interface HooksListingGates {
 /**
  * Whether a hook with this placement would run, and if not, the outermost
  * reason: bare mode, then safe mode, then `disableAllHooks`, then folder trust
- * for trust-gated entries, then the entry's own switch.
+ * for trust-gated entries, then project hooks approval, then the entry's own
+ * switch.
  */
 export function resolveRowEnabled(
-  placement: { entryEnabled: boolean; trustGated?: boolean },
+  placement: {
+    entryEnabled: boolean;
+    trustGated?: boolean;
+    pendingApproval?: boolean | 'rejected';
+  },
   gates: HooksListingGates,
 ): { enabled: true } | { enabled: false; reason: HooksListingDisabledReason } {
   if (gates.bareMode) return { enabled: false, reason: 'bareMode' };
@@ -191,6 +201,12 @@ export function resolveRowEnabled(
   if (gates.allDisabled) return { enabled: false, reason: 'allHooksDisabled' };
   if (placement.trustGated === true && !gates.trustedFolder) {
     return { enabled: false, reason: 'untrusted' };
+  }
+  if (placement.pendingApproval === 'rejected') {
+    return { enabled: false, reason: 'rejected' };
+  }
+  if (placement.pendingApproval === true) {
+    return { enabled: false, reason: 'pendingApproval' };
   }
   if (!placement.entryEnabled) {
     return { enabled: false, reason: 'registryDisabled' };
@@ -289,6 +305,24 @@ function rowsFromSettings(
   config: HooksListingConfig,
   gates: HooksListingGates,
 ): HooksListingRow[] {
+  const scopes: Array<[unknown, HooksConfigSource]> = [
+    [config.getSystemHooks(), HooksConfigSource.System],
+    [config.getUserHooks(), HooksConfigSource.User],
+    [config.getProjectHooks(), HooksConfigSource.Project],
+  ];
+  for (const extension of config.getExtensions()) {
+    if (extension.isActive && extension.hooks) {
+      scopes.push([extension.hooks, HooksConfigSource.Extensions]);
+    }
+  }
+  return settingsRows(scopes, gates);
+}
+
+function settingsRows(
+  scopes: ReadonlyArray<[unknown, HooksConfigSource]>,
+  gates: HooksListingGates,
+  pendingApproval: boolean | 'rejected' = false,
+): HooksListingRow[] {
   const rows: HooksListingRow[] = [];
   // The registry drops a hook whose source, event, identity, matcher and
   // `sequential` all equal an earlier entry's, comparing the raw values with
@@ -348,6 +382,7 @@ function rowsFromSettings(
                 source,
                 origin: 'registry',
                 entryEnabled: true,
+                ...(pendingApproval ? { pendingApproval } : {}),
               },
               gates,
             ),
@@ -357,14 +392,7 @@ function rowsFromSettings(
     }
   };
 
-  addScope(config.getSystemHooks(), HooksConfigSource.System);
-  addScope(config.getUserHooks(), HooksConfigSource.User);
-  addScope(config.getProjectHooks(), HooksConfigSource.Project);
-  for (const extension of config.getExtensions()) {
-    if (extension.isActive && extension.hooks) {
-      addScope(extension.hooks, HooksConfigSource.Extensions);
-    }
-  }
+  for (const [hooks, source] of scopes) addScope(hooks, source);
   return rows;
 }
 
@@ -419,6 +447,17 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
         entry.isSourceTrusted
           ? { ...gates, trustedFolder: entry.isSourceTrusted() }
           : gates,
+      ),
+    );
+  }
+  // Withheld project hooks are not in the registry; list what awaits approval.
+  const withheld = config.getWithheldProjectHooks?.();
+  if (withheld) {
+    listing.rows.push(
+      ...settingsRows(
+        [[withheld, HooksConfigSource.Project]],
+        gates,
+        config.isProjectHooksRejected?.() ? 'rejected' : true,
       ),
     );
   }

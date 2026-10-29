@@ -700,6 +700,14 @@ export async function start_sandbox(
       )}`,
     );
   }
+  if (process.env['QWEN_CODE_HOOK_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_HOOK_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_HOOK_APPROVALS_PATH'],
+      )}`,
+    );
+  }
   if (process.env['QWEN_CODE_WARNINGS_FILE']) {
     args.push(
       '--env',

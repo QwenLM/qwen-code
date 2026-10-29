@@ -172,6 +172,7 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    isProjectHooksPendingApproval: () => false,
     isLspEnabled: () => false,
     getLspClient: () => undefined,
     getWarnings: vi.fn(() => []),
@@ -566,6 +567,7 @@ describe('llm.tsx main function', () => {
       callOrder.push('loadCliConfig');
       return {
         isInteractive: () => false,
+        isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -678,6 +680,7 @@ describe('llm.tsx main function', () => {
       ).toBeUndefined();
       return {
         isInteractive: () => false,
+        isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -769,6 +772,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -886,6 +890,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -990,6 +995,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1762,6 +1768,7 @@ describe('llm.tsx main function', () => {
     };
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2059,6 +2066,7 @@ describe('llm.tsx main function', () => {
     let initialized = false;
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2178,6 +2186,131 @@ describe('llm.tsx main function', () => {
       2,
     );
   });
+
+  it.each([
+    ['pending', 'Run qwen interactively'],
+    ['rejected', 'not asked about again'],
+  ] as const)(
+    'warns on stderr that %s project hooks were not loaded',
+    async (state, expected) => {
+      const dir = mkdtempSync(join(tmpdir(), 'llm-hooks-gate-'));
+      const root = join(dir, 'repo');
+      const hooks = {
+        SessionStart: [{ hooks: [{ type: 'command', command: './x.sh' }] }],
+      };
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv('QWEN_CODE_HOOK_APPROVALS_PATH', join(dir, 'approvals.json'));
+      const { loadHookApprovals, resetHookApprovalsForTesting } = await import(
+        './config/hook-approvals.js'
+      );
+      resetHookApprovalsForTesting();
+      if (state === 'rejected') {
+        await loadHookApprovals().setState(root, hooks, 'rejected');
+      }
+      const originalIsTTY = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        'isTTY',
+      );
+      Object.defineProperty(process.stdin, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      const processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((code) => {
+          throw new MockProcessExitError(code);
+        });
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      const validatorModule = await import('./validateNonInterActiveAuth.js');
+      const nonInteractiveModule = await import('./nonInteractiveCli.js');
+      const initializerModule = await import('./core/initializer.js');
+      mockWriteStderrLine.mockClear();
+      vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        memoryFileCount: 0,
+      });
+      const runNonInteractiveSpy = vi
+        .spyOn(nonInteractiveModule, 'runNonInteractive')
+        .mockResolvedValue(0);
+      const configStub = {
+        isInteractive: () => false,
+        isProjectHooksPendingApproval: () => true,
+        getQuestion: () => 'hello',
+        getSandbox: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getDebugMode: () => false,
+        getListExtensions: () => false,
+        getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
+        getModelProvidersConfig: () => undefined,
+        initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getFailedMcpServerNames: () => [],
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getScreenReader: () => false,
+        getMemoryFileCount: () => 0,
+        getProjectRoot: () => '/',
+        getOutputFormat: () => OutputFormat.TEXT,
+        getWarnings: () => [],
+        isSafeMode: () => false,
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getContentGeneratorConfig: () => undefined,
+        getUsageStatisticsEnabled: () => true,
+        getSessionId: () => 'test-session-id',
+        getProxy: () => undefined,
+      } as unknown as Config;
+      vi.mocked(parseArguments).mockResolvedValue({
+        extensions: [],
+      } as unknown as CliArgs);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => hooks,
+        user: { originalSettings: {} },
+        workspace: {
+          path: join(root, '.qwen', 'settings.json'),
+          originalSettings: { hooks },
+        },
+      } as never);
+      vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+      vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+        configStub,
+      );
+
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) throw error;
+      } finally {
+        processExitSpy.mockRestore();
+        if (originalIsTTY) {
+          Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+        } else {
+          delete (process.stdin as { isTTY?: unknown }).isTTY;
+        }
+        vi.unstubAllEnvs();
+        resetHookApprovalsForTesting();
+        rmSync(dir, { recursive: true, force: true });
+      }
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(expected),
+      );
+      // Warn and continue: the prompt still runs, only the hooks are withheld.
+      expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('creates non-interactive prompt ids that preserve session correlation', () => {
     expect(createNonInteractivePromptId('test-session-id')).toBe(
@@ -2305,6 +2438,7 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2698,6 +2832,7 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,

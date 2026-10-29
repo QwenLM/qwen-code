@@ -347,7 +347,8 @@ export function HooksManagementDialog({
                 config: hookConfig,
                 source: HooksConfigSource.Project,
                 sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
-                enabled: true,
+                enabled: !config.isProjectHooksPendingApproval(),
+                rejected: config.isProjectHooksRejected(),
               },
               groupByMatcher,
             );

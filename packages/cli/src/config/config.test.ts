@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
@@ -44,6 +45,10 @@ import {
 } from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('./hook-approvals.js', () => ({
+  getProjectHooksApprovalState: vi.fn(() => undefined),
+}));
+
 vi.mock('../serve/ssh-workspace-store.js', () => ({
   readSshWorkspace: sshWorkspaceProbe,
 }));
@@ -5720,6 +5725,99 @@ describe('loadCliConfig with includeDirectories', () => {
       }),
     );
     expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  describe('project hooks approval gate', () => {
+    const projectHooks = { SessionStart: [{ hooks: [] }] };
+    const cwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const gateParam = () =>
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .projectHooksPendingApproval;
+
+    const lastParams = () => mockConfigConstructorParams.mock.lastCall?.[0];
+
+    beforeEach(() => {
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+    });
+
+    it.each([
+      ['default mode', true, false, [], {}],
+      ['--yolo', false, true, ['--yolo'], {}],
+      ['--approval-mode yolo', false, true, ['--approval-mode', 'yolo'], {}],
+      ['--safe-mode', undefined, false, ['--safe-mode'], {}],
+      ['--bare', undefined, false, ['--bare'], {}],
+      ['disableAllHooks', undefined, false, [], { disableAllHooks: true }],
+      [
+        'a settings-only yolo',
+        true,
+        false,
+        [],
+        { tools: { approvalMode: 'yolo' } },
+      ],
+    ] as const)(
+      'with %s, an unapproved block gives projectHooksPendingApproval=%s',
+      async (_label, expected, yoloExempt, flags, settings) => {
+        process.argv = ['node', 'script.js', ...flags];
+        const argv = await parseArguments();
+
+        await loadCliConfig(settings as Settings, argv, cwd, undefined, {
+          projectHooks,
+        });
+
+        expect(gateParam()).toBe(expected);
+        expect(lastParams()?.projectHooksYoloExempt).toBe(yoloExempt);
+      },
+    );
+
+    it('gates the unresolved block under the project that supplied it', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const root = path.resolve(path.sep, 'home', 'user', 'repo');
+      const unresolved = structuredClone(projectHooks);
+
+      await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: { root, hooks: unresolved },
+      });
+
+      expect(vi.mocked(getProjectHooksApprovalState).mock.calls).toEqual([
+        [unresolved, root],
+      ]);
+      expect(vi.mocked(getProjectHooksApprovalState).mock.calls[0]![0]).toBe(
+        unresolved,
+      );
+    });
+
+    it('gates the merged hooks when no separated scopes are supplied', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({ hooks: projectHooks }, argv, cwd);
+
+      expect(getProjectHooksApprovalState).toHaveBeenCalledWith(
+        projectHooks,
+        cwd,
+      );
+      expect(gateParam()).toBe(true);
+    });
+
+    it.each([
+      ['approved', false, false],
+      ['rejected', true, true],
+      [undefined, false, false],
+    ] as const)(
+      'maps a %s block to pending=%s, rejected=%s',
+      async (state, pending, rejected) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
+
+        expect(gateParam()).toBe(pending);
+        expect(lastParams()?.projectHooksRejected).toBe(rejected);
+      },
+    );
   });
 
   it('builds agent-host sessions with a read-only initialization profile', async () => {

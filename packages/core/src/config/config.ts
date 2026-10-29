@@ -1542,6 +1542,17 @@ export interface ConfigParameters {
    * discovery layer must not connect them. See issue #4615.
    */
   pendingMcpServers?: string[];
+  /**
+   * Settings-file project hooks have no approval bound to their current
+   * configuration (pending or rejected); `getProjectHooks()` withholds them
+   * until `setProjectHooksPendingApproval(false)`. `undefined` means the
+   * session does not gate them (bare, safe, all hooks off).
+   */
+  projectHooksPendingApproval?: boolean;
+  /** The withheld block was rejected, not just left undecided. */
+  projectHooksRejected?: boolean;
+  /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
+  projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -3028,6 +3039,9 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private projectHooksPendingApproval?: boolean;
+  private projectHooksRejected: boolean;
+  private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
@@ -3513,6 +3527,9 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    this.projectHooksPendingApproval = params.projectHooksPendingApproval;
+    this.projectHooksRejected = params.projectHooksRejected ?? false;
+    this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
     this.mcpToolIdleTimeoutMs =
@@ -8952,6 +8969,35 @@ export class Config {
     );
   }
 
+  isProjectHooksPendingApproval(): boolean {
+    return this.projectHooksPendingApproval === true;
+  }
+
+  isProjectHooksApprovalGated(): boolean {
+    return (
+      this.projectHooksPendingApproval !== undefined &&
+      !(
+        this.projectHooksYoloExempt &&
+        this.getApprovalMode() === ApprovalMode.YOLO
+      )
+    );
+  }
+
+  /**
+   * Set by the CLI when the user decides on the project hooks mid-session
+   * (approval dialog, `/hooks` reload). Takes effect on the next hook reload.
+   */
+  setProjectHooksPendingApproval(pending: boolean, rejected = false): void {
+    this.projectHooksPendingApproval = pending;
+    this.projectHooksRejected = rejected;
+  }
+
+  isProjectHooksRejected(): boolean {
+    return (
+      this.projectHooksPendingApproval === true && this.projectHooksRejected
+    );
+  }
+
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
     this.assertGeneratedUiServerNotReplaced(servers);
     if (this.shellExecutionSandbox && Object.keys(servers).length)
@@ -11731,6 +11777,23 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    return this.projectHooksPendingApproval === true
+      ? undefined
+      : this.readProjectHooks();
+  }
+
+  /** The project hooks block `getProjectHooks()` withholds while approval is pending. */
+  getWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    return this.projectHooksPendingApproval === true
+      ? this.readProjectHooks()
+      : undefined;
+  }
+
+  private readProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
@@ -11754,8 +11817,12 @@ export class Config {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
+    // It may carry workspace hooks, so it shares the project approval gate.
     const hooks =
-      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
+      this.userHooks ??
+      (this.hasScopedHooks() || this.projectHooksPendingApproval === true
+        ? undefined
+        : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 

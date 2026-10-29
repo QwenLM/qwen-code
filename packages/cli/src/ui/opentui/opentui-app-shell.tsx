@@ -133,10 +133,12 @@ import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
+  OpenTuiProjectHooksApprovalDialog,
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import {
   getDialogMaxHeight,
@@ -638,6 +640,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
+  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
+    addInfoItem({ type: MessageType.INFO, text }),
+  );
 
   const shellControl = props.foregroundShellControl;
   const foregroundShell = shellControl?.foregroundShell;
@@ -649,6 +654,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       activeModal ||
       activeToolCall ||
       mcpApproval.isMcpApprovalDialogOpen ||
+      hooksApproval.isProjectHooksApprovalDialogOpen ||
       shellModeActive,
   );
   const shellFocused =
@@ -755,6 +761,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       !activeModal &&
       !activeToolCall &&
       !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen &&
       (name === 'escape' || (name === 'c' && ctrl))
     ) {
       for (const controller of shellControllersRef.current) {
@@ -1532,6 +1539,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           !activeModal &&
           !activeToolCall &&
           !mcpApproval.isMcpApprovalDialogOpen &&
+          !hooksApproval.isProjectHooksApprovalDialogOpen &&
           updateNotice ? (
             <text>{updateNotice}</text>
           ) : null}
@@ -1561,6 +1569,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               pendingServers={mcpApproval.pendingMcpApprovals}
               remaining={mcpApproval.mcpApprovalRemaining}
               onSelect={mcpApproval.handleMcpApprovalSelect}
+            />
+          ) : hooksApproval.isProjectHooksApprovalDialogOpen &&
+            hooksApproval.pendingProjectHooks ? (
+            <OpenTuiProjectHooksApprovalDialog
+              key="project-hooks-approval"
+              lines={hooksApproval.pendingProjectHooks.lines}
+              availableTerminalHeight={dialogRegionHeight}
+              onSelect={hooksApproval.handleProjectHooksApprovalSelect}
             />
           ) : activeToolCall ? (
             <box key="tool-confirm-area" flexDirection="column">
@@ -1725,6 +1741,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !activeModal &&
             !activeToolCall &&
             !mcpApproval.isMcpApprovalDialogOpen &&
+            !hooksApproval.isProjectHooksApprovalDialogOpen &&
             !showSuggestions) ? (
             <OpenTuiFooter
               config={config}

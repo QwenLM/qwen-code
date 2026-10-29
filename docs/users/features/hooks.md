@@ -36,7 +36,7 @@ The browser never edits your configuration: to add, change or remove a hook, edi
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder and only once you have approved them (see [Approving project hooks](#approving-project-hooks)); a reload that changes the project hooks asks for approval again. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
 ### Agent frontmatter scope
 
@@ -1524,6 +1524,12 @@ It fires when the session starts, when context files are reloaded during the ses
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
 
+### Approving project hooks
+
+Hooks in a project's `.qwen/settings.json` are commands written by whoever controls the repository, and they run with your privileges. Like a project MCP server, they do not run until you approve them: the first time Qwen Code starts in a workspace that declares hooks, it lists them (with the environment variables and their current values, headers, prompt text and model they use) and asks whether to approve or reject them; Esc postpones the decision to the next start, and `/hooks` then lists them without asking. The decision is saved in `~/.qwen/hookApprovals.json` and is bound to the exact hooks configuration you reviewed and the values of the variables it references, so an edit to the project hooks, or to a variable they use (for example in the project `.env`), asks again. A rejected configuration stays unloaded and is not asked about again until it changes; to reconsider sooner, remove its entry from that file and open `/hooks` (or restart Qwen Code). A project `.env` cannot relocate the file. Hooks declared in a project skill's or subagent's frontmatter are not covered by this approval yet: they still need only folder trust.
+
+The approval applies whether or not [Trusted Folders](../configuration/trusted-folders.md) is enabled, because a trusted folder means its settings are read, not that every command in them was reviewed. Only `--yolo` or `--approval-mode yolo` on the command line skips the prompt and runs project hooks as approved, and only while the session stays in YOLO mode; a YOLO approval mode set in settings does not, because a repository's own settings could set it. No approval is asked for while `disableAllHooks`, `--safe-mode` or `--bare` turns hooks off. Non-interactive runs (`-p`, `--acp`) never prompt: unapproved project hooks stay unloaded and `qwen -p` prints a warning on stderr; run Qwen Code interactively in the folder once to approve them. While project hooks are withheld, the `/hooks` browser lists them as not approved, or as rejected.
+
 > [!NOTE]
 > A hook must include a name field to be enabled or disabled individually at runtime. Hooks without a name will always execute when their event and matcher conditions are met.
 
@@ -1620,7 +1626,7 @@ fi
 ### Security Model
 
 - Hooks run in the user's environment with user privileges
-- Project-level hooks require trusted folder status
+- Project-level hooks in `.qwen/settings.json` require trusted folder status and your approval of the exact hooks configuration (see [Approving project hooks](#approving-project-hooks)); hooks in project skill or subagent frontmatter need only folder trust
 - Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices

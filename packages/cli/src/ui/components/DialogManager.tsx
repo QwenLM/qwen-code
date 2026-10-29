@@ -10,6 +10,7 @@ import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
+import { ProjectHooksApprovalDialog } from './hooks/ProjectHooksApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -145,6 +146,16 @@ export const DialogManager = ({
         pendingServers={uiState.pendingMcpApprovals}
         remaining={uiState.mcpApprovalRemaining}
         onSelect={uiActions.handleMcpApprovalSelect}
+      />
+    );
+  }
+  if (uiState.isProjectHooksApprovalDialogOpen && uiState.pendingProjectHooks) {
+    return (
+      <ProjectHooksApprovalDialog
+        lines={uiState.pendingProjectHooks.lines}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={listDialogHeight}
+        onSelect={uiActions.handleProjectHooksApprovalSelect}
       />
     );
   }

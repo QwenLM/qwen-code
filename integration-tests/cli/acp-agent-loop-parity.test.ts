@@ -31,6 +31,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -239,6 +240,7 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',

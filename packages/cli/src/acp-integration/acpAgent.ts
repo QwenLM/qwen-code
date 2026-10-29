@@ -270,6 +270,7 @@ import {
   parseCallerSuppliedSessionId,
 } from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
 import {
@@ -4480,11 +4481,7 @@ class QwenAgent implements Agent {
           },
           cwd,
           undefined,
-          {
-            systemHooks: settings.getSystemHooks(),
-            userHooks: settings.getUserHooks(),
-            projectHooks: settings.getProjectHooks(),
-          },
+          getSeparatedHookSettings(settings),
           buildDisabledSkillNamesProvider(settings),
           undefined,
           undefined,
@@ -16379,13 +16376,7 @@ class QwenAgent implements Agent {
       // sessions pass [] because their workspace is a read-only capability.
       agentHostReadOnly ? [] : undefined,
       // Pass separated hooks for proper source attribution
-      agentHostReadOnly
-        ? {}
-        : {
-            systemHooks: settings.getSystemHooks(),
-            userHooks: settings.getUserHooks(),
-            projectHooks: settings.getProjectHooks(),
-          },
+      agentHostReadOnly ? {} : getSeparatedHookSettings(settings),
       // CRITICAL: close over the per-request `settings` (LoadedSettings
       // instance), NOT over the `mergedSettings` snapshot built above.
       // `LoadedSettings.setValue` replaces `_merged`, so a closure over the
