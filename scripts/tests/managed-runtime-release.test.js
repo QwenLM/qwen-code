@@ -666,7 +666,9 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       if (failure === 'production patch') {
         fs.writeFileSync(
           patch,
-          fs.readFileSync(patch, 'utf8').replaceAll(repairedTest, 'product.java'),
+          fs
+            .readFileSync(patch, 'utf8')
+            .replaceAll(repairedTest, 'product.java'),
         );
       }
       const result = run(repair.run, {
@@ -676,9 +678,9 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       });
       expect(result.status).not.toBe(0);
       expect(fs.readFileSync(target, 'utf8')).toBe(original);
-      expect(fs.readFileSync(path.join(temporary, 'product.java'), 'utf8')).toBe(
-        'original product',
-      );
+      expect(
+        fs.readFileSync(path.join(temporary, 'product.java'), 'utf8'),
+      ).toBe('original product');
     },
   );
 
