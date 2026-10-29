@@ -475,8 +475,19 @@ export function validateImportPath(
   const resolvedPath = realpathNearestExisting(
     path.resolve(basePath, importPath),
   );
+  const canonicalAllowed = allowedDirectories.map(realpathNearestExisting);
 
-  return allowedDirectories.some((allowedDir) =>
-    isSubpath(realpathNearestExisting(allowedDir), resolvedPath),
+  if (
+    canonicalAllowed.some((allowedDir) => isSubpath(allowedDir, resolvedPath))
+  ) {
+    return true;
+  }
+
+  // Flat mode drops a rejected import without a trace and tree mode labels it a
+  // traversal attempt even when it is a benign link out of the root, so name
+  // both canonical values here to keep the cause diagnosable in either format.
+  logger.warn(
+    `Import rejected: ${importPath} -> ${resolvedPath} is outside ${canonicalAllowed.join(', ')}`,
   );
+  return false;
 }
