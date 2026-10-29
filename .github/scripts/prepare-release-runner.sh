@@ -82,3 +82,6 @@ mkdir "${release_state}/gh" || exit 1
   echo "DOCKER_CONFIG=${release_state}/docker"
   echo "GH_CONFIG_DIR=${release_state}/gh"
 } >> "${GITHUB_ENV:?}"
+mkdir "${release_state}/bin"
+echo "NPM_CONFIG_PREFIX=${release_state}" >> "${GITHUB_ENV}"
+echo "${release_state}/bin" >> "${GITHUB_PATH:?}"

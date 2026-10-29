@@ -76,12 +76,14 @@ succeed:
 
 An empty reuse ID runs the full native matrix. Fresh builds now pin Node and
 the prebuildify target to 22.22.3 and use filtered, frozen pnpm dependencies
-when a lockfile exists; only older refs retain the npm install path. The trial
-bytes are discarded and re-downloaded by the consumer.
+when a lockfile exists; only older refs retain the npm install path. Linux on hosted and ECS runners
+builds run that same frozen install inside `node:22.22.3-bookworm`, preserving
+the existing glibc baseline. The trial bytes are discarded and re-downloaded
+by the consumer.
 
-The publisher does not trust `prepare`'s decision: it recomputes the
-fingerprint from its own checkout, re-verifies the source run, downloads by
-artifact ID, and validates the payload again. That verification is fatal — by
+Both the ECS build job and the hosted publisher independently recompute the
+fingerprint from their own checkout, re-verify the source run, download by
+artifact ID, and validate the payload again. That verification is fatal — by
 then the native matrix was skipped, so a bad artifact must stop the release
 rather than ship. A download failure or artifact deletion at this stage also
 stops the release; it does not restart the skipped matrix.
@@ -96,40 +98,32 @@ The collector merges per-platform artifacts on a possibly persistent workspace,
 where `download-artifact`'s `merge-multiple` merges into existing paths, so a
 stale `prebuilds/` tree would leak into the artifact it uploads.
 
-It now wipes through the shared release-runner preflight, which canonicalises
-the workspace and refuses paths resolving through a symlinked component or
-outside the runner workspace. The subtree `rm -rf` it replaces resolved through
-whatever `packages` happened to be on the host: with a leftover symlink it
-deleted an external tree and exited 0, and the following download wrote through
-the same symlink.
+It uses the shared release-runner preflight already on main, which canonicalises
+and wipes the workspace and refuses paths resolving through a symlinked
+component or outside the runner workspace. This change preserves that action
+and its cleanup implementation.
 
-The existing release workflow wipe anchor calls the same action, so workspace
-containment and Git/npm/Docker/gh state isolation have one implementation. The
-action downloads that script at the workflow SHA into the runner's temporary
-directory before checkout; it never executes a stale workspace copy. Node setup
-and the existing disk-floor gates remain separate from workspace cleanup.
+The action fetches the cleanup and disk-floor scripts at the workflow SHA into
+the runner's temporary directory before checkout. It isolates Git/npm/Docker/gh
+state, provides a job-local npm prefix, asserts Node 22 and checks disk space.
+The cleanup script itself does not depend on Node.
 
-The collector now uses the existing pre-installed Node preflight on self-hosted
+The collector uses the existing pre-installed Node preflight on self-hosted
 runners and pins hosted `setup-node` to 22.22.3 before the validator. Native
-compilation always uses Node 22.22.3. Workspace cleanup itself requires no Node
-and adds no stricter version gate than the existing self-hosted preflight.
-
-Its release-only label drops the `x64` component: the runners carrying
-`ecs-qwen-release-host` are ARM64, and an architecture component in that label
-does not fall back to hosted — it never matches, and the job queues until
-timeout.
+compilation always uses Node 22.22.3. The collector remains architecture-free;
+the Linux build legs retain their matching x64 or arm64 release-runner labels.
 
 ### Relationship to the release host switch
 
-None of this depends on `ECS_RELEASE_HOST_RUNNER_ENABLED`. The reuse decision
-happens in `prepare`, which already runs on its own pool, and the consumer is
-the existing publisher. The switch stays unset and this change takes effect
-anyway.
+Audio reuse works with `ECS_RELEASE_HOST_RUNNER_ENABLED` either enabled or unset.
+The decision happens in `prepare`. With the switch unset, the existing hosted
+publisher builds and consumes the audio payload. When enabled, the ECS producer
+consumes it before handing release outputs to the hosted publisher, which also
+verifies the audio source and payload. npm publication remains hosted in both
+cases, preserving the split already merged in #15832.
 
-Both the collector and publisher drop the `x64` component from their opt-in
-release-host label. With the switch unset, both still use GitHub-hosted runners.
-Keep the switch unset: #15832 owns the isolated build lane and the hosted npm
-publication boundary, and host isolation must be verified before activation.
+This change neither alters runner routing nor enables the switch. A cache hit
+skips the native matrix; a miss follows the existing hosted/ECS routing.
 
 ## Validation
 
@@ -144,8 +138,8 @@ A branch release dry-run can verify the miss path, all five native payloads and
 publisher consumption without publishing. It cannot seed a trusted reuse
 candidate because producers must run on `main`. A successful `main` run must
 first retain a keyed artifact; a later run with the same key can exercise reuse.
-Keep the release-host switch unset for this validation; collector execution on
-self-hosted runners remains outside that run's evidence.
+Record the switch state and actual runners used by each dry run. A hosted run
+does not verify ECS execution, and a miss does not verify reuse.
 
 ## Affected files
 
@@ -158,5 +152,6 @@ and the workflow size baseline.
 Runner image updates under unchanged labels do not change the fingerprint.
 N-API stabilises the Node ABI, not glibc or toolchain linkage, so this reuses a
 verified binary rather than guaranteeing that a fresh build would be
-bit-for-bit identical. A pinned build container would close that gap and is out
-of scope here.
+bit-for-bit identical. Linux on hosted and ECS runners uses a versioned Bookworm container tag, not
+an immutable image digest; macOS and Windows hosted images also continue to evolve. Pinning those
+environments completely is outside this change.

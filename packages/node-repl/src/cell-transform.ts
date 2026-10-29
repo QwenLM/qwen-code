@@ -717,7 +717,7 @@ export async function prepareNodeReplCell(
         edits.push({
           start: item.endIndex,
           end: item.endIndex,
-          text: commit,
+          text: `;${commit}`,
         });
       }
     }

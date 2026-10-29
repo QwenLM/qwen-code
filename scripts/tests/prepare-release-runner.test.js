@@ -125,6 +125,7 @@ it
       for (const key of [
         'GIT_CONFIG_GLOBAL',
         'NPM_CONFIG_USERCONFIG',
+        'NPM_CONFIG_PREFIX',
         'DOCKER_CONFIG',
         'GH_CONFIG_DIR',
       ])
@@ -132,6 +133,11 @@ it
           parsed[key].startsWith(temp + '/release-state.'),
           `${kind}: ${key}`,
         );
+      assert.equal(
+        readFileSync(pathFile, 'utf8').trim(),
+        join(parsed.NPM_CONFIG_PREFIX, 'bin'),
+      );
+      assert.ok(lstatSync(join(parsed.NPM_CONFIG_PREFIX, 'bin')).isDirectory());
       assert.equal(parsed.GIT_CONFIG_COUNT, '0');
       assert.equal(parsed.GIT_CONFIG_NOSYSTEM, '1');
       assert.equal(parsed.GIT_CONFIG_PARAMETERS, '');

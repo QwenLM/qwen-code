@@ -1,5 +1,7 @@
 # Release Jobs Off the Hosted Pool
 
+> Superseded for activation by [release runner slots](2026-10-28-release-queue-optimization.md): reserve runner processes on existing shared hosts; an exclusive machine is not required.
+
 [English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
 
 ## Problem and Scope
@@ -58,20 +60,19 @@ credentials) also runs on `ubuntu-latest`.
 - `publish` and `collect` move to a new, release-only runner label
   `ecs-qwen-release-host`, gated by a new opt-in repository variable
   `ECS_RELEASE_HOST_RUNNER_ENABLED`:
-  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
-  The audio-reuse follow-up removes `x64` from both expressions to match the
-  release-host runners. This does not make the lane ready for activation.
+  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
   With the variable unset (default), both jobs dispatch to `ubuntu-latest`
-  exactly as before this change. Keep the variable unset until host isolation
-  is verified and #15832 separates the build lane from hosted npm publication.
+  exactly as before this change. Operations provisions dedicated machines
+  carrying only the `ecs-qwen-release-host` label, then flips the variable.
 - `publish` gains the `release_disk_floor_gate` anchor (after its checkout,
   before install), bringing it under the same ENOSPC fast-fail regime (#10035)
   as every other pool-routed job.
-- `collect` and the release workflow's wipe anchor use the shared
-  `prepare-release-runner` action before checkout or artifact merge. On a
-  persistent workspace, `download-artifact` merges into existing paths, so
-  stale files must be removed with workspace containment checks first. A
-  cleanup failure stops the job instead of publishing a dirty artifact.
+- `collect` gains a fail-closed `rm -rf prebuilds` step before the artifact
+  merge: on a persistent workspace, `download-artifact` with
+  `merge-multiple: true` merges into existing paths, so a leftover directory
+  from a previous release would re-upload stale prebuilds. `rm` failing
+  (e.g. root-owned leftovers) fails the job instead of publishing a dirty
+  artifact.
 - `.github/actionlint.yaml` registers the new label.
 
 ## Design Decisions and Rationale
@@ -127,10 +128,9 @@ credentials) also runs on `ubuntu-latest`.
 - The four other suites that parse `release.yml` (`ai-release-notes`,
   `install-script`, `package-scripts`, `workflow-size`) and
   `classify-release-notes.test.mjs` pass unchanged.
-- For #15854, keep `ECS_RELEASE_HOST_RUNNER_ENABLED` unset and run a release
-  dry-run on the PR head. Activation testing is deferred to #15832 after host
-  isolation and hosted npm publication are established; the original routing
-  acceptance criteria below do not authorize enabling the current lane.
+- Before enabling: register an `ecs-qwen-release-host` runner, then dispatch
+  a dry-run release with `ECS_RELEASE_HOST_RUNNER_ENABLED=true` and confirm
+  `publish` + `collect` land on it while `notify_failure` stays hosted.
 
 ## Acceptance Criteria
 

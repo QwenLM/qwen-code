@@ -60,6 +60,7 @@ import { runSync } from './sync.js';
 import {
   autofixPrPaths,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -163,6 +164,7 @@ describe('runSync (real git, bare remote)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     mocks.live = {
       state: 'OPEN',
       headRefName: 'feat',

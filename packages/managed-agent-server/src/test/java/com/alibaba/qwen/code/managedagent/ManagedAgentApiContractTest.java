@@ -1101,6 +1101,12 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellExportSession", 404,
                 post(WEB_SHELL + "/sessions/export/query").header(TENANT, otherTenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        exchange(drift, "webShellRecentTranscriptItems", 200,
+                post(WEB_SHELL + "/transcript/items/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId));
+        exchange(drift, "webShellRecentTranscriptItems", 404,
+                post(WEB_SHELL + "/transcript/items/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
         String renameBody = """
                 {"requestId":"contract-rename","sessionId":"%s",
                  "idempotencyKey":"contract-web-rename","title":"renamed web"}
@@ -1227,6 +1233,21 @@ class ManagedAgentApiContractTest {
                     .isEqualTo("confirmed");
         }
         awaitMaterialized(tenant, webSessionId);
+        for (var operation : Map.of("webShellTranscript", "/transcript/query",
+                "webShellExportSession", "/sessions/export/query",
+                "webShellRecentTranscriptItems", "/transcript/items/query").entrySet()) {
+            String liveRead = "{\"sessionId\":\"%s\",\"view\":\"messages\",\"limit\":1}".formatted(webSessionId);
+            exchange(drift, operation.getKey(), 200,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant), liveRead);
+            exchange(drift, operation.getKey(), 404,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, otherTenant), liveRead);
+            exchange(drift, operation.getKey(), 400,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant),
+                    liveRead.replace("\"messages\"", "\"unknown\""));
+            exchange(drift, operation.getKey(), 400,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant),
+                    liveRead.replace("\"limit\":1", "\"limit\":101"));
+        }
         exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));

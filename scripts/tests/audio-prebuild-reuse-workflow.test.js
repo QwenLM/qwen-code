@@ -76,42 +76,47 @@ describe('audio prebuild reuse wiring', () => {
     );
   });
 
-  it('rechecks the reused source in the publisher and validates either path', () => {
-    expect(releaseYaml.jobs.publish.permissions.actions).toBe('read');
-    // prepare's decision is not trusted blindly: the publisher recomputes the
-    // fingerprint from its own checkout and re-verifies the source run.
-    const verify = step('publish', 'Verify reusable audio source');
-    expect(verify.if).toBe(
-      "${{ needs.prepare.outputs.audio_artifact_id != '' }}",
-    );
-    expect(verify['continue-on-error']).toBeUndefined();
-    expect(verify.with.script).toContain('audioPrebuildKey');
-    expect(verify.with.script).toContain('verifyAudioArtifact');
+  it.each(['build_release', 'publish'])(
+    'rechecks the reused source and validates either path in %s',
+    (job) => {
+      expect(releaseYaml.jobs[job].permissions.actions).toBe('read');
+      // prepare's decision is not trusted blindly: each consumer recomputes the
+      // fingerprint from its own checkout and re-verifies the source run.
+      const verify = step(job, 'Verify reusable audio source');
+      expect(verify.if).toBe(
+        "${{ needs.prepare.outputs.audio_artifact_id != '' }}",
+      );
+      expect(verify['continue-on-error']).toBeUndefined();
+      expect(verify.with.script).toContain('audioPrebuildKey');
+      expect(verify.with.script).toContain('verifyAudioArtifact');
 
-    const reused = step('publish', 'Download reusable audio prebuilds');
-    const fresh = step('publish', 'Download audio capture prebuilds');
-    expect(reused.if).toBe(
-      "${{ needs.prepare.outputs.audio_artifact_id != '' }}",
-    );
-    expect(fresh.if).toContain("needs.prepare.outputs.audio_artifact_id == ''");
-    expect(reused.with['artifact-ids']).toBe(
-      '${{ needs.prepare.outputs.audio_artifact_id }}',
-    );
-    expect(reused.with['run-id']).toBe(
-      '${{ needs.prepare.outputs.audio_run_id }}',
-    );
-    // Exactly one of the two runs, and both land in the same directory.
-    expect(reused.with.path).toBe(fresh.with.path);
+      const reused = step(job, 'Download reusable audio prebuilds');
+      const fresh = step(job, 'Download audio capture prebuilds');
+      expect(reused.if).toBe(
+        "${{ needs.prepare.outputs.audio_artifact_id != '' }}",
+      );
+      expect(fresh.if).toContain(
+        "needs.prepare.outputs.audio_artifact_id == ''",
+      );
+      expect(reused.with['artifact-ids']).toBe(
+        '${{ needs.prepare.outputs.audio_artifact_id }}',
+      );
+      expect(reused.with['run-id']).toBe(
+        '${{ needs.prepare.outputs.audio_run_id }}',
+      );
+      // Exactly one of the two runs, and both land in the same directory.
+      expect(reused.with.path).toBe(fresh.with.path);
 
-    // Whichever path ran, the payload is validated before the build consumes it.
-    const names = releaseYaml.jobs.publish.steps.map((entry) => entry.name);
-    const validate = names.indexOf('Validate complete audio prebuilds');
-    expect(validate).toBeGreaterThan(names.indexOf(reused.name));
-    expect(validate).toBeGreaterThan(names.indexOf(fresh.name));
-    expect(validate).toBeLessThan(
-      names.indexOf('Build Bundle and Prepare Package'),
-    );
-  });
+      // Whichever path ran, the payload is validated before the build consumes it.
+      const names = releaseYaml.jobs[job].steps.map((entry) => entry.name);
+      const validate = names.indexOf('Validate complete audio prebuilds');
+      expect(validate).toBeGreaterThan(names.indexOf(reused.name));
+      expect(validate).toBeGreaterThan(names.indexOf(fresh.name));
+      expect(validate).toBeLessThan(
+        names.indexOf('Build Bundle and Prepare Package'),
+      );
+    },
+  );
 
   it('retains a fingerprint-named artifact for later releases', () => {
     const collect = audioYaml.jobs.collect;
@@ -157,7 +162,7 @@ describe('prebuild collector hygiene', () => {
   });
 
   it('keeps the release-only label architecture-free', () => {
-    // The runners carrying ecs-qwen-release-host are ARM64. An "x64"
+    // The release pool includes ARM64 runners. An "x64"
     // component does not fall back to hosted — it never matches, and the job
     // queues until it times out. Resolve the expression rather than
     // substring-matching it, which would pass with the pin present.
