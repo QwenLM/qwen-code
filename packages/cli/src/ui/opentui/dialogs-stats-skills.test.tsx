@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     // Rows the body reports through onSizeChange, as OpenTUI layout would.
     contentRows: 100,
+    // The terminal width the dialog clips its tab bar and hint to.
+    width: 100,
     scroller: {
       scrollBy: vi.fn(),
       scrollTo: vi.fn(),
@@ -98,6 +100,7 @@ vi.mock('@opentui/react', () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
   }),
+  useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -117,6 +120,7 @@ vi.mock('./key-map.js', () => ({
 import {
   computeStatsBodyRows,
   OpenTuiStatsDialog,
+  statsTabRuns,
 } from './dialogs-stats-skills.js';
 
 const CONFIG = { getSessionId: () => undefined } as unknown as Config;
@@ -132,6 +136,7 @@ describe('OpenTuiStatsDialog scrolling', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.contentRows = 100;
+    mocks.state.width = 100;
     mocks.state.scroller.scrollBy.mockClear();
     mocks.state.scroller.scrollTo.mockClear();
   });
@@ -140,9 +145,28 @@ describe('OpenTuiStatsDialog scrolling', () => {
     // An 80x24 terminal leaves a 19-row region; a 40-row one leaves 35.
     expect(computeStatsBodyRows(35)).toBe(27);
     expect(computeStatsBodyRows(19)).toBe(11);
-    // The frame is unshrinkable, so a tiny region leaves the body nothing
-    // rather than pushing the border past the region's clip.
-    expect(computeStatsBodyRows(5)).toBe(0);
+    // Region 9 is the shortest that pays the normal chrome and a body row.
+    expect(computeStatsBodyRows(9)).toBe(1);
+    // Below it the unshrinkable frame sheds padding, tab bar and hint and
+    // keeps only its border (from three rows), so the body keeps content
+    // rows instead of the frame pushing its border past the region's clip.
+    expect(computeStatsBodyRows(8)).toBe(6);
+    expect(computeStatsBodyRows(5)).toBe(3);
+    expect(computeStatsBodyRows(2)).toBe(2);
+  });
+
+  it('clips the tab labels to one row, from the right, at a narrow width', () => {
+    // The unclipped bar is 33 columns: three labels and two one-column gaps.
+    expect(statsTabRuns(33)).toEqual([
+      ' Session ',
+      ' Activity ',
+      ' Efficiency ',
+    ]);
+    expect(statsTabRuns(30)).toEqual([' Session ', ' Activity ', ' Efficie…']);
+    // A label with no column left is dropped with its gap, not wrapped.
+    expect(statsTabRuns(20)).toEqual([' Session ', ' Activity ', '']);
+    expect(statsTabRuns(10)).toEqual([' Session ', '', '']);
+    expect(statsTabRuns(5)).toEqual([' Ses…', '', '']);
   });
 
   it('wraps the body in a scrollbox sized from the region budget', () => {
@@ -191,17 +215,75 @@ describe('OpenTuiStatsDialog scrolling', () => {
     expect(getByText('tab · ↑↓ scroll · esc')).toBeTruthy();
   });
 
-  it('does not advertise scrolling when the region leaves the body no rows', () => {
+  it('sheds the tab bar and the hint when the region cannot pay the chrome', () => {
     mocks.state.contentRows = 30;
-    const { getByText, queryByText } = render(
+    const { getByTestId, queryByText } = render(
       <OpenTuiStatsDialog
         config={CONFIG}
         onClose={() => {}}
         availableTerminalHeight={6}
       />,
     );
+    // Border only: six rows leave the body four.
+    expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('4');
+    expect(queryByText('Session')).toBeNull();
+    expect(queryByText('tab · esc')).toBeNull();
+    expect(queryByText('tab · ↑↓ scroll · esc')).toBeNull();
+    // The keys still move the body and Tab still cycles the tabs.
+    send('pagedown');
+    expect(mocks.state.scroller.scrollBy).toHaveBeenCalledWith(3);
+    send('tab');
+    expect(getByTestId('scrollbox').textContent).toContain(
+      'Activity (this session)',
+    );
+  });
+
+  it('keeps esc in the hint when the long hint cannot fit the row', () => {
+    // Twenty columns leave a content width of 10: the 21-column scroll hint
+    // would clip to 'tab · ↑↓ …' and lose the key that matters.
+    mocks.state.width = 20;
+    mocks.state.contentRows = 30;
+    const { getByText, queryByText } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
     expect(getByText('tab · esc')).toBeTruthy();
     expect(queryByText('tab · ↑↓ scroll · esc')).toBeNull();
+  });
+
+  it('budgets the embedded tab bar four columns narrower than the popup', () => {
+    // Inside Settings the frame sits within that dialog's border and
+    // padding: at 43 columns the popup's content width is 33, the embed's 29.
+    mocks.state.width = 43;
+    const labels = (container: HTMLElement) =>
+      Array.from(
+        container.firstElementChild?.children[0]?.querySelectorAll('span') ??
+          [],
+      ).map((label) => label.textContent);
+    const popup = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    expect(labels(popup.container)).toEqual([
+      ' Session ',
+      ' Activity ',
+      ' Efficiency ',
+    ]);
+    popup.unmount();
+    const embed = render(
+      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} />,
+    );
+    expect(labels(embed.container)).toEqual([
+      ' Session ',
+      ' Activity ',
+      ' Effici…',
+    ]);
   });
 
   it('scrolls the body with up/down/pageup/pagedown', () => {

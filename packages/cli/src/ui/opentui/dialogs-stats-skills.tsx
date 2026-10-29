@@ -43,7 +43,7 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
 import { scrollDialogLayout } from './dialogs-core.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
-import { truncateToWidth } from '../utils/textUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
 function useEscToClose(onClose: () => void, enabled: boolean) {
@@ -96,8 +96,13 @@ const SubRow = ({
   </box>
 );
 
+// A title's blank row is a spacer box, not a marginTop: with a one-row
+// scrollbox viewport the renderer leaves a child's margin out of the content
+// height, so three margins made the scroll range three rows short and the
+// Tokens section never painted at any scroll offset.
 const SectionTitle = ({ children }: { children?: ReactNode }) => (
-  <box marginTop={1}>
+  <box flexDirection="column">
+    <box height={1} />
     <text fg={C.text} attributes={1}>
       {children}
     </text>
@@ -113,17 +118,48 @@ const TABS: Array<{ name: StatsTabName; label: string }> = [
 
 /**
  * The Stats frame's rows outside the scrolled body: borders (2), vertical
- * padding (2), tab bar (1), spacer (1) and the footer hint with its margin (2).
+ * padding (2), tab bar (1), spacer (1) and the footer hint with its margin (2),
+ * the same eight rows ink's `SESSION_CHROME_ROWS` charges. The tab bar and
+ * the hint are clipped to one row at every width (`statsTabRuns`, below), so
+ * the flat count stays true where a wrapping run would have grown the frame.
  */
 export const STATS_FIXED_ROWS = 8;
 
 /**
- * Body rows that fit a standalone /stats dialog in a popup region of the
- * given height. The frame is unshrinkable and the region's clip cannot cut
- * its border, so a region too short for the chrome leaves the body nothing.
+ * The standalone frame's layout for a popup region of the given height, by
+ * the read-only scroll dialogs' shared rule: normal chrome while the region
+ * pays for it and at least one body row, compact chrome (no padding, tab bar
+ * or hint; the border only from three rows) otherwise, so the unshrinkable
+ * frame is never taller than the region. Without a region the body is
+ * unbounded, as the Settings embed renders it with no scrollbox.
  */
+function statsDialogLayout(regionHeight: number | undefined) {
+  return scrollDialogLayout(
+    regionHeight,
+    STATS_FIXED_ROWS,
+    Number.MAX_SAFE_INTEGER,
+  );
+}
+
+/** Body rows the region leaves after the chrome its layout keeps. */
 export function computeStatsBodyRows(regionHeight: number): number {
-  return Math.max(0, regionHeight - STATS_FIXED_ROWS);
+  return statsDialogLayout(regionHeight).bodyRows;
+}
+
+/**
+ * The tab labels as the one-row tab bar paints them in `contentWidth`
+ * columns: each run is clipped to what the row has left after the runs and
+ * the one-column gaps before it, and a run with no column left is dropped
+ * with its gap, so the bar never wraps at a narrow width.
+ */
+export function statsTabRuns(contentWidth: number): string[] {
+  let left = contentWidth;
+  return TABS.map((t, i) => {
+    const gap = i === 0 ? 0 : 1;
+    const run = truncateToWidth(` ${t.label} `, Math.max(0, left - gap));
+    left -= run ? gap + getCachedStringWidth(run) : 0;
+    return run;
+  });
 }
 
 export function OpenTuiStatsDialog(props: {
@@ -141,15 +177,22 @@ export function OpenTuiStatsDialog(props: {
 }) {
   const { config, onClose, isFocused = true } = props;
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
-  const bodyRows =
-    regionHeight === undefined ? undefined : computeStatsBodyRows(regionHeight);
+  const layout = statsDialogLayout(regionHeight);
+  const bodyRows = regionHeight === undefined ? undefined : layout.bodyRows;
+  // Columns inside the frame: the popup area minus its two border and four
+  // padding columns, as the skills frame below computes its own. Embedded in
+  // Settings (no budget) the frame sits inside that dialog's own border and
+  // padding, four columns more.
+  const { width } = useTerminalDimensions();
+  const contentWidth = Math.max(
+    1,
+    dialogAreaWidth(width) - (regionHeight === undefined ? 10 : 6),
+  );
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   // Rows the body wants, reported by layout; 0 until the first layout pass.
   const [contentRows, setContentRows] = useState(0);
-  // A zero budget still paints one clamped row that has nowhere to scroll,
-  // so only advertise scrolling when the viewport can actually move.
-  const canScroll =
-    bodyRows !== undefined && bodyRows > 0 && contentRows > bodyRows;
+  // Advertise scrolling only when the viewport can actually move.
+  const canScroll = bodyRows !== undefined && contentRows > bodyRows;
   const [tab, setTabState] = useState<StatsTabName>('session');
   // A held Tab hands the whole burst to the handler from the last render, so
   // the cycle must read where the previous key of the burst landed.
@@ -415,15 +458,26 @@ export function OpenTuiStatsDialog(props: {
       </box>
     );
 
+  const tabRuns = statsTabRuns(contentWidth);
+  // The long hint only where it fits the row; a narrower frame keeps the keys
+  // that matter rather than clipping "esc" off the end.
+  const scrollHint = 'tab · ↑↓ scroll · esc';
+  const hint =
+    canScroll && getCachedStringWidth(scrollHint) <= contentWidth
+      ? scrollHint
+      : 'tab · esc';
   return (
     <box
+      // Remount on a frame style change: a removed layout property can
+      // persist on a reused native node (2026-10-13 short-scroll dialogs).
+      key={layout.compact ? `compact-${layout.border}` : 'normal'}
       flexDirection="column"
-      border
+      border={layout.border ? true : []}
       borderColor={C.dim}
       paddingLeft={2}
       paddingRight={2}
-      paddingTop={1}
-      paddingBottom={1}
+      paddingTop={layout.compact ? 0 : 1}
+      paddingBottom={layout.compact ? 0 : 1}
       // A shrinkable frame lets a short region squeeze its text rows to zero
       // and paint them over each other; staying natural height keeps the rows
       // contiguous for the region's clip to cut at the tail, as ink does for
@@ -433,23 +487,32 @@ export function OpenTuiStatsDialog(props: {
       // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
-      {/* Tab bar */}
-      <box flexDirection="row">
-        {TABS.map((t) => {
-          const active = t.name === tab;
-          return (
-            <box key={t.name} marginLeft={t.name === 'session' ? 0 : 1}>
-              <text
-                fg={active ? '#1e1e2e' : C.text}
-                bg={active ? C.accent : undefined}
-              >
-                {` ${t.label} `}
-              </text>
-            </box>
-          );
-        })}
-      </box>
-      <box height={1} />
+      {/* Tab bar, one row at every width: a clipped label still cycles on
+          Tab, and a region too short for the chrome sheds the bar as the
+          skills frame sheds its title. */}
+      {layout.compact ? null : (
+        <>
+          <box flexDirection="row">
+            {TABS.map((t, i) => {
+              const run = tabRuns[i];
+              if (!run) return null;
+              const active = t.name === tab;
+              return (
+                <box key={t.name} marginLeft={i === 0 ? 0 : 1}>
+                  <text
+                    fg={active ? '#1e1e2e' : C.text}
+                    bg={active ? C.accent : undefined}
+                    wrapMode="none"
+                  >
+                    {run}
+                  </text>
+                </box>
+              );
+            })}
+          </box>
+          <box height={1} />
+        </>
+      )}
 
       {bodyRows === undefined ? (
         body
@@ -476,11 +539,13 @@ export function OpenTuiStatsDialog(props: {
         </scrollbox>
       )}
 
-      <box marginTop={1}>
-        <text fg={C.dim}>
-          {canScroll ? 'tab · ↑↓ scroll · esc' : 'tab · esc'}
-        </text>
-      </box>
+      {layout.compact ? null : (
+        <box marginTop={1}>
+          <text fg={C.dim} wrapMode="none">
+            {truncateToWidth(hint, contentWidth)}
+          </text>
+        </box>
+      )}
     </box>
   );
 }
