@@ -60,7 +60,9 @@ population」不会有分歧。年龄未知不构成陈旧的证据。
 
 机制在并发组本身，但不是「饿死到零」。一个组只保留一条 _活跃_ run，更新的 pending 会**取消**旧的 pending——`cancel-in-progress: false` 只保护已经开始跑的。因此越过并发闸门的那一条会一直等池子，而后面的新到达互相替换。同日实测：两条 scheduled run 在 `queued` 里分别等了 120 与 135 分钟、期间又来了八九次新到达，随后都跑了起来，实际工作 22 秒与 28 秒。也就是说吞吐受池子限制——大约每次池子等待落地一跳——循环并没有死，而是被压到约两小时一跳。无论哪种情况，只看深度都报「排队中」，而这恰好是最能把问题藏起来的读法。
 
-修复正是针对这个上界。主干节拍从 15 分钟降到 30 分钟，concurrency 的 key 改为表达式、共三个组——tick 用 `fleet-shepherd`、救援监视用 `fleet-shepherd-watchdog`、被救援的运行用 `fleet-shepherd-rescue`——这样被救援的运行能保住自己的位置，因为它的组里不会有新条目来替换它。真正缩短恢复时间的是这第二条串行车道，而不是节拍；把间隔减半只是减少对共享队列的 pending 搅动。另加一条 cron（`10,40 * * * *`），以「监视模式」运行同一个 job，并在任何 Dashboard 工作之前退出：读取本 workflow 自己的运行历史，若已超过 `SHEPHERD_STALE_MINUTES`（240 分钟）没有任何 fleet tick 完成、且没有 tick 正在运行，就发出一次 `shepherd-rescue` 类型的 `repository_dispatch`。
+修复正是针对这个上界，但要如实标出它的限度：循环是被压慢，不是死了，所以一条「等待 240 分钟静默」的车道**不会**为本次事故那 66 分钟的空档触发。救援车道是为「彻底不完成」这种情况存在的，它不会让「只是慢」变快。
+
+主干节拍从 15 分钟改为 30 分钟（间隔加倍），concurrency 的 key 改为表达式、共三个组——tick 用 `fleet-shepherd`、救援监视用 `fleet-shepherd-watchdog`、被救援的运行用 `fleet-shepherd-rescue`。按本文件自己的模型，替换只作用于尚未起跑的 run；救援之所以不会被替换，不只是因为组，而是因为「同时最多一条未收尾救援」这道守卫——通常不存在更新的一条待跑条目来替换它。真正缩短恢复时间的是这第二条串行车道，而不是节拍：间隔加倍让到达率减半（对共享队列的 pending 搅动随之减半），而落地速率丝毫不受影响。另加一条 cron（`10,40 * * * *`），以「监视模式」运行同一个 job，并在任何 Dashboard 工作之前退出：读取本 workflow 自己的运行历史，若已超过 `SHEPHERD_STALE_MINUTES`（240 分钟）没有任何 fleet tick 完成、且没有 tick 正在运行，就发出一次 `shepherd-rescue` 类型的 `repository_dispatch`。
 
 监视里有四条承重决策。它只数 **fleet tick，且按 run 标题识别**——它读的历史里必然包含本次 watch 自己（`in_progress`）以及此前每一次 watch（都以 success 退出），数上任何一个都会让两道闸永远为真，救援分支因此不可达，而日志会把饥饿说成一个并不存在的 in-progress tick；run id 作为第二道防线排除自身。陈旧程度以最近一次**完成**的 `updatedAt` 计算，绝不用 `createdAt`，也不能只算 success：一条在队列里等了两小时、一分钟前才完成的 run 是**新鲜**的，而只数 success 会把每一跳都失败的 shepherd 反复重派。`pending` 的 run 不推迟救援——pending 正是这里会死的状态——而 `in_progress` 的 tick 总是推迟。最多允许一条未收尾的 `repository_dispatch` 运行；历史不可读、**或为空**，一律不做任何动作：把空答案读成「没有在跑、从未成功」会在毫无证据的情况下派出救援。历史里有运行但一条 tick 都没有则不同，仍会触发——那正是 tick 车道没产出任何东西的证据。
 

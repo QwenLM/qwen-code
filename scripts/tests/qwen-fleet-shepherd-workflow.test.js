@@ -3098,7 +3098,7 @@ exit 1`;
       `head \`${HEAD}\` 与 \`main\`（以 \`abc123456\` 为准`,
     );
     expect(r.writes[0]).toContain(
-      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 40 (grace plus one tick interval).',
+      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 40 (one tick interval, assuming the next tick runs promptly; a congested runner pool stretches this).',
     );
     expect(r.writes[0]).toContain(
       'or the per-tick close cap postpones it, and the `autofix/needs-human` label parks it for a human. To keep it open, add the `autofix/skip` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.',
@@ -3107,7 +3107,7 @@ exit 1`;
       '带有 `autofix/needs-human` 标签则交由人工处理。如需保留，请添加 `autofix/skip` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。',
     );
     expect(r.writes[0]).toContain(
-      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 40 分钟内（宽限期加一个节拍间隔）。',
+      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 40 分钟内（一个节拍间隔，前提是下一跳能及时起跑；runner 池拥堵时会更久）。',
     );
     expect(r.writes[0]).not.toContain('on its next tick');
     expect(r.writes[0]).not.toContain('%s');
@@ -3622,6 +3622,10 @@ exit 1`;
     );
     expect(workflow).toContain("&& 'shepherd watch'");
     expect(workflow).toContain("|| 'shepherd tick'");
+    // A manual dispatch must NOT fall through to the tick title: the staleness
+    // clock keys off it, so a dry run would silence the rescue lane for a whole
+    // threshold while exercising no lever at all.
+    expect(workflow).toContain("|| 'shepherd manual'");
     // The literal-to-lane MAPPING is pinned exactly, not just for presence:
     // flipping either comparison swaps the lanes in production (every tick
     // would run the watch mode and exit, while the other cron ran the full
@@ -3655,6 +3659,12 @@ exit 1`;
     // redirect and the read, and a must-not-dispatch case would evaluate the
     // other case's fixture.
     expect(watch).toContain('/tmp/self-runs.json');
+    // The projection is load-bearing twice: without `displayTitle` every tick
+    // looks like no evidence and the watch rescues a healthy shepherd forever;
+    // without `conclusion` a cancelled lane reads as progress.
+    expect(watch).toContain(
+      '--json event,status,conclusion,updatedAt,displayTitle',
+    );
     const NOW = Math.floor(Date.parse('2026-10-28T08:30:00Z') / 1000);
     const at = (minutesAgo) =>
       new Date((NOW - minutesAgo * 60) * 1000)
@@ -3681,6 +3691,12 @@ exit 1`;
       databaseId: 30_000 + seq++,
       ...fields,
     });
+    const manual = (fields) => ({
+      event: 'workflow_dispatch',
+      displayTitle: 'shepherd manual',
+      databaseId: 40_000 + seq++,
+      ...fields,
+    });
     // The posted event type must exist in on.repository_dispatch.types: GitHub
     // answers 204 for an undeclared type and creates no run at all, so a rename
     // on either side would log "dispatched a rescue" forever, for nothing.
@@ -3688,24 +3704,17 @@ exit 1`;
       JSON.stringify(parse(workflow).on.repository_dispatch.types),
     );
     expect(declared).toEqual(['shepherd-rescue']);
-    const replay = ({
-      runs,
-      emptyFile = false,
-      dispatchFails = false,
-      stale = '240',
-      self = '900001',
-    }) => {
+    const replay = ({ runs, dispatchFails = false, stale = '240' }) => {
       const dir = mkdtempSync(join(tmpdir(), 'shepherd-watch-'));
       try {
-        // `emptyFile` is the unreadable arm; `runs: []` is the empty ARRAY arm,
-        // which must not be confused with it.
+        // `runs: null` is the unreadable arm (no fixture at all); `runs: []`
+        // is the empty ARRAY arm. Both must take no action, for different
+        // reasons, and both land in the same `unusable` log line.
         if (runs !== null) {
-          writeFileSync(
-            join(dir, 'fixture.json'),
-            emptyFile ? '' : JSON.stringify(runs),
-          );
+          writeFileSync(join(dir, 'fixture.json'), JSON.stringify(runs));
         }
         if (dispatchFails) writeFileSync(join(dir, 'dispatch-fails'), '');
+        const patValue = 'bot-pat-value';
         writeFileSync(
           join(dir, 'gh'),
           `#!/bin/bash
@@ -3715,6 +3724,12 @@ if [[ "$1" == 'run' && "$2" == 'list' ]]; then
 fi
 if [[ "$1" == 'api' ]]; then
   printf '%s\\n' "$*" >> '${dir}/dispatches'
+  # POST, or the call is a GET on /dispatches: 404, and the lane dies logging
+  # "dispatch failed" forever.
+  [[ "$*" == *'-X POST'* ]] || exit 1
+  # The step PAT, or the workflow token's contents:read cannot create a
+  # repository_dispatch (403).
+  [[ "\${GITHUB_TOKEN:-}" == '${patValue}' ]] || exit 1
   [[ -f '${dir}/dispatch-fails' ]] && exit 1
   exit 0
 fi
@@ -3731,9 +3746,11 @@ set -eo pipefail
 WATCHDOG_MODE='true'
 NOW_EPOCH='${NOW}'
 SHEPHERD_STALE_MINUTES='${stale}'
-SELF_RUN_ID='${self}'
 REPO='QwenLM/qwen-code'
-ACTIONS_TOKEN='x'
+# exported, not just set: the stub is a child process and reads it from the
+# environment, exactly as the step env supplies it in production.
+export GITHUB_TOKEN='${patValue}'
+ACTIONS_TOKEN='workflow-token-value'
 ( ${watch
               .replace(/\n {10}/g, '\n')
               // replaceAll: the block names the path TWICE (the redirect and the jq
@@ -3830,6 +3847,38 @@ ACTIONS_TOKEN='x'
     });
     expect(queued.dispatch).toBe('');
     expect(queued.log).toContain('already queued or running');
+
+    // A rescue that COMPLETED is progress — it is a full fleet tick by
+    // construction — so it resets the clock. Counting the tick lane alone
+    // re-armed another rescue every watch interval while the log claimed
+    // nothing had completed, about a run that finished 25 minutes earlier.
+    const rescued = replay({
+      runs: [
+        staleTick,
+        rescue({
+          status: 'completed',
+          conclusion: 'success',
+          updatedAt: at(25),
+        }),
+      ],
+    });
+    expect(rescued.dispatch).toBe('');
+    expect(rescued.log).toContain('the shepherd is current');
+
+    // A manual run is NOT a tick: it exercises no lever, so letting it carry
+    // the tick title would silence the lane for a whole threshold.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          manual({
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(5),
+          }),
+        ],
+      }).dispatch,
+    ).toContain('event_type=shepherd-rescue');
 
     // A shepherd that keeps FAILING is broken, not starved. Completion is what
     // the clock counts, so a failure five minutes ago is current — and does not
@@ -4160,6 +4209,10 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
     expect(diff('', [1, 2])).toBe('');
     // A trailing separator in a hand-edited marker is not an empty run id.
     expect(diff('1,', [1, 2])).toBe('digested 0 · new 1 · still queued 1');
+    // A marker written before the merge de-duplication carries duplicates;
+    // without `| unique` on the previous set they would each count as a run
+    // still queued, so a two-run queue would report three.
+    expect(diff('1,2,2,3', [1, 2])).toBe('digested 1 · new 0 · still queued 2');
   });
 
   it('behaviorally proves the queue waits and breakdown describe the enumerated runs', () => {
@@ -4561,6 +4614,37 @@ printf '%s|%s' "$PREV_QUEUE_IDS" "$PREV_QUEUE_TS"`,
         { encoding: 'utf8' },
       ),
     ).toBe('|');
+
+    // The reader's own line anchors, witnessed without help from the row
+    // sanitizer: a marker riding inside a table cell must not be recovered as
+    // the baseline, or the census's headline metric becomes forgeable by
+    // whatever wrote that cell. A genuine marker below it still wins.
+    const readQueue = (body) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+PREV_DASH="$(cat <<'BODY'
+${body}
+BODY
+)"
+${readers.replace(/\n {10}/g, '\n')}
+printf '%s|%s' "$PREV_QUEUE_IDS" "$PREV_QUEUE_TS"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+    const forged =
+      '<!-- fleet-shepherd queue-sample: ts=2099-01-01T00:00:00Z ids=666,777 -->';
+    expect(
+      readQueue(
+        `| PR | evil ${forged} |\n<!-- fleet-shepherd queue-sample: ts=2026-10-28T08:00:00Z ids=1,2,3 -->`,
+      ),
+    ).toBe('1,2,3|2026-10-28T08:00:00Z');
+    expect(readQueue(`| PR | evil ${forged} |`)).toBe('|');
   });
 
   it('behaviorally proves an inline marker in a workflow name cannot be recovered as the watermark', () => {
@@ -4723,6 +4807,66 @@ ${section.replace(/\n {10}/g, '\n')}`,
       QUEUE_N: '0',
     });
     expect(unknown).toContain('UNKNOWN, not zero');
+
+    // A capped enumeration must keep its FLOOR caveat — the acceptance
+    // criterion says a capped tick reports the waits as a floor.
+    const capped = render({
+      QUEUE_DEPTH: '600',
+      QUEUE_N: '500',
+      QUEUE_RECENT_N: '500',
+      QUEUE_COMPLETE: 'false',
+      QUEUE_WAIT: 'p50 300m · max 400m',
+      QUEUE_ROWS: '| CI | 500 |\n',
+      QUEUE_EVENTS: 'pull_request 500',
+    });
+    expect(capped).toContain('Enumeration capped at');
+    expect(capped).toContain('FLOOR');
+    expect(capped).not.toContain('Since ');
+
+    // The aged banner is the only place a reader learns that runs were
+    // excluded from the numbers above it.
+    const aged = render({
+      QUEUE_DEPTH: '231',
+      QUEUE_N: '231',
+      QUEUE_RECENT_N: '150',
+      QUEUE_AGED_N: '81',
+      QUEUE_AGED_OLDEST: '2026-08-19T01:04:50Z',
+      QUEUE_WAIT: 'p50 146m · max 461m',
+      QUEUE_ROWS: '| CI | 150 |\n',
+      QUEUE_EVENTS: 'pull_request 150',
+    });
+    expect(aged).toContain('81 queued run(s) are older than 24h');
+    expect(aged).toContain('2026-08-19T01:04:50Z');
+    expect(aged).toContain('150 live');
+    expect(aged).toContain('| CI | 150 |');
+
+    // The trend line reports digested/new/still, its timestamp, and the paging
+    // caveat the census cannot repair by de-duplication.
+    const trend = render({
+      QUEUE_DEPTH: '200',
+      QUEUE_N: '200',
+      QUEUE_RECENT_N: '200',
+      QUEUE_WAIT: 'p50 100m · max 200m',
+      QUEUE_ROWS: '| CI | 200 |\n',
+      QUEUE_EVENTS: 'pull_request 200',
+      QUEUE_TREND: 'digested 13 · new 145 · still queued 42',
+      PREV_QUEUE_TS: '2026-10-28T08:00:00Z',
+    });
+    expect(trend).toContain('Since 2026-10-28T08:00:00Z');
+    expect(trend).toContain('digested 13 · new 145 · still queued 42');
+    expect(trend).toContain('can read as digested while still queued');
+
+    // Everything enumerated is in the aged tail: no table, and the sentence
+    // says so rather than reusing the disagreement wording.
+    const agedOnly = render({
+      QUEUE_DEPTH: '81',
+      QUEUE_N: '81',
+      QUEUE_RECENT_N: '0',
+      QUEUE_AGED_N: '81',
+      QUEUE_AGED_OLDEST: '2026-08-19T01:04:50Z',
+    });
+    expect(agedOnly).toContain('No live runs queued');
+    expect(agedOnly).not.toContain('| Workflow |');
   });
 
   it('behaviorally proves the queue sample marker survives an unreadable tick and is dropped when capped', () => {

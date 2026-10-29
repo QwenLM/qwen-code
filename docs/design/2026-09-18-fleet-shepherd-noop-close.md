@@ -114,7 +114,8 @@ The no-op close takes two steps on separate ticks, both posted as the bot:
    head is on the PR, post a bilingual notice: what was detected and against
    which `main` commit, that the PR closes on a later tick unless the head
    moves — no sooner than 10 minutes from the notice, usually within about
-   20 — what can postpone it (a live autofix run for the PR, an unreadable
+   40 (one tick interval, and longer when the runner pool is congested) — what
+   can postpone it (a live autofix run for the PR, an unreadable
    state, the per-tick close cap), that `autofix/needs-human` parks it for a
    human, and that `autofix/skip` keeps it open. `autofix/skip` is the
    fleet-wide opt-out, not a no-op-lever switch: the PR leaves the shepherd's
