@@ -51,8 +51,8 @@ and the per-run read restriction needed for rollback safety.
   completed predecessor, so rollback shutdown is not a universal barrier to
   later plan decisions. Replays of an already committed submission still
   return its original answer.
-- Keep TS and Java input-preview lists and their tests aligned. Add the plan
-  domain to the Hosted reopen whitelist when enabling it.
+- Keep TS and Java input-preview lists and their tests aligned. b3d adds the
+  plan domain to the Hosted reopen whitelist ahead of its enablement.
 
 ## Integration surfaces
 
@@ -66,8 +66,10 @@ where required by the existing implementation.
 
 ## Constraints and acceptance
 
-- The XML-escaped plan must fit the 32 KiB continuation envelope, including
-  description, definition, preamble, decision text and 4 KiB feedback reserve.
+- The plan, XML-escaped and JSON-encoded, must fit the 32 KiB continuation
+  envelope, including description, definition, preamble, decision text and
+  4 KiB feedback reserve. The lead's refusal names the plan's size after XML
+  and JSON escaping and the bytes left, so the member can shorten it to fit.
 - A refusal, cancellation before handover or rejection permits a corrected
   submission; an accepted, in-flight or unknown submission does not.
 - A rejected member remains read-only on every continuation route; the first
@@ -75,6 +77,13 @@ where required by the existing implementation.
 - Interrupted submission, decision and continuation paths must not duplicate
   records or launches. A late replay must not supersede a newer run's plan.
 - Every serving Harness and the deployment rollback floor must include b3a.
+  Once a lead has committed a `team_plan` record, every Harness that may reopen
+  it and the rollback floor must carry b3d, even with the `team_plan` domain
+  disabled. A Harness without b3d refuses to load that lead: it answers 409
+  `hosted_turn_recovery_required` (reason `restore_verification_failed`; its
+  log names `Hosted recovery domain is unsupported.`). The control plane ends a
+  new Turn as `hosted_harness_unavailable` once its pre-admission retries run out;
+  an admitted Turn keeps retrying until a b3d Harness serves the lead.
   Real-stack validation is required before enablement or merge, including a
   rollback that does not ask b3a to reopen unsupported lead records.
 

@@ -34,8 +34,20 @@
   align-items: center;
   justify-content: center;
   margin-right: 2px;
+  padding: 0;
+  border: 0;
   border-radius: 10px;
+  background: transparent;
   color: var(--foreground);
+}
+
+button.workspaceIcon {
+  cursor: pointer;
+}
+
+.workspaceIcon:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .workspaceIcon:hover {

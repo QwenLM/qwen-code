@@ -23,7 +23,10 @@ import {
   mainContract,
   run,
 } from '../check-contract-open-prs.js';
-import { CONTRACT_DOCUMENT } from '../contract-version-utils.js';
+import {
+  CONTRACT_DOCUMENT,
+  CONTRACT_DOCUMENT_PREDECESSOR,
+} from '../contract-version-utils.js';
 
 const script = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -145,11 +148,11 @@ function fakeGh(prs, { failPost = [], graphqlError } = {}) {
     if (args[1] !== '--method') {
       // The contents API: repos/<repo>/contents/<document>?ref=<sha>.
       const [endpoint, query] = args[1].split('?');
-      expect(endpoint).toBe(
-        `repos/QwenLM/qwen-code/contents/${CONTRACT_DOCUMENT}`,
-      );
       const sha = new URLSearchParams(query).get('ref');
       const target = prs.find((node) => node.headRefOid === sha);
+      expect(endpoint).toBe(
+        `repos/QwenLM/qwen-code/contents/${target?.documentPath ?? CONTRACT_DOCUMENT}`,
+      );
       if (!target?.doc) throw new Error('HTTP 404: Not Found');
       return JSON.stringify({
         type: 'file',
@@ -216,6 +219,28 @@ describe('check-contract-open-prs', () => {
     expect(lines[0]).toBe(
       '### Contract versions of open PRs against main@fbde5cf',
     );
+  });
+
+  it('checks contract claims from PR heads based before the application move', async () => {
+    const { byPr } = await check([
+      pr(10001, [CONTRACT_DOCUMENT_PREDECESSOR], {
+        doc: document('1.38.0', 'old-layout'),
+        documentPath: CONTRACT_DOCUMENT_PREDECESSOR,
+      }),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'failure',
+      description: "1.38.0 does not advance past main's 1.38.0",
+    });
+  });
+
+  it('prefers the current contract path when a PR also removes its predecessor', async () => {
+    const { byPr } = await check([
+      pr(10001, [[CONTRACT_DOCUMENT_PREDECESSOR, 'DELETED'], touching()], {
+        doc: document('1.38.0', 'moved'),
+      }),
+    ]);
+    expect(byPr[10001].state).toBe('failure');
   });
 
   it('fails a PR that declares a version below main', async () => {

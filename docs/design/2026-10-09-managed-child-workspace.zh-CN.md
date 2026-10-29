@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-child-workspace.md) | [简体中文](2026-10-09-managed-child-workspace.zh-CN.md)
 
-状态：I1 已在本变更中实现。已落地：child Workspace（父 storage 内的一个 Git linked worktree）、它带 fencing 与恢复的持久命令、合并与丢弃两种收尾、storage lease 的维护 hold，以及把 child Session 绑定到已准备好的 child Workspace。I2（`worktree` 准入、relay 与级联接线）已由其单独的[设计](2026-10-10-managed-child-worktree-admission.zh-CN.md)实现。仍是设计：I3（`snapshot`，以及串行化的裁定），有其后续切片（见后续工作）。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H）的隔离切片，由 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 跟踪。它拆分自 H4c（[#13743](https://github.com/QwenLM/qwen-code/issues/13743)，PR #13754），其[设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)在决策 11 中确定了词汇。它承接 H4a（[记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md)）与 H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）。
+状态：I1 已在本变更中实现。已落地：child Workspace（父 storage 内的一个 Git linked worktree）、它带 fencing 与恢复的持久命令、合并与丢弃两种收尾、storage lease 的维护 hold，以及把 child Session 绑定到已准备好的 child Workspace。I2（`worktree` 准入、relay 与级联接线）已由其单独的[设计](2026-10-10-managed-child-worktree-admission.zh-CN.md)实现。I3（`snapshot`，以及串行化的裁定）由其自己的[设计](2026-10-11-managed-child-snapshot.zh-CN.md)实现。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H）的隔离切片，由 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 跟踪。它拆分自 H4c（[#13743](https://github.com/QwenLM/qwen-code/issues/13743)，PR #13754），其[设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)在决策 11 中确定了词汇。它承接 H4a（[记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md)）与 H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）。
 
 ## 问题与范围
 
@@ -38,9 +38,9 @@ Issue #13753 要求三项：
    - `git merge-tree --write-tree --merge-base=S P C` 计算合并树 `M`，不触碰任何工作区或 index。
    - 冲突时，行以 `conflicted` 结束并带上冲突路径（最多记录 100 条），父中不写入任何内容。合并冲突是一个持久结果，绝不是静默覆盖。worktree 与 base pin 立即被移除，而 child 的结果仍被 pin 住（决策 4）；随后由丢弃让该行退役。
    - 干净合并时，只写入 `P` 与 `M` 之间有差异的路径，作为父工作区中的未提交改动。父的 index 与 `HEAD` 保持原样，所以 child 的工作到达时就像父自己做的编辑一样。
-   - 干净合并中有两类路径无法写入，它们像冲突一样让行以 `conflicted` 结束：合并移动了的子模块指针，因为补丁无法移动它；以及合并新增、但父在该处持有被忽略的文件或目录，或在该路径某个上级目录的位置持有被忽略文件的路径，因为写入会覆盖 `P` 不包含的内容。名字不是 UTF-8 的路径也同样报告，因为写入无法逐字节写出它的名字。
+   - 干净合并中有三类路径无法写入，它们像冲突一样让行以 `conflicted` 结束：合并移动了的子模块指针，因为补丁无法移动它；合并新增、但父在该处持有被忽略的文件或目录，或在该路径某个上级目录的位置持有被忽略文件的路径，因为写入会覆盖 `P` 不包含的内容；以及合并删除、而其内容既不在父 `HEAD` 的该路径上、也没有被合并写到其他路径的路径，因为唯一的另一份副本是 base 快照，它的 pin 在行结束时随之移除。父的 index 不算保有：父下一次 `git add -A` 会暂存这次删除，并丢掉没有任何提交持有的条目。检查不再往别处看：合并未改动的其他路径上的副本不算保有，空文件也与其他文件一样判断，所以这两种删除都是冲突，而不是丢失。名字不是 UTF-8 的路径也同样报告，因为写入无法逐字节写出它的名字。
 6. **写入可续做，并逐路径检查。** `P` 与 `M` 在写入任何内容之前记录。每次写入尝试都会对当前工作区 `W` 做快照，并要求每个变化路径要么是它的 `P` 版本，要么是它的 `M` 版本；仍处于 `P` 的路径用一次树到树补丁的 `git apply` 写成 `M`。每个变化路径都按磁盘上的实际内容判断，无论是否被忽略，所以父忽略的合并路径（child 运行期间父开始忽略该目录，或 child 强制添加了该路径）既不会被校验拒绝，也不会被写两次。因此在两个文件之间崩溃，会从停下的地方续做。任何其他内容都意味着 lease 之外有东西改了树；行以 `blocked` 结束，不覆盖任何内容。补丁的格式是固定的（无颜色、三行上下文），否则仓库配置可能让它无法应用。写入之后，对照 `M` 校验树。合并与它的写入在同一个维护 hold 下运行（决策 10），所以在算出 `M` 与写入之间，没有 tool turn 能改动父的目录树。
-   - 随后在同一个 hold 下，行先迁移到 `applied`，再移除 worktree 与 pin。续做的 `applied` 行只做这些移除，绝不再次判断父的目录树：此后 storage 已经空闲过，那里的编辑是父自己的。唯一剩下的窗口是写入落地与这条记录之间的失败；续做的 `applying` 行会重新检查目录树，若期间有 tool turn 编辑了某个合并路径，则以 `blocked` 结束。
+   - 随后在同一个 hold 下，行先迁移到 `applied`，再移除 worktree 与 pin。续做的 `applied` 行只做这些移除，绝不再次判断父的目录树：此后 storage 已经空闲过，那里的编辑是父自己的。唯一剩下的窗口是写入落地与这条记录之间的失败；续做的 `applying` 行会重新检查目录树，若期间有 tool turn 编辑了某个合并路径，或某个尚未写入的删除已不再通过决策 5 的检查，则以 `blocked` 结束。
 7. **丢弃移除 worktree，保留产出的工作。** 丢弃用 `git worktree remove` 移除已注册的 worktree，然后在不跟随其中任何符号链接的前提下移除预留路径上剩下的一切，移除该 worktree 自己的管理目录（`<commonDir>/worktrees` 下 `gitdir` 指向它的那一项；绝不使用 `git worktree prune`，它会连父的 worktree 一起判断），移除 child 创建的 refs，并删除 base pin。预留路径属于控制面，所以模型在那里替换或清空过的目录也会被移除，留在那里的符号链接只作为链接被移除，绝不跟随。记录的仓库已不存在时（其顶层没有 Git 目录），只移除目录。其他任何拒绝，例如不安全的配置（决策 11）、变化了的布局或瞬时故障，都会像其他步骤一样让丢弃失败，所以注册与 pin 的清理绝不会被跳过。丢弃是失败与取消 child 的收尾，也是走出 `conflicted` 与 `blocked` 的出口。
    - child 创建的分支或 tag 落在仓库共享的 refs 中，移除 worktree 触及不到它们。worktree 创建之前，仓库的 ref 名称被记录在它旁边（`.qwen-child-workspaces/<id>.refs`）。存在结果时，移除 worktree 的那次丢弃会先读取 child 的 `HEAD`，然后删除每个不在该记录中、包含该 child 自己 base（见决策 3）、且位于该 `HEAD` 那条线上的 ref（这条线的最终内容由结果持有）；符号 ref 只删除其本身，绝不删除其目标。偏离这条线的侧分支保持不动，所以只被某个 ref 持有的提交不会丢失；没有结果，或 worktree 已不存在或无法安全读取时，什么都不删。一旦 base 进入了别人的历史，就什么都不删：父的 `HEAD`、父原有的 ref（即使被 child 移动过）、某个 worktree 检出着的 ref，或另一个 child 的 pin 包含了它，例如父合并了某个 child 的分支之后。`refs/stash`（它唯一的 reflog 也保存着父的 stash）永远不删，所以 child 的 stash 会留在 stash 列表中。不是常规文件或超过 16 MiB 的记录不会被读取，此时什么都不删；记录名字处的任何东西都随 worktree 一起移除。父自己在 child 运行期间指向 child 那条线、但没有并入它原有 ref 或 `HEAD` 的分支，仍适用这条规则，会与 child 自己的分支一起被删除；其中的提交仍留在结果中。
 8. **每个 child run 一条持久行。** `qwen_managed_child_workspace`（V60）对每个（tenant、父 Session、child run）保存一行。状态如下：
@@ -79,6 +79,7 @@ Issue #13753 要求三项：
 15. **I3 的方向。**
     - 串行共享不需要单独的取值。storage lease 一次只接纳一个 holder，而 storage 的每个写入方（父、`shared` child、`worktree` child 或 child Workspace 维护）都在写入前获取它。因此它们中任何两个都不能同时持有 storage，lease 本身就是 2026-10-04 问题框架所要求的 generation barrier。
     - `snapshot` 可以复用本能力：一个总是被丢弃的 child Workspace，绑定到一个工具 profile 拒绝所有写入的 child。由 I3 决定 profile 级别的拒绝是否足以作为「不能写」的证据。
+    - I3 已裁定这两点：串行化的裁定为最终结论；拒绝方式是在结束时丢弃的 child Workspace 之上使用只读 profile（`read_file`、`glob`），行记录自己的模式（I3 决策 4、5、9）。
 
 ## 记录与表
 
@@ -112,7 +113,7 @@ Issue #13753 要求三项：
 
 ## 受影响的文件
 
-- `packages/sdk-java/managed-agent-server/src/main/resources/db/migration/V60__managed_child_workspace.sql`：新表与 lease 列。
+- `packages/managed-agent-server/src/main/resources/db/migration/V60__managed_child_workspace.sql`：新表与 lease 列。
 - `service/ChildWorktreeGit.java`：加固的 Git 执行器与各物理步骤（布局检查、快照、创建、结果、合并、写入、丢弃）。`service/ChildWorkspaceException.java`：它们的失败码。
 - `service/ChildWorkspaceProvider.java`：`RuntimeWarmer.childWorkspaces()` 回答的 provider 接口。`EmbeddedRuntimeBroker` 基于 `service/WorkspaceRuntimeResolver.java` 新增的 `storageRoot`（经校验的挂载根）实现它。
 - `service/ChildWorkspaceService.java`：`prepare`、`finish`、`find`、定时 scan 与状态机。
@@ -124,12 +125,12 @@ Issue #13753 要求三项：
 
 ## 验证
 
-- **Git 步骤**（`ChildWorktreeGitTest`，48 个用例，在临时目录中针对真实仓库）：
+- **Git 步骤**（`ChildWorktreeGitTest`，58 个用例，在临时目录中针对真实仓库）：
   - 快照：无论父的 index 如何标记（`skip-worktree`、`assume-unchanged`、暂存了不同版本），都携带工作区内容而不携带被忽略的文件；不触碰父的 index、`HEAD` 与 status；结果确定；开启 `core.safecrlf` 的仓库既不会让它失败，也不会刷屏。
   - 布局：offset，以及决策 2 的每一种拒绝，包括位于仓库内的 storage 根，以及写成 `true`、`2` 或无值的稀疏检出（空值可以通过）。
   - 配置：不安全配置被拒绝且其过滤器程序从未运行；include 被拒绝；由 `2` 或无值键开启的 `config.worktree` 同样会被读取；对 child 自己的 `config.worktree` 做同样的检查；布尔值矩阵；被拒绝键的矩阵；promisor 远端以 `child_workspace_unsafe_config` 被拒绝，其传输程序从未运行。
   - 覆盖项：仓库的 `core.hooksPath` hook、默认 hooks 目录中的 `post-checkout` 与 `reference-transaction`，以及仓库的 `core.fsmonitor` 都从未运行；每条命令只看到执行器自己的环境。
-  - 合并与写入：干净合并以未提交改动落地，`HEAD` 与 index 不被触碰；child 的提交按内容合并；worktree、两个 pin 以及 child 的分支和 tag 被移除，父的 refs 保留；清理只删除符号 ref 本身，保留 result pin 与父的 stash；清理只取 child 检出的那条线，没有结果或 worktree 已不存在时什么都不删；容器名字处是文件时丢弃仍能完成；一旦 base 进入别人的历史（父原有的分支、被检出的分支、父的分支或 detached `HEAD`、兄弟的 base），清理就不再删除任何东西；从同一父状态派生的兄弟各有自己的 base 与清理范围；过大而无法读取的 ref 记录让清理什么都不删，记录名字处的东西会被移除；pin 名字处的符号 ref 会被替换而不被跟随；非 ASCII 的名字能合并，不是 UTF-8 的名字算冲突；父忽略的合并路径能落地并可续做；合并把已跟踪文件变成目录时能落地；会覆盖被忽略文件、或在被忽略文件的位置放置目录的合并，以及移动了的子模块指针，都以冲突结束，写入本身也拒绝已记录的 gitlink 变化；带颜色和零上下文的 diff 配置不会破坏写入；冲突指出其路径且不写入任何内容；写入从写了一半的树续做，并拒绝覆盖在 lease 之外被修改的路径。
+  - 合并与写入：干净合并以未提交改动落地，`HEAD` 与 index 不被触碰；child 的提交按内容合并；worktree、两个 pin 以及 child 的分支和 tag 被移除，父的 refs 保留；清理只删除符号 ref 本身，保留 result pin 与父的 stash；清理只取 child 检出的那条线，没有结果或 worktree 已不存在时什么都不删；容器名字处是文件时丢弃仍能完成；一旦 base 进入别人的历史（父原有的分支、被检出的分支、父的分支或 detached `HEAD`、兄弟的 base），清理就不再删除任何东西；从同一父状态派生的兄弟各有自己的 base 与清理范围；过大而无法读取的 ref 记录让清理什么都不删，记录名字处的东西会被移除；pin 名字处的符号 ref 会被替换而不被跟随；非 ASCII 的名字能合并，不是 UTF-8 的名字算冲突；父忽略的合并路径能落地并可续做；合并把已跟踪文件变成目录时能落地；会覆盖被忽略文件、或在被忽略文件的位置放置目录的合并，以及移动了的子模块指针，都以冲突结束，写入本身也拒绝已记录的 gitlink 变化；父的 `HEAD` 与合并都不保有其内容的删除（child 解除跟踪的、父从未提交的文件，未提交的编辑，只暂存过的文件）算冲突，而父的 `HEAD` 或合并本身保有其内容的删除能落地，续做的写入拒绝 `HEAD` 已不再持有其内容的删除；带颜色和零上下文的 diff 配置不会破坏写入；冲突指出其路径且不写入任何内容；写入从写了一半的树续做，并拒绝覆盖在 lease 之外被修改的路径。
   - worktree 与丢弃：中断的检出被重建，未注册的目录被拒绝；链接形式的 `worktrees` 目录或其中的链接被拒绝，外部什么都不受影响，`refs`、`logs` 或 `objects` 中的链接同样被拒绝（否则删除 ref 时会 unlink 外部的日志），`packed-refs` 是链接时也一样；丢弃只移除自己 worktree 的注册；指向另一个仓库的 child gitfile 被拒绝；预留路径上的链接被移除而不被跟随，链接形式的容器被拒绝；丢弃会保留 result pin，在仓库被删除后仍能完成，在仓库变得不安全时保留一切，在 Git 无法运行时保留 worktree；已不存在的仓库与变化了的仓库能被区分。
   - 上限：失去 claim 的步骤不再启动 Git，并连同子进程一起终止正在运行的那条；超过时间上限的命令以同样方式被终止；任一输出流超过上限时在命令运行期间就被拒绝。
 - **版本下限**（`ChildWorktreeGitVersionTest`，使用桩可执行文件）：2.40 及以后被接受，更早的被拒绝，无法报告版本的 Git 被拒绝并带上其退出码与 stderr。需要真实 Git 的套件在主机没有 Git 2.40 时跳过，但当主机有合格的 Git 而执行器拒绝它时会失败。两个套件也在从源码构建的 Git 2.40.0 上通过。

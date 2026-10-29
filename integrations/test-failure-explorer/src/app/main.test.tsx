@@ -102,6 +102,63 @@ async function boot() {
 }
 
 describe('MCP App bridge', () => {
+  it('restores the saved effective view and keeps group queries bound to its report', async () => {
+    await boot();
+    const view = {
+      schemaVersion: 1,
+      reportId: snapshot.reportId,
+      sections: [
+        { kind: 'failure-list', groupBy: 'file', columns: ['duration'] },
+      ],
+    };
+    await act(async () =>
+      bridge.events.get('toolresult')!(showResult(snapshot, view)),
+    );
+    expect(bridge.props?.report.view).toEqual(view);
+    const query = {
+      kind: 'list',
+      collection: 'failures',
+      failureIds: ['f0:a1'],
+    } as const;
+    const input: ReportQuery = { ...query, failureIds: [...query.failureIds] };
+    bridge.callServerTool.mockResolvedValue(queryReport(snapshot, input));
+    await bridge.props!.query!(input, new AbortController().signal);
+    expect(bridge.callServerTool.mock.calls[0][0]).toEqual({
+      name: 'test_report_query',
+      arguments: { reportId: snapshot.reportId, query: input },
+    });
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps unknown saved layouts readable without host query or message capabilities', async () => {
+    bridge.getHostCapabilities.mockReturnValue({});
+    await boot();
+    const fixed = showResult(snapshot).structuredContent!;
+    await act(async () =>
+      bridge.events.get('toolresult')!({
+        structuredContent: {
+          ...fixed,
+          viewResolution: { mode: 'generated', digest: 'c'.repeat(64) },
+          view: {
+            schemaVersion: 99,
+            reportId: snapshot.reportId,
+            sections: [],
+          },
+        },
+      }),
+    );
+    expect(bridge.props?.report.viewResolution).toEqual({
+      mode: 'fixed',
+      reason: 'unsupported-view',
+    });
+    expect(bridge.props?.report.summary).toEqual(fixed['summary']);
+    expect(bridge.props?.report.firstPage).toBeUndefined();
+    expect(bridge.props?.query).toBeUndefined();
+    expect(bridge.props?.sendAnalysis).toBeUndefined();
+    expect(bridge.callServerTool).not.toHaveBeenCalled();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('enables SDK resize notifications when supplying strict connection options', async () => {
     await boot();
     // SDK 1.7.5 defaults autoResize only when the entire options argument is omitted.

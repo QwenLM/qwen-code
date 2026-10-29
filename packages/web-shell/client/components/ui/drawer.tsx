@@ -36,7 +36,10 @@ function DrawerClose({
   return <DrawerPrimitive.Close data-slot="drawer-close" {...props} />;
 }
 
-const DrawerOverlay = React.forwardRef<
+const DrawerOverlay: React.ForwardRefExoticComponent<
+  React.ComponentPropsWithoutRef<typeof DrawerPrimitive.Overlay> &
+    React.RefAttributes<HTMLDivElement>
+> = React.forwardRef<
   React.ComponentRef<typeof DrawerPrimitive.Overlay>,
   React.ComponentProps<typeof DrawerPrimitive.Overlay>
 >(function DrawerOverlay({ className, ...props }, ref) {

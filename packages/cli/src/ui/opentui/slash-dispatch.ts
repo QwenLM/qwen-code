@@ -25,6 +25,8 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { CommandService } from '../../services/CommandService.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { ensureConfigInitialized } from './live-session.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -52,13 +54,15 @@ export async function loadInteractiveCommands(
   signal?: AbortSignal,
   settings?: LoadedSettings | null,
 ): Promise<readonly SlashCommand[]> {
+  let mods = getInteractiveModSession(config);
   // Skill/MCP/project commands need the config fully initialized (the skill
   // manager is created in initialize()); without this /skills errors and
   // skill commands are missing from /-completion.
   try {
-    await config?.initialize();
+    if (config) await ensureConfigInitialized(config);
   } catch {
-    /* proceed with partial commands */
+    // Native initialization can fail before Mod startup is ever settled.
+    mods = undefined;
   }
   const loaders = [
     new McpPromptLoader(config),
@@ -67,6 +71,7 @@ export async function loadInteractiveCommands(
     new SkillCommandLoader(config),
     new SavedWorkflowLoader(config),
     new FileCommandLoader(config),
+    ...(mods ? [mods] : []),
   ];
   const disabled = config?.getDisabledSlashCommands() ?? [];
   const commandService = await CommandService.create(

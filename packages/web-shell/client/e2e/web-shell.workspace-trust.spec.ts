@@ -66,6 +66,7 @@ async function openPanel(
       replayedCount: scenario.events.length,
     }),
   );
+  await page.getByTestId('manage-workspaces').locator('../..').hover();
   await page.getByTestId('manage-workspaces').click();
   await expect(page.getByTestId('workspaces-overview-panel')).toBeVisible();
 }
@@ -109,7 +110,7 @@ test('trusts an untrusted workspace from the Projects panel', async ({
   await expect(row.getByText('untrusted')).toBeVisible();
   const trust = row.getByRole('button', { name: 'Trust', exact: true });
   await expect(trust).toBeVisible();
-  await expect(row.getByRole('button', { name: 'New task' })).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'New session' })).toHaveCount(0);
 
   await trust.click();
   await expect
@@ -121,7 +122,7 @@ test('trusts an untrusted workspace from the Projects panel', async ({
   );
 
   // The daemon agrees on the next fetch, so the row leaves its dead end.
-  const newTask = row.getByRole('button', { name: 'New task' });
+  const newTask = row.getByRole('button', { name: 'New session' });
   await expect(newTask).toBeEnabled({ timeout: 15_000 });
   await expect(trust).toHaveCount(0);
 });
@@ -139,5 +140,5 @@ test('keeps an untrusted workspace read-only on a daemon without the grant', asy
   await expect(
     row.getByRole('button', { name: 'Trust', exact: true }),
   ).toHaveCount(0);
-  await expect(row.getByRole('button', { name: 'New task' })).toBeDisabled();
+  await expect(row.getByRole('button', { name: 'New session' })).toBeDisabled();
 });

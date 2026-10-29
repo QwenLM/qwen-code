@@ -16,12 +16,12 @@ use crate::ax::bindings::{copy_action_names, kAXErrorSuccess, perform_action, AX
 use super::ToolState;
 
 pub struct PerformSecondaryActionTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 
 impl PerformSecondaryActionTool {
     pub fn new(state: Arc<ToolState>) -> Self {
-        Self { state }
+        Self { _state: state }
     }
 }
 
@@ -116,6 +116,7 @@ impl Tool for PerformSecondaryActionTool {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let cua_driver_core::element_token::ResolvedElement::Element {
             window_id: Some(window_id),
             element_index,
@@ -125,20 +126,15 @@ impl Tool for PerformSecondaryActionTool {
             return ToolResult::error("perform_secondary_action requires a current element_token")
                 .with_structured(json!({ "code": "invalid_element_target" }));
         };
-        let element =
-            match self
-                .state
-                .element_cache
-                .get_element_retained(pid, window_id, element_index)
-            {
-                Some(element) => element,
-                None => {
-                    return ToolResult::error(
-                        "element_token no longer resolves in the current AX snapshot",
-                    )
-                    .with_structured(json!({ "code": "stale_element_token" }))
-                }
-            };
+        let element = match element_cache.get_element_retained(pid, window_id, element_index) {
+            Some(element) => element,
+            None => {
+                return ToolResult::error(
+                    "element_token no longer resolves in the current AX snapshot",
+                )
+                .with_structured(json!({ "code": "stale_element_token" }))
+            }
+        };
         let element_ptr = element.as_ptr();
         let _lease = match super::gate_background_window_action(
             pid,

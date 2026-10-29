@@ -43,6 +43,13 @@ delete process.env['QWEN_RUNTIME_DIR'];
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
+
+// The extraction-cadence experiment is default-off and its gate reads
+// process.env on every call, so an ambient export would switch it on for every
+// suite whose session schedules an extraction. Deleting rather than pinning:
+// tests that exercise the experiment stub the variable in-body.
+delete process.env[EXTRACT_NOOP_SKIP_TURNS_ENV];
 
 // QWEN_HOME is the OPERATOR's config home, and inheriting it lets the host's
 // real ~/.qwen leak into this suite: every unpinned settings read
@@ -78,8 +85,35 @@ process.env['QWEN_HOME'] = fs.mkdtempSync(
 );
 
 import { configure } from '@testing-library/react';
+import { afterEach, beforeEach } from 'vitest';
 
 import './src/test-utils/customMatchers.js';
+
+// Give every test its own autofix anchor dir so anchors never leak between
+// tests or onto the host's real ~/.qwen; a test confirms an anchor for its
+// clone via writeAnchor in its own beforeEach. Capture the base root at module
+// load, BEFORE any suite repoints TMPDIR/TEMP/TMP (script-lint-isolation does,
+// to exercise a fail-closed path): os.tmpdir() inside a beforeEach would then
+// throw ENOENT before the test body runs.
+const autofixAnchorBase = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'autofix-anchor-base-'),
+);
+let autofixAnchorDir: string | undefined;
+beforeEach(() => {
+  autofixAnchorDir = fs.mkdtempSync(path.join(autofixAnchorBase, 'case-'));
+  process.env['QWEN_AUTOFIX_ANCHOR_DIR'] = autofixAnchorDir;
+});
+afterEach(() => {
+  if (autofixAnchorDir) {
+    fs.rmSync(autofixAnchorDir, { recursive: true, force: true });
+  }
+  autofixAnchorDir = undefined;
+  delete process.env['QWEN_AUTOFIX_ANCHOR_DIR'];
+});
+
+// Capture the real timer so sync-heavy suites can drain worker RPC replies.
+const realSetTimeout = setTimeout;
+beforeEach(() => new Promise<void>((resolve) => realSetTimeout(resolve, 0)));
 
 // CI and the autofix verification gate run this suite on a shared,
 // oversubscribed host, where the testing-library default 1s async budget is

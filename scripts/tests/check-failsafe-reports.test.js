@@ -69,6 +69,8 @@ describe('check-failsafe-reports', () => {
     ['o4-oss', 'O4OssGate', 'error'],
     ['event-transport', 'EventTransportBrokerGate', 'failure'],
     ['event-transport', 'EventTransportBrokerGate', 'error'],
+    ['event-transport-multi-node', 'EventTransportMultiNodeGate', 'failure'],
+    ['event-transport-multi-node', 'EventTransportMultiNodeGate', 'error'],
   ])('rejects %s %s %s even with Maven failure-ignore', (family, gate, tag) => {
     const className = `com.example.${gate}`;
     const dir = module('failed', [className]);
@@ -85,6 +87,7 @@ describe('check-failsafe-reports', () => {
     ['o4-mysql', 'O4MySqlGate'],
     ['o4-oss', 'O4OssGate'],
     ['event-transport', 'EventTransportBrokerGate'],
+    ['event-transport-multi-node', 'EventTransportMultiNodeGate'],
   ])(
     'requires complete opt-in %s evidence without changing the ordinary family',
     (family, gate) => {
@@ -93,6 +96,7 @@ describe('check-failsafe-reports', () => {
         'com.example.O4MySqlGate',
         'com.example.O4OssGate',
         'com.example.EventTransportBrokerGate',
+        'com.example.EventTransportMultiNodeGate',
       ];
       const complete = module('complete', sources, {
         [`com.example.${gate}`]: [3, 0],
@@ -142,6 +146,38 @@ describe('check-failsafe-reports', () => {
       'com.example.HostedFlowIT': [1, 0],
     });
     expect(check('hosted', hosted).status).toBe(0);
+  });
+
+  it('exempts a class the module binds to surefire, and fails when the pom disagrees', () => {
+    // The real module name, because the exemption is keyed on it: the pom binds
+    // ManagedAgentPackagingIT to a surefire execution and excludes it from the
+    // mysql-integration failsafe, so it can never satisfy the non-hosted roster.
+    const name = 'packages/managed-agent-server';
+    const sources = [
+      'com.example.ManagedAgentPackagingIT',
+      'com.example.OrdersIT',
+    ];
+    const bound = module(name, sources, { 'com.example.OrdersIT': [1, 0] });
+    writeFileSync(
+      join(bound, 'pom.xml'),
+      '<project><plugin><configuration><includes><include>**/ManagedAgentPackagingIT.java</include></includes></configuration></plugin><plugin><configuration><excludes><exclude>**/ManagedAgentPackagingIT.java</exclude></excludes></configuration></plugin></project>',
+    );
+    const exempt = check('non-hosted', bound);
+    expect(exempt.output).toContain(
+      'ManagedAgentPackagingIT runs under surefire, not failsafe',
+    );
+    expect(exempt.status).toBe(0);
+
+    // Drift guard: the exemption is only valid while the pom keeps both bindings.
+    writeFileSync(
+      join(bound, 'pom.xml'),
+      '<project><plugin><configuration><excludes><exclude>**/ManagedAgentPackagingIT.java</exclude></excludes></configuration></plugin></project>',
+    );
+    const drifted = check('non-hosted', bound);
+    expect(drifted.output).toContain(
+      'no longer binds it to a surefire include',
+    );
+    expect(drifted.status).toBe(1);
   });
 
   it('counts the test cases failsafe folds into an outer report', () => {

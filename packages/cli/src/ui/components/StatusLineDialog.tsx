@@ -9,29 +9,24 @@ import { useCallback, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { SettingScope } from '../../config/settings.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import type { UIState } from '../contexts/UIStateContext.js';
-import { MultiSelect, type MultiSelectItem } from './shared/MultiSelect.js';
+import { MultiSelect } from './shared/MultiSelect.js';
 import {
-  aggregateModelTokens,
-  buildStatusLinePresetData,
   buildStatusLinePresetLines,
-  DEFAULT_STATUS_LINE_PRESET_CONFIG,
-  normalizeStatusLinePresetConfig,
-  orderStatusLinePresetItems,
-  STATUS_LINE_PRESET_ITEMS,
   type StatusLinePresetConfig,
-  type StatusLinePresetItemId,
 } from '../statusLinePresets.js';
-
-type StatusLineOption =
-  | { kind: 'theme-colors' }
-  | { kind: 'separator' }
-  | { kind: 'item'; id: StatusLinePresetItemId };
+import {
+  buildInitialSelectedKeys,
+  buildConfigFromKeys,
+  getEffectiveStatusLineScope,
+  getPreviewData,
+  STATUS_LINE_OPTIONS,
+  STATUS_LINE_DIALOG_FIXED_ROWS,
+} from '../status-line-model.js';
 
 interface StatusLineDialogProps {
   settings: LoadedSettings;
@@ -41,87 +36,6 @@ interface StatusLineDialogProps {
   onSaved?: (config: StatusLinePresetConfig) => void;
   onClose: () => void;
   availableTerminalHeight?: number;
-}
-
-const THEME_COLORS_KEY = 'theme-colors';
-const DESCRIPTION_COLUMN = 24;
-// border + paddingY + title + subtitle + search + margins + preview + footer
-const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
-
-const STATUS_LINE_OPTIONS: Array<MultiSelectItem<StatusLineOption>> = [
-  {
-    key: THEME_COLORS_KEY,
-    value: { kind: 'theme-colors' },
-    label: `${'Use theme colors'.padEnd(DESCRIPTION_COLUMN)} Apply colors from the active /theme`,
-  },
-  {
-    key: 'statusline-separator',
-    value: { kind: 'separator' },
-    label: '─'.repeat(23),
-    disabled: true,
-    separator: true,
-  },
-  ...STATUS_LINE_PRESET_ITEMS.map((item) => ({
-    key: item.id,
-    value: { kind: 'item' as const, id: item.id },
-    label: `${item.label.padEnd(DESCRIPTION_COLUMN)} ${item.description}`,
-  })),
-];
-
-function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
-  const preset =
-    normalizeStatusLinePresetConfig(settings.merged.ui?.statusLine) ??
-    DEFAULT_STATUS_LINE_PRESET_CONFIG;
-  return [
-    ...(preset.useThemeColors ? [THEME_COLORS_KEY] : []),
-    ...preset.items,
-  ];
-}
-
-function buildConfigFromKeys(keys: readonly string[]): StatusLinePresetConfig {
-  const selected = new Set(keys);
-
-  return {
-    type: 'preset',
-    useThemeColors: selected.has(THEME_COLORS_KEY),
-    items: orderStatusLinePresetItems(keys),
-  };
-}
-
-function getEffectiveStatusLineScope(settings: LoadedSettings): SettingScope {
-  if (settings.forScope(SettingScope.System).settings.ui?.statusLine) {
-    return SettingScope.System;
-  }
-  if (
-    settings.isTrusted &&
-    settings.forScope(SettingScope.Workspace).settings.ui?.statusLine
-  ) {
-    return SettingScope.Workspace;
-  }
-  return SettingScope.User;
-}
-
-function getPreviewData(config: Config, uiState: UIState) {
-  const stats = uiState.sessionStats;
-  const metrics = stats.metrics;
-  const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(metrics);
-  const contentGeneratorConfig = config.getContentGeneratorConfig();
-
-  return buildStatusLinePresetData({
-    sessionId: stats.sessionId,
-    version: config.getCliVersion(),
-    modelDisplayName: config.getModelDisplayName(),
-    reasoning: contentGeneratorConfig?.reasoning,
-    currentDir: config.getTargetDir(),
-    branch: uiState.branchName,
-    contextWindowSize: contentGeneratorConfig?.contextWindowSize || 0,
-    currentUsage: stats.lastPromptTokenCount,
-    totalInputTokens,
-    totalOutputTokens,
-    totalLinesAdded: metrics.files.totalLinesAdded,
-    totalLinesRemoved: metrics.files.totalLinesRemoved,
-    streamingState: uiState.streamingState,
-  });
 }
 
 export function StatusLineDialog({

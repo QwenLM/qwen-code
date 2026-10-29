@@ -12,7 +12,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 // Registered locations cover the legacy upgrades and the fresh managed-schema
-// baseline shared by Server and Broker; versions are checked across dependencies.
+// baseline in Managed Agent Server; versions are checked across dependencies.
 // Flyway scans each location AND its subdirectories, and nowhere else — a
 // versioned-migration file anywhere
 // else under the source root is invisible to it, so finding one there means

@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 import { DialogManager } from './DialogManager.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -47,18 +47,19 @@ const createUIState = (overrides: Partial<UIState>): UIState =>
     ...overrides,
   }) as UIState;
 
+const dialogTree = (uiState: UIState) => (
+  <UIStateContext.Provider value={uiState}>
+    <UIActionsContext.Provider value={{} as UIActions}>
+      <DialogManager addItem={vi.fn()} terminalWidth={100} />
+    </UIActionsContext.Provider>
+  </UIStateContext.Provider>
+);
+
 const renderDialogManager = (
   uiState: UIState,
   config: Partial<Config>,
 ): ReturnType<typeof renderWithProviders> =>
-  renderWithProviders(
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={{} as UIActions}>
-        <DialogManager addItem={vi.fn()} terminalWidth={100} />
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>,
-    { config: config as Config },
-  );
+  renderWithProviders(dialogTree(uiState), { config: config as Config });
 
 describe('DialogManager', () => {
   // The picker's list comes from the hook, which re-reads the style
@@ -114,6 +115,53 @@ describe('DialogManager', () => {
       open({ constrainHeight: false, terminalHeight: 24 });
       expect(statsDialogProps.last).toBeDefined();
       expect(statsDialogProps.last?.sessionAvailableHeight).toBeUndefined();
+    });
+  });
+
+  describe('provider update prompt', () => {
+    const request = (id: number, providerLabel: string) => ({
+      id,
+      entries: [
+        {
+          providerLabel,
+          diff: {
+            added: ['new-model'],
+            removed: [],
+            currentModelAffected: false,
+          },
+        },
+      ],
+      onConfirm: vi.fn(),
+    });
+
+    // A queued prompt replaces the previous one in the same render, so
+    // without a remount it would inherit the row highlighted there.
+    it('opens the next queued prompt on its default choice', async () => {
+      const config = {} as Config;
+      const { lastFrame, stdin, rerender } = renderDialogManager(
+        createUIState({ providerUpdateRequest: request(1, 'Coding Plan') }),
+        config,
+      );
+      stdin.write('\u001B[B');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      stdin.write('\u001B[B');
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('› 3. Remind me later');
+      });
+
+      rerender(
+        withProviders(
+          dialogTree(
+            createUIState({ providerUpdateRequest: request(2, 'Token Plan') }),
+          ),
+          { config },
+        ),
+      );
+
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('Token Plan');
+        expect(lastFrame()).toContain('› 1. Update all');
+      });
     });
   });
 });

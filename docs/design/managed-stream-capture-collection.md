@@ -2,6 +2,19 @@
 
 [English](managed-stream-capture-collection.md) | [简体中文](managed-stream-capture-collection.zh-CN.md)
 
+## Current status after schema consolidation
+
+The P1 implementation below records the original `4a3b8f3c08` baseline. On
+`06efd789b1`, the shared schema uses `ma_resource`, `ma_resource_ref`, and a
+`SESSION_RESOURCE_GC` operation. The collector now releases retired Session
+record/journal owners before collecting unreferenced `MYSQL_INLINE` bodies in
+either `PUBLISHED` or `REFERENCED` state, without a kind whitelist. The older
+claims below that MCP records and journal-referenced manifests remain pinned
+permanently no longer describe current SQL collection. See the
+[MCP lifecycle contract and witness](managed-mcp-retention-lifecycle.md).
+Private CSI Sessions remain excluded, and the physical GC default and
+deployment gates remain unchanged.
+
 ## Problem and baseline
 
 O4 (`managed-tool-output-retention.md`) made the physical collection of tool
@@ -160,8 +173,12 @@ never hold the live-session scheduler.
    recovery or migration operation pinned the Session). Each failure
    reschedules with the
    same backoff taxonomy as the publication collector: `recovery_protected`
-   waits 24 hours, `grace_period` waits until `retired_at + grace`, and every
-   other blocker waits 60 seconds.
+   waits 24 hours, `grace_period` waits until `retired_at + grace`,
+   `reader_active` waits until the last read lease expires, capped at one claim
+   interval, and every
+   other blocker waits 60 seconds. While the Session ledger has not settled,
+   the publication collector rechecks `resource_referenced` every 5 seconds
+   instead of a full minute, because the Session collector owns that handoff.
 3. A confirmed claim holds the ledger for 60 seconds. Each page runs in its
    own new transaction: claim's locks and blocker evaluation committed with
    claim's transaction, so the page first re-takes the tenant and Session
@@ -275,7 +292,7 @@ Rollout notes:
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` named check                                                                                                                                                                |
 | `config/ToolPublicationConfiguration.java`                | Collector bean on the existing scheduler                                                                                                                                                        |
 | `store/SessionResourceCollectionCollectorTest.java` (new) | Predicate, blockers, paging, fencing, byte-exact accounting, retirement-fenced outcomes                                                                                                         |
-| `packages/sdk-java/managed-agent-server/README.md`        | Operations paragraph                                                                                                                                                                            |
+| `packages/managed-agent-server/README.md`                 | Operations paragraph                                                                                                                                                                            |
 
 Out of this change: `ToolPublicationRetentionStore`,
 `ToolPublicationCollector`, and every TS package are untouched except for
@@ -322,7 +339,10 @@ operators ask for fleet numbers.
 - P2 (MCP result retention) and P3 (media and shared outputs) are separate
   slices of #13534 with different reference closures: the MCP records' set-once
   ref rules and the omni object store's cross-session content addressing need
-  their own designs.
+  their own designs. After schema consolidation, the current
+  [private SQL media lifecycle](managed-media-retention-boundary.md) is covered
+  by the generic retired-owner collector. Physically shared Hosted/omni media
+  and its complete reference-release lifecycle remain future work.
 - The local file runtime (`LocalToolResultSegmentStore`, filesystem layout
   under the runtime base directory) is unmanaged by this design; its retention
   is a separate host-local problem.

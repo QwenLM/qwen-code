@@ -26,7 +26,7 @@ import {
 // approvals (`managed-team_plan`), all held by the lead Session. They keep
 // the Legacy team vocabulary of packages/core/src/agents/team. The shared
 // fixtures in contracts/managed-team-record-v1.fixtures.json pin them, and
-// ManagedTeamRecords in packages/sdk-java/managed-agent-server replays the
+// ManagedTeamRecords in packages/managed-agent-server replays the
 // same cases. See docs/design/2026-10-10-managed-agent-teams.md.
 
 export const MANAGED_TEAM_LIMITS = Object.freeze({

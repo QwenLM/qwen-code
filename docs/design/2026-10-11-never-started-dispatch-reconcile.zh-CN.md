@@ -2,11 +2,10 @@
 
 [English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
 
-状态：提案（2026-10-11，作者 wenshao）
+状态：reload 对账已随 #13917 合入；回合内后台 Shell 取证（#13937）随本次改动落地。原设计 2026-10-11，作者 wenshao。
 跟踪：#12380 阶段 H → #12827，#13532 验收运行的发现 **A3**。
-不在范围内：A1 本体（#13789，已合入）、跨 Session 楔死（#13800）、
-启用 `monitor_run` 或 `child_run` 的 `shell` kind，以及 #13801 的
-Gap A（回合内「从未启动」取证门 —— 见「有意不做的事」）。
+
+范围：#13801 的 reload 对账与独立的 #13937 回合内后台 Shell 取证。A1 执行启用、跨 Session 楔死与 Monitor 行缺失取证继续不在这两条路径内。
 
 ## 问题陈述
 
@@ -35,9 +34,14 @@ R3 —— 不放宽：含糊的结果必须保持阻塞，绝不被报为「从�
 
 ## 关键证据链（全部在当前 HEAD 核实）
 
-1. **对一次 `is_background` 派发，缺失 `:process` 行是「从未启动」
-   的完整证明** —— 该行也只为 `is_background` 派发入账
-   （`RuntimeBrokerService.admitBackgroundProcess`）。
+1. **对一次 `is_background` 派发，只有先经过排除迟到准入的生命周期边界，
+   再缺失 `:process` 行，才是「从未启动」的完整证明** —— reload 为对账路径提供
+   该边界，存活回合则通过成功的取消屏障取得它。该行只为那一次执行入账，并按派发所属的 hold 家族
+   入账（`is_background` 为 `ManagedHoldFamily.SHELL`，`is_monitor` 为
+   `ManagedHoldFamily.MONITOR`；两者都经
+   `RuntimeBrokerService.admitBackgroundProcess`，共用同一个键）。
+   缺失读取不区分家族，因此它只是「正在被结算的那个家族」的
+   从未启动证明。
    `RuntimeBrokerService` 在 execute 准入时、_早于_ `beginDispatch`，
    于同一个 `.thenApply` 块内入账 `:process` 账本行（键为
    `<executionCallId>:process`，JDBC 持久化，
@@ -83,7 +87,7 @@ not_started_proven` 是许可的执行步，`running → failed` 是许可的
    `stopReason`。回合内 arm 提交的正是这个 body。记录从不携带
    `startReceiptRef` —— 恰是 never-started 结算所要求的形态。
 
-## 拟议设计
+## 设计
 
 ### 新模块：会话开的对账扫描
 
@@ -131,6 +135,41 @@ started: false })` → 经 `commitExtensionRecord` 提交
    `ambiguous_state` —— 永久性空洞（凭据错误）不再与瞬时不可达
    输出逐字节相同的行。
 
+### 回合内后台失败取证（#13937）
+
+tool-turn 的 catch 处理 publication 行尚未创建时失败的后台 Shell 预留。
+保留 grant owner 的 `NOT_STARTED` 证明。close 请求失败或没有返回状态时，
+后备路径先要求原 Broker 确认取消。Broker 在 Session 锁下持久化取消，并在
+等待中的 publication 安装结束后重新检查，因此成功应答会阻止迟到的进程
+入账与派发。随后才通过 `backgroundProcessStatus(executionCallId)` 查询同一原
+Broker。任何明确状态都是反证，不得被后备查询覆盖。因此 publication 缺失时，
+也必须先跨过取消屏障，再由独立进程账本返回确定性的 404，才允许结算。只有带类型的
+`runtime_execution_not_found` 应答解析为行缺失，才允许在存活回合内执行
+`settleFailed(..., { stopReason: 'start_failed', started: false })`。
+行存在、unknown、身份不匹配或查询被拒绝时，记录继续未结算；publication
+报错本身永远不是未启动证明。
+
+当一个失败回合包含多个后台 Shell binding 时，每个 grant owner 返回的
+`NOT_STARTED` 都会立即结算对应记录；剩余 grant owner 判定全部完成后，再并发
+启动所有允许执行的进程账本探测。因此 Broker 静默无响应只消耗
+一个 30 秒探测窗口，而不是每个 binding 各消耗一个窗口。reload 扫描器和
+回合内恢复分支共用同一探测判定：只有账本行缺失才能证明 never-started；
+账本行存在时报告 `ambiguous_state (<state>)`；查询被拒绝时报告
+`probe_rejected (<safe detail>)`。诊断包含 execution id，可在不插入
+rejection message 的前提下区分两个已知 Broker 契约错误与传输错误类型，
+并记录每个由进程账本证明后成功结算的记录。
+
+此后备取证仅适用于后台 Shell 请求。Monitor 派发会创建自己的 `:process`
+行，但 `request.background` 会有意排除它们；其结算继续由 Monitor 专属的
+grant 与远程证据路径负责。不增加 acquire、release、派发或协议字段。记录
+已证明的 child 终态后，原 Turn 仍报告需要恢复；不宣称批次中的其它不确定
+调用已完成。
+
+回归用例先拒绝 reserve，再因 publication 缺失拒绝 `close_not_started`。
+只有取消屏障成功且原进程明确不存在时才要求立即结算 child；取消失败、进程行
+存在或 Broker 不可达时，保留拒绝结算行为。Broker 侧另有回归钉住：publication
+安装延迟期间一旦持久化取消，安装随后完成也不得迟到派发。
+
 ### 挂点：hosted 会话 open
 
 在 `registerHostedHarnessSessionRoutes` 的 open/load 处理里
@@ -160,19 +199,12 @@ if (session.childRuns && brokerOptions)
 - 不做 `monitor_run` arm：monitor 记录在同一窗口搁浅，但 issue 的
   R1 只针对 `child_run`（monitor 的 `dispatchStarted` 连
   `state: 'admitted'` 都不变，是**少报**方向，属 #13377 的镜像 ——
-  另一种症状，不在范围内）。证明本身同样不可迁移：`:process` 账本行
-  只为 `is_background` 派发入账
-  （`RuntimeBrokerService.admitBackgroundProcess`），而 monitor 的输入
-  携带 `is_monitor`、绝不携带 `is_background`，因此根本没有可缺失的
-  行，「缺失即证明」对 `monitor_run` 不成立 —— 向那里扩展必须先找到
-  另一种证明。
-- 不修 #13801 R1 的 Gap A —— 回合内取证门：当一次后台 reserve 从未
-  落下 publication 行（容量或 owner 拒绝、`await_runtime` 检查点缺
-  失），回合内的 `close_not_started` arm 无法证明「从未启动」，这样
-  的记录只能搁浅到某次重开运行本 arm —— 而常驻 Session 可能永远不会
-  重开。补上另一半位于 `hosted-workspace-tool-turn.ts` 的派发路径，
-  是它自己的后续工作（跟踪为 #13937），且落地时必须保持
-  「仅行缺失」（R3）。
+  另一种症状，不在范围内）。Monitor 派发会在
+  `ManagedHoldFamily.MONITOR` 下写入自己的 `:process` 行，但本设计不复用
+  该缺失读取：monitor 记录、hold、停止证据与最终输出分别由专属生命周期
+  负责。向那里扩展前，必须先定义 Monitor 专属的结算契约与见证。
+- reload 扫描器不处理 #13801 R1 Gap A 的存活回合失败路径。该路径由
+  上述 #13937 后备取证单独覆盖，保留同一原进程账本的行缺失证明。
 - 不做周期扫描器：按 R1 只做 reload。open 时 Broker 不可达留下的洞，
   留到下一次 reload 自愈；严格好于今天（永远没有）。
 - 探测后不 `release()`：release 会持久 `RELEASED` 并楔死该 runtime
@@ -222,14 +254,16 @@ execution: 'not_started_proven'} }`，`valid: true` —— 由现有 TS 与
 
 ## 受影响文件
 
-| 文件                                                                                    | 改动                    |
-| --------------------------------------------------------------------------------------- | ----------------------- |
-| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **新增**，arm 本体      |
-| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **新增**，见证          |
-| `packages/cli/src/serve/hosted-harness-session.ts`                                      | open 时调用 arm（很小） |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | 接线见证                |
-| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 组后继对             |
-| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | 本文档                  |
+| 文件                                                                                    | 改动                     |
+| --------------------------------------------------------------------------------------- | ------------------------ |
+| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **新增**，arm 本体       |
+| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **新增**，见证           |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | 回合内后备取证           |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | 进程缺失与不确定结果见证 |
+| `packages/cli/src/serve/hosted-harness-session.ts`                                      | open 时调用 arm（很小）  |
+| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | 接线见证                 |
+| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 组后继对              |
+| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | 本文档                   |
 
 ## 未决问题
 

@@ -24,6 +24,8 @@ import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   decodeChildLaunchEnvelope,
   encodeChildLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+  type ChildLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
@@ -179,6 +181,40 @@ export function teamPlanInstruction(
   feedback: string,
 ): string {
   return `Your plan was ${decision}. ${decision === 'approved' ? 'Carry out the plan.' : 'Revise the plan and call exit_plan_mode again.'}\n<plan>\n${escapeXml(plan)}\n</plan>\n<feedback>${escapeXml(feedback)}</feedback>`;
+}
+
+/** The largest feedback a decision may carry, escaped at its worst. */
+const PLAN_FEEDBACK_RESERVE = '"'.repeat(4096);
+
+/**
+ * A plan over its continuation bound is refused with its size and the
+ * room left, both in envelope bytes: the plan as XML-escaped and then
+ * JSON-encoded inside the prompt, and the bound less the envelope with an
+ * empty plan. Both escapes map code point by code point and the plan sits
+ * between newlines, so its bytes add exactly to the empty-plan envelope:
+ * the plan fits exactly when the first figure is at most the second.
+ */
+function planBoundRefusal(
+  launch: ChildLaunchEnvelope,
+  preamble: string,
+  plan: string,
+): string {
+  const refusal =
+    'Plan exceeds its continuation envelope including escaped feedback reserve (byte_limit)';
+  let fixed: number;
+  try {
+    fixed = encodeChildLaunchEnvelope({
+      ...launch,
+      prompt:
+        preamble + teamPlanInstruction('', 'rejected', PLAN_FEEDBACK_RESERVE),
+    }).byteLength;
+  } catch (cause) {
+    if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+    // No plan fits: there is no room to name, so no size to shorten to.
+    return `${refusal}.`;
+  }
+  const needed = Buffer.byteLength(JSON.stringify(escapeXml(plan)), 'utf8') - 2;
+  return `${refusal}: it needs ${needed} bytes after XML and JSON escaping and ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes - fixed} fit. Shorten it and call exit_plan_mode again.`;
 }
 
 export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
@@ -819,20 +855,20 @@ export class HostedTeamSession {
       const launch = decodeChildLaunchEnvelope(
         await this.store.resources.read(view.head.inputRef),
       );
+      const preamble = teamMemberPreamble(
+        { name: member.name, teamName: member.team.name },
+        true,
+      );
       try {
         encodeChildLaunchEnvelope({
           ...launch,
           prompt:
-            teamMemberPreamble(
-              { name: member.name, teamName: member.team.name },
-              true,
-            ) + teamPlanInstruction(text, 'rejected', '"'.repeat(4096)),
+            preamble +
+            teamPlanInstruction(text, 'rejected', PLAN_FEEDBACK_RESERVE),
         });
       } catch (cause) {
         if (!(cause instanceof ManagedSessionRecordError)) throw cause;
-        throw new HostedTeamRefusal(
-          'Plan exceeds its continuation envelope including escaped feedback reserve (byte_limit).',
-        );
+        throw new HostedTeamRefusal(planBoundRefusal(launch, preamble, text));
       }
       const planRef = await this.store.resources.publish(
         'managed-team-content',
@@ -1341,7 +1377,9 @@ export class HostedTeamSession {
       const chains = this.chains();
       const view = hostedMemberView(chains, member.childRunId);
       const recorded = ` "${owner}" was not notified: task_update records the board only.`;
-      if (isEndedMember(view)) {
+      if (view.stoppingBeforeStart) {
+        notice = `${recorded} ${owner}'s latest continuation is being stopped before it started; if it ends without starting, ${owner} can take work again. Check task_list once it settles.`;
+      } else if (isEndedMember(view)) {
         notice = `${recorded} ${owner} cannot take more work: it ${view.stopping ? 'is being stopped' : view.stopRequestedCompletion ? 'completed after a stop was requested' : `has ${view.state}`}.`;
       } else if (view.neverStarted !== undefined) {
         const neverStarted = hostedNeverStarted(
@@ -1434,15 +1472,16 @@ export class HostedTeamSession {
     // or delete it; a new owner is checked, and so is a kept owner when the
     // call moves the task to another open status, so a member that ended
     // never lands on open work.
-    if (owner != null && owner !== task.owner)
+    if (owner != null && owner !== task.owner) {
       this.assertOwner(team, owner, status === 'completed', turnPrefix);
-    else if (
+    } else if (
       (owner === undefined || owner === task.owner) &&
       task.owner !== null &&
       status !== task.status &&
       status !== 'completed'
-    )
+    ) {
       this.assertOwner(team, task.owner, false, turnPrefix, number);
+    }
     if (
       status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
@@ -1677,7 +1716,11 @@ export class HostedTeamSession {
         : view.state === 'cancelled'
           ? 'was cancelled'
           : `has ${view.state}`;
-      // No run of it completed, so it did no task's work.
+      if (completing && view.stopping)
+        throw new HostedTeamRefusal(
+          `Member "${owner}" is being stopped and has not completed a run yet. Complete the task with this owner only after task_list shows its run completed; otherwise record the member that did it, or "leader".`,
+        );
+      // No settled run of an ended member could have done the task's work.
       if (completing)
         throw new HostedTeamRefusal(
           `Member "${owner}" ${ended} without completing a run, so it did not do this task's work. Record the member that did it, or "leader".`,
@@ -1699,7 +1742,7 @@ export class HostedTeamSession {
         this.messagesTo(view.neverStarted.childRunId),
       );
       throw new HostedTeamRefusal(
-        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}, then update the task in the same turn${unassign}.`,
+        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}. Then update the task in the same turn${unassign}.`,
       );
     }
     if (

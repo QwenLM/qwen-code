@@ -29,9 +29,9 @@ const script = join(
   '..',
   'check-flyway-open-prs.js',
 );
-const SERVER = 'packages/sdk-java/managed-agent-server';
-const BROKER = 'packages/sdk-java/runtime-broker';
-const MODULES = [SERVER, BROKER];
+const SERVER = 'packages/managed-agent-server';
+const SDK = 'packages/sdk-java/qwencode';
+const MODULES = [SERVER, SDK];
 const sql = (name, module = SERVER) =>
   `${module}/src/main/resources/db/migration/${name}`;
 const java = (name, module = SERVER) =>
@@ -43,7 +43,7 @@ let root;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'check-flyway-open-prs-'));
   onMain(sql('V1__core.sql'), sql('V53__workspace_roles.sql'));
-  mkdirSync(join(root, BROKER), { recursive: true });
+  mkdirSync(join(root, SDK), { recursive: true });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -206,17 +206,38 @@ describe('check-flyway-open-prs', () => {
     );
   });
 
+  it.each([
+    'packages/sdk-java/managed-agent-server',
+    'packages/sdk-java/runtime-broker',
+  ])(
+    'compares historical migration paths from %s against the combined module',
+    async (previous) => {
+      const { byPr } = await check([
+        pr(20001, [sql('V53__collision.sql', previous)]),
+        pr(20002, [sql('V53__workspace_roles.sql', previous)]),
+        pr(20003, [
+          [sql('V53__workspace_roles.sql', previous), 'DELETED'],
+          sql('V53__replacement.sql'),
+        ]),
+      ]);
+      expect(byPr[20001].state).toBe('failure');
+      expect(byPr[20001].description).toContain('V53__workspace_roles.sql');
+      expect(byPr[20002]).toBeUndefined();
+      expect(byPr[20003].state).toBe('success');
+    },
+  );
+
   it('tracks the shared fresh baseline and its open PR claims', async () => {
     rmSync(join(root, SERVER, 'src'), { recursive: true });
-    const baseline = `${BROKER}/src/main/resources/db/managed-schema/V1__managed_schema.sql`;
+    const baseline = `${SERVER}/src/main/resources/db/managed-schema/V1__managed_schema.sql`;
     onMain(baseline);
     expect(mainMigrations(root, MODULES)).toEqual([baseline]);
     const { byPr } = await check([
       pr(20001, [
-        `${BROKER}/src/main/resources/db/managed-schema/V01__duplicate.sql`,
+        `${SERVER}/src/main/resources/db/managed-schema/V01__duplicate.sql`,
       ]),
       pr(20002, [
-        `${BROKER}/src/main/resources/db/managed-schema/V2__next.sql`,
+        `${SERVER}/src/main/resources/db/managed-schema/V2__next.sql`,
       ]),
     ]);
     expect(byPr[20001].state).toBe('failure');
@@ -248,7 +269,7 @@ describe('check-flyway-open-prs', () => {
       pr(10001, [sql('V053__zero_padded.sql')]),
       pr(10002, [java('V1_0__trailing_zero.java')]),
       pr(10003, [sql('archive/V53__nested.SQL')]),
-      pr(10004, [sql('V53__other_module.sql', BROKER)]),
+      pr(10004, [sql('V53__other_module.sql', SDK)]),
       pr(10005, [java('V53__upper_case.JAVA')]),
     ]);
     for (const number of [10001, 10002, 10003, 10004, 10005]) {
@@ -262,7 +283,7 @@ describe('check-flyway-open-prs', () => {
   it('ignores paths outside the scanned locations, and names that claim no version', async () => {
     const { posts } = await check([
       pr(10001, [
-        'packages/sdk-java/managed-agent-server/src/test/resources/db/migration/V53__fixture.sql',
+        'packages/managed-agent-server/src/test/resources/db/migration/V53__fixture.sql',
         sql('V53__client.sql', 'packages/sdk-java/client'),
         sql('R__repeatable_view.sql'),
         sql('V53__old.sql').replace('/migration/', '/migration_old/'),
@@ -464,8 +485,8 @@ describe('check-flyway-open-prs', () => {
     expect(() => mainMigrations(root, [...MODULES, 'packages/gone'])).toThrow(
       'packages/gone: no such Maven module directory',
     );
-    expect(() => mainMigrations(root, [BROKER])).toThrow(
-      `found no migration under ${BROKER}`,
+    expect(() => mainMigrations(root, [SDK])).toThrow(
+      `found no migration under ${SDK}`,
     );
     expect(mainMigrations(root, MODULES).sort()).toEqual([
       sql('V1__core.sql'),
@@ -566,7 +587,7 @@ process.stdout.write(JSON.stringify({ data: { repository: { pullRequests: {
     };
 
     it('posts one status per claiming PR and writes the step summary', async () => {
-      const result = await cli([`./${SERVER}/`, BROKER]);
+      const result = await cli([`./${SERVER}/`, SDK]);
       expect(result.code).toBe(0);
       expect(result.summary).toBe(
         [
@@ -596,7 +617,7 @@ process.stdout.write(JSON.stringify({ data: { repository: { pullRequests: {
     });
 
     it('retries a failed call, and posts nothing on a dry run', async () => {
-      const result = await cli(['--dry-run', SERVER, BROKER], {
+      const result = await cli(['--dry-run', SERVER, SDK], {
         GH_FAILURES: '1',
       });
       expect(result.code).toBe(0);
@@ -606,7 +627,7 @@ process.stdout.write(JSON.stringify({ data: { repository: { pullRequests: {
     });
 
     it('exits non-zero after three failed attempts', async () => {
-      const result = await cli([SERVER, BROKER], { GH_FAILURES: '3' });
+      const result = await cli([SERVER, SDK], { GH_FAILURES: '3' });
       expect(result.code).toBe(1);
       expect(result.stderr).toContain(
         'HTTP 502: Bad Gateway ;;error;;forged ##［group]x',
@@ -615,7 +636,7 @@ process.stdout.write(JSON.stringify({ data: { repository: { pullRequests: {
     });
 
     it('exits non-zero when a status cannot be set', async () => {
-      const result = await cli([SERVER, BROKER], { GH_POST_FAILS: '1' });
+      const result = await cli([SERVER, SDK], { GH_POST_FAILS: '1' });
       expect(result.code).toBe(1);
       expect(result.summary).toContain(
         '  - could not set the status: HTTP 422: No commit found',

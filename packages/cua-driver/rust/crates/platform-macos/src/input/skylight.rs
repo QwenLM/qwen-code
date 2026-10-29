@@ -492,36 +492,15 @@ impl SpaceQuery {
 /// or triggering Space-follow. Ported from yabai's
 /// `window_manager_focus_window_without_raise`.
 ///
-/// Recipe:
-/// 1. `_SLPSGetFrontProcess` → capture current front PSN.
-/// 2. `SLSGetWindowOwner + SLSGetConnectionPSN` → target PSN, with
-///    `GetProcessForPID(target_pid)` as an older-system fallback.
-/// 3. Post 248-byte defocus record to front PSN (`bytes[0x8a] = 0x02`).
-/// 4. Post 248-byte focus record to target PSN (`bytes[0x8a] = 0x01`,
-///    `bytes[0x3c..0x3f]` = `target_wid` little-endian).
-///
-/// Deliberately skips `SLPSSetFrontProcessWithOptions` — see the Swift
-/// reference `FocusWithoutRaise.swift` for why omitting it keeps
-/// Chromium's user-activation gate open.
-///
-/// Returns `true` when all SPIs resolved and both posts succeeded.
+/// Post a target-only synthetic focus record. The user's front app never
+/// receives a deactivation notice (#4943). Global foreground and Space stay put.
+/// Returns true when the target PSN resolves and the focus post succeeds.
 pub fn activate_without_raise(target_pid: pid_t, target_wid: u32) -> bool {
     let post_fn = match post_event_record_to_fn() {
         Some(f) => f,
         None => return false,
     };
-    let get_front = match get_front_process_fn() {
-        Some(f) => f,
-        None => return false,
-    };
-    // 8-byte PSN buffers (two UInt32s).
-    let mut prev_psn = [0u8; 8];
     let mut target_psn = [0u8; 8];
-
-    let ok_prev = unsafe { get_front(prev_psn.as_mut_ptr() as *mut c_void) } == 0;
-    if !ok_prev {
-        return false;
-    }
 
     if !get_process_psn_for_window(target_wid, target_pid, &mut target_psn) {
         return false;
@@ -537,15 +516,11 @@ pub fn activate_without_raise(target_pid: pid_t, target_wid: u32) -> bool {
     buf[0x3E] = ((target_wid >> 16) & 0xFF) as u8;
     buf[0x3F] = ((target_wid >> 24) & 0xFF) as u8;
 
-    // Step 3: defocus previous front.
-    buf[0x8A] = 0x02;
-    let defocus_ok = unsafe { post_fn(prev_psn.as_ptr() as *const c_void, buf.as_ptr()) == 0 };
-
-    // Step 4: focus target.
+    // Focus only the target.
     buf[0x8A] = 0x01;
     let focus_ok = unsafe { post_fn(target_psn.as_ptr() as *const c_void, buf.as_ptr()) == 0 };
 
-    defocus_ok && focus_ok
+    focus_ok
 }
 
 // ── NSMenu shortcut activation ────────────────────────────────────────────────
@@ -654,72 +629,25 @@ fn post_focus_preparation(
     window_id: u32,
     preparation: super::app_focus::Preparation,
 ) -> anyhow::Result<()> {
-    let point = if preparation == super::app_focus::Preparation::Activate {
-        window_activation_point(pid, window_id)
-    } else {
-        None
-    };
-    let events = super::app_pointer::focus_events(preparation, window_id, point)?;
+    let post = post_event_record_to_fn()
+        .ok_or_else(|| anyhow::anyhow!("background key-window record transport unavailable"))?;
+    let mut target_psn = [0u8; 8];
+    if !get_process_psn_for_window(window_id, pid, &mut target_psn) {
+        anyhow::bail!("background key-window target PSN unavailable");
+    }
+    let events = super::app_pointer::focus_events(preparation, window_id)?;
     for event in &events {
         super::app_pointer::post(pid, event);
     }
-    Ok(())
-}
-
-fn window_activation_point(pid: pid_t, window_id: u32) -> Option<((f64, f64), (f64, f64))> {
-    use crate::ax::bindings::*;
-    use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
-    use core_foundation::string::CFString;
-    unsafe {
-        let app = AXUIElementCreateApplication(pid);
-        if app.is_null() {
-            return None;
+    // AppKit activation alone leaves keyWindow unset. Address only the native
+    // target window; changing WindowServer's front process would take user input.
+    for kind in [0x01, 0x02] {
+        let record = make_key_window_record(window_id, kind);
+        if unsafe { post(target_psn.as_ptr() as *const c_void, record.as_ptr()) } != 0 {
+            anyhow::bail!("background key-window record was rejected");
         }
-        let mut target = None;
-        for candidate in copy_ax_windows(app) {
-            if target.is_none() && ax_get_window_id(candidate) == Some(window_id) {
-                target = Some(candidate);
-            } else {
-                CFRelease(candidate as CFTypeRef);
-            }
-        }
-        CFRelease(app as CFTypeRef);
-        let window = target?;
-        let frame = element_screen_rect(window);
-        let mut value: CFTypeRef = std::ptr::null();
-        let status = AXUIElementCopyAttributeValue(
-            window,
-            CFString::new("AXActivationPoint").as_concrete_TypeRef(),
-            &mut value,
-        );
-        CFRelease(window as CFTypeRef);
-        if value.is_null() {
-            return None;
-        }
-        let mut point = core_graphics::geometry::CGPoint::new(0.0, 0.0);
-        let valid = status == kAXErrorSuccess
-            && CFGetTypeID(value) == AXValueGetTypeID()
-            && AXValueGetType(value as AXValueRef) == kAXValueCGPointType
-            && AXValueGetValue(
-                value as AXValueRef,
-                kAXValueCGPointType,
-                &mut point as *mut _ as *mut c_void,
-            );
-        CFRelease(value);
-        let [x, y, width, height] = frame?;
-        if !valid
-            || ![point.x, point.y, x, y, width, height]
-                .iter()
-                .all(|v| v.is_finite())
-            || point.x < x
-            || point.x > x + width
-            || point.y < y
-            || point.y > y + height
-        {
-            return None;
-        }
-        Some(((point.x, point.y), (point.x - x, point.y - y)))
     }
+    Ok(())
 }
 
 /// Make `target_pid` and `target_wid` WindowServer-frontmost and leave them
@@ -731,6 +659,7 @@ fn window_activation_point(pid: pid_t, window_id: u32) -> Option<((f64, f64), (f
 /// Returns `true` only when the target PSN resolved and WindowServer accepted
 /// `SLPSSetFrontProcessWithOptions`.
 pub fn set_front_process_persistently(target_pid: libc::pid_t, target_wid: u32) -> bool {
+    crate::window_change_detector::note_intentional_activation();
     let Some(set_front) = set_front_process_fn() else {
         return false;
     };
@@ -825,6 +754,7 @@ pub fn with_foreground_assist(
     target_wid: u32,
     body: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<bool> {
+    crate::window_change_detector::note_intentional_activation();
     let set_front = match set_front_process_fn() {
         Some(f) => f,
         None => {
@@ -915,6 +845,7 @@ pub fn with_foreground_hid_activation(
     target_wid: u32,
     action: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    crate::window_change_detector::note_intentional_activation();
     let set_front = set_front_process_fn()
         .ok_or_else(|| anyhow::anyhow!("foreground HID delivery is unavailable"))?;
 
@@ -986,6 +917,7 @@ pub fn with_menu_shortcut_activation(
     target_wid: u32,
     action: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<bool> {
+    crate::window_change_detector::note_intentional_activation();
     let set_front = match set_front_process_fn() {
         Some(f) => f,
         None => {
@@ -1076,4 +1008,178 @@ mod tests {
             true, target, target, None, 42
         ));
     }
+}
+
+type HwCaptureWindowListFn = unsafe extern "C" fn(c_int, *mut u32, c_int, u32) -> *const c_void;
+
+fn hw_capture_window_list_fn() -> Option<HwCaptureWindowListFn> {
+    static SYM: OnceLock<Option<HwCaptureWindowListFn>> = OnceLock::new();
+    *SYM.get_or_init(|| {
+        find_sym(b"SLSHWCaptureWindowList\0")
+            .or_else(|| find_sym(b"CGSHWCaptureWindowList\0"))
+            .map(|p| unsafe { as_fn(p) })
+    })
+}
+
+pub(crate) fn hw_capture_window(window_id: u32) -> Option<core_graphics::image::CGImage> {
+    use core_foundation::{
+        array::CFArray,
+        base::{CFGetTypeID, CFRetain, CFTypeRef, TCFType},
+    };
+    use foreign_types::ForeignType;
+
+    extern "C" {
+        fn CGImageGetTypeID() -> core_foundation::base::CFTypeID;
+    }
+
+    let capture = hw_capture_window_list_fn()?;
+    let cid = c_int::try_from(main_connection_id()?).ok()?;
+    let mut window = window_id;
+    // Ignore global Space clipping and request backing-store (Retina) pixels.
+    let images = unsafe { capture(cid, &mut window, 1, (1 << 11) | (1 << 8)) };
+    if images.is_null() {
+        return None;
+    }
+    let images: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(images as _) };
+    let image = *images.get(0)?;
+    if image.is_null() || unsafe { CFGetTypeID(image) } != unsafe { CGImageGetTypeID() } {
+        return None;
+    }
+    // The returned array owns the image; keep an independent retain.
+    unsafe {
+        CFRetain(image);
+        Some(core_graphics::image::CGImage::from_ptr(image as *mut _))
+    }
+}
+
+// ── Key-focus theft ───────────────────────────────────────────────────────────
+
+/// `CGError SLPSStealKeyFocusReturningID(uint32_t cid, uint32_t options, int32_t *theft_id)`
+type StealKeyFocusReturningIdFn = unsafe extern "C" fn(u32, u32, *mut i32) -> i32;
+
+/// `CGError SLPSReleaseKeyFocusWithID(int32_t theft_id)`
+type ReleaseKeyFocusWithIdFn = unsafe extern "C" fn(i32) -> i32;
+
+fn steal_key_focus_fn() -> Option<StealKeyFocusReturningIdFn> {
+    static SYM: OnceLock<Option<StealKeyFocusReturningIdFn>> = OnceLock::new();
+    *SYM.get_or_init(|| find_sym(b"SLPSStealKeyFocusReturningID\0").map(|p| unsafe { as_fn(p) }))
+}
+
+fn release_key_focus_fn() -> Option<ReleaseKeyFocusWithIdFn> {
+    static SYM: OnceLock<Option<ReleaseKeyFocusWithIdFn>> = OnceLock::new();
+    *SYM.get_or_init(|| find_sym(b"SLPSReleaseKeyFocusWithID\0").map(|p| unsafe { as_fn(p) }))
+}
+
+/// `OSStatus SLPSGetKeyFocusProcess(ProcessSerialNumber *psn, uint32_t *connection)`.
+/// Both are out-parameters; the second must be a valid pointer.
+type GetKeyFocusProcessFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+
+/// `OSStatus GetProcessPID(const ProcessSerialNumber *psn, pid_t *pid)`
+type GetProcessPidFn = unsafe extern "C" fn(*const c_void, *mut pid_t) -> i32;
+
+fn get_key_focus_process_fn() -> Option<GetKeyFocusProcessFn> {
+    static SYM: OnceLock<Option<GetKeyFocusProcessFn>> = OnceLock::new();
+    *SYM.get_or_init(|| find_sym(b"SLPSGetKeyFocusProcess\0").map(|p| unsafe { as_fn(p) }))
+}
+
+fn get_process_pid_fn() -> Option<GetProcessPidFn> {
+    static SYM: OnceLock<Option<GetProcessPidFn>> = OnceLock::new();
+    *SYM.get_or_init(|| find_sym(b"GetProcessPID\0").map(|p| unsafe { as_fn(p) }))
+}
+
+/// The pid of the process WindowServer gives key focus to: normally the
+/// frontmost app, or a non-activating panel (Spotlight-like launchers) or a
+/// menu that took it.
+pub fn key_focus_pid() -> Option<pid_t> {
+    let get = get_key_focus_process_fn()?;
+    let to_pid = get_process_pid_fn()?;
+    let mut psn = [0u8; 8];
+    // Room for whatever the second out-parameter holds (a connection id).
+    let mut second = [0u64; 2];
+    let err = unsafe {
+        get(
+            psn.as_mut_ptr() as *mut c_void,
+            second.as_mut_ptr() as *mut c_void,
+        )
+    };
+    if err != 0 || psn == [0u8; 8] {
+        return None;
+    }
+    let mut pid: pid_t = 0;
+    if unsafe { to_pid(psn.as_ptr() as *const c_void, &mut pid) } != 0 || pid <= 0 {
+        return None;
+    }
+    Some(pid)
+}
+
+/// The pid of the process WindowServer has frontmost now. Unlike
+/// `NSWorkspace.frontmostApplication`, this does not wait for the caller's
+/// AppKit run loop to process an activation notice, so it sees a background
+/// app's self-activation at once.
+pub fn front_process_pid() -> Option<pid_t> {
+    let get_front = get_front_process_fn()?;
+    let to_pid = get_process_pid_fn()?;
+    let mut psn = [0u8; 8];
+    if unsafe { get_front(psn.as_mut_ptr() as *mut c_void) } != 0 || psn == [0u8; 8] {
+        return None;
+    }
+    let mut pid: pid_t = 0;
+    if unsafe { to_pid(psn.as_ptr() as *const c_void, &mut pid) } != 0 || pid <= 0 {
+        return None;
+    }
+    Some(pid)
+}
+
+/// Whether the key-focus theft SPIs resolve on this system.
+pub fn key_focus_theft_available() -> bool {
+    steal_key_focus_fn().is_some()
+        && release_key_focus_fn().is_some()
+        && main_connection_id().is_some()
+}
+
+/// Steal key focus for this process's own connection and return the theft id.
+///
+/// WindowServer numbers thefts from one session-wide counter, so the id tells
+/// the caller which id the next theft will get. AppKit uses the same call,
+/// with the same options, when it opens a menu in an app that is not active.
+pub fn steal_key_focus() -> Option<i32> {
+    let steal = steal_key_focus_fn()?;
+    let cid = main_connection_id()?;
+    let mut id = 0i32;
+    let err = unsafe { steal(cid, 0xC80, &mut id) };
+    (err == 0 && id != 0).then_some(id)
+}
+
+/// Release a key-focus theft by id, whichever connection made it.
+/// Returns the CGError (0 on success; 1010 when no such theft is live).
+pub fn release_key_focus(theft_id: i32) -> i32 {
+    match release_key_focus_fn() {
+        Some(release) => unsafe { release(theft_id) },
+        None => -1,
+    }
+}
+
+pub fn key_window_of_pid(pid: pid_t) -> Option<u32> {
+    use crate::ax::bindings::{ax_get_window_id, copy_element_attr, AXUIElementCreateApplication};
+    let focused = unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            None
+        } else {
+            let window = copy_element_attr(app, "AXFocusedWindow");
+            core_foundation::base::CFRelease(app as _);
+            window.and_then(|window| {
+                let wid = ax_get_window_id(window);
+                core_foundation::base::CFRelease(window as _);
+                wid
+            })
+        }
+    };
+    focused.or_else(|| {
+        crate::windows::visible_windows()
+            .into_iter()
+            .filter(|w| w.pid == pid && w.layer == 0 && w.is_on_screen)
+            .max_by_key(|w| w.z_index)
+            .map(|w| w.window_id)
+    })
 }

@@ -45,6 +45,7 @@ final class HeldStreamHarness {
                     + "\"features\":[\"hosted_harness_private_v1\","
                     + "\"managed_session_journal_delta_v1\"],"
                     + "\"transports\":[\"rest\"],\"hostedHarness\":{"
+                    + "\"features\":[\"event-keepalive/1\"],"
                     + "\"protocolVersions\":{\"current\":1,"
                     + "\"supported\":[1]},\"bootId\":\"" + BOOT_ID
                     + "\",\"capabilityDigest\":\"" + DIGEST + "\"}}")

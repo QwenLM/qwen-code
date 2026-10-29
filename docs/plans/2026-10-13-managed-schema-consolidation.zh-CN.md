@@ -12,7 +12,7 @@
 
 使用 Java21 和项目锁定的 pnpm。执行 `corepack pnpm install --frozen-lockfile`，prepare 会构建整个工作区，再执行 `npm run typecheck`。先构建并安装 Runtime Broker，再构建 Server；后者消费前者的 schema 类、资源和共享契约测试 jar。同一 checkout 的 Maven 工作需串行，不能并发 clean 共用 target。
 
-在 `packages/sdk-java/runtime-broker` 执行 `mvn clean verify install`，在 `packages/sdk-java/managed-agent-server` 执行 `mvn clean verify`。检查最终应用 jar：Broker 依赖中应只有 canonical V1，不能包含旧 `db/migration` 资源或类，以及独立的 `schema.sql`。
+在 `packages/managed-agent-server` 执行 `mvn clean verify install`，在 `packages/managed-agent-server` 执行 `mvn clean verify`。检查最终应用 jar：Broker 依赖中应只有 canonical V1，不能包含旧 `db/migration` 资源或类，以及独立的 `schema.sql`。
 
 真实 MySQL 8.4 测试使用 `mysql-integration` profile，连接任务专用实例上的独立空库。部分用例通过此地址再创建随机库，其他用例直接初始化传入的库。每次 suite 使用唯一数据库，结束后仅删除该库及用例创建的子库。不能把系统 mysql 目录当作应用测试数据库，也不能使用应用数据库。JVM 时区变体在同一真实数据库上运行，并使用数据库原生时间的租约谓词。
 

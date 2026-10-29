@@ -63,6 +63,173 @@ afterEach(async () => {
 });
 
 describe('actual stdio MCP artifact', () => {
+  it('generates bounded views, safely falls back inside the handler, and replays the same immutable result', async () => {
+    const root = await temporary();
+    await copyReport(root);
+    const client = await connect(root);
+    const imported = await call(client, 'test_report_import', {
+      relativePath: 'report.json',
+    });
+    const reportId = imported.structuredContent!['reportId'];
+    const failed = await call(client, 'test_report_query', {
+      reportId,
+      query: { kind: 'list', collection: 'failures' },
+    });
+    const failureId = (
+      failed.structuredContent!['items'] as Array<{ itemId: string }>
+    )[0].itemId;
+    const passed = await call(client, 'test_report_query', {
+      reportId,
+      query: { kind: 'list', collection: 'assertions', status: 'passed' },
+    });
+    const passedId = (
+      passed.structuredContent!['items'] as Array<{ itemId: string }>
+    )[0].itemId;
+    const view = {
+      schemaVersion: 1,
+      reportId,
+      sections: [
+        {
+          kind: 'hypothesis-groups',
+          groups: [
+            {
+              label: 'Assertion evidence',
+              hypothesis:
+                'Inspect the recorded mismatch before inferring a cause.',
+              failureIds: [failureId],
+            },
+          ],
+        },
+        { kind: 'evidence', initialFailureId: failureId },
+        {
+          kind: 'failure-list',
+          groupBy: 'file',
+          columns: ['title', 'duration'],
+          initialTextFilter: 'AssertionError',
+        },
+      ],
+    };
+    const shown = await call(client, 'test_report_show', { reportId, view });
+    expect(shown.isError).not.toBe(true);
+    expect(shown.structuredContent).toMatchObject({
+      kind: 'show',
+      reportId,
+      view,
+      viewResolution: {
+        mode: 'generated',
+        digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      firstPage: { matchedCount: 1, items: [{ itemId: failureId }] },
+      initialDetail: {
+        kind: 'detail',
+        item: { itemId: failureId },
+        field: 'diagnostics',
+        offset: 0,
+      },
+    });
+    const invalidCandidates = [
+      {
+        candidate: { ...view, schemaVersion: 2 },
+        reason: 'unsupported-version',
+      },
+      {
+        candidate: { ...view, reportId: `r1_${'f'.repeat(64)}` },
+        reason: 'invalid-reference',
+      },
+      {
+        candidate: { ...view, url: 'https://example.test' },
+        reason: 'invalid-schema',
+      },
+      {
+        candidate: {
+          ...view,
+          sections: [
+            ...view.sections,
+            { kind: 'html', html: '<script>never execute</script>' },
+          ],
+        },
+        reason: 'invalid-schema',
+      },
+      {
+        candidate: { ...view, ['x'.repeat(30_000)]: 'untrusted payload' },
+        reason: 'spec-too-large',
+      },
+      ...[passedId, 'f1999:a19999'].map((id) => ({
+        candidate: {
+          ...view,
+          sections: [
+            view.sections[2],
+            { kind: 'evidence', initialFailureId: id },
+          ],
+        },
+        reason: 'invalid-reference',
+      })),
+    ];
+    for (const { candidate, reason } of invalidCandidates) {
+      const fallback = await call(client, 'test_report_show', {
+        reportId,
+        view: candidate,
+      });
+      expect(fallback.isError).not.toBe(true);
+      expect(fallback.structuredContent).toMatchObject({
+        kind: 'show',
+        reportId,
+        viewResolution: { mode: 'fixed', reason },
+        firstPage: { matchedCount: 1 },
+      });
+      expect(fallback.structuredContent).not.toHaveProperty('view');
+      expect(JSON.stringify(fallback)).not.toContain('untrusted payload');
+    }
+    for (const invalid of ['not an object', null, []]) {
+      const result = await call(client, 'test_report_show', {
+        reportId,
+        view: invalid,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent ?? {}).not.toHaveProperty(
+        'viewResolution',
+      );
+    }
+    const missing = await call(client, 'test_report_show', {
+      reportId: `r1_${'f'.repeat(64)}`,
+      view,
+    });
+    expect(missing).toMatchObject({
+      isError: true,
+      structuredContent: { code: 'REPORT_UNAVAILABLE' },
+    });
+    expect(
+      await call(client, 'test_report_query', {
+        reportId,
+        query: {
+          kind: 'list',
+          collection: 'failures',
+          failureIds: [failureId],
+        },
+      }),
+    ).toMatchObject({
+      structuredContent: { matchedCount: 1, items: [{ itemId: failureId }] },
+    });
+    for (const failureIds of [
+      [failureId, passedId],
+      [failureId, failureId],
+      [],
+    ]) {
+      expect(
+        await call(client, 'test_report_query', {
+          reportId,
+          query: { kind: 'list', collection: 'failures', failureIds },
+        }),
+      ).toMatchObject({ isError: true });
+    }
+    await client.close();
+    await rm(join(root, 'report.json'));
+    const restarted = await connect(root);
+    expect(
+      await call(restarted, 'test_report_show', { reportId, view }),
+    ).toEqual(shown);
+  }, 30_000);
+
   it('rejects malformed collections without publishing snapshots and keeps serving', async () => {
     const root = await temporary();
     await copyReport(root);

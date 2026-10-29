@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MonitorWakeTransientReadError } from './hosted-monitor-wake.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -43,6 +44,7 @@ import {
   childDispatchBody,
   childFailBody,
   childLaunchBody,
+  childRecoveryBlockedBody,
   childSettleCompletedBody,
   childStopRequestedBody,
   decodeChildLaunchEnvelope,
@@ -51,6 +53,7 @@ import {
   workflowLaunchBody,
   type ChildAdmission,
   type ChildLaunchEnvelope,
+  type PublicChildLaunchSnapshot,
   type WorkflowLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import {
@@ -99,6 +102,7 @@ import {
 /** The narrow authority/resource pair a HostedChildAgentSession commits through. */
 export interface HostedChildAgentStore {
   readonly authority: {
+    settlePendingAppend(): Promise<void>;
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
@@ -123,6 +127,7 @@ export interface HostedChildAgentStore {
 }
 
 export interface ChildAgentLaunchParams {
+  readonly publicLaunch?: PublicChildLaunchSnapshot;
   readonly childRunId: string;
   readonly ownerScopeId: string;
   readonly rootSessionId: string;
@@ -171,6 +176,8 @@ export function childLaunchAdmission(params: {
   readonly workspaceMode: ChildWorkspaceMode;
   /** #13753 I2: the control plane serves child Workspaces. */
   readonly childWorkspaces: boolean;
+  /** #13753 I3: it also serves read-only snapshots. */
+  readonly childSnapshots: boolean;
   readonly sameDefinition: boolean;
   readonly closing: boolean;
   readonly activeInScope: number;
@@ -185,6 +192,7 @@ export function childLaunchAdmission(params: {
     envelopeBytes: params.envelopeBytes,
     workspaceMode: params.workspaceMode,
     childWorkspaces: params.childWorkspaces,
+    childSnapshots: params.childSnapshots,
     sameDefinition: params.sameDefinition,
   });
 }
@@ -356,7 +364,14 @@ export function childKindLabel(
  * the record itself carries.
  */
 export function childRunEndedText(record: ChildSessionRun): string {
-  return `${childKindLabel(record.kind)} run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).${childWorkspaceEndedSuffix(record)}`;
+  // #14387: a blocked run never ended — its outcome is unwitnessed, so the
+  // sentence says blocked, never a terminal shape it did not take.
+  const blocked = record.run.state === 'recovery_blocked';
+  const state = blocked
+    ? 'recovery blocked'
+    : record.run.state.replace(/^\w/, (letter) => letter.toLowerCase());
+  const reason = blocked ? 'outcome unknown' : (record.stopReason ?? 'unknown');
+  return `${childKindLabel(record.kind)} run ${state} (${reason}).${childWorkspaceEndedSuffix(record)}`;
 }
 
 /**
@@ -492,7 +507,91 @@ export class HostedChildAgentSession {
   constructor(
     private readonly store: HostedChildAgentStore,
     private readonly key: ManagedSessionKey,
+    private readonly sourceCancelled: (promptId: string) => boolean = () =>
+      false,
+    private readonly launchEnabled: () => boolean = () => true,
   ) {}
+
+  async cancelledNotification(turnId: string): Promise<boolean> {
+    if (this.sourceCancelled(turnId)) return true;
+    const suffix = [':accept:notify', ':blocked:notify'].find((value) =>
+      turnId.endsWith(value),
+    );
+    if (!suffix) return false;
+    const record = this.record(turnId.slice(0, -suffix.length));
+    return record !== undefined && this.cancelledLaunch(record);
+  }
+
+  private async cancelledLaunch(record: ChildSessionRun): Promise<boolean> {
+    if (record.kind !== 'child_agent') return false;
+    let bytes: Buffer;
+    try {
+      bytes = await this.store.resources.read(record.inputRef);
+    } catch (cause) {
+      throw new MonitorWakeTransientReadError(String(cause), { cause });
+    }
+    const launch = decodeChildLaunchEnvelope(bytes);
+    return (
+      launch.publicLaunch !== undefined &&
+      this.sourceCancelled(launch.publicLaunch.sourcePromptId)
+    );
+  }
+
+  async publicLaunchSnapshot(
+    childRunId: string,
+  ): Promise<PublicChildLaunchSnapshot | undefined> {
+    const record = this.record(childRunId);
+    return record?.kind === 'child_agent'
+      ? decodeChildLaunchEnvelope(
+          await this.store.resources.read(record.inputRef),
+        ).publicLaunch
+      : undefined;
+  }
+
+  async stopCancelledSources(): Promise<void> {
+    await this.cancelSourcePrompt();
+  }
+
+  cancelSourcePrompt(
+    promptId?: string,
+    fence?: () => Promise<unknown>,
+  ): Promise<void> {
+    return this.inWrites(async () => {
+      await fence?.();
+      for (const entry of this.store.authority.extensionRecordsInDomain(
+        'child_run',
+      )) {
+        const record = parseChildRun(entry.record);
+        if (
+          record.kind !== 'child_agent' ||
+          record.stopRequested ||
+          isTerminalRunState(record.run.state)
+        )
+          continue;
+        const launch = decodeChildLaunchEnvelope(
+          await this.store.resources.read(record.inputRef),
+        );
+        const source = launch.publicLaunch?.sourcePromptId;
+        if (
+          source === undefined ||
+          (promptId !== undefined && source !== promptId) ||
+          !this.sourceCancelled(source)
+        )
+          continue;
+        const next = childStopRequestedBody(record);
+        await this.store.authority.commitExtensionRecord(
+          {
+            operation: 'cancelSourcePromptChildren',
+            commandId: `${record.childRunId}:source-cancel`,
+            sessionKey: this.key,
+            contentDigest: digest(next),
+          },
+          { domain: 'child_run', record: next },
+          TRUSTED,
+        );
+      }
+    });
+  }
 
   /** The last committed body of one child run, parsed. Both child Session
    * kinds answer: the relay and cascade verbs are kind-blind (#13803 K2). */
@@ -519,20 +618,31 @@ export class HostedChildAgentSession {
    * Every child Session run one owner scope launched, ended or not. The
    * quotas count child Sessions, so both child Session kinds count.
    */
-  launchedChildRunsOf(ownerScopeId: string): readonly ChildSessionRun[] {
-    return this.store.authority
-      .extensionRecordsInDomain('child_run')
-      .map((entry) => parseChildRun(entry.record))
-      .filter(
-        (record): record is ChildSessionRun =>
-          isChildSessionRun(record) && record.ownerScopeId === ownerScopeId,
-      );
+  launchedChildRunsOf(
+    ownerScopeId: string,
+    chains?: HostedChildChains,
+  ): readonly ChildSessionRun[] {
+    const runs =
+      chains?.runs() ??
+      this.store.authority
+        .extensionRecordsInDomain('child_run')
+        .map((entry) => parseChildRun(entry.record))
+        .filter(isChildSessionRun);
+    return runs.filter((record) => record.ownerScopeId === ownerScopeId);
   }
 
   /** The non-terminal child Session runs of one owner scope. */
-  activeChildRunsOf(ownerScopeId: string): readonly ChildSessionRun[] {
-    return this.launchedChildRunsOf(ownerScopeId).filter(
-      (record) => !isTerminalRunState(record.run.state),
+  activeChildRunsOf(
+    ownerScopeId: string,
+    chains?: HostedChildChains,
+  ): readonly ChildSessionRun[] {
+    return this.launchedChildRunsOf(ownerScopeId, chains).filter(
+      (record) =>
+        !isTerminalRunState(record.run.state) &&
+        // #14387: a recovery-blocked run is parked — evidence of an
+        // unwitnessed execution, never live work — so it does not hold a
+        // launch-admission slot (matching the relay's hasLiveTurn gate).
+        record.run.state !== 'recovery_blocked',
     );
   }
 
@@ -542,11 +652,16 @@ export class HostedChildAgentSession {
   }
 
   /** The child agent run one task id names, of any chain generation. */
-  runForTask(taskId: string): ChildAgentRun | undefined {
-    for (const entry of this.store.authority.extensionRecordsInDomain(
-      'child_run',
-    )) {
-      const record = parseChildRun(entry.record);
+  runForTask(
+    taskId: string,
+    chains?: HostedChildChains,
+  ): ChildAgentRun | undefined {
+    const runs =
+      chains?.runs() ??
+      this.store.authority
+        .extensionRecordsInDomain('child_run')
+        .map((entry) => parseChildRun(entry.record));
+    for (const record of runs) {
       if (
         record.kind === 'child_agent' &&
         this.taskIdOf(record.childRunId) === taskId
@@ -637,6 +752,9 @@ export class HostedChildAgentSession {
       readonly decision: 'approved' | 'rejected';
       readonly childRunId: string;
     };
+    /** #13753 I3: the host also serves snapshots, which a continued
+     * snapshot run needs likewise. */
+    readonly childSnapshots?: boolean;
   }): Promise<ChildMessageRoute> {
     return this.inWrites(async () => {
       const content = Buffer.from(params.text, 'utf8');
@@ -682,7 +800,10 @@ export class HostedChildAgentSession {
           predecessorChildRunId: continued.predecessorChildRunId,
         });
       }
-      const run = this.runForTask(params.taskId);
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      const run = this.runForTask(params.taskId, chains);
       if (run === undefined) {
         // A workflow child's task id is a real task — the refusal says why
         // it takes no message instead of denying it exists.
@@ -705,9 +826,6 @@ export class HostedChildAgentSession {
       // predecessor untouched (H4d-a decision 9), so its task id routes
       // from that predecessor: an answer that named it must still reach
       // the chain, never read as an ended child.
-      const chains = new HostedChildChains(
-        this.store.authority.extensionRecordsInDomain('child_run'),
-      );
       let from = run;
       while (
         from.run.execution === 'not_started_proven' &&
@@ -853,6 +971,16 @@ export class HostedChildAgentSession {
             reason: 'This Session is closing and sends no more messages.',
           };
         }
+        // #13753 I3: a snapshot child has no message lane, so nothing may
+        // be committed that it could never receive; once it completes, a
+        // message continues it as a new snapshot run. It sits below the
+        // closing arm because a closing Session admits no continuation.
+        if (head.workspaceMode === 'snapshot') {
+          return {
+            kind: 'refused',
+            reason: `${subject} is a read-only snapshot and takes no messages while it runs. Wait for its result; a message sent after it completes continues it as a new snapshot.`,
+          };
+        }
         const sentBefore = this.messagesTo(head.childRunId);
         const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
         if (sentBefore.length >= limits.maxPerRun) {
@@ -895,6 +1023,7 @@ export class HostedChildAgentSession {
         return this.routed(
           { kind: 'message', childRunId: head.childRunId },
           params.messageId,
+          chains,
         );
       }
       if (head.stopReason !== 'completed' || head.stopRequested) {
@@ -925,10 +1054,12 @@ export class HostedChildAgentSession {
       const admission = childLaunchAdmission({
         workspaceMode: head.workspaceMode,
         childWorkspaces: params.childWorkspaces === true,
+        childSnapshots: params.childSnapshots === true,
         sameDefinition: true,
         closing: params.closing,
-        activeInScope: this.activeChildRunsOf(head.ownerScopeId).length,
-        launchedInScope: this.launchedChildRunsOf(head.ownerScopeId).length,
+        activeInScope: this.activeChildRunsOf(head.ownerScopeId, chains).length,
+        launchedInScope: this.launchedChildRunsOf(head.ownerScopeId, chains)
+          .length,
         envelopeBytes: envelope.byteLength,
       });
       if (!admission.admitted) {
@@ -941,11 +1072,15 @@ export class HostedChildAgentSession {
         };
       }
       if (params.preflight) {
-        return this.routed({
-          kind: 'continuation',
-          childRunId: head.childRunId,
-          predecessorChildRunId: head.childRunId,
-        });
+        return this.routed(
+          {
+            kind: 'continuation',
+            childRunId: head.childRunId,
+            predecessorChildRunId: head.childRunId,
+          },
+          undefined,
+          chains,
+        );
       }
       const inputRef = await this.store.resources.publish(
         'managed-input',
@@ -967,11 +1102,16 @@ export class HostedChildAgentSession {
         { domain: 'child_run', record: body },
         TRUSTED,
       );
-      return this.routed({
-        kind: 'continuation',
-        childRunId: params.continuationRunId,
-        predecessorChildRunId: head.childRunId,
-      });
+      chains.add(body);
+      return this.routed(
+        {
+          kind: 'continuation',
+          childRunId: params.continuationRunId,
+          predecessorChildRunId: head.childRunId,
+        },
+        undefined,
+        chains,
+      );
     });
   }
 
@@ -981,10 +1121,14 @@ export class HostedChildAgentSession {
       readonly kind: 'message' | 'continuation';
       readonly childRunId: string;
     },
-  >(route: Route, messageId?: string): Route & HostedRouteDetails {
+  >(
+    route: Route,
+    messageId?: string,
+    chains?: HostedChildChains,
+  ): Route & HostedRouteDetails {
     return {
       ...route,
-      ...hostedRouteDetails(this.store.authority, route, messageId),
+      ...hostedRouteDetails(this.store.authority, route, messageId, chains),
     };
   }
 
@@ -1137,6 +1281,7 @@ export class HostedChildAgentSession {
       description: params.description,
       prompt: params.prompt,
       definition: params.definition,
+      ...(params.publicLaunch ? { publicLaunch: params.publicLaunch } : {}),
     };
     const replay = await this.admitLaunch(params, {
       bytes: () => encodeChildLaunchEnvelope(envelope),
@@ -1146,6 +1291,8 @@ export class HostedChildAgentSession {
         return (
           committed.description === params.description &&
           isDeepStrictEqual(committed.definition, params.definition) &&
+          committed.publicLaunch?.sourcePromptId ===
+            params.publicLaunch?.sourcePromptId &&
           (committed.prompt === params.prompt ||
             isSentInstruction(committed.prompt, sentPrompt))
         );
@@ -1425,6 +1572,91 @@ export class HostedChildAgentSession {
     });
   }
 
+  /**
+   * #14387: the Harness generation running this child was lost and the
+   * in-process execution's outcome stays unwitnessed (a workflow's
+   * node:vm work leaves no witness on a new generation). The record
+   * settles blocked — never re-executed, never failed as if observed. A
+   * background (sent) child owes its parent the blocked line — it never
+   * produces a result, so the notification rides this commit.
+   */
+  settleRecoveryBlocked(
+    childRunId: string,
+    params: {
+      readonly reason: ChildSessionRun['run']['reason'];
+      readonly childSessionId?: string;
+    },
+  ): Promise<void> {
+    return this.inWrites(async () => {
+      const existing = this.store.authority.extensionRecord(
+        'child_run',
+        childRunId,
+      );
+      if (existing === undefined) {
+        throw new Error(`Child run ${childRunId} has no record to revise.`);
+      }
+      const previous = this.parseSessionRun(existing.record, childRunId);
+      const next = childRecoveryBlockedBody(previous, params);
+      if (isDeepStrictEqual(previous, next)) return;
+      // The line renders the blocked revision this commit lands, never
+      // the running one it replaces (#14165 FG10d).
+      const notification =
+        previous.completion === 'sent' &&
+        !(await this.cancelledLaunch(previous))
+          ? await this.buildBlockedNotification(childRunId, next)
+          : undefined;
+      await this.store.authority.commitExtensionRecord(
+        {
+          operation: 'commitChildRunRecord',
+          commandId: `${childRunId}:${existing.revision + 1}`,
+          sessionKey: this.key,
+          contentDigest: digest(next),
+        },
+        {
+          domain: 'child_run',
+          record: next,
+          ...(notification === undefined ? {} : { input: notification }),
+        },
+        TRUSTED,
+      );
+    });
+  }
+
+  /** The blocked line for a background child, which never has a result. */
+  private async buildBlockedNotification(
+    childRunId: string,
+    child: ChildSessionRun,
+  ): Promise<ManagedSessionInputRequest> {
+    const inputId = `${childRunId}:blocked:notify`;
+    const label = child.run.definition?.definitionId ?? child.childRunId;
+    const text = [
+      '<task-notification>',
+      `<task-id>${escapeXml(this.taskIdOf(childRunId))}</task-id>`,
+      `<kind>${child.kind}</kind>`,
+      '<status>blocked</status>',
+      `<summary>${childKindLabel(child.kind)} "${escapeXml(truncateNotificationLabel(label))}" recovery blocked (outcome unknown).</summary>`,
+      '<result>',
+      escapeXml(childRunEndedText(child)),
+      '</result>',
+      '</task-notification>',
+    ].join('\n');
+    return {
+      inputId,
+      turnId: inputId,
+      source: child.kind,
+      contentRef: await this.store.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify({ text }), 'utf8'),
+      ),
+      deadline: null,
+      admissionRef: await this.store.resources.publish(
+        'managed-admission',
+        Buffer.from('{}', 'utf8'),
+      ),
+      wakeReason: 'input',
+    };
+  }
+
   /** A stop was requested of the owner; set once, never cleared. */
   requestStop(
     childRunId: string,
@@ -1483,7 +1715,7 @@ export class HostedChildAgentSession {
         return child.resultRef!;
       }
       const notification =
-        params.notification === undefined
+        params.notification === undefined || (await this.cancelledLaunch(child))
           ? undefined
           : await this.buildResultNotification(
               childRunId,
@@ -1778,6 +2010,16 @@ export class HostedChildAgentSession {
   ): Promise<void> {
     const write = this.writes.then(async () => {
       const existing = this.store.authority.extensionRecord(domain, recordId);
+      if (
+        operation === 'startChildRun' &&
+        existing === undefined &&
+        ((await this.cancelledLaunch(record as ChildSessionRun)) ||
+          !this.launchEnabled())
+      ) {
+        throw new ManagedSessionConflictError(
+          'New child launches are disabled or the source prompt was cancelled.',
+        );
+      }
       if (
         existing !== undefined &&
         domain === 'child_acceptance' &&

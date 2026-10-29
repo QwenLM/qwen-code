@@ -535,11 +535,13 @@ export class WorkflowRunner {
             : undefined,
           reviewLimits?.subagent,
           options.refuseSubagentTools,
+          options.toolUseId,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       const registration: WorkflowTaskRegistration = {
         runId,
         toolUseId: options.toolUseId,
+        parentSessionId: config.getSessionId?.(),
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
         meta: null,

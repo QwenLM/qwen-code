@@ -19,8 +19,15 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
-import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  HostedToolRecoveryRequiredError,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
+import {
+  answerResumedTurnCalls,
+  settleCancelledCommandWaitRuns,
+} from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -33,6 +40,7 @@ import {
   type HostedSessionLineage,
 } from './hosted-session-message-session.js';
 import { hostedPromptKey, teamMemberPreamble } from './hosted-member-chain.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // H4e-b3: a member Session's board tools ride the command channel. The
 // suite runs the real funnel chain — the park checkpoint, the outbound
@@ -57,6 +65,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
     warm = broker.warm;
@@ -100,6 +109,10 @@ let rootDir: string;
 let session: ManagedSession;
 let children: HostedChildAgentSession;
 let commands: HostedSessionCommandSession;
+const executions: Array<{
+  controller: AbortController;
+  result: Promise<Part[]>;
+}> = [];
 let sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
 const lineage: HostedSessionLineage = {
   parentSessionId: PARENT,
@@ -180,18 +193,23 @@ function createTurn(
   );
 }
 
-async function execute(
+function execute(
   turn: HostedWorkspaceToolTurn,
   batch: ToolCallRequestInfo[],
 ): Promise<Part[]> {
-  return turn.execute(
+  const controller = new AbortController();
+  const result = turn.execute(
     batch,
     batch.map((entry) => ({
       functionCall: { id: entry.callId, name: entry.name, args: entry.args },
     })),
     'model',
-    new AbortController().signal,
+    controller.signal,
   );
+  executions.push({ controller, result });
+  // Observe failures even when an earlier assertion prevents the await.
+  void result.catch(() => undefined);
+  return result;
 }
 
 function commandIdOf(callId: string, promptName = 'prompt'): string {
@@ -296,6 +314,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const { controller } of executions) controller.abort();
+  await Promise.allSettled(executions.map(({ result }) => result));
+  executions.length = 0;
   vi.useRealTimers();
   await session?.close();
   await rm(rootDir, { recursive: true, force: true });
@@ -342,6 +363,79 @@ async function journaledResults(): Promise<string> {
       .flatMap((entry) => entry.message?.parts ?? []),
   );
 }
+
+// #14063: every wait settlement preserves the member-message guidance.
+it.each([
+  ['live', 'accepting'],
+  ['live', 'unknown'],
+  ['resumed', 'accepting'],
+  ['resumed', 'unknown'],
+  ['interrupted', 'accepting'],
+  ['interrupted', 'unknown'],
+] as const)(
+  'does not suggest resending a member message in the %s %s path',
+  async (route, state) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }),
+    );
+    const callId = 'call-message-timeout';
+    const commandId = commandIdOf(callId);
+    let live: Promise<Part[]> | undefined;
+    let runs: HarnessCommandWaitRun[] = [];
+    if (route === 'live') {
+      live = execute(createTurn(), [
+        call({ to: 'bob', message: 'sync at noon' }, callId, 'send_message'),
+      ]);
+      await vi.waitFor(
+        () => expect(commands.command(commandId)).toBeDefined(),
+        { timeout: 10_000 },
+      );
+    } else {
+      runs = await parkCalls([{ callId, toolName: 'send_message' }]);
+      await commands.runCommand({
+        commandId,
+        kind: 'member_message',
+        args: { to: 'bob', message: 'sync at noon' },
+        executionCallId: callId,
+        closing: false,
+      });
+    }
+    await commands.handover(commandId, PARENT);
+    if (state === 'unknown') await commands.settle(commandId, 'unknown');
+
+    if (route === 'live') {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 121_000);
+      await live;
+      vi.useRealTimers();
+    } else if (route === 'resumed') {
+      await createManagedHarnessHandle(session).markCommandWaitTimeout();
+      await createTurn().resumeCommandWaitRuns(
+        runs,
+        false,
+        'model',
+        new AbortController().signal,
+      );
+    } else {
+      await settleCancelledCommandWaitRuns({
+        managed: session,
+        sessionId: sessionKey.sessionId,
+        promptId: 'prompt',
+        cwd: rootDir,
+        runs,
+        commands,
+      });
+    }
+
+    const answered = await journaledResults();
+    expect(answered).toContain(
+      sessionCommandEvidenceText(state, 'member_message'),
+    );
+    expect(answered).not.toMatch(/read the board/i);
+    expect(answered).toContain('Do not send it again');
+    expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+  },
+);
 
 async function runnableCheckpoint() {
   const authorization = await session.authority.harnessRunAuthorization();
@@ -537,9 +631,14 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
     call({ status: 'pending' }, 'call-list-1', 'task_list'),
   ]);
   const commandId = commandIdOf('call-list-1');
-  await vi.waitFor(() => {
-    expect(commands.command(commandId)).toBeDefined();
-  });
+  // The turn's append chain can outlast vitest's 1 s waitFor default on a
+  // loaded host (#15593); this is the budget the file's other projections use.
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
   // The checkpoint named the batch before the outbox commit ever ran.
   const authority = await session.authority.harnessRunAuthorization();
   if (authority.status !== 'runnable')
@@ -562,6 +661,42 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
   expect(settled.checkpoint.commandWait?.runs.every((run) => run.folded)).toBe(
     true,
   );
+});
+
+it('propagates an unsettled command append instead of answering the tool call', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const turn = createTurn();
+  const unsettled = new ManagedSessionAppendUnsettledError(
+    new Error('ack lost'),
+  );
+  const realRun = commands.runCommand.bind(commands);
+  const run = vi
+    .spyOn(commands, 'runCommand')
+    .mockImplementationOnce(async (params) => {
+      await realRun(params);
+      throw unsettled;
+    });
+  try {
+    const running = execute(turn, [
+      call({ subject: 'x', description: 'y' }, 'call-unsettled', 'task_create'),
+    ]);
+    const failure = await running.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect((failure as Error).cause).toBe(unsettled);
+    // The outbound landed; the failure is the store's, not the call's
+    // answer, so the parked wait stays for recovery.
+    expect(commands.command(commandIdOf('call-unsettled'))).toBeDefined();
+    const checkpoint = await runnableCheckpoint();
+    expect(checkpoint.continuation.phase).toBe('await_command');
+  } finally {
+    run.mockRestore();
+  }
 });
 
 it('answers a never-handed command as not sent when the wait bound ends', async () => {
@@ -1407,37 +1542,41 @@ it('routes a parked command wait to the recovery cancel, never the plain settle'
 // A budget refusal is a normal local answer, so it owes the parked wait
 // its fold: a durable wait left behind turns the Turn's next call into a
 // recovery fault instead of the same local refusal.
-it('folds the parked wait on a budget refusal, so the next call refuses the same way', async () => {
-  await seedFirstInput(
-    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
-      'write the board forever',
-  );
-  // Mint the per-run budget by hand: a direct count of outbound records
-  // is the rule's own evidence.
-  for (let index = 0; index < 256; index += 1) {
-    await commands.runCommand({
-      commandId: commandIdOf(`budget-seed-${index}`),
-      kind: 'board_read',
-      args: { filter: 'all' },
-      executionCallId: `budget-seed-${index}`,
-      closing: false,
-    });
-  }
-  const parts = await execute(createTurn(), [
-    call({ subject: 'x', description: 'y' }, 'call-over', 'task_create'),
-  ]);
-  expect(texts(parts)).toContain('budget_exhausted');
-  const folded = await session.authority.harnessRunAuthorization();
-  if (folded.status !== 'runnable')
-    throw new Error(`expected runnable, got ${folded.status}`);
-  expect(folded.checkpoint.continuation.phase).toBe('model_output_committed');
-  // The Turn's next call meets the same local refusal, never a recovery
-  // fault from its own durable wait.
-  const again = await execute(createTurn(), [
-    call({ subject: 'x', description: 'y' }, 'call-over-2', 'task_create'),
-  ]);
-  expect(texts(again)).toContain('budget_exhausted');
-}, 60_000);
+it(
+  'folds the parked wait on a budget refusal, so the next call refuses the same way',
+  async () => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+        'write the board forever',
+    );
+    // Mint the per-run budget by hand: a direct count of outbound records
+    // is the rule's own evidence.
+    for (let index = 0; index < 256; index += 1) {
+      await commands.runCommand({
+        commandId: commandIdOf(`budget-seed-${index}`),
+        kind: 'board_read',
+        args: { filter: 'all' },
+        executionCallId: `budget-seed-${index}`,
+        closing: false,
+      });
+    }
+    const parts = await execute(createTurn(), [
+      call({ subject: 'x', description: 'y' }, 'call-over', 'task_create'),
+    ]);
+    expect(texts(parts)).toContain('budget_exhausted');
+    const folded = await session.authority.harnessRunAuthorization();
+    if (folded.status !== 'runnable')
+      throw new Error(`expected runnable, got ${folded.status}`);
+    expect(folded.checkpoint.continuation.phase).toBe('model_output_committed');
+    // The Turn's next call meets the same local refusal, never a recovery
+    // fault from its own durable wait.
+    const again = await execute(createTurn(), [
+      call({ subject: 'x', description: 'y' }, 'call-over-2', 'task_create'),
+    ]);
+    expect(texts(again)).toContain('budget_exhausted');
+  },
+  isSlowTestHost() ? 120_000 : 60_000,
+);
 
 it('declares the widened send_message beside the member tools (b3c)', async () => {
   await seedFirstInput(
@@ -1580,6 +1719,114 @@ it('bounds a member message with the member-message wrapper budget (b3c)', async
   ]);
   expect(texts(parts)).toContain('too long for a member message');
   expect(commands.command(commandIdOf('call-big'))).toBeUndefined();
+});
+
+it.each([
+  [
+    'bob',
+    'Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.',
+  ],
+  [
+    '*',
+    'Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.',
+  ],
+  [
+    'parent',
+    'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
+  ],
+])(
+  'refuses an encoded message overflow to %s without opening a delivery (#14062)',
+  async (to, expectedError) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+    );
+    const message = JSON.stringify(Array.from({ length: 6500 }, () => 'aa'));
+    const responses = await execute(createTurn(), [
+      call({ to, message }, 'call-dense', 'send_message'),
+    ]);
+    expect(responses).toEqual([
+      expect.objectContaining({
+        functionResponse: expect.objectContaining({
+          id: 'call-dense',
+          name: 'send_message',
+          response: expect.objectContaining({
+            error: expectedError,
+          }),
+        }),
+      }),
+    ]);
+    for (const domain of ['session_command', 'session_message'] as const)
+      expect(session.authority.extensionRecordsInDomain(domain)).toHaveLength(
+        0,
+      );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const history = await session.sink.project();
+    expect(history.map((record) => record.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual([
+      { functionResponse: responses[0].functionResponse },
+    ]);
+  },
+);
+
+// These direct-call cases isolate domain validation; the suite's permissive
+// transcript predicate does not prove that a real oversized record fits.
+it.each([
+  ['x'.repeat(65_536), 'once encoded (byte_limit)'],
+  ['x'.repeat(65_537), 'message exceeds 65536 bytes.'],
+  ['中'.repeat(21_846), 'message exceeds 65536 bytes.'],
+])(
+  'bounds member-to-parent UTF-8 content (#14062)',
+  async (message, reason) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+    );
+    const responses = await execute(createTurn(), [
+      call({ to: 'parent', message }, 'call-raw', 'send_message'),
+    ]);
+    expect(texts(responses)).toContain(reason);
+    expect(
+      session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+  },
+);
+
+it('preserves a recipient refusal when encoding also overflows (#14062)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const responses = await execute(createTurn(), [
+    call(
+      { to: 'alice', message: '"'.repeat(20_000) },
+      'call-self-dense',
+      'send_message',
+    ),
+  ]);
+  expect(texts(responses)).toContain(
+    'A member cannot send a message to itself',
+  );
+  expect(texts(responses)).not.toContain('once encoded');
+});
+
+it('refuses an initial command batch before opening any commands (#14062)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const responses = await execute(createTurn(), [
+    call({ to: 'bob', message: '"'.repeat(20_000) }, 'dense', 'send_message'),
+    call({}, 'board', 'task_list'),
+  ]);
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'dense',
+    'board',
+  ]);
+  expect(texts(responses)).toContain('another call in the batch');
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
 });
 
 it('refuses member messages in plan mode while the leader stays open (b3c)', async () => {

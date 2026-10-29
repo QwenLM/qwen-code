@@ -2,6 +2,8 @@
 
 [English](2026-10-07-managed-agent-actor-roles.md) | [简体中文](2026-10-07-managed-agent-actor-roles.zh-CN.md)
 
+当前状态：下文 cwd 提交路由及 `SESSION_CWD_CHANGE` 条目描述历史角色矩阵。新建目录切换准入已退役；已有操作的查询及清算保留。参见[退役设计](2026-10-26-retire-managed-cwd-change.zh-CN.md)。
+
 议题：#13535（R1 actor 角色，R2 隔离验收）。上层：#12380 生产启用。词表来源：#12867 第 10 节（`reader`、`operator`、`owner`；无读权限返回 `404`，有读无操作权限返回 `403`；幂等域包含 actor —— D4 已在操作台账落地这一部分；submitter 族的命令键仍是 `(tenant_id, operation, idempotency_key)`，其 actor 限定跟进为 #13619）。本设计回答 #12867 的开放问题 Q4（角色从哪里来），并定义 surface 注册表及其构建门禁。
 
 核实基点：`main` = `ac497aeed9`（比 issue 点名的 `b585508733` 基线新一个提交；增量是本模块之外的 TUI 改动）。
@@ -34,7 +36,6 @@ D4/D7 的强制执行各节描述的是它落地的改动。
 | 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close \| archive \| unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生                                      | `requireWorkspaceCreator`（先 can_read 再创建命令行）                           | 403 `session_operation_forbidden` |
 | Action（审批）回答                                      | `POST …/actions/{id}/responses`、WebShell `actions/respond`                                                           | `requireOwner`（creator_actor_key，回退创建命令）                               | 403 `action_forbidden`            |
 
-<<<<<<< HEAD
 其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**`、`/v1/agent-automations` 与 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十一个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 39 条公开 + 24 条 WebShell + 24 条内部路由（含 L3 两条授权入口，门禁实计共 87 条；这里上次写的是 #13088 之前的 77/21 与 L3 之前的 78，H6b 自动化运行时为第十一个 controller 新增七条公开路由）。
 
 workspace registry/access 行没有任何生产置备路径 —— 今天只有测试与 fixture 入口写它们，部署环境靠带外方式写入；全仓没有 role 列、owner 列，也没有按租户存放 actor 的表。
@@ -186,7 +187,6 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 ## 10. Surface 路由矩阵（切片 A 注册表，双语摘要）
 
 与 L3 整合后的 `api/SurfaceRegistry.java` 携带 80 条路由常量：十个
-<<<<<<< HEAD
 controller 的 32 公开 + 24 WebShell + 24 internal handler 方法（含 L3 两条授权入口）。（第 2 节上一版正文里的 21 internal 已过时：
 #13088 新增 `receipts/verify`，L3 又加两条授权入口；门禁从扫描推导一切，计数只是信息，不是被断言的常量。）H6b 自动化运行时为第十一个 controller 增加七条公开 `/v1/agent-automations` 路由，注册表现合计 87 条：39 公开 + 24 WebShell + 24 internal。
 

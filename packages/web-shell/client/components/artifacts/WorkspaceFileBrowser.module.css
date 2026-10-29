@@ -1,4 +1,5 @@
 .browser {
+  position: relative;
   height: 100%;
   min-width: 0;
   min-height: 0;
@@ -43,6 +44,7 @@
 }
 
 .sidebar {
+  position: relative;
   height: 100%;
   min-width: 0;
   box-sizing: border-box;
@@ -111,4 +113,46 @@
   padding: 12px;
   color: var(--muted-foreground);
   font-size: 13px;
+}
+
+.dropHint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border: 1px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  color: var(--primary);
+  padding: 48px 12px 12px;
+  font-size: 12px;
+  text-align: right;
+}
+
+.uploadProgress {
+  position: absolute;
+  inset: auto 0 0;
+  height: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+
+.uploadProgress > div {
+  height: 100%;
+  background: var(--primary);
+  transition: width 150ms;
+}
+
+.uploadError {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--destructive);
+}
+
+.uploadError > span {
+  flex: 1;
+  overflow-wrap: anywhere;
 }

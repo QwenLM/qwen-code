@@ -14,7 +14,9 @@ import {
   MAX_TASK_RUNS,
   readCronTasks,
   removeCronTasks,
+  taskHasLegacyCondition,
   updateCronTasks,
+  withTaskGate,
   writeCronTasks,
 } from './cronTasksFile.js';
 import { Storage } from '../config/storage.js';
@@ -213,6 +215,72 @@ describe('cronTasksFile', () => {
       expect(result[0]!.enabled).toBeUndefined();
     });
 
+    it('round-trips a gate, its status and a gated run', async () => {
+      const gated = withTaskGate(
+        makeTask({
+          gateStatus: {
+            lastAt: 1718000240000,
+            lastOutcome: 'delivered',
+            quietSinceDelivery: 0,
+            lastDeliveredAt: 1718000240000,
+            consecutiveFailures: 0,
+          },
+          runs: [{ at: 1718000240000, kind: 'scheduled', gate: 'delivered' }],
+        }),
+        './probe.sh',
+      );
+      await seedTasksFile(tmpDir, JSON.stringify([gated]));
+      const [result] = await readCronTasks(tmpDir);
+      expect(result).toMatchObject({
+        gate: './probe.sh',
+        condition: './probe.sh',
+        gateStatus: { lastOutcome: 'delivered' },
+        runs: [{ gate: 'delivered' }],
+      });
+    });
+
+    it('treats the downgrade fuse as a gate, not as a legacy precondition', () => {
+      const gated = withTaskGate(makeTask(), './probe.sh');
+      expect(gated.condition).toBe('./probe.sh');
+      expect(taskHasLegacyCondition(gated)).toBe(false);
+      // Removing the gate removes the fuse with it, so this version does not
+      // withhold the task as legacy afterwards.
+      const cleared = withTaskGate(gated, undefined);
+      expect(cleared).not.toHaveProperty('gate');
+      expect(cleared).not.toHaveProperty('condition');
+      // A fuse written by this version but read by an older one stays a
+      // legacy condition there: a bare `condition` is still fail-closed here.
+      expect(
+        taskHasLegacyCondition({
+          ...makeTask(),
+          condition: './probe.sh',
+        } as DurableCronTask),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['rejects an empty gate', { gate: '' }],
+      ['rejects a non-string gate', { gate: 7 }],
+      [
+        'rejects a gate status with an unknown outcome',
+        {
+          gateStatus: {
+            lastAt: 1718000240000,
+            lastOutcome: 'maybe',
+            quietSinceDelivery: 0,
+            consecutiveFailures: 0,
+          },
+        },
+      ],
+      [
+        'rejects a run entry with an unknown gate outcome',
+        { runs: [{ at: 1718000240000, gate: 'skipped' }] },
+      ],
+    ])('%s', async (_label, over) => {
+      await seedTasksFile(tmpDir, JSON.stringify([{ ...makeTask(), ...over }]));
+      await expect(readCronTasks(tmpDir)).rejects.toThrow();
+    });
+
     it.each([
       ['rejects a task whose name is not a string', { name: 123 }],
       ['rejects a task whose enabled is not a boolean', { enabled: 'yes' }],
@@ -320,6 +388,19 @@ describe('cronTasksFile', () => {
   });
 
   describe('appendCronRun', () => {
+    it('keeps the ring in time order when an older slot is booked late', () => {
+      // A gated fire is booked when its gate settles, under its own slot,
+      // after a manual run booked meanwhile.
+      const runs = appendCronRun(
+        appendCronRun([{ at: 60_000, kind: 'scheduled' }], {
+          at: 150_500,
+          kind: 'manual',
+        }),
+        { at: 120_000, kind: 'scheduled', gate: 'delivered' },
+      );
+      expect(runs.map((run) => run.at)).toEqual([60_000, 120_000, 150_500]);
+    });
+
     it('appends newest-last, treating absent history as empty', () => {
       const once = appendCronRun(undefined, { at: 1, kind: 'scheduled' });
       expect(once).toEqual([{ at: 1, kind: 'scheduled' }]);

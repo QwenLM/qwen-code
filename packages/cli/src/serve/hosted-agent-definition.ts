@@ -11,6 +11,7 @@ import {
   type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import { HOSTED_SKILL_CATALOG_MAX_BYTES } from './hosted-skill-catalog.js';
 
 export interface HostedAgentDefinition {
   agentId: string;
@@ -18,6 +19,7 @@ export interface HostedAgentDefinition {
   digest: string;
   model?: { id: string };
   instructionsRef?: ManagedSessionDurableRef;
+  skillsRef?: ManagedSessionDurableRef;
 }
 
 export function parseHostedAgentDefinition(
@@ -29,7 +31,7 @@ export function parseHostedAgentDefinition(
     throw new Error('Invalid agent definition.');
   const pin = value as Record<string, unknown>;
   const fields = create
-    ? ['agentId', 'revision', 'digest', 'model', 'instructionsRef']
+    ? ['agentId', 'revision', 'digest', 'model', 'instructionsRef', 'skillsRef']
     : ['agentId', 'revision', 'digest'];
   if (
     Object.keys(pin).some((key) => !fields.includes(key)) ||
@@ -71,6 +73,19 @@ export function parseHostedAgentDefinition(
     )
       throw new Error('Invalid agent instructions reference.');
     result.instructionsRef = ref;
+  }
+  if (pin['skillsRef'] !== undefined) {
+    const ref = assertManagedSessionDurableRef(
+      pin['skillsRef'] as ManagedSessionJsonValue,
+      'agent skills',
+    );
+    if (
+      ref.kind !== 'managed-agent-skills' ||
+      ref.schemaVersion !== 1 ||
+      ref.byteLength > HOSTED_SKILL_CATALOG_MAX_BYTES
+    )
+      throw new Error('Invalid agent skills reference.');
+    result.skillsRef = ref;
   }
   return result;
 }

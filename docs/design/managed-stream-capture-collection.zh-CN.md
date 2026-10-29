@@ -2,6 +2,16 @@
 
 [English](managed-stream-capture-collection.md) | [简体中文](managed-stream-capture-collection.zh-CN.md)
 
+## Schema 整合后的当前状态
+
+下文 P1 实现记录的是最初 `4a3b8f3c08` 基线。在 `06efd789b1` 上，共享 schema
+使用 `ma_resource`、`ma_resource_ref` 和 `SESSION_RESOURCE_GC` 操作。
+回收器现已在回收前释放退役 Session 的记录与 journal owner，再收集没有引用的
+`MYSQL_INLINE` 资源体；覆盖 `PUBLISHED` 与 `REFERENCED` 两种状态，不再限制
+kind。下文关于 MCP 记录与 journal 引用的 manifest 永久钉住的历史说明已不再代表
+当前 SQL 回收行为。参见 [MCP 生命周期契约与见证](managed-mcp-retention-lifecycle.zh-CN.md)。
+私有 CSI Session 仍不参与此通道，物理 GC 默认值与部署门禁保持不变。
+
 ## 问题与基线
 
 O4（`managed-tool-output-retention.md`）让工具输出的物理回收变得安全，但只覆盖
@@ -126,7 +136,10 @@ qwen_managed_session_resource_collection
    `recovery_active`（`CAPTURING` 或 `VERIFYING` 状态的恢复或迁移操作钉住了该
    Session）。每次失败都按与发布回收器相同的退避分类法重排：
    `recovery_protected` 等 24 小时，`grace_period` 等到
-   `retired_at + grace`，其它 blocker 一律 60 秒。
+   `retired_at + grace`，`reader_active` 等到最后一个读租约到期（但不超过一个
+   claim 周期），其它 blocker
+   一律 60 秒。Session 台账尚未收尾时，发布回收器以 5 秒间隔重查
+   `resource_referenced`，因为该交接由 Session 回收器负责。
 3. 确认的 claim 持有账本 60 秒。每一页在一个属于自己的新事务里完成：claim 的锁
    与 blocker 评估已随 claim 事务提交，因此分页首先按 claim 的顺序重新获取 tenant
    与 Session 锁，并以加锁读重新评估恢复钉住 —— 唯一可能在 claim→page 间隙内新生
@@ -213,7 +226,7 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` 命名检查                                                                                                                                                            |
 | `config/ToolPublicationConfiguration.java`                | 复用现有调度器的回收器 bean                                                                                                                                                              |
 | `store/SessionResourceCollectionCollectorTest.java`（新） | 谓词、blocker、分页、防护、字节精确记账、退役围栏后的结果                                                                                                                                |
-| `packages/sdk-java/managed-agent-server/README.md`        | 运维一段                                                                                                                                                                                 |
+| `packages/managed-agent-server/README.md`                 | 运维一段                                                                                                                                                                                 |
 
 不在本变化内：`ToolPublicationRetentionStore`、`ToolPublicationCollector`、以及除文
 档链接外的所有 TS 包均不改动。刻意不把发布回收器与本回收器合并出一个公共骨架：
@@ -250,7 +263,9 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 
 - P2（MCP 结果保留）与 P3（media 与共享输出）是 #13534 的独立切片，引用闭包不同：
   MCP 记录的 set-once 引用规则与 omni 对象存储的跨 Session 内容寻址各自需要独立的
-  设计。
+  设计。Schema 整合后，当前[私有 SQL 媒体生命周期](managed-media-retention-boundary.zh-CN.md)
+  已由通用退役 owner 回收器覆盖。物理共享的 Hosted/omni 媒体及其完整引用释放
+  生命周期仍是后续工作。
 - 本地文件运行时（`LocalToolResultSegmentStore`，运行时基目录下的文件系统布局）不
   归本设计管理；它的保留是独立的主机本地问题。
 - 回放容忍：`loadExtensionRevision` 在恢复工作区时会重读 `child_run.outputRef`。
