@@ -97,6 +97,7 @@ import type {
   WorkspaceSkillToggleResult,
   WorkspaceSkillToggleActivation,
   PersistDisabledSkillsBatchResult,
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
@@ -1220,7 +1221,7 @@ export function createDaemonWorkspaceService(
     async installWorkspaceSkill(
       _ctx: WorkspaceRequestContext,
       request: WorkspaceSkillInstallRequest,
-      opts?: { refreshRuntime?: boolean },
+      opts?: WorkspaceSkillInstallOptions & { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const result = await installWorkspaceSkill(
@@ -1228,6 +1229,7 @@ export function createDaemonWorkspaceService(
         request,
         skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
         assertGenerationOpen,
+        opts,
       );
       assertActiveGeneration();
       if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsInventory();

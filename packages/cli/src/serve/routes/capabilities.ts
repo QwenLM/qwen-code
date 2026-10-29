@@ -13,6 +13,12 @@ import {
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
+  MAX_SKILL_ARCHIVE_BYTES,
+  MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+  MAX_SKILL_ARCHIVE_ENTRIES,
+  MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+} from '../workspace-skill-management.js';
+import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
 } from '../server/serve-features.js';
@@ -129,6 +135,15 @@ export function registerCapabilitiesRoutes(
         sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
         ...(features.includes('workspace_file_upload')
           ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
+        ...(features.includes('skill_archive_install') ||
+        features.includes('skill_zip_file_source')
+          ? {
+              maxSkillArchiveBytes: MAX_SKILL_ARCHIVE_BYTES,
+              maxSkillArchiveExpandedBytes: MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+              maxSkillArchiveEntries: MAX_SKILL_ARCHIVE_ENTRIES,
+              maxSkillArchiveManifestBytes: MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+            }
           : {}),
         ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
           ? {

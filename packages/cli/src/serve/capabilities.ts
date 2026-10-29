@@ -264,6 +264,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // operation after the activation operation commits.
   extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // Native archive sources also support owner-scoped installation receipts.
+  skill_archive_install: { since: 'v1' },
+  skill_zip_file_source: { since: 'v1' },
   // `GET /brand` — the Web Shell's product name and logo, resolved from the
   // operator settings scopes. Unconditional because the route is registered
   // unconditionally. Advertised so a host can preflight rather than issue the
@@ -901,6 +904,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_skills_config_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'skill_archive_install',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'skill_zip_file_source',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [

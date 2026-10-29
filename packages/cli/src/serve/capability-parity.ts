@@ -350,6 +350,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_skill_manage: NO_MANAGED_EQUIVALENT(
     'no Managed skill management route',
   ),
+  skill_archive_install: NO_MANAGED_EQUIVALENT(
+    'no Managed native Skill archive installation or receipt route',
+  ),
+  skill_zip_file_source: NO_MANAGED_EQUIVALENT(
+    'no Managed daemon-local Skill ZIP source or receipt route',
+  ),
   web_shell_brand: {
     standing: 'managed',
     evidence: 'docs:packages/web-shell/README.md',

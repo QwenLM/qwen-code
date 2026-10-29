@@ -7,16 +7,24 @@ import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
-import { SkillManager, Storage, type Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { SkillManager } from '@qwen-code/qwen-code-core/skills/skill-manager.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { sanitizeChildEnv } from '@qwen-code/qwen-code-core/utils/sanitize-child-env.js';
-import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
+import {
+  fromBuffer,
+  open as openZipFile,
+  type Entry,
+  type ZipFile,
+} from 'yauzl';
 
 export type WorkspaceSkillScope = 'workspace' | 'global';
 
 export type WorkspaceSkillInstallSource =
   | { type: 'github'; url: string }
   | { type: 'folder'; path: string }
-  | { type: 'zip'; contentBase64: string };
+  | { type: 'zip'; contentBase64: string }
+  | { type: 'prepared-zip'; path: string };
 
 export interface WorkspaceSkillInstallRequest {
   name: string;
@@ -31,12 +39,32 @@ export interface WorkspaceSkillMutationResult {
   deleted?: boolean;
 }
 
+export interface WorkspaceSkillInstallOptions {
+  signal?: AbortSignal;
+  beforePublish?: () => void;
+  onCommitted?: (result: WorkspaceSkillMutationResult) => void;
+}
+
 // Largest raw ZIP that fits in the 10 MiB JSON body:
 // 3 * floor((10 * 1024 * 1024 - 330) / 4).
 export const MAX_ZIP_ARCHIVE_BYTES = 7_864_071;
 export const MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
 export const MAX_FILES = 2000;
+export const MAX_SKILL_ARCHIVE_BYTES = 50 * 1024 * 1024;
+export const MAX_SKILL_ARCHIVE_EXPANDED_BYTES = 200 * 1024 * 1024;
+export const MAX_SKILL_ARCHIVE_ENTRIES = 4096;
+export const MAX_SKILL_ARCHIVE_MANIFEST_BYTES = 32 * 1024 * 1024;
+const LEGACY_ZIP_LIMITS = {
+  fileBytes: MAX_FILE_BYTES,
+  packageBytes: MAX_PACKAGE_BYTES,
+  files: MAX_FILES,
+};
+const FILE_ZIP_LIMITS = {
+  fileBytes: MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+  packageBytes: MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+  files: MAX_SKILL_ARCHIVE_ENTRIES,
+};
 const MAX_PATH_LENGTH = 512;
 const MAX_PATH_DEPTH = 16;
 // GitHub returns at most 1000 entries per Contents API listing and silently
@@ -90,6 +118,20 @@ export class WorkspaceSkillManagementError extends Error {
   ) {
     super(message);
     this.name = 'WorkspaceSkillManagementError';
+  }
+}
+
+export class WorkspaceSkillRecoveryError extends WorkspaceSkillManagementError {
+  constructor(
+    readonly retainedPaths: string[],
+    cause: unknown,
+  ) {
+    super(
+      'skill_install_recovery_required',
+      'Skill installation could not restore the previous state; recovery materials were retained',
+      500,
+    );
+    this.cause = cause;
   }
 }
 
@@ -249,6 +291,7 @@ function beginStagedFile(
   relativePath: string,
   state: PackageState,
   tooManyMessage: string,
+  maxFiles = MAX_FILES,
 ): StagedFile | undefined {
   if (isPlatformMetadataPath(relativePath)) return undefined;
   const normalized = normalizeRelativePath(relativePath);
@@ -264,7 +307,7 @@ function beginStagedFile(
       `Skill package has conflicting file and directory entries: ${normalized}`,
     );
   }
-  if (state.count >= MAX_FILES) {
+  if (state.count >= maxFiles) {
     skillError('skill_too_many_files', tooManyMessage);
   }
   return {
@@ -717,12 +760,17 @@ async function downloadGitHubSkill(
   }
 }
 
-function openZip(content: Buffer): Promise<ZipFile> {
+function openZip(content: Buffer | string): Promise<ZipFile> {
   return new Promise((resolve, reject) => {
-    fromBuffer(content, { lazyEntries: true }, (error, zipFile) => {
+    const callback = (error: Error | null, zipFile: ZipFile) => {
       if (error) reject(error);
       else resolve(zipFile);
-    });
+    };
+    if (typeof content === 'string') {
+      openZipFile(content, { lazyEntries: true }, callback);
+    } else {
+      fromBuffer(content, { lazyEntries: true }, callback);
+    }
   });
 }
 
@@ -740,10 +788,12 @@ async function writeZipEntry(
   entry: Entry,
   target: string,
   totalBytes: number,
+  limits: typeof LEGACY_ZIP_LIMITS,
+  signal?: AbortSignal,
+  exclusive = false,
 ): Promise<number> {
   const stream = await openZipStream(zipFile, entry);
-  // yauzl keeps its own destroy() on a deflated entry's stream and never
-  // emits 'close', so pipeline() must own a stream it can close itself.
+  // An owned bridge keeps cancellation independent of yauzl's stream teardown.
   const source = new PassThrough();
   stream.on('error', (error) => source.destroy(error));
   stream.pipe(source);
@@ -751,7 +801,7 @@ async function writeZipEntry(
   const guard = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       size += chunk.length;
-      if (size > MAX_FILE_BYTES) {
+      if (size > limits.fileBytes) {
         callback(
           new WorkspaceSkillManagementError(
             'skill_package_too_large',
@@ -761,7 +811,7 @@ async function writeZipEntry(
         );
         return;
       }
-      if (totalBytes + size > MAX_PACKAGE_BYTES) {
+      if (totalBytes + size > limits.packageBytes) {
         callback(
           new WorkspaceSkillManagementError(
             'skill_package_too_large',
@@ -775,7 +825,14 @@ async function writeZipEntry(
     },
   });
   try {
-    await stageWrite(() => pipeline(source, guard, createWriteStream(target)));
+    await stageWrite(() =>
+      pipeline(
+        source,
+        guard,
+        createWriteStream(target, { flags: exclusive ? 'wx' : 'w' }),
+        { signal },
+      ),
+    );
   } finally {
     stream.destroy();
     source.destroy();
@@ -784,24 +841,73 @@ async function writeZipEntry(
 }
 
 async function filesFromZip(
-  content: Buffer,
+  content: Buffer | string,
   staging: string,
   state: PackageState,
   assertGenerationOpen?: () => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  const nativeArchive = typeof content === 'string';
+  const limits = nativeArchive ? FILE_ZIP_LIMITS : LEGACY_ZIP_LIMITS;
+  signal?.throwIfAborted();
   const zipFile = await openZip(content);
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let writing: Promise<void> | undefined;
+    let entries = 0;
+    const paths = new Map<string, boolean>();
     const finish = (error?: unknown) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', onAbort);
       zipFile.close();
-      if (error) reject(error);
-      else resolve();
+      // Closing the reader must not release the lock while a file write is live.
+      void (writing ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(() => {
+          if (error) reject(error);
+          else resolve();
+        });
     };
+    const onAbort = () => finish(signal?.reason);
     const writeEntry = async (entry: Entry) => {
+      signal?.throwIfAborted();
+      assertGenerationOpen?.();
       const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
       const fileType = mode & 0xf000;
+      if (nativeArchive) {
+        entries += 1;
+        if (entries > MAX_SKILL_ARCHIVE_ENTRIES) {
+          skillError(
+            'skill_too_many_files',
+            'Skill ZIP contains too many entries (max 4096)',
+          );
+        }
+        const directory = entry.fileName.endsWith('/') || fileType === 0x4000;
+        const normalized = normalizeRelativePath(
+          entry.fileName.replace(/\/$/, ''),
+        );
+        if (fileType !== 0 && fileType !== 0x8000 && fileType !== 0x4000) {
+          skillError(
+            'invalid_skill_package',
+            'Skill ZIP contains a link or special file',
+          );
+        }
+        if (
+          paths.has(normalized) ||
+          [...paths].some(
+            ([existing, isDirectory]) =>
+              (!isDirectory && normalized.startsWith(`${existing}/`)) ||
+              (!directory && existing.startsWith(`${normalized}/`)),
+          )
+        ) {
+          skillError(
+            'invalid_skill_package',
+            `Skill ZIP has conflicting paths: ${normalized}`,
+          );
+        }
+        paths.set(normalized, directory);
+      }
       if (fileType === 0xa000) {
         throw new Error('Skill ZIP contains a symbolic link');
       }
@@ -814,16 +920,17 @@ async function filesFromZip(
         entry.fileName,
         state,
         ZIP_TOO_MANY,
+        limits.files,
       );
       if (!staged) return;
-      if (entry.uncompressedSize > MAX_FILE_BYTES) {
+      if (entry.uncompressedSize > limits.fileBytes) {
         skillError(
           'skill_package_too_large',
           'Skill ZIP entry exceeds the allowed size',
           413,
         );
       }
-      if (state.totalBytes + entry.uncompressedSize > MAX_PACKAGE_BYTES) {
+      if (state.totalBytes + entry.uncompressedSize > limits.packageBytes) {
         skillError(
           'skill_package_too_large',
           'Skill ZIP expands beyond the allowed size',
@@ -836,16 +943,26 @@ async function filesFromZip(
         entry,
         staged.target,
         state.totalBytes,
+        limits,
+        signal,
+        nativeArchive,
       );
       commitStagedFile(staged.normalized, written, state);
     };
     zipFile.on('error', finish);
     zipFile.on('entry', (entry: Entry) => {
-      void writeEntry(entry).then(() => {
+      if (settled) return;
+      writing = writeEntry(entry);
+      void writing.then(() => {
         if (!settled) zipFile.readEntry();
       }, finish);
     });
     zipFile.on('end', () => finish());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     zipFile.readEntry();
   });
 }
@@ -1027,6 +1144,7 @@ async function stageSkillSource(
   staging: string,
   githubToken: string | undefined,
   assertGenerationOpen?: () => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const state: PackageState = { count: 0, totalBytes: 0, paths: new Set() };
   try {
@@ -1042,14 +1160,18 @@ async function stageSkillSource(
       await copyFolder(source.path, staging, state, assertGenerationOpen);
     } else {
       await filesFromZip(
-        decodeBase64(source.contentBase64),
+        source.type === 'prepared-zip'
+          ? source.path
+          : decodeBase64(source.contentBase64),
         staging,
         state,
         assertGenerationOpen,
+        signal,
       );
     }
     await finalizeStagedPackage(staging, state, assertGenerationOpen);
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof WorkspaceSkillManagementError) throw error;
     if (
       error instanceof Error &&
@@ -1090,11 +1212,11 @@ async function removeInstallArtifacts(
   const locations = [
     {
       directory: baseDir,
-      prefixes: [`.${skillName}.installing-`, `.${skillName}.backup-`],
+      prefixes: [`.${skillName}.installing-`],
     },
     {
       directory: workDir,
-      prefixes: [`${workPrefix}.installing-`, `${workPrefix}.backup-`],
+      prefixes: [`${workPrefix}.installing-`],
     },
   ];
   for (const { directory, prefixes } of locations) {
@@ -1156,7 +1278,9 @@ export async function installWorkspaceSkill(
   request: WorkspaceSkillInstallRequest,
   githubToken?: string,
   assertGenerationOpen?: () => void,
+  options: WorkspaceSkillInstallOptions = {},
 ): Promise<WorkspaceSkillMutationResult> {
+  options.signal?.throwIfAborted();
   assertGenerationOpen?.();
   const skillName = validateWorkspaceSkillName(request.name);
   rejectInstallArtifactSkillName(skillName);
@@ -1203,8 +1327,20 @@ export async function installWorkspaceSkill(
       staging,
       githubToken,
       assertGenerationOpen,
+      options.signal,
     );
     const skillFile = path.join(staging, 'SKILL.md');
+    options.signal?.throwIfAborted();
+    if (
+      request.source.type === 'prepared-zip' &&
+      (await fs.stat(skillFile)).size > MAX_SKILL_ARCHIVE_MANIFEST_BYTES
+    ) {
+      skillError(
+        'skill_package_too_large',
+        'Root SKILL.md exceeds 32 MiB',
+        413,
+      );
+    }
     let parsed: ReturnType<SkillManager['parseSkillContent']>;
     try {
       parsed = new SkillManager({} as Config).parseSkillContent(
@@ -1224,6 +1360,9 @@ export async function installWorkspaceSkill(
         `Skill name "${parsed.name}" does not match requested name "${skillName}"`,
       );
     }
+    options.signal?.throwIfAborted();
+    assertGenerationOpen?.();
+    options.beforePublish?.();
     if (existing) {
       assertGenerationOpen?.();
       liveInstallArtifacts.add(backup);
@@ -1235,30 +1374,46 @@ export async function installWorkspaceSkill(
     committedStaging = true;
     assertGenerationOpen?.();
   } catch (error) {
-    await fs
-      .rm(committedStaging ? destination : staging, {
+    let recoveryError: unknown;
+    try {
+      await fs.rm(committedStaging ? destination : staging, {
         recursive: true,
         force: true,
-      })
-      .catch(() => undefined);
+      });
+    } catch (cleanupError) {
+      if (committedStaging) recoveryError = cleanupError;
+    }
     if (movedExisting) {
-      await fs.rename(backup, destination).catch(() => undefined);
+      try {
+        await fs.rename(backup, destination);
+        recoveryError = undefined;
+      } catch (restoreError) {
+        recoveryError = restoreError;
+      }
+    }
+    if (recoveryError !== undefined) {
+      throw new WorkspaceSkillRecoveryError(
+        [destination, ...(movedExisting ? [backup] : []), staging],
+        new AggregateError([error, recoveryError]),
+      );
     }
     throw error;
   } finally {
     liveInstallArtifacts.delete(staging);
     liveInstallArtifacts.delete(backup);
   }
+  const result = {
+    skillName,
+    scope: request.scope,
+    installedPath: path.join(destination, 'SKILL.md'),
+  };
+  options.onCommitted?.(result);
   if (movedExisting) {
     await fs
       .rm(backup, { recursive: true, force: true })
       .catch(() => undefined);
   }
-  return {
-    skillName,
-    scope: request.scope,
-    installedPath: path.join(destination, 'SKILL.md'),
-  };
+  return result;
 }
 
 export async function deleteWorkspaceSkill(

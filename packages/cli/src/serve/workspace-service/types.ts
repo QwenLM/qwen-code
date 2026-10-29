@@ -43,12 +43,14 @@ import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-st
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
 import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import type {
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
 
 export type {
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
@@ -255,7 +257,7 @@ export interface DaemonWorkspaceService {
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
     request: WorkspaceSkillInstallRequest,
-    opts?: { refreshRuntime?: boolean },
+    opts?: WorkspaceSkillInstallOptions & { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Delete a managed project- or user-level Skill. */

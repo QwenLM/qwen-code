@@ -823,6 +823,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
     }
+    if (feature === 'workspace_skill_manage') {
+      return [feature, 'skill_archive_install', 'skill_zip_file_source'];
+    }
     if (feature === 'session_artifacts') {
       return [
         feature,
@@ -4074,7 +4077,9 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'workspace_runtime' ||
-          feature === 'workspace_skills_config_runtime'
+          feature === 'workspace_skills_config_runtime' ||
+          feature === 'skill_archive_install' ||
+          feature === 'skill_zip_file_source'
         ) {
           expect(predicate({ workspaceRuntimeAvailable: true })).toBe(true);
           expect(predicate({ workspaceRuntimeAvailable: false })).toBe(false);

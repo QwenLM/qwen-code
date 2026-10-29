@@ -23,6 +23,7 @@ import {
   type DaemonWorkspaceSkillStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import type { DaemonSkillMutationResult } from '@qwen-code/sdk/daemon';
 import {
   filterSkills,
   preserveSkillSelection,
@@ -186,6 +187,8 @@ export function SkillsManagerPage({
     ensureRuntime,
     setEnabled,
     install,
+    installArchive,
+    lookupInstallAttempt,
     remove,
   } = useSkills({ autoLoad: true, workspaceCwd });
   const canToggleSkills =
@@ -204,6 +207,7 @@ export function SkillsManagerPage({
   const [installOpen, setInstallOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [listNotice, setListNotice] = useState<string | null>(null);
+  const [installWarning, setInstallWarning] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     skillName: string;
     text: string;
@@ -306,9 +310,28 @@ export function SkillsManagerPage({
     request: Parameters<typeof install>[0],
   ): Promise<void> {
     setListNotice(null);
+    setInstallWarning(null);
     await install(request);
     setListNotice(t('skills.install.succeeded', { name: request.name.trim() }));
     await reloadConfig().catch(() => undefined);
+  }
+
+  async function completeArchiveInstall(
+    result: DaemonSkillMutationResult,
+  ): Promise<void> {
+    let warning = result.activationWarning;
+    await reloadConfig().catch(() => undefined);
+    try {
+      await ensureRuntime({ throwOnError: true });
+    } catch (error) {
+      warning ??= error instanceof Error ? error.message : String(error);
+    }
+    setListNotice(t('skills.install.succeeded', { name: result.skillName }));
+    setInstallWarning(
+      warning
+        ? t('skills.install.activationWarning', { detail: warning })
+        : null,
+    );
   }
 
   async function deleteSkill(): Promise<void> {
@@ -664,6 +687,16 @@ export function SkillsManagerPage({
             {listNotice}
           </ManagementNotice>
         ) : null}
+        {installWarning ? (
+          <ManagementNotice
+            tone="error"
+            noticeKey={installWarning}
+            closeLabel={t('common.close')}
+            onDismiss={() => setInstallWarning(null)}
+          >
+            {installWarning}
+          </ManagementNotice>
+        ) : null}
 
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -807,6 +840,20 @@ export function SkillsManagerPage({
         open={installOpen}
         onOpenChange={setInstallOpen}
         onInstall={installSkill}
+        archive={
+          workspace.capabilities?.features.includes('skill_archive_install')
+            ? {
+                limits: workspace.capabilities.limits,
+                install: async (request, scope) => {
+                  setListNotice(null);
+                  setInstallWarning(null);
+                  return installArchive(request, scope);
+                },
+                lookup: lookupInstallAttempt,
+                committed: completeArchiveInstall,
+              }
+            : undefined
+        }
       />
     </div>
   );
