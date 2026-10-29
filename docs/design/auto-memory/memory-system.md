@@ -193,7 +193,9 @@ flowchart TD
 flowchart TD
     A[scheduleAutoMemoryExtract 被调用] --> B{本轮历史记录中\n是否有写记忆文件的工具调用?}
     B -- 是 --> C[登记 skipped 任务\n原因: memory_tool]
-    B -- 否 --> D{isExtractRunning?}
+    B -- 否 --> Z{#13004 实验开启\n且上一轮提取\n读了记忆但零产出?}
+    Z -- 是 --> Y[跳过并登记 pending 快照\n原因: cadence]
+    Z -- 否 --> D{isExtractRunning?}
     D -- 是 --> E{是否已有 queued 请求?}
     E -- 是 --> F[更新 queued 请求的\nhistory 参数]
     E -- 否 --> G[注册 pending 任务\n放入 queue]
@@ -205,15 +207,17 @@ flowchart TD
     F --> M[返回 skipped: queued]
     G --> M
     C --> N[返回 skipped: memory_tool]
+    Y --> W[返回 skipped: cadence]
 ```
 
 **跳过原因说明**：
 
-| 原因              | 含义                                            |
-| ----------------- | ----------------------------------------------- |
-| `memory_tool`     | 本轮主 Agent 已直接写了记忆文件，跳过以避免冲突 |
-| `already_running` | 提取正在进行且无法入队                          |
-| `queued`          | 已有提取在运行，本次请求已入队                  |
+| 原因              | 含义                                                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `memory_tool`     | 本轮主 Agent 已直接写了记忆文件，跳过以避免冲突                                                                                                  |
+| `cadence`         | #13004 实验开启时，上一轮提取读了记忆但零产出，且本轮在跳过预算与窗口内，跳过以省一次 fork；被跳过的轮次记为 pending，由 ACP 关闭时的 flush 补齐 |
+| `already_running` | 提取正在进行且无法入队                                                                                                                           |
+| `queued`          | 已有提取在运行，本次请求已入队                                                                                                                   |
 
 ### 核心提取流程（`extract.ts`）
 

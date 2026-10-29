@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -654,6 +654,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     .thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
                     .thenCompose(ignored -> drainSessions(binding, renewal, authority, null));
         });
+    }
+
+    /**
+     * Retryable provider answers that keep an already-placed external worker
+     * adoptable: capacity and unavailable/shutdown. Both external kinds share
+     * them under scratch and under registered-storage (managed-context)
+     * placement, so a transient provider answer never buries a recoverable
+     * worker behind a permanent recovery block.
+     */
+    private static boolean externalRetryable(RuntimeProvisionRequest request,
+            RuntimeBrokerException failure) {
+        return ExternalRuntimeKinds.isExternal(request.getProvisionerKind())
+                && failure.getStatusCode() == 503
+                && ("runtime_external_capacity".equals(failure.getCode())
+                        || "runtime_external_unavailable".equals(failure.getCode()));
     }
 
     private static boolean workerRefusedRelease(Throwable error) {
@@ -3760,15 +3775,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
             // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && (claimed.getResourceHandle() == null
+                            || externalRetryable(request, brokerFailure)
                             || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
                                     && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext() && brokerFailure.getStatusCode() == 503
-                                    && (("kubernetes-scratch".equals(request.getProvisionerKind())
-                                            && "runtime_kubernetes_capacity".equals(brokerFailure.getCode()))
-                                            || (ExternalRuntimeProvisioner.KIND.equals(request.getProvisionerKind())
-                                                    && ("runtime_external_capacity".equals(brokerFailure.getCode())
-                                                            || "runtime_external_unavailable"
-                                                                    .equals(brokerFailure.getCode()))))));
+                            || (!request.isManagedContext()
+                                    && "kubernetes-scratch".equals(request.getProvisionerKind())
+                                    && brokerFailure.getStatusCode() == 503
+                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
@@ -3881,8 +3894,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                         .getResourceHandle() == null
                                         // The external ensureResource commits
                                         // nothing before the handle is returned.
-                                        && !ExternalRuntimeProvisioner.KIND
-                                                .equals(request.getProvisionerKind())) {
+                                        && !ExternalRuntimeKinds.isExternal(request.getProvisionerKind())) {
                                     blockRecoveryQuietly(currentClaim, cause);
                                 }
                             }

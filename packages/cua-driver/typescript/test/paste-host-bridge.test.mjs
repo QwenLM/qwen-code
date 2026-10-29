@@ -50,12 +50,34 @@ async function fixture(t) {
   writeFileSync(
     path.join(directory, 'native/cua_driver_sdk.js'),
     `
-    export const state = { calls: [], operation: () => Promise.resolve('completed') };
+    export const state = {
+      calls: [],
+      nativeUsers: 0,
+      hostAvailable: false,
+      operation: () => Promise.resolve('completed'),
+      construct: () => { state.nativeUsers++; return new CuaDriver(); },
+      setHost: (available) => {
+        const previous = state.hostAvailable;
+        state.hostAvailable = available;
+        return previous;
+      },
+    };
+    export const nativeUiNeedsPump = () => state.nativeUsers > 0;
+    export const setNativeUiHostAvailable = (available) => state.setHost(available);
+    function construct(method, args) {
+      state.calls.push({ method, args, hostAvailable: state.hostAvailable });
+      return state.construct();
+    }
     function dispatch(receiver, method, args) {
       state.calls.push({ receiver, method, args });
       return state.operation();
     }
     export class CuaDriver {
+      static createWithClientKind(...args) { return construct('create', args); }
+      static createConfiguredWithClientKind(...args) { return construct('configured', args); }
+      static createConfiguredWithAuthorizationHostAndClientKind(...args) { return construct('authorization', args); }
+      static createConfiguredWithActivityObserverAndClientKind(...args) { return construct('observer', args); }
+      static createConfiguredWithHostIntegrationsAndClientKind(...args) { return construct('integrations', args); }
       paste(...args) { return dispatch(this, 'paste', args); }
       callTool(...args) { return dispatch(this, 'callTool', args); }
     }
@@ -87,8 +109,14 @@ function trackTimers(t) {
   const clearInterval = globalThis.clearInterval;
   const timers = new Map();
   globalThis.setInterval = (callback, delay) => {
-    const handle = {};
-    timers.set(handle, { callback, delay });
+    const entry = { callback, delay, unrefs: 0 };
+    const handle = {
+      unref() {
+        entry.unrefs++;
+        return handle;
+      },
+    };
+    timers.set(handle, entry);
     return handle;
   };
   globalThis.clearInterval = (handle) => {
@@ -202,6 +230,161 @@ test('root default exports use the same wrapped driver and session', async (t) =
   );
 });
 
+for (const [factory, method, args] of [
+  ['create', 'create', [{}]],
+  ['createConfigured', 'configured', [{}]],
+  [
+    'createConfiguredWithAuthorizationHost',
+    'authorization',
+    [{}, { host: true }],
+  ],
+  [
+    'createConfiguredWithActivityObserver',
+    'observer',
+    [{}, { observer: true }],
+  ],
+  [
+    'createConfiguredWithHostIntegrations',
+    'integrations',
+    [{}, { host: true }, { observer: true }],
+  ],
+]) {
+  test(`${factory} keeps one unref pump until the native UI lease ends`, async (t) => {
+    const { sdk } = await fixture(t);
+    const timers = trackTimers(t);
+    sdk.CuaDriver[factory](...args);
+    assert.deepEqual(sdk.state.calls, [
+      {
+        method,
+        args: [...args, sdk.SdkClientKind.Typescript],
+        hostAvailable: true,
+      },
+    ]);
+    assert.equal(sdk.state.hostAvailable, false);
+    assert.equal(timers.size, 1);
+    const timer = [...timers.values()][0];
+    assert.equal(timer.unrefs, 1);
+    timer.callback();
+    assert.equal(timers.size, 1);
+    sdk.state.nativeUsers = 0;
+    timer.callback();
+    assert.equal(timers.size, 0);
+  });
+}
+
+test('multiple native owners share the pump and can recreate it after teardown', async (t) => {
+  const { sdk } = await fixture(t);
+  const timers = trackTimers(t);
+  sdk.CuaDriver.createConfigured({});
+  sdk.CuaDriver.createConfigured({});
+  assert.equal(timers.size, 1);
+  const timer = [...timers.values()][0];
+  sdk.state.nativeUsers--;
+  timer.callback();
+  assert.equal(timers.size, 1);
+  sdk.state.nativeUsers--;
+  timer.callback();
+  assert.equal(timers.size, 0);
+  sdk.CuaDriver.createConfigured({});
+  assert.equal(timers.size, 1);
+  sdk.state.nativeUsers = 0;
+  [...timers.values()][0].callback();
+  assert.equal(timers.size, 0);
+});
+
+test('constructor failure releases its temporary lease without stopping another owner', async (t) => {
+  const { sdk } = await fixture(t);
+  const timers = trackTimers(t);
+  const failure = new Error('constructor failed');
+  sdk.state.construct = () => {
+    throw failure;
+  };
+  assert.throws(
+    () => sdk.CuaDriver.createConfigured({}),
+    (error) => error === failure,
+  );
+  assert.equal(timers.size, 0);
+  assert.equal(sdk.state.hostAvailable, false);
+  sdk.state.nativeUsers = 1;
+  assert.throws(
+    () => sdk.CuaDriver.createConfigured({}),
+    (error) => error === failure,
+  );
+  assert.equal(timers.size, 1);
+  assert.equal(sdk.state.hostAvailable, false);
+  sdk.state.nativeUsers = 0;
+  [...timers.values()][0].callback();
+  assert.equal(timers.size, 0);
+});
+
+test('nested constructors restore their enclosing trusted UI host scope', async (t) => {
+  const { sdk } = await fixture(t);
+  const timers = trackTimers(t);
+  let depth = 0;
+  sdk.state.construct = () => {
+    assert.equal(sdk.state.hostAvailable, true);
+    if (depth++ === 0) {
+      sdk.CuaDriver.createConfigured({ nested: true });
+      assert.equal(sdk.state.hostAvailable, true);
+    }
+    sdk.state.nativeUsers++;
+    return new sdk.CuaDriver();
+  };
+  sdk.CuaDriver.createConfigured({});
+  assert.equal(sdk.state.hostAvailable, false);
+  assert.equal(timers.size, 1);
+  sdk.state.nativeUsers = 0;
+  [...timers.values()][0].callback();
+  assert.equal(timers.size, 0);
+});
+
+test('host setter failures still release the temporary pump', async (t) => {
+  const { sdk } = await fixture(t);
+  const timers = trackTimers(t);
+  const failure = new Error('host setter failed');
+  sdk.state.setHost = () => {
+    throw failure;
+  };
+  assert.throws(
+    () => sdk.CuaDriver.createConfigured({}),
+    (error) => error === failure,
+  );
+  assert.equal(sdk.state.calls.length, 0);
+  assert.equal(timers.size, 0);
+  sdk.state.setHost = (available) => {
+    const previous = sdk.state.hostAvailable;
+    sdk.state.hostAvailable = available;
+    if (!available) throw failure;
+    return previous;
+  };
+  assert.throws(
+    () => sdk.CuaDriver.createConfigured({}),
+    (error) => error === failure,
+  );
+  assert.equal(sdk.state.hostAvailable, false);
+  sdk.state.nativeUsers = 0;
+  [...timers.values()][0].callback();
+  assert.equal(timers.size, 0);
+});
+
+test('concurrent paste cleanup shares a temporary pump with the native owner', async (t) => {
+  const { sdk } = await fixture(t);
+  const timers = trackTimers(t);
+  sdk.CuaDriver.createConfigured({});
+  const pending = [];
+  sdk.state.operation = () => new Promise((resolve) => pending.push(resolve));
+  const first = new sdk.CuaDriver().paste({});
+  const second = new sdk.CuaDriverSession().paste({});
+  assert.equal(timers.size, 1);
+  sdk.state.nativeUsers = 0;
+  pending[0]('first');
+  assert.equal(await first, 'first');
+  assert.equal(timers.size, 1);
+  pending[1]('second');
+  assert.equal(await second, 'second');
+  assert.equal(timers.size, 0);
+});
+
 test(
   'a native main-thread refusal prevents Worker paste dispatch and timer creation',
   { timeout: 10_000 },
@@ -221,6 +404,7 @@ test(
       await assert.rejects(receiver.paste({}), /requires the Node main thread/);
       await assert.rejects(receiver.callTool('paste', '{}'), /requires the Node main thread/);
     }
+    assert.throws(() => sdk.CuaDriver.createConfigured({}), /requires the Node main thread/);
     assert.equal(sdk.state.calls.length, 0);
     assert.equal(timers, 0);
     parentPort.postMessage('refused before dispatch');

@@ -207,6 +207,7 @@ describe('runNonInteractiveStreamJson', () => {
     >;
   };
   let mockOutputAdapter: {
+    send: ReturnType<typeof vi.fn>;
     emitResult: ReturnType<typeof vi.fn>;
     emitMessage: ReturnType<typeof vi.fn>;
     emitUserMessage: ReturnType<typeof vi.fn>;
@@ -242,11 +243,13 @@ describe('runNonInteractiveStreamJson', () => {
 
     // Setup mocks
     mockOutputAdapter = {
+      send: vi.fn(),
       emitResult: vi.fn(),
       emitMessage: vi.fn(),
       emitUserMessage: vi.fn(),
       emitSystemMessage: vi.fn(),
     } as {
+      send: ReturnType<typeof vi.fn>;
       emitResult: ReturnType<typeof vi.fn>;
       emitMessage: ReturnType<typeof vi.fn>;
       emitUserMessage: ReturnType<typeof vi.fn>;
@@ -384,8 +387,287 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
   });
+
+  it('keeps MCP responses flowing while a Workflow mode getter awaits readiness', async () => {
+    let releaseInitialization!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    config = createConfig({ initialize: vi.fn(() => initialization) });
+    let waitForInitialization!: () => Promise<void>;
+    vi.mocked(ControlContext).mockImplementation((options) => {
+      waitForInitialization = options.waitForInitialization!;
+      return {} as ControlContext;
+    });
+    let getter: Promise<void> | undefined;
+    let getterComplete = false;
+    mockDispatcher.dispatch.mockImplementation((request: CLIControlRequest) => {
+      if (request.request.subtype === 'get_workflow_mode') {
+        getter = waitForInitialization().then(() => {
+          getterComplete = true;
+        });
+        return getter;
+      }
+      return Promise.resolve();
+    });
+    mockDispatcher.handleControlResponse.mockImplementation(() => {
+      expect(getterComplete).toBe(false);
+      releaseInitialization();
+    });
+    mockDispatcher.waitForPendingIncomingRequests.mockImplementation(
+      () => getter,
+    );
+    mockInputReader.read = async function* () {
+      yield createControlRequest();
+      yield {
+        type: 'control_request',
+        request_id: 'workflow-get',
+        request: { subtype: 'get_workflow_mode' },
+      };
+      yield createControlResponse('mcp-initialize');
+    };
+    await runNonInteractiveStreamJson(config, '');
+    expect(mockDispatcher.handleControlResponse).toHaveBeenCalledOnce();
+    expect(getterComplete).toBe(true);
+  });
+
+  it('does not dispatch the first prompt after an initial Workflow mode staging failure', async () => {
+    mockDispatcher.dispatch.mockRejectedValueOnce(
+      new Error('Conflicting Workflow mode'),
+    );
+    mockInputReader.read = async function* () {
+      yield createControlRequest();
+      yield createUserMessage('must not reach the model');
+    };
+    await runNonInteractiveStreamJson(config, '');
+    expect(config.initialize).not.toHaveBeenCalled();
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalled();
+  });
+
+  it('rejects a pending duplicate initialize without executing it after cancellation', async () => {
+    let release!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    config = createConfig({ initialize: vi.fn(() => initialization) });
+    const first = createControlRequest();
+    const duplicate: CLIControlRequest = {
+      type: 'control_request',
+      request_id: 'pending-duplicate',
+      request: { subtype: 'initialize', effort: 'low' },
+    };
+    let responseBeforeReady: unknown;
+    mockInputReader.read = async function* () {
+      try {
+        yield first;
+        await vi.waitFor(() =>
+          expect(config.initialize).toHaveBeenCalledOnce(),
+        );
+        yield duplicate;
+        await Promise.resolve();
+        responseBeforeReady = mockOutputAdapter.send.mock.calls.find(
+          ([frame]) => frame.response?.request_id === duplicate.request_id,
+        )?.[0];
+        yield {
+          type: 'control_cancel_request',
+          request_id: duplicate.request_id,
+        } as ControlCancelRequest;
+      } finally {
+        release();
+      }
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(responseBeforeReady).toEqual({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: duplicate.request_id,
+        error: 'Session initialization is in progress. Try again when ready.',
+      },
+    });
+    expect(mockDispatcher.dispatch).toHaveBeenCalledExactlyOnceWith(
+      first,
+      true,
+    );
+    expect(mockDispatcher.handleCancel).toHaveBeenCalledWith(
+      duplicate.request_id,
+    );
+    expect(config.initialize).toHaveBeenCalledOnce();
+  });
+
+  it('rejects another initialize after payload validation fails', async () => {
+    const initialRequest = createControlRequest();
+    const retryRequest = {
+      ...createControlRequest(),
+      request_id: 'initialize-retry',
+    };
+    const error = new Error(
+      'Invalid effort value. Supported: low, medium, high, xhigh, max',
+    );
+    mockDispatcher.dispatch.mockImplementation(
+      async (request: CLIControlRequest, propagateError = false) => {
+        const failed = request.request_id === initialRequest.request_id;
+        mockOutputAdapter.send({
+          type: 'control_response',
+          response: failed
+            ? {
+                subtype: 'error',
+                request_id: request.request_id,
+                error: error.message,
+              }
+            : {
+                subtype: 'success',
+                request_id: request.request_id,
+                response: { subtype: 'initialize' },
+              },
+        });
+        if (failed && propagateError) throw error;
+      },
+    );
+    mockInputReader.read = async function* () {
+      yield initialRequest;
+      yield retryRequest;
+      yield createUserMessage('must not reach the model');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(mockDispatcher.dispatch).toHaveBeenCalledExactlyOnceWith(
+      initialRequest,
+      true,
+    );
+    expect(mockOutputAdapter.send.mock.calls.map(([frame]) => frame)).toEqual([
+      {
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: initialRequest.request_id,
+          error: error.message,
+        },
+      },
+      {
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: retryRequest.request_id,
+          error: `Session initialization failed: ${error.message}`,
+        },
+      },
+    ]);
+    expect(config.initialize).not.toHaveBeenCalled();
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: error.message,
+      }),
+    );
+  });
+
+  it.each([true, false])(
+    'rejects a pending initialize and preserves the settled config outcome (success=%s)',
+    async (succeeds) => {
+      let resolveInitialization!: () => void;
+      let rejectInitialization!: (error: Error) => void;
+      const initialization = new Promise<void>((resolve, reject) => {
+        resolveInitialization = resolve;
+        rejectInitialization = reject;
+      });
+      let initializationStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        initializationStarted = resolve;
+      });
+      config = createConfig({
+        initialize: vi.fn(() => {
+          initializationStarted();
+          return initialization;
+        }),
+      });
+      const initialRequest = createControlRequest();
+      const retryRequest = {
+        ...createControlRequest(),
+        request_id: 'initialize-retry',
+      };
+      const settledRequest = {
+        ...createControlRequest(),
+        request_id: 'initialize-settled',
+      };
+      const error = new Error('bad credentials');
+      mockDispatcher.dispatch.mockImplementation(
+        async (request: CLIControlRequest) => {
+          mockOutputAdapter.send({
+            type: 'control_response',
+            response: {
+              subtype: 'success',
+              request_id: request.request_id,
+              response: { subtype: 'initialize' },
+            },
+          });
+        },
+      );
+      mockDispatcher.handleControlResponse.mockImplementation(() => {
+        if (succeeds) resolveInitialization();
+        else rejectInitialization(error);
+      });
+      let dispatchesWhileInitializing: number | undefined;
+      mockInputReader.read = async function* () {
+        yield initialRequest;
+        await started;
+        yield retryRequest;
+        dispatchesWhileInitializing = mockDispatcher.dispatch.mock.calls.length;
+        yield createControlResponse('mcp-initialize');
+        yield createUserMessage('run only after successful initialization');
+        await vi.waitFor(() => {
+          if (succeeds) expect(runNonInteractiveMock).toHaveBeenCalledOnce();
+          else expect(mockOutputAdapter.emitResult).toHaveBeenCalledOnce();
+        });
+        yield settledRequest;
+      };
+
+      await runNonInteractiveStreamJson(config, '');
+
+      expect(dispatchesWhileInitializing).toBe(1);
+      expect(
+        mockDispatcher.handleControlResponse,
+      ).toHaveBeenCalledExactlyOnceWith(
+        createControlResponse('mcp-initialize'),
+      );
+      expect(config.initialize).toHaveBeenCalledOnce();
+      expect(mockOutputAdapter.send).toHaveBeenCalledTimes(3);
+      expect(mockOutputAdapter.send).toHaveBeenNthCalledWith(2, {
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: retryRequest.request_id,
+          error: 'Session initialization is in progress. Try again when ready.',
+        },
+      });
+      expect(mockOutputAdapter.send).toHaveBeenLastCalledWith({
+        type: 'control_response',
+        response: succeeds
+          ? {
+              subtype: 'success',
+              request_id: settledRequest.request_id,
+              response: { subtype: 'initialize' },
+            }
+          : {
+              subtype: 'error',
+              request_id: settledRequest.request_id,
+              error: `Session initialization failed: ${error.message}`,
+            },
+      });
+      expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(succeeds ? 2 : 1);
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(succeeds ? 1 : 0);
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(
+        succeeds ? 0 : 1,
+      );
+    },
+  );
 
   it('writes only warnings produced during deferred initialization to stderr', async () => {
     const warnings = ['Warning: already emitted before stream-json startup'];
@@ -1419,7 +1701,11 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(2);
-    expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(1, initRequest);
+    expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(
+      1,
+      initRequest,
+      true,
+    );
     expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(2, controlRequest);
   });
 
@@ -1626,7 +1912,7 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     // Verify initialization happened
-    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
     expect(mockDispatcher.shutdown).toHaveBeenCalled();
   });
 
