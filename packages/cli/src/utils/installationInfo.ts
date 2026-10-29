@@ -5,6 +5,7 @@
  */
 
 import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
+import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -437,6 +438,7 @@ function isStandaloneInstallDir(installDir: string): boolean {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
       name?: unknown;
       target?: unknown;
+      runtime?: unknown;
     };
     // Manifest format is produced by writeManifest in create-standalone-package.js.
     if (
@@ -447,7 +449,14 @@ function isStandaloneInstallDir(installDir: string): boolean {
       return false;
     }
 
-    return hasStandaloneRuntimeLayout(installDir, manifest.target);
+    const runtime: JsRuntime = manifest.runtime === 'bun' ? 'bun' : 'node';
+    // Installs from before the v0.18.1 entry-point floor only have the
+    // installer's launcher; later archives ship the entry point plus the
+    // bundled runtime.
+    return (
+      hasStandaloneLauncherLayout(installDir, manifest.target, runtime) ||
+      hasStandaloneArchiveLayout(installDir, manifest.target, runtime)
+    );
   } catch (err) {
     debugLogger.error('Standalone detection failed:', installDir, err);
     return false;
@@ -455,40 +464,66 @@ function isStandaloneInstallDir(installDir: string): boolean {
 }
 
 /**
- * Resolves the launcher and bundled-runtime paths a standalone installation
- * has for the given target. The layout is produced by
- * scripts/create-standalone-package.js (writeShims and the runtime
+ * Resolves the launcher, bundled-runtime and entry-point paths of a standalone
+ * installation for the given target and runtime flavor. The layout is produced
+ * by scripts/create-standalone-package.js (writeShims and the runtime
  * installer); keep this in sync when that layout changes.
  */
-function standaloneRuntimePaths(
+export function standaloneRuntimePaths(
   installDir: string,
   target: string,
-): { launcher: string; node: string } {
+  runtime: JsRuntime,
+): { launcher: string; interpreter: string; entryPoint: string } {
   const isWindowsTarget = target.startsWith('win');
   return {
     launcher: isWindowsTarget
       ? path.join(installDir, 'bin', 'qwen.cmd')
       : path.join(installDir, 'bin', 'qwen'),
-    node: isWindowsTarget
-      ? path.join(installDir, 'node', 'node.exe')
-      : path.join(installDir, 'node', 'bin', 'node'),
+    interpreter: isWindowsTarget
+      ? path.join(installDir, runtime, `${runtime}.exe`)
+      : path.join(installDir, runtime, 'bin', runtime),
+    entryPoint: path.join(installDir, 'lib', 'cli-entry.js'),
   };
 }
 
-/**
- * Checks the executable layout a standalone installation must have for the
- * given target: the launcher and the bundled runtime.
- */
-function hasStandaloneRuntimeLayout(
+function hasStandaloneLauncherLayout(
   installDir: string,
   target: string,
+  runtime: JsRuntime,
 ): boolean {
-  const { launcher, node } = standaloneRuntimePaths(installDir, target);
+  const { launcher, interpreter } = standaloneRuntimePaths(
+    installDir,
+    target,
+    runtime,
+  );
   return (
     fs.existsSync(launcher) &&
-    fs.existsSync(node) &&
+    fs.existsSync(interpreter) &&
     isStandaloneRuntimeFile(launcher) &&
-    isStandaloneRuntimeFile(node)
+    isStandaloneRuntimeFile(interpreter)
+  );
+}
+
+/**
+ * Checks the archive contract shared by the update gate and installation
+ * detection: the CLI entry point plus the bundled runtime. The installer's
+ * launcher is optional because the update gate accepts repacked archives that
+ * ship only the entry point the launcher would exec.
+ */
+export function hasStandaloneArchiveLayout(
+  installDir: string,
+  target: string,
+  runtime: JsRuntime,
+): boolean {
+  const { entryPoint, interpreter } = standaloneRuntimePaths(
+    installDir,
+    target,
+    runtime,
+  );
+  return (
+    fs.existsSync(entryPoint) &&
+    fs.existsSync(interpreter) &&
+    isStandaloneRuntimeFile(interpreter)
   );
 }
 

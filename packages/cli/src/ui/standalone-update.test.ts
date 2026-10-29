@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import * as tar from 'tar';
 import {
   acquireLock,
@@ -22,6 +23,7 @@ import {
   isSafeTarEntry,
   isSafeTarLinkTarget,
 } from './standalone-update.js';
+import { getInstallationInfo } from '../utils/installationInfo.js';
 
 const mockFetch = vi.hoisted(() => vi.fn());
 vi.mock('../utils/load-undici.js', () => ({
@@ -315,6 +317,109 @@ describe('standalone-update', () => {
         }
       },
     );
+
+    it.skipIf(process.platform === 'win32')(
+      'refreshes a wrapper that targets a launcher the activated tree lacks',
+      () => {
+        const libDir = path.join(tempDir, '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        const binDir = path.join(tempDir, '.local', 'bin');
+        fs.mkdirSync(path.join(standaloneDir, 'lib'), { recursive: true });
+        fs.writeFileSync(path.join(standaloneDir, 'lib', 'cli-entry.js'), '');
+        fs.mkdirSync(path.join(standaloneDir, 'node', 'bin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'node', 'bin', 'node'),
+          '#!/bin/sh\n',
+          { mode: 0o755 },
+        );
+        fs.mkdirSync(binDir, { recursive: true });
+        const wrapperPath = path.join(binDir, 'qwen');
+        fs.writeFileSync(
+          wrapperPath,
+          `#!/usr/bin/env sh\nexec '${standaloneDir}/bin/qwen' "$@"\n`,
+          { mode: 0o755 },
+        );
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain(
+          path.join(standaloneDir, 'lib', 'cli-entry.js'),
+        );
+        expect(content).not.toContain(path.join(standaloneDir, 'bin', 'qwen'));
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'launches the installed entry point when the archive has no launcher',
+      () => {
+        const libDir = path.join(tempDir, '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(path.join(standaloneDir, 'lib'), { recursive: true });
+        fs.writeFileSync(path.join(standaloneDir, 'lib', 'cli-entry.js'), '');
+        fs.mkdirSync(path.join(standaloneDir, 'node', 'bin'), {
+          recursive: true,
+        });
+        const marker = path.join(tempDir, 'argv.txt');
+        fs.writeFileSync(
+          path.join(standaloneDir, 'node', 'bin', 'node'),
+          `#!/bin/sh\nprintf '%s\\n' "$@" > '${marker}'\n`,
+          { mode: 0o755 },
+        );
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        execFileSync(path.join(tempDir, '.local', 'bin', 'qwen'), [
+          '--target-version',
+          '1.2.3',
+        ]);
+        expect(fs.readFileSync(marker, 'utf8').trim().split('\n')).toEqual([
+          path.join(standaloneDir, 'lib', 'cli-entry.js'),
+          '--target-version',
+          '1.2.3',
+        ]);
+      },
+    );
+
+    it('writes a cmd wrapper that runs the entry point when the launcher is absent', () => {
+      const libDir = path.join(tempDir, '.local', 'lib');
+      const standaloneDir = path.join(libDir, 'qwen-code');
+      fs.mkdirSync(path.join(standaloneDir, 'lib'), { recursive: true });
+      fs.writeFileSync(path.join(standaloneDir, 'lib', 'cli-entry.js'), '');
+      fs.mkdirSync(path.join(standaloneDir, 'bun'), { recursive: true });
+      fs.writeFileSync(path.join(standaloneDir, 'bun', 'bun.exe'), '');
+
+      ensureBinWrapper(standaloneDir, 'win-x64', 'bun');
+
+      const wrapperPath = path.join(tempDir, '.local', 'bin', 'qwen.cmd');
+      const content = fs.readFileSync(wrapperPath, 'utf-8');
+      expect(content).toContain(path.join(standaloneDir, 'bun', 'bun.exe'));
+      expect(content).toContain(
+        path.join(standaloneDir, 'lib', 'cli-entry.js'),
+      );
+      expect(content).toContain('QWEN_TUI_RENDERER=opentui');
+      expect(content).not.toContain('call "');
+    });
 
     it.skipIf(process.platform === 'win32')(
       'throws when wrapper creation fails safety validation',
@@ -1560,9 +1665,14 @@ describe('standalone-update', () => {
     it('accepts an archive without a launcher once the entry point runs', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
       // The standalone-runtime harness repacks a minimal runnable tree without
-      // bin/qwen; the archive contract is the lib/cli-entry.js floor plus the
-      // smoke test, not the installer's launcher layout.
-      await serveArchive({ runnable: true, binless: true });
+      // bin/qwen; the archive contract is the entry point plus the bundled
+      // runtime, and the wrapper falls back to the entry point.
+      const hostTarget = `${process.platform}-${process.arch}`;
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({ target: hostTarget, version: '0.1.0' }),
+      );
+      await serveArchive({ runnable: true, binless: true, target: hostTarget });
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).resolves.toBe('done');
@@ -1571,6 +1681,19 @@ describe('standalone-update', () => {
           fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
         ),
       ).toMatchObject({ version: '1.2.3' });
+
+      const originalArgv = process.argv;
+      process.argv = [...originalArgv];
+      process.argv[1] = path.join(standaloneDir, 'lib', 'cli.js');
+      try {
+        // The activated tree must still classify as standalone, or automatic
+        // updates and exact-version updates silently stop applying to it.
+        const info = getInstallationInfo(path.join(testRoot, 'project'), false);
+        expect(info.isStandalone).toBe(true);
+        expect(info.standaloneDir).toBe(standaloneDir);
+      } finally {
+        process.argv = originalArgv;
+      }
     });
 
     it('preserves the installation when the archive omits the launcher entry point', async () => {
@@ -1582,7 +1705,7 @@ describe('standalone-update', () => {
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).rejects.toThrow(
-        'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
+        'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
       );
       expectInstallationPreserved();
     });
@@ -1787,7 +1910,7 @@ describe('standalone-update', () => {
         const failed = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
         pending = failed;
         await expect(failed.activate()).rejects.toThrow(
-          'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
+          'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
         );
         expect(cachedArchives()).toHaveLength(0);
         expectInstallationPreserved();
@@ -1815,7 +1938,7 @@ describe('standalone-update', () => {
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
-          'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
+          'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
         );
 
         expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
@@ -1842,7 +1965,7 @@ describe('standalone-update', () => {
       await expect(
         performStandaloneUpdate(standaloneDir, 'v1.2.3'),
       ).rejects.toThrow(
-        'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
+        'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
       );
       expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
         `${baseUrl}/v1.2.3/${filename}`,

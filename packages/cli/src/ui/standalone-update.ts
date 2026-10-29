@@ -18,6 +18,10 @@ import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  hasStandaloneArchiveLayout,
+  standaloneRuntimePaths,
+} from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -985,9 +989,16 @@ function atomicReplace(
 export function ensureBinWrapper(
   standaloneDir: string,
   target: string,
+  runtime: JsRuntime = 'node',
 ): BinWrapperArtifacts {
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
   const artifacts: BinWrapperArtifacts = { wrapperCreated: false };
+  const { launcher, interpreter, entryPoint } = standaloneRuntimePaths(
+    standaloneDir,
+    target,
+    runtime,
+  );
+  const hasLauncher = fs.existsSync(launcher);
 
   try {
     fs.mkdirSync(binDir, { recursive: true });
@@ -999,7 +1010,12 @@ export function ensureBinWrapper(
       }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
       artifacts.wrapperPath = wrapperPath;
-      const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
+      const content = hasLauncher
+        ? `@echo off\r\ncall "${launcher}" %*\r\n`
+        : `@echo off\r\nsetlocal\r\n` +
+          `set "QWEN_CODE_LAUNCHER_PATH=${wrapperPath}"\r\n` +
+          `${runtime === 'bun' ? 'if not defined QWEN_TUI_RENDERER set "QWEN_TUI_RENDERER=opentui"\r\n' : ''}` +
+          `"${interpreter}" "${entryPoint}" %*\r\nexit /b %ERRORLEVEL%\r\n`;
       try {
         fs.writeFileSync(wrapperPath, content, { flag: 'wx' });
         artifacts.wrapperCreated = true;
@@ -1011,17 +1027,28 @@ export function ensureBinWrapper(
           wrapperPath,
           standaloneDir,
         );
+        if (!artifacts.wrapperNeedsAttention && !hasLauncher) {
+          artifacts.wrapperNeedsAttention = !refreshLauncherlessWrapper(
+            wrapperPath,
+            content,
+          );
+        }
       }
     } else {
       assertSafeForSingleQuotedShellPath(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
       artifacts.wrapperPath = wrapperPath;
-      // Match install-qwen-standalone.sh's write_unix_wrapper:
-      // uses /usr/bin/env sh for portability, and single-quoted paths.
-      const quotedQwenBin = shellQuoteForSh(
-        path.join(standaloneDir, 'bin', 'qwen'),
-      );
-      const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
+      // Match install-qwen-standalone.sh's write_unix_wrapper and the
+      // archive's writeShims: /usr/bin/env sh, single-quoted paths.
+      const rendererDefault =
+        runtime === 'bun'
+          ? 'export QWEN_TUI_RENDERER="${QWEN_TUI_RENDERER:-opentui}"\n'
+          : '';
+      const content = hasLauncher
+        ? `#!/usr/bin/env sh\nexec ${shellQuoteForSh(launcher)} "$@"\n`
+        : `#!/usr/bin/env sh\n${rendererDefault}` +
+          `QWEN_CODE_LAUNCHER_PATH=${shellQuoteForSh(wrapperPath)} ` +
+          `exec ${shellQuoteForSh(interpreter)} ${shellQuoteForSh(entryPoint)} "$@"\n`;
       try {
         fs.writeFileSync(wrapperPath, content, { mode: 0o755, flag: 'wx' });
         artifacts.wrapperCreated = true;
@@ -1033,6 +1060,12 @@ export function ensureBinWrapper(
           wrapperPath,
           standaloneDir,
         );
+        if (!artifacts.wrapperNeedsAttention && !hasLauncher) {
+          artifacts.wrapperNeedsAttention = !refreshLauncherlessWrapper(
+            wrapperPath,
+            content,
+          );
+        }
       }
       artifacts.shellPathUpdate = ensurePathInShellRc(binDir);
     }
@@ -1040,6 +1073,26 @@ export function ensureBinWrapper(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to create bin wrapper: ${detail}`);
+  }
+}
+
+/**
+ * Rewrites an existing wrapper that targets the launcher an activated archive
+ * no longer ships, so the install stays launchable. Symlinks are left alone.
+ */
+function refreshLauncherlessWrapper(
+  wrapperPath: string,
+  content: string,
+): boolean {
+  try {
+    if (fs.lstatSync(wrapperPath).isSymbolicLink()) {
+      return false;
+    }
+    fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
+    return true;
+  } catch (err) {
+    debugLogger.warn('Failed to refresh bin wrapper:', err);
+    return false;
   }
 }
 
@@ -1458,9 +1511,9 @@ async function applyStandaloneUpdate(
         'Downloaded archive does not match the expected target, runtime and version',
       );
     }
-    if (!fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))) {
+    if (!hasStandaloneArchiveLayout(newInstallDir, target, runtime)) {
       throw new Error(
-        'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
+        'Downloaded archive is missing the standalone executable layout (bundled runtime and lib/cli-entry.js)',
       );
     }
     debugLogger.info('Running smoke test...');
@@ -1503,7 +1556,7 @@ async function applyStandaloneUpdate(
     }
 
     try {
-      migrationArtifacts = ensureBinWrapper(standaloneDir, target);
+      migrationArtifacts = ensureBinWrapper(standaloneDir, target, runtime);
       surfaceBinWrapperWarnings(migrationArtifacts);
     } catch (wrapperErr) {
       debugLogger.warn('Failed to refresh bin wrapper:', wrapperErr);
