@@ -22,7 +22,8 @@ import {
   isRegularFile,
   NO_FOLLOW,
   readGateCursor,
-  repoRoot,
+  readRegularFile,
+  resolveWatchRoot,
   requireState,
   TASK_OPTION,
   taskArg,
@@ -94,7 +95,7 @@ export function readFixMarker(
   if (!stat.isFile()) return { attempt: null, mtimeMs: stat.mtimeMs };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(paths.fixPath, 'utf8'));
+    parsed = JSON.parse(readRegularFile(paths.fixPath) ?? 'null');
   } catch {
     parsed = null;
   }
@@ -251,7 +252,7 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
   marker: string;
 } {
   assertAttemptId(args.attempt);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state);
@@ -316,7 +317,7 @@ export type FixEndResult =
 
 export function runFixEnd(args: FixEndArgs): FixEndResult {
   assertAttemptId(args.attempt);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state, args.task);

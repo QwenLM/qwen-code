@@ -111,8 +111,12 @@ sudo systemd-run --wait --pipe --collect \
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-`--check` binds the configured ports, so it reports a false failure while the
-service is running.
+`--check` binds the configured ports, and its `workers` row warns about Runtime
+workers still running from an earlier start, so run it while the service is
+stopped. While the service runs, add `--online`: the port rows then check that
+the server and Broker listen, and the `workers` row reports only workers a
+stopped server left behind, or is skipped for a durable Broker, which adopts
+them.
 
 ## Why the kill modes differ
 
@@ -127,9 +131,26 @@ keep the state directory and Workspace, and a following start races them. Reap
 them before restarting with
 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`.
 
+The JVM exits with status 143 after a clean shutdown on `SIGTERM`, so the unit
+sets `SuccessExitStatus=143`; without it, every stop leaves the unit failed.
+
+## Upgrade
+
+Upgrade with the new distribution's `bin/qwen-managed-agent-upgrade`, as the
+deployment guide's "Upgrade" section shows. It stops these units, reaps the
+Runtime workers, backs up the database, Runtime state and configuration, and
+starts the new release after its preflight passes. Its first `install` moves
+`/opt/qwen-managed-agent` to `/opt/qwen-managed-agent-releases/<version>` and
+puts a link in its place, so the units keep their paths. It never edits these
+units: when its `check` reports a changed template, carry the change over and
+run `systemctl daemon-reload` before `start`.
+
 ## Paths
 
-- `/opt/qwen-managed-agent` — extracted distribution (read-only).
+- `/opt/qwen-managed-agent` — extracted distribution (read-only); after the
+  first upgrade, a link to the installed release.
+- `/opt/qwen-managed-agent-releases` — releases the upgrade installed, the
+  previous one included.
 - `/etc/qwen-managed-agent` — credentials and `application.yml`.
 - `/var/lib/qwen-managed-agent` — Runtime state.
 - `/srv/qwen-workspace` — Workspace; adjust `ReadWritePaths` when it moves.

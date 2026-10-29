@@ -2,6 +2,8 @@
 
 [English](2026-10-22-mysql-ci-optimization.md) | [简体中文](2026-10-22-mysql-ci-optimization.zh-CN.md)
 
+Current database integration CI runs on MySQL 8.4 only. The two-engine descriptions and measurements below record the original optimization; the retained MySQL job still uses one independent instance per fork. See the [current database verification scope](managed-runtime-broker-jdbc.md#database-verification-scope).
+
 ## Problem and evidence
 
 The main nightly [run 39664846210](https://github.com/QwenLM/qwen-code/actions/runs/39664846210) spent 33 minutes 41 seconds executing 1,060 integration tests in 52 classes. Their reported class times sum to 33 minutes 39 seconds, so execution was effectively serial. This excludes unit tests, Maven cache work, and the runner's Java lock wait.

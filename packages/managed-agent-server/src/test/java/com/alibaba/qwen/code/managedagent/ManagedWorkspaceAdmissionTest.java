@@ -15,7 +15,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -32,6 +34,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -43,6 +46,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -80,7 +84,7 @@ class ManagedWorkspaceAdmissionTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedAgentStore store;
@@ -92,6 +96,7 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedWorkspaceRegistry registry;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Test
@@ -2353,6 +2358,159 @@ class ManagedWorkspaceAdmissionTest {
         return workspaceFilesService(tenant, workspaceFiles, null);
     }
 
+    @Test
+    void preparingWorktreesProjectTheirTargetWithoutAdmittingMoreInput() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        persistWorktree(tenant, session, "PREPARING");
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        var summary = enabled.getWebShellSession(tenant, "actor-a", session);
+        assertThat(summary.workspace().state()).isEqualTo("changing");
+        assertThat(summary.workspace().cwdRelative()).startsWith(".qwen-managed-worktrees/");
+        assertThat(summary.worktree().state()).isEqualTo("preparing");
+        assertThat(summary.capabilities().workspaceTurns()).isFalse();
+        assertRefused(() -> enabled.submitTurn(tenant, "actor-a", "next", session,
+                List.of(new InputBlock("text", "go"))), "worktree_preparing");
+        mvc.perform(get("/v1/agents/sessions/{sessionId}", session).header(TenantContextFilter.HEADER, tenant).principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.worktree.session_id").value(session))
+                .andExpect(jsonPath("$.worktree.base_commit").value("a".repeat(40)))
+                .andExpect(jsonPath("$.worktree.state").value("preparing"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PREPARING", "FAILED", "BLOCKED", "REMOVING", "REMOVED"})
+    void unreadyWorktreesAllowQueueManagementButKeepRuntimeActionsGated(String state) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsFencedTitles()).thenReturn(true);
+        when(harness.supportsUserMessageQueue()).thenReturn(true);
+        var enabled = boundServiceWith(harness);
+        var messages = new ManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled);
+        var transaction = new TransactionTemplate(transactionManager);
+        var input = List.of(new InputBlock("text", "queued"));
+        var first = transaction.execute(status -> messages.command(tenant, "actor-a", session, "seed",
+                new ManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
+        persistWorktree(tenant, session, state);
+
+        assertThat(transaction.execute(status -> messages.queryMessages(tenant, "operator2", session)).messages()).hasSize(1);
+        var edited = transaction.execute(status -> messages.command(tenant, "operator2", session, "edit",
+                new ManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
+        assertThat(edited.messages().getFirst().revision()).isEqualTo(2);
+        assertThat(edited.messages().getFirst().input().getFirst().get("text")).isEqualTo("edited");
+        assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "new",
+                new ManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "resume",
+                new ManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertThat(transaction.execute(status -> messages.command(tenant, "operator2", session, "withdraw",
+                new ManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
+        assertRefused(() -> enabled.submitTurn(tenant, "operator2", "submit", session, input),
+                "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertRefused(() -> enabled.renameSession(tenant, "operator2", "rename", session, "renamed"),
+                "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, session)).isZero();
+        verify(harness, never()).createOrLoad(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean());
+        assertRefused(() -> enabled.authorizeUserMessages(tenant, "reader", session), "session_operation_forbidden");
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                tenant, "ws-a", ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
+        assertRefused(() -> enabled.authorizeUserMessages(tenant, "operator2", session), "workspace_unavailable");
+    }
+
+    @Test
+    void sessionPagesPreserveWorktreeGatingAndBlockInvalidReadyIdentities() throws Exception {
+        for (String state : List.of("PREPARING", "FAILED", "READY")) {
+            String tenant = "tenant-" + UUID.randomUUID();
+            String session = boundSession(tenant);
+            persistWorktree(tenant, session, state);
+            var enabled = boundServiceWithWorkingHarness();
+            var publicPage = enabled.listPublicSessions(tenant, "actor-a", null, 1).data();
+            assertThat(publicPage).hasSize(1);
+            String expected = "READY".equals(state) ? "blocked" : state.toLowerCase(java.util.Locale.ROOT);
+            assertThat(publicPage.getFirst().worktree().sessionId()).isEqualTo(session);
+            assertThat(publicPage.getFirst().worktree().state()).isEqualTo(expected);
+            var page = enabled.listWebShellSessions(tenant, "actor-a", null, 1).data();
+            assertThat(page).hasSize(1);
+            assertThat(page.getFirst().worktree().state()).isEqualTo(expected);
+            assertThat(page.getFirst().capabilities().workspaceTurns()).isFalse();
+            if ("READY".equals(state)) {
+                assertThat(jdbc.queryForObject("SELECT state FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?",
+                        String.class, tenant, session)).isEqualTo("BLOCKED");
+            }
+        }
+    }
+
+    @Test
+    void worktreePreparationGatesDispatchButPreservesCancellation() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        var enabled = boundServiceWithWorkingHarness();
+        var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
+        persistWorktree(tenant, session, "PREPARING");
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
+                .noneMatch(target -> target.sessionId().equals(session));
+        assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isEmpty();
+
+        enabled.cancelTurn(tenant, "actor-a", "cancel-initial", session, admission.turnId());
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
+                .anyMatch(target -> target.sessionId().equals(session));
+        assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isPresent();
+        store.cancelBeforeAdmission(tenant, session, admission.turnId(), "owner");
+        assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void failedAndBlockedWorktreesStillAllowCancellation() throws Exception {
+        for (String state : List.of("FAILED", "BLOCKED")) {
+            String tenant = "tenant-" + UUID.randomUUID();
+            String session = boundSession(tenant);
+            var enabled = boundServiceWithWorkingHarness();
+            var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
+            persistWorktree(tenant, session, state);
+            enabled.cancelTurn(tenant, "actor-a", "cancel-initial", session, admission.turnId());
+            assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLING");
+        }
+    }
+
+    @Test
+    void failedWorktreePreparationSettlesInitialInputOnce() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        var admission = boundServiceWithWorkingHarness().submitTurn(tenant, "actor-a", "initial", session,
+                List.of(new InputBlock("text", "go")));
+        persistWorktree(tenant, session, "FAILED");
+        store.failWorktreeInitialTurns(tenant, session, "worktree_prepare_failed");
+        store.failWorktreeInitialTurns(tenant, session, "worktree_prepare_failed");
+        assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                + " AND event_type = 'turn.failed'", Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    private void persistWorktree(String tenant, String session, String state) throws Exception {
+        String id = UUID.randomUUID().toString().replace("-", "");
+        String cwd = ".qwen-managed-worktrees/" + id;
+        var binding = store.requireSession(tenant, session).workspace();
+        var plan = new SessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
+                binding.getContextConfigRef(), 1, "/workspace", "root-identity", ".", ".",
+                "/workspace/.git", "common-identity", "main", "a".repeat(40), id, cwd, cwd, "qwen/" + id);
+        jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE tenant_id = ? AND session_id = ?", cwd, tenant, session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id,"
+                + " session_id, target_kind, target_key, request_digest, request_json, state, phase, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'SESSION_WORKTREE', ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, 1, 1)",
+                ManagedSchemaKeys.key(tenant, id), ManagedSchemaKeys.key(tenant), id, tenant, session,
+                ManagedSchemaKeys.key(session), state, state);
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'ws-a', 'storage-a', ?, ?, ?, ?, 1, ?, ?, 1, 1)", tenant, session,
+                "a".repeat(64), id, ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
+    }
+
     private ManagedAgentService workspaceFilesService(String tenant,
             boolean workspaceFiles, HarnessCoordinator coordinator) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
@@ -2411,6 +2569,11 @@ class ManagedWorkspaceAdmissionTest {
                 new ManagedAgentProperties()) {
             @Override
             public void dispatch(String tenantId, String sessionId,
+                    String turnId) {
+            }
+
+            @Override
+            public void cancel(String tenantId, String sessionId,
                     String turnId) {
             }
         };

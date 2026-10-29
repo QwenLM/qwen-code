@@ -47,6 +47,17 @@ describe('Mod discovery', () => {
     );
   });
 
+  it.each(['register.tsx', 'register.jsx'])(
+    'takes a %s entry',
+    async (entry) => {
+      await write('hooks/hooks.json', { modules: [`./${entry}`] });
+      await write(`hooks/${entry}`, 'export function register() {}');
+      expect((await loadModSource(root))?.entry).toBe(
+        path.join(await fs.realpath(root), 'hooks', entry),
+      );
+    },
+  );
+
   it('ignores ordinary extensions without modules', async () => {
     expect(await loadModSource(root)).toBeUndefined();
     await write('hooks/hooks.json', { hooks: { SessionStart: [] } });
@@ -112,7 +123,7 @@ describe('Mod discovery', () => {
   it.each([
     [[], /one relative/],
     [['./a.js', './b.js'], /one relative/],
-    [['./entry.tsx'], /one relative/],
+    [['./entry.vue'], /one relative/],
     [['/tmp/entry.js'], /one relative/],
     [['../../escape.js'], /inside/],
   ])('rejects invalid modules %j', async (modules, error) => {
