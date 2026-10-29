@@ -11,6 +11,7 @@ import {
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
 import { useMcpAppMessages } from '../../hooks/useMcpAppMessages';
+import { I18nProvider } from '../../i18n';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -19,6 +20,7 @@ const appBridgeMocks = vi.hoisted(() => ({
   last: null as {
     onsandboxready?: () => void;
     oninitialized?: () => void;
+    onsizechange?: (params: { height?: number; width?: number }) => void;
     onmessage?: (
       params: { role: string; content: Array<Record<string, unknown>> },
       extra: { signal: AbortSignal },
@@ -136,6 +138,12 @@ function renderApp(
   };
 }
 
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
+
 describe('McpApp host lifetime', () => {
   it('advertises messages only for the bound transcript session', () => {
     const requestMessage = vi.fn().mockResolvedValue({});
@@ -212,6 +220,9 @@ describe('McpApp host lifetime', () => {
         resourceUri: 'ui://demo/app',
         text,
       }),
+    );
+    expect(requestMessage.mock.calls[0][0]).not.toHaveProperty(
+      'requiredFeature',
     );
   });
 
@@ -325,7 +336,7 @@ describe('McpApp host lifetime', () => {
           />,
         ),
       );
-      expect(await pendingMessage).toEqual({ isError: true });
+      expect(await pendingMessage).toEqual(notSent('cancelled'));
       expect(appBridgeMocks.last).toBe(bridge);
       expect(appBridgeMocks.constructed).toBe(constructed);
       expect(container.querySelector('iframe')).toBe(iframe);
@@ -342,7 +353,7 @@ describe('McpApp host lifetime', () => {
       await act(async () =>
         rerender(<BoundApp clientId="client-b" enabled={false} />),
       );
-      expect(await fresh).toEqual({ isError: true });
+      expect(await fresh).toEqual(notSent('cancelled'));
       expect(submit).not.toHaveBeenCalled();
       finishTool({ content: [] });
       await pendingTool;
@@ -543,6 +554,40 @@ describe('McpApp host lifetime', () => {
     );
   });
 
+  it('sends the Web Shell language and pushes language changes', async () => {
+    const display = appDisplay();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (language: 'zh-CN' | 'en') => (
+      <I18nProvider language={language}>
+        <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+          <ThemeProvider value={WebShellThemeId.Dark}>
+            <McpApp display={display} />
+          </ThemeProvider>
+        </McpAppHostContext.Provider>
+      </I18nProvider>
+    );
+
+    act(() => root.render(wrap('zh-CN')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { locale: 'zh-CN' },
+    });
+
+    act(() => root.render(wrap('en')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.constructed).toBe(1);
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ locale: 'en' }),
+    );
+  });
+
   it('passes theme-specific style variables resolved from Web Shell tokens', async () => {
     const display = appDisplay();
     // jsdom does not inherit custom properties, so declare them on the card.
@@ -598,6 +643,47 @@ describe('McpApp host lifetime', () => {
       }),
     );
     tokens.remove();
+  });
+
+  it('ignores a size reported while the App had no width', async () => {
+    const { container } = renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const iframe = container.querySelector('iframe')!;
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 300, width: 600 });
+    });
+    expect(iframe.style.height).toBe('300px');
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 3656, width: 0 });
+    });
+    expect(iframe.style.height).toBe('300px');
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 3000, width: 600 });
+    });
+    // Other MCP Apps keep the generic cap.
+    expect(iframe.style.height).toBe('960px');
+  });
+
+  it('keeps the frame out of sight until the App initializes', async () => {
+    const { container } = renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const iframe = container.querySelector('iframe')!;
+    // A sandbox origin that is not reachable yet must not show its error page.
+    expect(iframe.style.visibility).toBe('hidden');
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'mcpApp.loading',
+    );
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      appBridgeMocks.last?.oninitialized?.();
+      await Promise.resolve();
+    });
+    expect(iframe.style.visibility).toBe('');
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it('sends the sandbox resource after AppBridge reports ready', async () => {
@@ -1244,6 +1330,109 @@ describe('built-in Generated UI admission', () => {
       expect(appBridgeMocks.constructed).toBe(0);
     },
   );
+
+  it('shows the saved title and summary instead of the structured result text', () => {
+    const { container } = renderApp({
+      ...display,
+      fallbackText:
+        '{"schemaVersion":1,"documentId":"g1_abc","title":"Bill","summary":"Each pays 154."}\nBill\nEach pays 154.',
+      toolResult: {
+        content: [{ type: 'text', text: 'Bill\nEach pays 154.' }],
+        structuredContent: {
+          schemaVersion: 1,
+          documentId: 'g1_abc',
+          title: 'Bill',
+          summary: 'Each pays 154.',
+        },
+      },
+    });
+    expect(container.textContent).toContain('Bill');
+    expect(container.textContent).toContain('Each pays 154.');
+    expect(container.textContent).not.toContain('schemaVersion');
+    expect(container.textContent).toContain('mcpApp.generatedUi.unavailable');
+  });
+
+  it('lets the built-in card grow past the generic App height cap', async () => {
+    const { rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { containerDimensions: { maxHeight: 4000 } },
+    });
+  });
+
+  it('labels the built-in card as an interactive view without MCP plumbing', () => {
+    const { container, rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    // This suite renders without an I18nProvider, so keys stand in for text.
+    expect(container.querySelector('iframe')?.title).toBe(
+      'mcpApp.generatedUi.title',
+    );
+    expect(container.textContent).not.toContain('MCP App');
+  });
+
+  it('marks its messages as coming from the bundled server', async () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppMessagesContext.Provider
+          value={{ sessionId: 'owner', requestMessage }}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpApp display={display} />
+          </McpAppSessionContext.Provider>
+        </McpAppMessagesContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    await appBridgeMocks.last!.onmessage!(
+      { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+      { signal: new AbortController().signal },
+    );
+    expect(requestMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ requiredFeature: 'generated-ui' }),
+    );
+  });
+
+  it('keeps the MCP framing for a server that only claims the bundled resource', () => {
+    const claimed = { ...display, serverName: 'third-party' };
+    delete claimed.requiredFeature;
+    const { container, rerender } = renderApp(claimed);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={claimed} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    expect(container.querySelector('iframe')?.title).toBe(
+      'third-party MCP App',
+    );
+    expect(container.textContent).toContain('MCP App');
+    expect(container.textContent).toContain('third-party');
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { containerDimensions: { maxHeight: 960 } },
+    });
+  });
 
   it('retains manually installed legacy Generated UI behavior', () => {
     const { container } = renderApp(

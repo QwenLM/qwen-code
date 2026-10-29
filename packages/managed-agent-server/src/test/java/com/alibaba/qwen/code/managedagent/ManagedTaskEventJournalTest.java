@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore.Task
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -47,6 +48,7 @@ class ManagedTaskEventJournalTest {
     private ManagedSessionStore sessionStore;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Test

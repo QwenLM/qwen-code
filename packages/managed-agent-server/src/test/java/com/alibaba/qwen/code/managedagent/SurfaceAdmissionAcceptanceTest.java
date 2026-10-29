@@ -1926,7 +1926,8 @@ class SurfaceAdmissionAcceptanceTest {
         @Primary
         com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector
                 acceptanceProjector(
-                        ManagedToolResultStore store, JdbcTemplate jdbc,
+                        ManagedToolResultStore store,
+                        @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                         org.springframework.beans.factory.ObjectProvider<
                                 ToolPublicationDataStore> publications,
                         com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader reader,
@@ -1945,8 +1946,9 @@ class SurfaceAdmissionAcceptanceTest {
          * writer credential flows through the same code the service mounts.
          */
         @Bean
-        ToolPublicationStore acceptancePublicationGrants(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationStore acceptancePublicationGrants(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ManagedSessionStore sessions) {
             return new ToolPublicationStore(jdbc, manager, sessions,
                     mock(ToolExecutionRepository.class),
@@ -1961,8 +1963,9 @@ class SurfaceAdmissionAcceptanceTest {
          * artifact route family — live in this boot.
          */
         @Bean
-        ToolPublicationDataStore acceptancePublicationData(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationDataStore acceptancePublicationData(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ManagedSessionStore sessions,
                 ToolPublicationObjectStore acceptanceObjects) {
@@ -1980,8 +1983,9 @@ class SurfaceAdmissionAcceptanceTest {
          * beans.
          */
         @Bean
-        ToolPublicationController acceptanceToolPublication(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationController acceptanceToolPublication(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ToolPublicationDataStore acceptancePublicationData,
                 ManagedSessionStore sessions,
