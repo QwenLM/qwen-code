@@ -44,6 +44,10 @@ beforeEach(() => {
   actions.addWorkspaceDirectory.mockReset();
   actions.removeWorkspaceDirectory.mockReset();
   actions.suggestWorkspacePaths.mockReset();
+  actions.suggestWorkspacePaths.mockResolvedValue({
+    suggestions: [],
+    sep: '/',
+  });
   actions.pickWorkspaceDirectory.mockReset();
   actions.listWorkspaceDirectories.mockResolvedValue({
     v: 1,
@@ -58,6 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 async function render(): Promise<void> {
@@ -161,6 +166,7 @@ describe('WorkspaceDirectoriesSection', () => {
   });
 
   it('adds a directory through the dialog', async () => {
+    vi.useFakeTimers();
     actions.addWorkspaceDirectory.mockResolvedValue({
       v: 1,
       primaryDirectory: '/ws',
@@ -184,6 +190,10 @@ describe('WorkspaceDirectoriesSection', () => {
       setter.call(input, '/other');
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(actions.suggestWorkspacePaths).toHaveBeenCalled();
     const submit = document.querySelector<HTMLButtonElement>(
       'button[type="submit"]',
     )!;
