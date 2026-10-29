@@ -18,6 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const script = resolve('.github/scripts/run-release-step.sh');
 const directories = [];
@@ -154,3 +155,44 @@ describe.skipIf(process.platform === 'win32')(
     );
   },
 );
+
+it('uses a job-specific SDK image and tests its immutable ID without pruning peers', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sdk-image-'));
+  directories.push(root);
+  const step = parse(
+    readFileSync('.github/workflows/release-sdk.yml', 'utf8'),
+  ).jobs['build-sdk'].steps.find(
+    (step) => step.name === 'Run SDK Integration Tests',
+  );
+  const commands = {
+    npm: 'printf "%s\\n" "$*" >> "$TRACE"',
+    docker: `if [ "$1" = image ]; then
+      printf '%s\\n' "$*" >> "$TRACE"
+      echo sha256:tested-image
+    fi`,
+    npx: 'printf "%s %s\\n" "$QWEN_SANDBOX" "$QWEN_SANDBOX_IMAGE" >> "$TRACE"',
+    xargs: 'exit 0',
+  };
+  for (const [name, body] of Object.entries(commands)) {
+    write(root, `bin/${name}`, `#!/bin/sh\n${body}\n`);
+    chmodSync(join(root, 'bin', name), 0o755);
+  }
+  const trace = join(root, 'trace');
+  const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', step.run], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PATH: `${root}/bin:${process.env.PATH}`,
+      TRACE: trace,
+      RELEASE_CONTAINER_OWNER: '123-1-build-sdk',
+    },
+    encoding: 'utf8',
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(readFileSync(trace, 'utf8').trim().split('\n')).toEqual([
+    'run test:integration:sdk:sandbox:none',
+    'run build:sandbox -- --no-prune -i qwen-sdk-release:123-1-build-sdk',
+    'image inspect --format {{.Id}} qwen-sdk-release:123-1-build-sdk',
+    'docker sha256:tested-image',
+  ]);
+});

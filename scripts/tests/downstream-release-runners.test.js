@@ -9,11 +9,7 @@ import { parse } from 'yaml';
 
 const workflow = (name) =>
   parse(readFileSync(`.github/workflows/${name}.yml`, 'utf8'));
-// Every release-only label must stay architecture-free: the runners carrying
-// ecs-qwen-release-host are ARM64, so an "x64" component would queue the job
-// until it times out. Jobs that genuinely need an amd64 host (the OSS mirrors
-// and the managed runtime, which execute a hardcoded linux-amd64 ossutil) are
-// deliberately not routed here.
+// Architecture-free jobs can use either reserved ARM64 or x64 slots.
 const routes = [
   ['release-vscode-companion', 'prepare'],
   ['release-vscode-companion', 'build'],
@@ -132,8 +128,8 @@ describe('downstream release pool', () => {
       'ubuntu-latest',
     );
     // These execute a hardcoded linux-amd64 ossutil, so they cannot ride the
-    // ARM64 release-only pool and must stay on their hosted runners until the
-    // download selects a binary for the host architecture.
+    // architecture-free routes. Their migration to the reserved x64 slot is
+    // separate from this change.
     for (const [file, id] of [
       ['sync-release-to-oss', 'sync'],
       ['sync-desktop-to-oss', 'sync'],
@@ -172,7 +168,7 @@ describe('SDK build/publish handoff', () => {
     );
     // The builder's label is a literal array rather than a switched
     // expression, so the arch-free contract needs its own assertion: the
-    // release-only runners are ARM64 and this job only bundles with Node.
+    // pool has both architectures and this job only bundles with Node.
     expect(builder['runs-on']).toEqual([
       'self-hosted',
       'linux',
@@ -222,5 +218,86 @@ describe('SDK build/publish handoff', () => {
       "needs.build-sdk.result == 'failure'",
     );
     expect(jobs['report-failure'].if).toContain('inputs.dry_run != true');
+  });
+});
+
+describe('audio release slots', () => {
+  const audio = workflow('audio-capture-prebuilds');
+  const release = workflow('release');
+  const route = (job, matrix, enabled, repository = 'QwenLM/qwen-code') =>
+    Function(
+      'github',
+      'vars',
+      'matrix',
+      'fromJSON',
+      'startsWith',
+      'format',
+      `return (${job['runs-on'].slice(3, -2)})`,
+    )(
+      { repository },
+      { ECS_RELEASE_HOST_RUNNER_ENABLED: enabled },
+      matrix,
+      JSON.parse,
+      (value, prefix) => value.startsWith(prefix),
+      (template, value) => template.replace('{0}', value),
+    );
+
+  it('selects matching Linux architecture and preserves hosted fallbacks', () => {
+    for (const matrix of audio.jobs.build.strategy.matrix.include) {
+      const linux = matrix.os.startsWith('ubuntu');
+      expect(route(audio.jobs.build, matrix, 'true')).toEqual(
+        linux
+          ? ['self-hosted', 'linux', matrix.arch, 'ecs-qwen-release-host']
+          : matrix.runner,
+      );
+      expect(route(audio.jobs.build, matrix, '')).toBe(matrix.runner);
+      expect(route(audio.jobs.build, matrix, 'false')).toBe(matrix.runner);
+      expect(route(audio.jobs.build, matrix, 'true', 'fork/repo')).toBe(
+        matrix.runner,
+      );
+    }
+    expect(route(audio.jobs.collect, {}, 'true')).toEqual([
+      'self-hosted',
+      'linux',
+      'ecs-qwen-release-host',
+    ]);
+    expect(route(audio.jobs.collect, {}, '')).toEqual(['ubuntu-latest']);
+  });
+
+  it('builds the selected release commit without a cache dependency', () => {
+    expect(release.jobs.audio_capture_prebuilds.uses).toBe(
+      './.github/workflows/audio-capture-prebuilds.yml',
+    );
+    expect(release.jobs.audio_capture_prebuilds.with).toEqual({
+      ref: '${{ needs.prepare.outputs.release_sha }}',
+    });
+    expect(
+      audio.jobs.build.steps.find((s) =>
+        s.uses?.startsWith('actions/checkout@'),
+      ).with.ref,
+    ).toBe('${{ inputs.ref || github.sha }}');
+    expect(JSON.stringify(release)).not.toMatch(
+      /audio_artifact_id|audio_prebuild_key|audio-prebuilds\.mjs/,
+    );
+    for (const job of [audio.jobs.build, audio.jobs.collect]) {
+      expect(job.steps[0].uses).toBe(
+        '$/.github/actions/prepare-release-runner',
+      );
+    }
+  });
+
+  it('keeps newer host glibc out of Linux native binaries', () => {
+    const steps = audio.jobs.build.steps;
+    const container = steps.find(
+      (s) => s.name === 'Build Linux prebuild on ECS',
+    );
+    expect(container.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(container.run).toContain('node:22-bookworm');
+    expect(container.run).toContain('--user "$(id -u):$(id -g)"');
+    for (const name of ['Install build deps', 'Build prebuild']) {
+      expect(steps.find((s) => s.name === name).if).toBe(
+        "${{ runner.environment != 'self-hosted' }}",
+      );
+    }
   });
 });

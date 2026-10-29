@@ -1,72 +1,27 @@
-# Reduce release runner queues
+# Release runner slots
 
 [English](2026-10-28-release-queue-optimization.md) | [简体中文](2026-10-28-release-queue-optimization.zh-CN.md)
 
-The v0.26.3 Linux x64 audio prebuild waited 74 minutes to execute for 50
-seconds. Collection waited another ten minutes. Release validation already
-runs on ECS, but native builds repeat for every release and the final publish
-job still rebuilds the entire application on GitHub-hosted capacity.
+## Goal
 
-## Audio prebuild reuse
+Remove GitHub-hosted queue waits from release work that can run on existing ECS capacity. This change targets main independently of #15854; audio caching is not required.
 
-Specified separately in [audio prebuild reuse](./2026-10-29-audio-prebuild-reuse.md),
-which this change builds on: the fingerprint, provenance and retention rules, the
-selection-versus-consumption split and the miss fallbacks all live there. The
-ECS build job below consumes whatever that mechanism selected.
+## Routing
 
-## Optional ECS build handoff
+Use `ecs-qwen-release-host` on three existing runner processes: hz1-17 and hz1-18 (ARM64), and hk4-31 (x64). Remove ordinary CI labels from those processes only. Other processes and machine uses remain unchanged; no reinstall or exclusive machine is needed.
 
-Keep final npm publishing on GitHub-hosted runners: npm OIDC trusted
-publishing and provenance do not support ordinary self-hosted runners. When
-`ECS_RELEASE_HOST_RUNNER_ENABLED` is true, a separate job on the architecture
-agnostic `ecs-qwen-release-host` label prepares the version commit, builds the
-bundle and workspace outputs, and builds/verifies standalone archives.
+Linux audio builds select the matching architecture and build in `node:22-bookworm` so a newer host glibc does not raise the binary's compatibility floor. macOS and Windows audio builds keep their existing runners. Audio collection uses any release slot and always consumes artifacts from the current run, for the selected release commit.
 
-The job has read-only repository access and no publishing credentials. It
-passes the exact version commit and build outputs in a same-run artifact,
-using tar to preserve executable modes. The hosted publisher imports that
-commit, installs dependencies, and retains existing pnpm/npm publication and
-package lifecycle checks. Recreating the version commit independently is
-incorrect because the bundle embeds its commit SHA.
+CLI builds prepare the version commit and bundle/workspace/standalone outputs on ECS, then transfer the exact commit and outputs to a hosted npm publisher. The SDK similarly hands off its tested package. Preserve executable modes and verify the imported commit; failed or unexpectedly skipped builds must block publication.
 
-With the switch unset, skip the new job and keep the current hosted build
-path; this avoids adding a hosted queue before infrastructure is ready.
-Retain production environment protection, tag-specific publish concurrency,
-the immutable-version guard, workflow-pinned helpers, dry-run semantics, and
-the PAT-backed release event that starts downstream workflows. Build failures
-and audio failures must reach the existing failure reporter.
+Eligible VSCode universal/prepare/publish, Desktop publish, Chrome extension, finalization and GHCR jobs use the same slots. Final npm publication remains hosted for trusted publishing/provenance. Native VSCode/Desktop, OSS mirrors, managed-runtime and other SDK/Live Host publishers keep existing routes in this change. Failure reporting remains hosted so an ECS outage can still be reported.
 
-## Scope and activation
+## Persistent runner preparation
 
-Reserve a small number of runner processes on existing ECS machines for release
-scheduling. Start with hz1-17 and hz1-18: retain `ecs-qwen-release-host` and remove
-`ecs-qwen` so ordinary shared-pool jobs do not consume those slots. Other runner
-processes on the machine remain in service; no machine reinstall or exclusive
-host is required by the chosen deployment model.
+A workflow-pinned preflight clears the contained workspace before checkout, checks Node 22 and disk space, and isolates Git/npm/Docker/gh state and npm's installation prefix. Labels reserve scheduling capacity; they do not isolate sibling processes on the shared host. This deployment accepts that existing shared-host trust boundary and preserves environment protections.
 
-Labels and workspace cleanup are not a machine-level security boundary. PR code
-on a sibling runner can affect the shared host, including release artifacts and
-credentials. This deployment accepts that shared-host trust tradeoff; it must
-not be described as host isolation. Keep npm publication hosted and retain the
-existing workflow/environment protection and artifact checks.
+## Activation and verification
 
-Enable the switch only after the build/publish split is on main, runner labels
-and tooling are verified, and active releases are accounted for. Validate the
-main and downstream dry-runs separately. See the [downstream design](./2026-10-29-downstream-release-runners.md)
-and tracking issues #15461 and #15465.
+Keep `ECS_RELEASE_HOST_RUNNER_ENABLED` unset until this build/publish split reaches main. Enabling the old whole-publisher route would also move npm publication to ECS. Once merged, enable the variable; unsetting it restores hosted routes.
 
-Changes reach the two release workflows, their workflow-pinned helpers,
-focused workflow/packaging tests, and the workflow size ratchet. Public CLI
-behavior and release artifact names remain compatible.
-
-## Verification
-
-Exercise fingerprint invalidation, rejected producer runs, complete and
-incomplete payloads, lookup/download misses, exact-ref wiring, and the
-five-target gate. Exercise the ECS build handoff with real temporary Git
-repositories and tar archives, including unchanged version commits and
-executable modes. Verify enabled/disabled routing, dry runs, skip-tests gates,
-same-run reruns, publishing credentials, and failure reporting. Run focused
-release suites, build, typecheck, and bundle. An actual Actions dry run and a
-real npm release remain activation acceptance checks; local tests cannot
-prove hosted scheduling capacity or npm's real OIDC exchange.
+Verify on/off routing, both Linux audio architectures and native addon loading, same-run Git/artifact handoffs, SDK package identity, failure propagation and workflow syntax. Then run non-publishing Actions acceptance on the reserved runners and retain runner names and queue/start times. Main release dry-run does not emit a release event; downstream routes need separate acceptance. Observe the first real release before calling activation complete. No UI or tmux evidence applies to these workflow changes.

@@ -19,11 +19,7 @@ on:
   workflow_call:
     inputs:
       ref:
-        type: 'string'
-        required: true
-      cache_key:
-        type: 'string'
-        required: false
+        type: string
         default: ''
   workflow_dispatch:
 
@@ -37,7 +33,7 @@ defaults:
 jobs:
   build:
     name: 'prebuild ${{ matrix.os }} (${{ matrix.arch }})'
-    runs-on: '${{ matrix.runner }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'' && startsWith(matrix.os, ''ubuntu'')) && fromJSON(format(''["self-hosted", "linux", "{0}", "ecs-qwen-release-host"]'', matrix.arch)) || matrix.runner }}'
     strategy:
       fail-fast: false
       matrix:
@@ -58,38 +54,42 @@ jobs:
             runner: 'windows-2022'
             arch: 'x64'
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
           persist-credentials: false
       - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        if: "${{ runner.environment != 'self-hosted' }}"
         with:
-          node-version: '22.22.3'
-      # Use the lock that participates in the reuse fingerprint. Older refs
-      # without pnpm retain the original build path and cannot seed reuse.
+          node-version: '22'
+      # Install only this package's deps (skip the node-gyp-build install hook;
+      # prebuildify does its own compile below).
       - name: 'Install build deps'
-        working-directory: '.'
-        shell: 'bash'
-        run: |-
-          if [ -f pnpm-lock.yaml ]; then
-            corepack pnpm --filter @qwen-code/audio-capture install --frozen-lockfile --ignore-scripts --reporter=append-only
-          else
-            cd packages/audio-capture
-            npm install --no-workspaces --ignore-scripts --no-audit --no-fund
-          fi
+        if: "${{ runner.environment != 'self-hosted' }}"
+        run: 'npm install --no-workspaces --ignore-scripts --no-audit --no-fund'
       - name: 'Build prebuild'
+        if: "${{ runner.environment != 'self-hosted' }}"
         shell: 'bash'
         run: |
-          npm run prebuildify -- --target 22.22.3
+          npm run prebuildify
           # Cross-compile the Intel (x64) slice on this arm64 runner instead of
           # a separate macos-13 runner (frameworks are universal). See #5642.
           if [ "$RUNNER_OS" = 'macOS' ]; then
-            npm run prebuildify -- --target 22.22.3 --arch x64
+            npm run prebuildify -- --arch x64
           fi
+      # Keep Linux binaries compatible with older glibc even on newer ECS hosts.
+      - name: 'Build Linux prebuild on ECS'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        shell: bash
+        run: |-
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -v "$PWD:/build" -w /build node:22-bookworm \
+            bash -euc 'npm install --no-workspaces --ignore-scripts --no-audit --no-fund; npm run prebuildify'
       - name: 'Upload prebuild'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          overwrite: true
           name: 'prebuilds-${{ matrix.os }}-${{ matrix.artifact_suffix || matrix.arch }}'
           path: 'packages/audio-capture/prebuilds/'
           if-no-files-found: 'error'
@@ -97,18 +97,8 @@ jobs:
   collect:
     name: 'collect prebuilds'
     needs: 'build'
-    # Opted into the release-only pool via ECS_RELEASE_HOST_RUNNER_ENABLED, as
-    # it already was. The label carries no architecture component: the runners
-    # holding it are ARM64, and an "x64" component would not fall back to
-    # hosted — it would simply never match and queue until the timeout.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
-      # A persistent workspace must be wiped before the merge below, because
-      # download-artifact's merge-multiple merges into existing paths and a
-      # leftover prebuilds/ would leak into the artifact. The shared preflight
-      # does that with path containment, instead of an
-      # ad-hoc rm -rf that would follow a leftover symlinked parent out of the
-      # workspace. It also isolates inherited tool state on the pool.
       - uses: '$/.github/actions/prepare-release-runner'
 
       - name: 'Merge per-platform prebuilds'
@@ -117,40 +107,11 @@ jobs:
           pattern: 'prebuilds-*'
           merge-multiple: true
           path: 'packages/audio-capture/prebuilds'
-      - name: 'Checkout audio workflow helper'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          ref: '${{ github.workflow_sha }}'
-          persist-credentials: false
-          sparse-checkout: |-
-            .github/scripts/audio-prebuilds.mjs
-            .github/actions/self-hosted-node
-          sparse-checkout-cone-mode: false
-          path: '.audio-workflow'
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        uses: './.audio-workflow/.github/actions/self-hosted-node'
-      - name: 'Setup Node.js'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version: '22.22.3'
-      - name: 'Validate complete audio prebuilds'
-        working-directory: '.'
-        run: 'node .audio-workflow/.github/scripts/audio-prebuilds.mjs validate packages/audio-capture/prebuilds'
+      - name: 'List collected prebuilds'
+        run: 'find prebuilds -type f'
       - name: 'Upload combined prebuilds'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'audio-capture-prebuilds'
-          overwrite: true
           path: 'packages/audio-capture/prebuilds/'
           if-no-files-found: 'error'
-
-      - name: 'Retain reusable audio prebuilds'
-        if: "${{ inputs.cache_key != '' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'audio-capture-prebuilds-${{ inputs.cache_key }}'
-          path: 'packages/audio-capture/prebuilds/'
-          if-no-files-found: 'error'
-          overwrite: true

@@ -52,8 +52,7 @@ concurrency:
 
 jobs:
   build-sdk:
-    # The release-only runners are ARM64; this job only bundles and packs with
-    # Node, so it carries no architecture requirement. Scheduling is gated by
+    # This job bundles and packs with Node on either release architecture. Scheduling is gated by
     # the job's `if` below, not by this label.
     runs-on: ['self-hosted', 'linux', 'ecs-qwen-release-host']
     environment: 'production-release'
@@ -327,7 +326,11 @@ jobs:
           export SANDBOX_FLAGS="${SANDBOX_FLAGS:-} --label org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}"
           trap 'docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" | xargs -r docker rm -f' EXIT
           npm run test:integration:sdk:sandbox:none
-          npm run test:integration:sdk:sandbox:docker
+          sandbox_image="qwen-sdk-release:${RELEASE_CONTAINER_OWNER}"
+          QWEN_SANDBOX=docker npm run build:sandbox -- --no-prune -i "$sandbox_image"
+          export QWEN_SANDBOX_IMAGE="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
+          [[ "$QWEN_SANDBOX_IMAGE" == sha256:* ]]
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'

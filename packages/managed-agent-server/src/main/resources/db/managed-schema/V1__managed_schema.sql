@@ -236,10 +236,13 @@ CREATE TABLE ma_session_journal_tx (
     record_bytes MEDIUMBLOB NOT NULL,
     byte_length BIGINT NOT NULL,
     record_digest CHAR(64) NOT NULL,
+    activation_lease_until BIGINT UNSIGNED,
+    activation_renewal_seq BIGINT,
     gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, journal_revision),
     CONSTRAINT uq_managed_session_command
-        UNIQUE (tenant_id, session_id, command_key_hash)
+        UNIQUE (tenant_id, session_id, command_key_hash),
+    CONSTRAINT ck_ma_activation_lease CHECK ((activation_lease_until IS NULL AND activation_renewal_seq IS NULL) OR (activation_lease_until IS NOT NULL AND activation_lease_until <= 9007199254740991 AND activation_renewal_seq IS NOT NULL AND activation_renewal_seq > 0 AND activation_renewal_seq <= 9007199254740991))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_event_stream (

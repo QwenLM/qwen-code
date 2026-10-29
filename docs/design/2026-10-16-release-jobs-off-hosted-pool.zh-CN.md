@@ -1,8 +1,8 @@
 # Release 任务迁出 GitHub 托管池
 
-[English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
+> 启用方案以[release runner 槽位](2026-10-28-release-queue-optimization.zh-CN.md)为准：在现有共享机器上预留 runner 进程，不要求独占整机。
 
-> 后续方案见[发布排队优化](2026-10-28-release-queue-optimization.zh-CN.md)：最终 npm OIDC 发布保留在 GitHub-hosted runner，启用后的隔离 ECS runner 负责构建和产物交接；音频预构建可复用经过验证的历史产物。启用前仍须完成主机隔离。
+[English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
 
 ## 问题与范围
 
@@ -55,18 +55,16 @@ lane、workspace tests、两个 integration lane）——这些机器是双标�
 - `publish` 与 `collect` 迁到新的、只服务 release 的 runner 标签
   `ecs-qwen-release-host`，由新的 opt-in 仓库变量
   `ECS_RELEASE_HOST_RUNNER_ENABLED` 控制：
-  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
-  音频复用后续改动从两个表达式中都移除了 `x64`，以匹配 release-host
-  runner。这不代表该通道已经可以启用。
+  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
   变量未设置（默认）时两个 job 与本变更之前完全一样派发到
-  `ubuntu-latest`。保持变量未设置，直到主机隔离得到确认，且 #15832 完成
-  构建通道与 hosted npm 发布的拆分。
+  `ubuntu-latest`。运维准备好只挂 `ecs-qwen-release-host` 标签的专用机器后，
+  拨开变量即可。
 - `publish` 补上 `release_disk_floor_gate` 锚点（在它的 checkout 之后、安装
   之前），纳入与其他池路由 job 相同的 ENOSPC 快速失败机制（#10035）。
-- `collect` 和 release workflow 的清理锚点都在 checkout 或合并制品前调用
-  共享的 `prepare-release-runner` action。在持久工作区上，
-  `download-artifact` 会合并进已存在的路径，因此必须先经过工作区边界检查
-  再删除残留文件。清理失败会让 job 停止，而不是发布脏制品。
+- `collect` 在合并制品前新增 fail-closed 的 `rm -rf prebuilds` 步骤：在持久
+  工作区上，`download-artifact` 的 `merge-multiple: true` 会合并进已存在的
+  路径，上一轮 release 残留的目录会把陈旧 prebuild 一并重新上传。`rm` 失败
+  （如残留 root 属主文件）会让 job 失败，而不是发布脏制品。
 - `.github/actionlint.yaml` 登记新标签。
 
 ## 设计决策与理由
@@ -110,9 +108,9 @@ lane、workspace tests、两个 integration lane）——这些机器是双标�
 - 其余四个解析 `release.yml` 的套件（`ai-release-notes`、`install-script`、
   `package-scripts`、`workflow-size`）与 `classify-release-notes.test.mjs`
   全部通过且无需改动断言。
-- #15854 保持 `ECS_RELEASE_HOST_RUNNER_ENABLED` 未设置，在 PR head 上执行
-  release dry-run。启用验证留给 #15832，前提是完成主机隔离和 hosted npm
-  发布边界；下面保留的原始路由验收标准不代表可以启用当前通道。
+- 启用前：注册一台 `ecs-qwen-release-host` runner，再以
+  `ECS_RELEASE_HOST_RUNNER_ENABLED=true` 派发一次 dry-run release，确认
+  `publish` 与 `collect` 落在专用机上、`notify_failure` 仍在托管池。
 
 ## 验收标准
 

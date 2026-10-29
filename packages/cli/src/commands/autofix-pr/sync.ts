@@ -31,7 +31,8 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
-  repoRoot,
+  trustAnchor,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -76,7 +77,7 @@ export function runSync(
   discard = false,
   task?: string,
 ): SyncOutcome {
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () => {
     // Before anything moves: the attempt's agent may be working in the
@@ -101,7 +102,7 @@ function syncLocked(
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root, discard);
+  requireWorktree(paths, prNumber, root, discard, trustAnchor(state));
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.

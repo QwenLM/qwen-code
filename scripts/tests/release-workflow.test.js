@@ -577,7 +577,7 @@ describe('release workflow', () => {
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/.github/workflows/audio-capture-prebuilds.yml\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -708,7 +708,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    // The optional ECS build handoff and audio reuse add artifact routing;
+    // The optional ECS build handoff adds artifact routing;
     // fingerprinting, source validation, and packing remain in scripts.
     expect(workflow.split('\n').length).toBeLessThan(1160);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
@@ -3867,37 +3867,9 @@ describe('release lane runner routing', () => {
   });
 });
 
-describe('release artifact reuse and handoff', () => {
+describe('release artifact handoff', () => {
   const step = (job, name) =>
     releaseYaml.jobs[job].steps.find((entry) => entry.name === name);
-
-  // The reuse mechanism itself is pinned by
-  // scripts/tests/audio-prebuild-reuse-workflow.test.js. What this file adds is
-  // that the isolated build job is held to the same consumer contract as the
-  // publisher, because it is a second, independent consumer of that artifact.
-  it('rechecks reused sources independently in both artifact consumers', () => {
-    for (const job of ['build_release', 'publish']) {
-      const steps = releaseYaml.jobs[job].steps;
-      const verify = step(job, 'Verify reusable audio source');
-      const download = step(job, 'Download reusable audio prebuilds');
-      const validate = step(job, 'Validate complete audio prebuilds');
-      expect(verify.with.script).toContain('audioPrebuildKey(');
-      expect(verify.with.script).toContain('verifyAudioArtifact(');
-      expect(verify.env.RELEASE_SHA).toBe(
-        '${{ needs.prepare.outputs.release_sha }}',
-      );
-      expect(download.with['artifact-ids']).toBe(
-        '${{ needs.prepare.outputs.audio_artifact_id }}',
-      );
-      expect(download.with['run-id']).toBe(
-        '${{ needs.prepare.outputs.audio_run_id }}',
-      );
-      expect(steps.indexOf(verify)).toBeLessThan(steps.indexOf(download));
-      expect(steps.indexOf(download)).toBeLessThan(steps.indexOf(validate));
-      expect(verify['continue-on-error']).toBeUndefined();
-      expect(validate['continue-on-error']).toBeUndefined();
-    }
-  });
 
   it.each([
     {
@@ -3909,13 +3881,6 @@ describe('release artifact reuse and handoff', () => {
     },
     {
       name: 'enabled, fresh audio',
-      expectedBuild: true,
-      expectedPublish: true,
-    },
-    {
-      name: 'enabled, reused audio',
-      audio: 'skipped',
-      reuse: '123',
       expectedBuild: true,
       expectedPublish: true,
     },
@@ -3979,7 +3944,6 @@ describe('release artifact reuse and handoff', () => {
     const needs = {
       prepare: {
         result: scenario.prepare ?? 'success',
-        outputs: { audio_artifact_id: scenario.reuse ?? '' },
       },
       quality: { result: scenario.quality ?? 'success' },
       integration_none: { result: 'success' },
