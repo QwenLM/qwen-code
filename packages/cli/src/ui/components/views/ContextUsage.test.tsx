@@ -43,6 +43,27 @@ function makeBreakdown(
   };
 }
 
+it('renders instructions independently from auto memory', () => {
+  const { lastFrame } = render(
+    <ContextUsage
+      modelName="qwen3-coder"
+      totalTokens={50000}
+      contextWindowSize={128000}
+      breakdown={makeBreakdown('safe', { instructionFiles: 100 })}
+      builtinTools={[]}
+      mcpTools={[]}
+      skills={[]}
+      instructionFiles={[{ path: 'QWEN.md', tokens: 100 }]}
+      memoryFiles={[{ path: 'auto memory', tokens: 200 }]}
+      showDetails={true}
+    />,
+  );
+  expect(lastFrame()).toContain('Instruction files');
+  expect(lastFrame()).toContain('Auto memory');
+  expect(lastFrame()).toContain('QWEN.md');
+  expect(lastFrame()).not.toContain('Memory files');
+});
+
 describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', () => {
   it('keeps a loaded skill name and listing cost on one line with one body-cost label', () => {
     const name = 'agent-reproduce-feature';

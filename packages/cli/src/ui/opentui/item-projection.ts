@@ -486,7 +486,17 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ['System prompt', 'systemPrompt'],
     ['Built-in tools', 'builtinTools'],
     ['MCP tools', 'mcpTools'],
-    ['Memory files', 'memoryFiles'],
+    ...(breakdown['instructionFiles'] === undefined
+      ? []
+      : ([['Instruction files', 'instructionFiles']] as Array<
+          [string, string]
+        >)),
+    [
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
+      'memoryFiles',
+    ],
     ['Skills', 'skills'],
     ['Startup context', 'startupContext'],
   ];
@@ -569,7 +579,20 @@ export function projectContextUsage(item: Record<string, unknown>): string {
       ].sort(byTokens),
     );
     detail(
-      'Memory files',
+      'Instruction files',
+      (
+        (item['instructionFiles'] ?? []) as Array<{
+          path: string;
+          tokens: number;
+        }>
+      )
+        .map((file) => ({ name: file.path, tokens: file.tokens }))
+        .sort(byTokens),
+    );
+    detail(
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
       // The producer emits ContextMemoryDetail ({ path, tokens }); map to
       // the name field detail() renders.
       [

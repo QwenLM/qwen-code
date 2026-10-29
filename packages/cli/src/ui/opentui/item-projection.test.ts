@@ -421,6 +421,19 @@ describe('projectContextUsage', () => {
   });
 
   it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const split = projectContextUsage({
+      modelName: 'm',
+      totalTokens: 30,
+      contextWindowSize: 100,
+      breakdown: { instructionFiles: 20, memoryFiles: 10 },
+      showDetails: true,
+      instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
+      memoryFiles: [{ path: 'auto memory', tokens: 10 }],
+    });
+    expect(split).toContain('Instruction files');
+    expect(split).toContain('Auto memory');
+    expect(split).toContain('QWEN.md');
+    expect(split).not.toContain('Memory files');
     const text = projectContextUsage({
       modelName: 'm',
       totalTokens: 5000,

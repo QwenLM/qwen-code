@@ -1346,6 +1346,8 @@ const EN: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
+  'contextUsage.instructionFiles': 'Instruction files',
+  'contextUsage.autoMemory': 'Auto memory',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
   'contextUsage.startupContext': 'Startup context',
@@ -5900,6 +5902,8 @@ const ZH: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
+  'contextUsage.instructionFiles': '指令文件',
+  'contextUsage.autoMemory': '自动记忆',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
   'contextUsage.startupContext': '启动上下文',
