@@ -210,9 +210,10 @@ export function createJavaManagedAgentProvider(
     },
     exportSnapshot: (sessionId, request) =>
       client.exportSnapshot(
-        { sessionId, cursor: request.cursor, limit: 100 },
+        { sessionId, cursor: request.cursor, limit: 100, view: 'messages' },
         request.signal,
       ),
+    exportConsistency: 'live',
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -876,6 +877,7 @@ export function createJavaManagedAgentProvider(
           sessionId,
           cursor: request.before,
           limit: request.limit,
+          view: 'messages',
         },
         request.signal,
       );
@@ -889,7 +891,8 @@ export function createJavaManagedAgentProvider(
           (left, right) => left.id - right.id,
         ),
         olderCursor: transcript.olderCursor ?? undefined,
-        lastEventId: transcript.lastSequence,
+        lastEventId: transcript.coveredSequence,
+        history: 'items',
       };
     },
     async createSession(request, command) {

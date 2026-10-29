@@ -1403,6 +1403,7 @@ describe('createJavaManagedAgentProvider', () => {
         events: [],
         items: [],
         lastSequence: 7,
+        coveredSequence: 5,
         hasMore: true,
         olderCursor: 'older-1',
       }),
@@ -1419,7 +1420,9 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.olderCursor).toBe('older-1');
-    expect(transcript.lastEventId).toBe(7);
+    expect(transcript.lastEventId).toBe(5);
+    expect(transcript.history).toBe('items');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
       'https://product.example/api/agent/web-shell/v1/transcript/query',
@@ -1429,6 +1432,7 @@ describe('createJavaManagedAgentProvider', () => {
         sessionId: 'session-1',
         cursor: 'before-1',
         limit: 25,
+        view: 'messages',
       }),
     );
   });
@@ -1770,6 +1774,7 @@ describe('createJavaManagedAgentProvider', () => {
         olderCursor: 'older-1',
         hasMore: true,
         lastSequence: 4,
+        coveredSequence: 4,
       }),
     );
     const provider = createJavaManagedAgentProvider({
