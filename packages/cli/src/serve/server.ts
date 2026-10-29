@@ -4318,81 +4318,87 @@ export function createServeApp(
     setRateLimiter(app, rateLimiter);
   }
 
-  let appDrainComplete = false;
-  if (!deps.serveAppLifecycle)
-    serveAppLifecycle.setAppDrain(async () => {
-      if (appDrainComplete) return;
-      const pendingDrains = [
-        stopHostedCsiSessions?.() ?? Promise.resolve(),
-        (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
-        workspaceManagementHandle.sealAndWait(),
-        (
-          app.locals as {
-            sealAndWaitLiveCoordinator?: () => Promise<void>;
-          }
-        ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
-        archiveCoordinator.sealMaintenanceAndWait(),
-        conversationRuntimeActivity?.sealAndWait() ?? Promise.resolve(),
-      ];
-      const cleanupErrors: unknown[] = [];
-      const stopAppResource = (stop: (() => void) | undefined) => {
-        try {
-          stop?.();
-        } catch (error) {
-          cleanupErrors.push(error);
+  // Registered even when the lifecycle comes from the caller: `runQwenServe`
+  // passes its own controller, and nothing else installs an app drain, so
+  // gating on `deps.serveAppLifecycle` skipped this teardown in production.
+  // Latching the promise makes repeated and concurrent drains share one run.
+  let appDrain: Promise<void> | undefined;
+  serveAppLifecycle.setAppDrain(() => {
+    appDrain ??= drainServeApp();
+    return appDrain;
+  });
+
+  async function drainServeApp(): Promise<void> {
+    const pendingDrains = [
+      stopHostedCsiSessions?.() ?? Promise.resolve(),
+      (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
+      workspaceManagementHandle.sealAndWait(),
+      (
+        app.locals as {
+          sealAndWaitLiveCoordinator?: () => Promise<void>;
         }
-      };
-      const locals = app.locals as {
-        stopMcpAppSandbox?: () => void;
-        stopScheduledTaskKeepalive?: () => void;
-        stopWorkspaceGitState?: () => void;
-        stopExtensionGenerationReconciler?: () => void;
-        stopSessionAgentOrchestrators?: () => void;
-        stopHostedMountHandbacks?: () => void;
-      };
-      stopAppResource(locals.stopMcpAppSandbox);
-      stopAppResource(locals.stopScheduledTaskKeepalive);
-      stopAppResource(locals.stopWorkspaceGitState);
-      stopAppResource(locals.stopExtensionGenerationReconciler);
-      stopAppResource(locals.stopSessionAgentOrchestrators);
-      stopAppResource(locals.stopHostedMountHandbacks);
-      stopAppResource(() => deviceFlowRegistry.dispose());
-      stopAppResource(() => rateLimiter?.setDraining(true));
-      stopAppResource(() => rateLimiter?.dispose());
-      stopAppResource(() => agentHostRateLimiter?.dispose());
-      stopAppResource(
-        (app.locals as { stopAgentHostRestore?: () => void })
-          .stopAgentHostRestore,
-      );
-      stopAppResource(() => webTerminalRegistry.dispose());
-      // The catalogs' watchers belong to this daemon process, whichever service
-      // created them.
-      stopAppResource(() => {
-        trustedSkillsConfigStatus.dispose?.();
-        untrustedSkillsConfigStatus.dispose?.();
-        disposeAllSkillsWatchers();
-      });
-      const drains = await Promise.allSettled(pendingDrains);
-      stopAppResource(() => acpHandleRef.current?.dispose());
-      const bridgeDrains = await Promise.allSettled(
-        workspaceRegistry
-          .listManaged()
-          .map((runtime) => runtime.bridge.shutdown()),
-      );
-      const errors = [
-        ...cleanupErrors,
-        ...[...drains, ...bridgeDrains]
-          .filter(
-            (result): result is PromiseRejectedResult =>
-              result.status === 'rejected',
-          )
-          .map((result) => result.reason as unknown),
-      ];
-      if (errors.length > 0) {
-        throw new AggregateError(errors, 'Serve app drain is incomplete.');
+      ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
+      archiveCoordinator.sealMaintenanceAndWait(),
+      conversationRuntimeActivity?.sealAndWait() ?? Promise.resolve(),
+    ];
+    const cleanupErrors: unknown[] = [];
+    const stopAppResource = (stop: (() => void) | undefined) => {
+      try {
+        stop?.();
+      } catch (error) {
+        cleanupErrors.push(error);
       }
-      appDrainComplete = true;
+    };
+    const locals = app.locals as {
+      stopMcpAppSandbox?: () => void;
+      stopScheduledTaskKeepalive?: () => void;
+      stopWorkspaceGitState?: () => void;
+      stopExtensionGenerationReconciler?: () => void;
+      stopSessionAgentOrchestrators?: () => void;
+      stopHostedMountHandbacks?: () => void;
+    };
+    stopAppResource(locals.stopMcpAppSandbox);
+    stopAppResource(locals.stopScheduledTaskKeepalive);
+    stopAppResource(locals.stopWorkspaceGitState);
+    stopAppResource(locals.stopExtensionGenerationReconciler);
+    stopAppResource(locals.stopSessionAgentOrchestrators);
+    stopAppResource(locals.stopHostedMountHandbacks);
+    stopAppResource(() => deviceFlowRegistry.dispose());
+    stopAppResource(() => rateLimiter?.setDraining(true));
+    stopAppResource(() => rateLimiter?.dispose());
+    stopAppResource(() => agentHostRateLimiter?.dispose());
+    stopAppResource(
+      (app.locals as { stopAgentHostRestore?: () => void })
+        .stopAgentHostRestore,
+    );
+    stopAppResource(() => webTerminalRegistry.dispose());
+    // The catalogs' watchers belong to this daemon process, whichever service
+    // created them.
+    stopAppResource(() => {
+      trustedSkillsConfigStatus.dispose?.();
+      untrustedSkillsConfigStatus.dispose?.();
+      disposeAllSkillsWatchers();
     });
+    const drains = await Promise.allSettled(pendingDrains);
+    stopAppResource(() => acpHandleRef.current?.dispose());
+    const bridgeDrains = await Promise.allSettled(
+      workspaceRegistry
+        .listManaged()
+        .map((runtime) => runtime.bridge.shutdown()),
+    );
+    const errors = [
+      ...cleanupErrors,
+      ...[...drains, ...bridgeDrains]
+        .filter(
+          (result): result is PromiseRejectedResult =>
+            result.status === 'rejected',
+        )
+        .map((result) => result.reason as unknown),
+    ];
+    if (errors.length > 0) {
+      throw new AggregateError(errors, 'Serve app drain is incomplete.');
+    }
+  }
 
   return app;
 }
