@@ -1434,6 +1434,12 @@ test('backup leaves no partial backup when the dump fails', async (t) => {
   await assert.rejects(stat(target), { code: 'ENOENT' });
 });
 
+async function modesOf(root, names) {
+  return Promise.all(
+    names.map(async (name) => (await stat(path.join(root, name))).mode & 0o777),
+  );
+}
+
 async function backedUp(t, overrides) {
   const host = await rig(t, overrides);
   await host.stop();
@@ -2236,12 +2242,53 @@ test('install uses an existing release directory only when it is this build', as
   assert.ok((await lstat(host.current)).isDirectory());
   assert.equal(await readFile(config, 'utf8'), 'key: y\n');
 
-  // The copy an interrupted install left is this build, and is used.
+  // The archive extracted there is this build, and is used. Extracted with
+  // modes only root reads, it is made readable as a copy would be, except
+  // for a file no release lists.
   await writeFile(config, 'key: x\n');
+  await chmod(path.join(release, 'lib'), 0o700);
+  await chmod(path.join(release, 'lib/server.jar'), 0o600);
+  await chmod(path.join(release, 'bin/qwen-managed-agent-server'), 0o700);
+  await writeFile(path.join(release, 'config/extra.yml'), 'k: v\n', {
+    mode: 0o600,
+  });
   assert.equal(await host.upgrade('install', '--backup', target), 0);
   assert.ok(host.output.includes(`Using ${release}`));
   assert.ok(!host.output.includes('Copied config/application.yml'));
   assert.equal(await readlink(host.current), release);
+  assert.deepEqual(
+    await modesOf(release, [
+      'lib',
+      'lib/server.jar',
+      'bin/qwen-managed-agent-server',
+      'config/extra.yml',
+    ]),
+    [0o755, 0o644, 0o755, 0o600],
+  );
+});
+
+test('install lets the service account read a release it runs from', async (t) => {
+  const { host, target } = await backedUp(t);
+  // Extracted where install puts it, with modes only root reads, and run
+  // from there.
+  const release = path.join(`${host.current}-releases`, '0.2.0');
+  await mkdir(path.dirname(release));
+  await cp(host.distribution, release, { recursive: true });
+  host.system.distribution = await realpath(release);
+  await chmod(path.join(release, 'lib'), 0o700);
+  await chmod(path.join(release, 'lib/server.jar'), 0o600);
+  await chmod(path.join(release, 'bin/qwen-managed-agent-server'), 0o700);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  assert.ok(host.output.includes(`Using ${release}`), host.output.join('\n'));
+  assert.equal(await readlink(host.current), release);
+  assert.deepEqual(
+    await modesOf(release, [
+      'lib',
+      'lib/server.jar',
+      'bin/qwen-managed-agent-server',
+    ]),
+    [0o755, 0o644, 0o755],
+  );
 });
 
 test('install leaves no partial copy, and an interrupted one is reported', async (t) => {

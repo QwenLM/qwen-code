@@ -61,7 +61,7 @@ Three other problems show up only on a real host:
   - Requires: both units stopped; a backup that still describes the deployment; `check` has no FAIL.
   - Does:
     1. Removes what an install killed earlier left: partial copies, `.upgrade-<8 hex digits>` links beside the distribution path, and `.tmp-` operator files in the release it will use. `check` lists them in the `layout` row.
-    2. Copies the release to `<distribution>-releases/<version>`, verifies the copy and makes the files `SHA256SUMS` lists readable by every account, removing the copy when a step fails. An existing directory there is used only when its `SHA256SUMS` is the new distribution's and its files match it.
+    2. Copies the release to `<distribution>-releases/<version>`, verifies the copy and makes the files `SHA256SUMS` lists readable by every account, removing the copy when a step fails. An existing directory there is used only when its `SHA256SUMS` is the new distribution's and its files match it, and its listed files are made readable the same way, since an archive extracted there keeps the extraction's modes.
     3. Copies operator files from the installed `config/`.
     4. Replaces the distribution link with one `rename`. The first run instead moves the installed directory into the releases directory and puts a link in its place, and moves the directory back when the second `rename` fails. When that move back fails too, it keeps the link and names both `mv -T` commands.
 - **`start`**
@@ -155,7 +155,7 @@ The control-plane unit adds `SuccessExitStatus=143`. `check` reports the changed
   - each check row;
   - every phase's refusals and its steps.
 - **Environment files.** 1579 random files read back through `systemd-run` on systemd 257, with no difference from the command's reader.
-- **Mutation testing.** 87 mutants of the script's decisions, 5 of the preflight changes and 8 of `ResolvedConfiguration` and the auth mode it reads; the follow-up added 33 for its own changes and 9 for its review.
+- **Mutation testing.** 87 mutants of the script's decisions, 5 of the preflight changes and 8 of `ResolvedConfiguration` and the auth mode it reads; the follow-up added 33 for its own changes and 12 for its review.
 - **Preflight unit tests:**
   - Flyway ordering;
   - the validation hook;

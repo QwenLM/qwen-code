@@ -2186,6 +2186,10 @@ async function phaseInstall(system, deployment, options) {
   if (await exists(target)) {
     // An earlier install of this release, or the archive extracted there:
     // the same SHA256SUMS, and files that still match it, make it this build.
+    const sums = await verifyChecksums(target).catch(() => ({
+      listed: [],
+      failed: ['SHA256SUMS'],
+    }));
     if ((await realpath(target)) !== deployment.distribution) {
       const [ours, theirs] = await Promise.all(
         [deployment.distribution, target].map((root) =>
@@ -2194,15 +2198,15 @@ async function phaseInstall(system, deployment, options) {
           ),
         ),
       );
-      const sums = await verifyChecksums(target).catch(() => ({
-        failed: ['SHA256SUMS'],
-      }));
       if (theirs === undefined || theirs !== ours || sums.failed.length > 0) {
         throw new Refusal(
           `${target} exists but is not this release; remove it and run install again.`,
         );
       }
     }
+    // An archive extracted there keeps the extraction's modes, which a copy
+    // made here would not.
+    await grantRead(target, sums.listed);
     system.out(`Using ${target}`);
   } else {
     const partial = path.join(
