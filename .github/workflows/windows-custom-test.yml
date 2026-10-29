@@ -1,9 +1,9 @@
 name: Windows 10 compatible test build
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - custom-qwen38-agent
+concurrency:
+  group: windows-custom-test-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
