@@ -18,7 +18,7 @@ if (process.argv.length !== 3 || file === undefined) {
 let result: OriginalReceiptCheckpointObservation;
 try {
   const handle = await open(file, 'r');
-  const limit = 48 * 1024 * 1024;
+  const limit = 192 * 1024 * 1024;
   let bytes: Buffer;
   try {
     if ((await handle.stat()).size > limit)

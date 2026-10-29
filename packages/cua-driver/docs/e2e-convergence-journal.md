@@ -1,5 +1,10 @@
 # E2E Convergence Journal
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 **Historical record.** Use `action-support.md` and the hosted platform support
 reference for current support claims.
 

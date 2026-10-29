@@ -1,15 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore.PendingChild;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore.RelayRow;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -38,6 +39,7 @@ class ChildResultRelayStoreTest {
     private AgentStateStore state;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @org.junit.jupiter.api.BeforeEach
@@ -109,9 +111,9 @@ class ChildResultRelayStoreTest {
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
                 parent, creationKey, "other-digest", "audit", input, null,
                 lineage))
-                .isInstanceOf(ApiException.class)
+                .isInstanceOf(ManagedAgentException.class)
                 .satisfies(error -> assertThat(
-                        ((ApiException) error).getCode())
+                        ((ManagedAgentException) error).getCode())
                         .isEqualTo("idempotency_conflict"));
         assertThat(creationKey).matches("^[0-9a-f]{64}$");
         assertThat(jdbc.queryForObject(
@@ -145,9 +147,9 @@ class ChildResultRelayStoreTest {
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
                 parent, "key-1", "digest", "audit", List.of(), null,
                 new StoreModels.SessionLineage(parent, parent, "run-1", 1)))
-                .isInstanceOf(ApiException.class)
+                .isInstanceOf(ManagedAgentException.class)
                 .satisfies(error -> assertThat(
-                        ((ApiException) error).getCode())
+                        ((ManagedAgentException) error).getCode())
                         .isEqualTo("child_parent_unavailable"));
     }
 
@@ -271,8 +273,8 @@ class ChildResultRelayStoreTest {
                         + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, ?, ?, ?, ?, 1)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
-                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
                 TENANT, sessionId, recordId,
                 "resource-" + recordId,
                 "shell".equals(kind) ? "background_shell" : kind, taskState,
@@ -589,7 +591,7 @@ class ChildResultRelayStoreTest {
     }
 
     private void resource(String sessionId, String resourceId, String kind, String body) {
-        String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,

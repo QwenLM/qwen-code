@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -79,9 +80,14 @@ final class HostedShellOutputProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+                + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session.get("sessionId"));
+        member.put("physicalOwner", physical);
+        return member;
     }
 
     private List<?> owned() {
@@ -129,7 +135,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
                 assertThat(worker.isAlive()).isTrue();
                 capture(worker);
                 long pid = Long.parseLong(Files.readString(Path.of(session.get("directory").toString()).resolve("shell.pid")));
-                assertThat(worker.descendants().filter(process -> process.pid() == pid && running(process)).toList())
+                assertThat(worker.descendants().filter(process -> process.pid() == pid && HostedProcessLiveness.running(process)).toList())
                         .as("real Shell child alive at durable-prefix barrier").hasSize(1);
                 assertThat(resources(id, "managed-tool-result-manifest")).isEmpty();
                 assertThat(resources(id, "managed-tool-outcome")).isEmpty();
@@ -159,8 +165,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
         for (String key : List.of("binding_id", "runtime_generation", "runtime_session_id")) {
             assertThat(original.get(key)).isEqualTo(row.get(key));
         }
-        assertThat(original.get("holder_key")).isEqualTo(sha256((row.get("binding_id") + "\u0000"
-                + row.get("runtime_generation") + "\u0000" + row.get("runtime_session_id")).getBytes(StandardCharsets.UTF_8)));
+        assertThat(original.get("execution_storage_key"))
+                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("storage_key"));
         assertThat(jdbc.queryForList("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?",
                 String.class, id)).containsExactly("READY");
         return Map.of("state", row.get("execution_state"));
@@ -393,22 +399,6 @@ final class HostedShellOutputProbe implements AutoCloseable {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
-    private static boolean running(ProcessHandle process) {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (!Files.exists(stat)) {
-            return true;
-        }
-        try {
-            String value = Files.readString(stat);
-            return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-        } catch (java.io.IOException gone) {
-            return process.isAlive();
-        }
-    }
-
     @Override
     public void close() throws Exception {
         for (Object value : owned()) {
@@ -416,11 +406,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
         }
         processes.forEach(ProcessHandle::destroyForcibly);
         for (ProcessHandle process : processes) {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (running(process)) {
-                assertThat(System.nanoTime()).as("Shell worker/descendant cleanup %s", process.pid()).isLessThan(deadline);
-                Thread.sleep(20);
-            }
+            HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "Shell worker/descendant cleanup");
         }
     }
 }

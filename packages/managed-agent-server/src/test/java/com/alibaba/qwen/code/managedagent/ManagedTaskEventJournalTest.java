@@ -1,13 +1,14 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.EventPage;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.TaskEvent;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore.EventPage;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore.TaskEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -47,6 +48,7 @@ class ManagedTaskEventJournalTest {
     private ManagedSessionStore sessionStore;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Test
@@ -168,7 +170,7 @@ class ManagedTaskEventJournalTest {
         events.expireThrough(TENANT, sessionId, taskId, outputSequence - 1);
         assertThatThrownBy(() -> events.expireThrough(TENANT, sessionId,
                 taskId, outputSequence))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
                             .isEqualTo(HttpStatus.CONFLICT);
                     assertThat(error.getCode()).isEqualTo(
@@ -210,7 +212,7 @@ class ManagedTaskEventJournalTest {
         // ...and the next accepted event is a refusal, never a silent drop.
         assertThatThrownBy(() -> events.appendStateChange(TENANT, sessionId,
                 taskId, "running", "ready", 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_BACKLOG_FULL));
         // Archival plus an explicit expiry reopens admission.
@@ -274,12 +276,12 @@ class ManagedTaskEventJournalTest {
                 .doesNotHaveDuplicates();
         assertThatThrownBy(() -> events.appendArtifact(TENANT, sessionId,
                 taskId, "artifact-100", 100))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         assertThatThrownBy(() -> events.appendArtifact(TENANT, sessionId,
                 taskId, "artifact-0", 101))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         // No reference aged out to admit another.
@@ -294,13 +296,13 @@ class ManagedTaskEventJournalTest {
         String taskId = "task_" + "cc".repeat(32);
         assertThatThrownBy(() -> events.appendOutput(TENANT, plain, taskId,
                 "x", false, null, null, null, null, 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         // Includes a task whose output would go only to Artifacts.
         assertThatThrownBy(() -> events.appendArtifact(TENANT, plain,
                 taskId, "artifact-1", 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         String deleting = session(true);
@@ -309,7 +311,7 @@ class ManagedTaskEventJournalTest {
                 deleting);
         assertThatThrownBy(() -> events.appendOutput(TENANT, deleting,
                 taskId, "x", false, null, null, null, null, 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
     }
@@ -320,22 +322,22 @@ class ManagedTaskEventJournalTest {
         String taskId = "task_" + "dd".repeat(32);
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "", false, null, null, null, null, 0))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "x".repeat(16385), false, null, null, null, null,
                 0))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         events.appendOutput(TENANT, sessionId, taskId, "x".repeat(16384),
                 true, null, null, null, null, 0);
         // The segment identity is all or nothing, with a half-open range.
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "x", false, "capture-1", null, 0L, 1L, 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "x", false, "capture-1", "stdout", 1L, 1L, 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
     }
@@ -354,18 +356,18 @@ class ManagedTaskEventJournalTest {
         // An overlap or duplication against the published space refuses.
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "zz", true, "capture-1", "stdout", 2L, 5L, 3))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "abcd", true, "capture-1", "stdout", 0L, 4L, 4))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         // A gap against the continuous space refuses as well.
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "zz", true, "capture-1", "stdout", 10L, 12L, 5))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         // What committed joins: each stream's ranges are continuous and

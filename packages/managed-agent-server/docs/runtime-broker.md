@@ -7,6 +7,11 @@ and JDBC implementations; and a framework-neutral service that composes
 authoritative scope resolution, Runtime provisioning, and Runtime transport
 adapters.
 
+Runtime providers and their deployment protocols are in `runtimebroker.provisioning`,
+HTTP adapters and wire protocols in `runtimebroker.transport`, and credential
+encryption in `runtimebroker.security`. The execution and repository core stays
+in the parent package; the application still builds all of them in one Maven module.
+
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
 intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
@@ -132,6 +137,133 @@ Durable rows alone do not make a stopped local Runtime process recoverable.
 For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## External scratch Runtime (opt-in)
+
+`ExternalRuntimeProvisioner` (kind `external-scratch`) delegates Session-exclusive
+scratch worker placement to an operator-run HTTP service, so a deployment can use
+an existing sandbox or container platform without Kubernetes, SSH or a vendor SDK
+inside this repository. It implements the scratch slice of
+[the external provider design](../../../docs/design/2026-10-23-external-runtime-provider.md);
+managed-context (registered Workspace) requests are refused.
+
+Select it with `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-scratch` plus
+`QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL`, `..._PROVIDER_TOKEN`,
+`..._PROVIDER_ID` and optional `..._REQUEST_TIMEOUT` / `..._STARTUP_TIMEOUT`. The
+selection does not imply the Broker itself: also set
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true`, a non-empty
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`, the
+`QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID` /
+`QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY` pair (the external path persists
+provision seeds encrypted through it) and
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. An explicit
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is required: the worker-side cwd cannot be
+hashed on the Broker host, so the local-process/Kubernetes derivation does not
+apply. The README's [Broker deployment](../README.md#broker-deployment) recipe
+lists the full export block. The provider URL must be HTTP(S) without
+credentials, query or fragment; use HTTPS for anything outside a trusted control
+plane. Workspace files and Shell must stay disabled, and the configured
+`workspace-cwd` is the worker-side path, so the Broker host does not need that
+directory. Preflight validates configuration only; reachability and worker
+identity are checked on first use.
+
+The provider implements two authenticated POST routes, `provision` and `observe`.
+`provision` is idempotent on `provisionRequestId`: the Broker persists a
+deterministic logical handle before its first call, sends it on every retry, and
+rejects a response carrying another handle. The provider must bind that handle to
+one immutable physical resource and keep the binding across its own restarts;
+neither a lost response nor a lost worker authorizes replacement under the same
+identity. `observe` is read-only and reports `RUNNING`, `STARTING` or `UNKNOWN`;
+`GONE` and unknown states fail closed. A provider `RUNNING` never establishes
+identity on its own: the Broker attests the returned origin with the existing
+bearer/lease protocol and keeps every lease, epoch and execution decision.
+
+Transient provider failures stay retryable against the same request and lease, so
+a temporary outage does not invalidate a healthy binding; endpoint or identity
+mismatch does. The provider ID, Workspace ID, Workspace generation, Workspace
+cwd and Harness capability digest are all digested into the handle identity
+described in the design; the lease token is deliberately excluded so rotation
+does not replace identity. Changing any of the frozen inputs after Sessions
+have been placed invalidates every existing binding, with no unblock path —
+set them once before the first Session. There is deliberately no `release` route. Release can run after an
+operation loses its CAS or fails attestation, so it cannot authorize stopping a
+worker another Broker may own. Closing a Session therefore does not stop its
+scratch worker: budget the provider's own TTL and inspect retained resources.
+
+This increment allocates, attests and recovers workers but has no tool consumer.
+A Session without a Workspace binding has no Hosted tool profile, so the model is
+offered no tools while every admitted Turn still warms that Session's Runtime.
+Each such Session holds a remote worker that runs no tool calls until its TTL
+expires. Workspace-backed remote tools require the extension described in the
+design; do not enable this provisioner for production tool use yet.
+
+Placement retry state is bounded at 1024 retained seeds per Broker process and is
+never evicted: a provider-conflict outcome frees its own entry, but a merely
+idle or closed Session keeps holding one, and at capacity new seeds fail with the
+retryable `runtime_external_capacity`. Plan a Broker restart or a capacity change
+before that many distinct Sessions, and budget provider-side resource retention
+separately.
+
+## External Workspace storage registration
+
+Operators can reserve an immutable `EXTERNAL` storage ownership record through
+`POST /internal/managed-workspaces/v1/storage:register-external`. This is metadata
+registration only: it creates no Workspace, Session, worker, remote call or local
+filesystem access. It needs no external provisioner profile. Existing execution
+and local recovery paths refuse these aliases. See the
+[registration design](../../../docs/design/2026-10-25-external-storage-registration.md).
+
+The listener must be explicitly bound to loopback (`server.address` for a shared
+listener, or `qwen.managed-agent.internal-server.address` for a dedicated internal
+listener). Use literal `127.0.0.1` or `::1`. Both local and peer addresses must be
+loopback; forwarded headers do not grant access. A dedicated internal listener
+also requires its configured port. Send `Authorization: Bearer <runtime-broker.token>`
+and `X-Qwen-Tenant-Id`. An empty Broker token or a non-loopback listener is refused,
+even if ordinary API authentication is open. The operator credential authorizes
+the named tenant; ordinary Workspace grants do not authorize registration.
+
+```json
+{
+  "identity": {
+    "providerId": "provider-a",
+    "physicalKey": "persistent-volume-42",
+    "registrationRevision": 1
+  },
+  "alias": {
+    "tenantWorkspaceId": "workspace-42",
+    "aliasPath": "/external/workspace-42",
+    "mountRoot": "/workspace"
+  },
+  "idempotencyKey": "register-workspace-42",
+  "requestId": "operator-request-42"
+}
+```
+
+`providerId`, `physicalKey` and `tenantWorkspaceId` use `[A-Za-z0-9._-]{1,128}`;
+`registrationRevision` is positive. The provider must supply durable storage
+identity, never a sandbox ID. `tenantWorkspaceId` reserves the tenant's storage ID
+for a future Workspace; an existing alias, Workspace or Runtime binding is never
+adopted. Paths are absolute, non-root, at most 2048 characters and use nonempty
+`[A-Za-z0-9._-]+` components other than `.` and `..`. Backslashes, duplicate or
+trailing separators are rejected. Registration does not attest permissions or
+existence on the worker; its physical owner remains `UNVERIFIED`.
+
+A provider/physicalKey pair has one immutable tenant and alias, independent of
+revision. Alias paths are exclusive across external registrations, including
+across tenants. Attempts to change ownership return `409 alias_conflict` with a
+sanitized message. The tenant-scoped `idempotencyKey` uses
+`[A-Za-z0-9._:-]{1,128}`; the same key with different registration data returns
+`409 idempotency_conflict`. A committed retry returns the original `registrationId`,
+`storageKind`, `registration` and `registeredAt` (epoch milliseconds), including
+after restart. Optional `requestId` is visible ASCII of 1–128 characters and only
+sets HTTP correlation; changing it does not change the durable request digest.
+All responses are `Cache-Control: no-store`. Success is HTTP 200; invalid input is
+400, operator admission failure 403, and payloads over 16 KiB 413.
+
+Registration, owner and idempotency receipt commit atomically. The fresh V1 schema
+adds the `EXTERNAL_STORAGE` receipt namespace; existing development catalogs must
+be recreated under the existing fresh-schema policy. There is no update,
+re-registration, retirement, mount or execution API in this increment.
 
 ## Experimental Kubernetes scratch Runtime
 

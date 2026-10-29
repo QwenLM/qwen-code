@@ -365,9 +365,16 @@ describe('Markdown footnote cards', () => {
       '2',
     );
     const copy = [...container.querySelectorAll('button')].find(
-      (button) => button.getAttribute('aria-label') === 'Copy table',
+      (button) => button.getAttribute('aria-label') === 'Copy',
     );
+    act(() => {
+      copy!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    });
     click(copy!);
+    const copyTextItem = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'Copy text');
+    click(copyTextItem ?? null);
     await act(async () => {});
     expect(writeText).toHaveBeenCalledWith(
       expect.stringContaining('Result1 21'),
@@ -725,7 +732,7 @@ describe('Host inline footnote icon selection', () => {
       .spyOn(navigator.clipboard, 'writeText')
       .mockResolvedValue();
     render(<AssistantMessage content={resourceReport} showFooterActions />);
-    click(container.querySelector('[aria-label="Copy"]'));
+    click(container.querySelector('[aria-label="Copy Markdown source"]'));
     await act(async () => {});
     expect(writeText).toHaveBeenCalledWith(resourceReport);
     const resolver = vi.fn<WebShellFootnoteIconResolver>();

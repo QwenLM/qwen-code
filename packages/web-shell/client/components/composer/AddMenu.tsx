@@ -27,6 +27,7 @@ import {
   escapeAtReferenceText,
   EXTENSIONS_PROVIDER_ID,
   FILE_PROVIDER_ID,
+  MCP_RESOURCES_PROVIDER_ID,
   sanitizeInsertText,
 } from '../../hooks/useAtMentionSources';
 import type {
@@ -87,6 +88,7 @@ export interface AddMenuProps {
     onLiveVoice?: () => void;
   };
   commandsOnly?: boolean;
+  simpleMode?: boolean;
 }
 
 export interface AddMenuPlanControl {
@@ -205,7 +207,7 @@ function SearchableProviderSubmenu({
       className={
         mobile
           ? 'flex w-full flex-col gap-2'
-          : 'flex w-52 max-w-[calc(100vw-1rem)] flex-col gap-1 p-1 sm:w-72'
+          : 'flex w-52 max-w-[min(calc(100vw-1rem),var(--radix-dropdown-menu-content-available-width))] flex-col gap-1 p-1 sm:w-72'
       }
     >
       {placeholder ? (
@@ -257,10 +259,11 @@ function SearchableProviderSubmenu({
                   : item.description) && provider.id !== FILE_PROVIDER_ID ? (
                   <span
                     className={
-                      mobile
+                      mobile || provider.id === MCP_RESOURCES_PROVIDER_ID
                         ? '[overflow-wrap:anywhere] text-xs text-muted-foreground'
                         : 'hidden truncate text-xs text-muted-foreground sm:block'
                     }
+                    title={item.description}
                   >
                     {provider.id === EXTENSIONS_PROVIDER_ID
                       ? item.detail
@@ -317,6 +320,7 @@ export function AddMenu({
   btw,
   mobileActions,
   commandsOnly = false,
+  simpleMode = false,
 }: AddMenuProps) {
   const { t, language } = useI18n();
   const [open, setOpen] = useState(false);
@@ -595,6 +599,14 @@ export function AddMenu({
             <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
               {page === 'root' && (
                 <div className="flex flex-col gap-1">
+                  {simpleMode && !anyAvailable && (
+                    <div
+                      className="p-3 text-muted-foreground"
+                      data-testid="composer-add-menu-empty"
+                    >
+                      {t('composerAdd.emptyState')}
+                    </div>
+                  )}
                   {addFileAvailable && (
                     <>
                       <Button
@@ -655,42 +667,48 @@ export function AddMenu({
                         {pageLabels[id]}
                       </Button>
                     ))}
-                  <div className="my-1 border-t" />
-                  {!mobileActions.shellMode &&
-                    mobileActions.commands.length > 0 && (
+                  {!simpleMode && (
+                    <>
+                      <div className="my-1 border-t" />
+                      {!mobileActions.shellMode &&
+                        mobileActions.commands.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            className={mobileRowClass}
+                            onClick={() => setPage('commands')}
+                          >
+                            {t('composerMobile.commands')}
+                          </Button>
+                        )}
                       <Button
                         variant="ghost"
                         className={mobileRowClass}
-                        onClick={() => setPage('commands')}
+                        onClick={() => closeAndRun(mobileActions.onHistory)}
                       >
-                        {t('composerMobile.commands')}
+                        {t('composerMobile.history')}
                       </Button>
-                    )}
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onHistory)}
-                  >
-                    {t('composerMobile.history')}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onToggleShell)}
-                  >
-                    {t(
-                      mobileActions.shellMode
-                        ? 'quickActions.exitShellMode'
-                        : 'quickActions.shellMode',
-                    )}
-                  </Button>
-                  {mobileActions.onLiveVoice && (
-                    <LiveVoiceMenuItem
-                      className={mobileRowClass}
-                      onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
-                    />
+                      <Button
+                        variant="ghost"
+                        className={mobileRowClass}
+                        onClick={() => closeAndRun(mobileActions.onToggleShell)}
+                      >
+                        {t(
+                          mobileActions.shellMode
+                            ? 'quickActions.exitShellMode'
+                            : 'quickActions.shellMode',
+                        )}
+                      </Button>
+                      {mobileActions.onLiveVoice && (
+                        <LiveVoiceMenuItem
+                          className={mobileRowClass}
+                          onClick={() =>
+                            closeAndRun(mobileActions.onLiveVoice!)
+                          }
+                        />
+                      )}
+                    </>
                   )}
-                  {btw && (
+                  {btw && !simpleMode && (
                     <Button
                       variant="ghost"
                       className={`${mobileRowClass} py-2`}
@@ -711,7 +729,7 @@ export function AddMenu({
                       </span>
                     </Button>
                   )}
-                  {plan && (
+                  {plan && !simpleMode && (
                     <Button
                       variant="ghost"
                       className={mobileRowClass}
@@ -875,7 +893,7 @@ export function AddMenu({
             }}
           >
             {!anyAvailable ? (
-              !btw && (
+              (simpleMode || !btw) && (
                 <DropdownMenuLabel data-testid="composer-add-menu-empty">
                   {t('composerAdd.emptyState')}
                 </DropdownMenuLabel>
@@ -1054,7 +1072,7 @@ export function AddMenu({
                 </DropdownMenuSub>
               </>
             )}
-            {btw ? (
+            {btw && !simpleMode ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -1073,7 +1091,7 @@ export function AddMenu({
                 </DropdownMenuItem>
               </>
             ) : null}
-            {plan ? (
+            {plan && !simpleMode ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuCheckboxItem

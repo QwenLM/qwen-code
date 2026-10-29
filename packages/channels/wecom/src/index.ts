@@ -1,4 +1,6 @@
 export { WeComChannel } from './WeComAdapter.js';
+export { WeComCallbackChannel } from './wecom-callback-adapter.js';
+export { callbackPlugin } from './callback-plugin.js';
 
 import { WeComChannel } from './WeComAdapter.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';

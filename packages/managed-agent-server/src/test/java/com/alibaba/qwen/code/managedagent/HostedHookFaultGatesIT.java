@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,10 +19,10 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -48,6 +48,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -134,7 +136,7 @@ class HostedHookFaultGatesIT {
         HarnessConnector connector = spring.getBean(HarnessConnector.class);
         long[] attachedAt = {0};
         waitFor(() -> {
-            HarnessAttach attach = attachment(connector, session);
+            HarnessSessionRef attach = attachment(connector, session);
             if (attach != null) {
                 var status = hookStatus(session, executionId, attach);
                 if (status.statusCode() == 200) {
@@ -203,11 +205,14 @@ class HostedHookFaultGatesIT {
         });
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
-        // The worker loss is the accepted H2 limit: the command and its
-        // descendant outlive the worker with no owner, receipt or timer.
-        assertThat(running(hook)).isTrue();
-        assertThat(running(child)).isTrue();
-        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+        // #14502's parent-death reaper empties the unit even though no
+        // survivor can settle the record: the orphan can no longer change
+        // the Workspace after its owner is gone.
+        waitFor(() -> {
+            assertThat(running(hook)).isFalse();
+            assertThat(running(child)).isFalse();
+            assertHookUnitsEmpty();
+        });
         JsonNode refused = api("POST", "/v1/agents/sessions/" + session + "/close", null, "close", 409, 503);
         assertThat(refused.toString()).containsAnyOf("turn_active", "runtime_reconciliation_required");
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
@@ -388,29 +393,13 @@ class HostedHookFaultGatesIT {
         return json.readTree(body);
     }
 
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
-    private record HarnessAttach(String clientId, String bootId) {}
-
-    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
-        Field field = connector.getClass().getDeclaredField("attachments");
-        field.setAccessible(true);
-        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
-            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
-            }
-        }
-        return null;
-    }
-
-    private HttpResponse<String> hookStatus(String session, String executionId, HarnessAttach attach) throws Exception {
+    private HttpResponse<String> hookStatus(String session, String executionId, HarnessSessionRef attach) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId))
                 .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId()).GET().build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -580,15 +569,15 @@ class HostedHookFaultGatesIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).failFast(() -> {
-            if (modelFailure.get() != null) {
-                throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
-            }
-        }).untilAsserted(assertion::execute);
-    }
-
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
+        await().atMost(Duration.ofSeconds(60))
+                .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
+                        || e instanceof CannotAcquireLockException)
+                .failFast(() -> {
+                    if (modelFailure.get() != null) {
+                        throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
+                    }
+                })
+                .untilAsserted(assertion::execute);
     }
 
     @AfterEach

@@ -20,10 +20,8 @@ import {
 } from 'lucide-react';
 import type {
   DaemonWorkspaceActions,
-  DaemonWorkspaceMcpResourceStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMcpServerStatus,
-  DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useMcp } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -90,13 +88,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '../ui/toggle-group';
 import { Textarea } from '../ui/textarea';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../ui/tooltip';
 import type { EmbeddedManagerPage } from '../plugins/manager-page';
+import {
+  McpDetailField as DetailField,
+  McpToolDetail,
+  McpResourceDetail,
+  McpServerCard,
+} from './McpDetails';
 
 type McpStatus = Awaited<ReturnType<DaemonWorkspaceActions['loadMcpStatus']>>;
 type T = ReturnType<typeof useI18n>['t'];
@@ -283,108 +281,6 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function toolAnnotationText(tool: DaemonWorkspaceMcpToolStatus, t: T): string {
-  const annotations = tool.annotations ?? {};
-  const labels: string[] = [];
-  if (annotations['destructiveHint']) {
-    labels.push(t('mcp.annotation.destructive'));
-  }
-  if (annotations['readOnlyHint']) labels.push(t('mcp.annotation.readOnly'));
-  if (annotations['openWorldHint']) labels.push(t('mcp.annotation.openWorld'));
-  if (annotations['idempotentHint']) {
-    labels.push(t('mcp.annotation.idempotent'));
-  }
-  return labels.join(', ');
-}
-
-function DetailField({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="text-sm font-medium">{label}</div>
-      <div className="break-words text-sm text-muted-foreground">{value}</div>
-    </div>
-  );
-}
-
-function ToolDetail({ tool, t }: { tool: DaemonWorkspaceMcpToolStatus; t: T }) {
-  const annotations = toolAnnotationText(tool, t);
-  const schema = tool.schema as
-    | { parametersJsonSchema?: unknown; parameters?: unknown }
-    | undefined;
-  const schemaContent =
-    schema?.parametersJsonSchema ?? schema?.parameters ?? schema;
-
-  return (
-    <div className="flex flex-col gap-5">
-      {!tool.isValid ? (
-        <Alert variant="destructive">
-          <AlertCircleIcon />
-          <AlertTitle>{t('mcp.invalidToolWarning')}</AlertTitle>
-          <AlertDescription>
-            {tool.invalidReason || t('mcp.status.unknown')}
-            <span className="mt-1 block">{t('mcp.invalidToolHelp')}</span>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      <DetailField
-        label={t('mcp.description')}
-        value={tool.description?.trim() || t('mcp.noDescription')}
-      />
-      {annotations ? (
-        <DetailField label={t('mcp.annotations')} value={annotations} />
-      ) : null}
-      <div className="flex flex-col gap-2">
-        <div className="text-sm font-medium">{t('mcp.inputSchema')}</div>
-        {schemaContent ? (
-          <pre className="max-h-96 overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">
-            {JSON.stringify(schemaContent, null, 2)}
-          </pre>
-        ) : (
-          <div className="text-sm text-muted-foreground">
-            {t('mcp.noSchema')}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ResourceDetail({
-  resource,
-  t,
-}: {
-  resource: DaemonWorkspaceMcpResourceStatus;
-  t: T;
-}) {
-  const friendlyName = resource.title || resource.name || '';
-  return (
-    <div className="flex flex-col gap-5">
-      <DetailField label={t('mcp.resource.uriLabel')} value={resource.uri} />
-      {friendlyName && friendlyName !== resource.uri ? (
-        <DetailField label={t('mcp.resource.nameLabel')} value={friendlyName} />
-      ) : null}
-      {resource.mimeType ? (
-        <DetailField
-          label={t('mcp.resource.mimeTypeLabel')}
-          value={resource.mimeType}
-        />
-      ) : null}
-      {typeof resource.size === 'number' ? (
-        <DetailField
-          label={t('mcp.resource.sizeLabel')}
-          value={t('mcp.resource.bytes', { count: resource.size })}
-        />
-      ) : null}
-      {resource.description ? (
-        <DetailField
-          label={t('mcp.description')}
-          value={resource.description.trim()}
-        />
-      ) : null}
-    </div>
-  );
 }
 
 export function McpManagerPage({
@@ -1399,7 +1295,7 @@ export function McpManagerPage({
             </div>
             <Card>
               <CardContent>
-                <ToolDetail tool={selectedTool} t={t} />
+                <McpToolDetail tool={selectedTool} />
               </CardContent>
             </Card>
           </div>
@@ -1427,7 +1323,7 @@ export function McpManagerPage({
             </div>
             <Card>
               <CardContent>
-                <ResourceDetail resource={selectedResource} t={t} />
+                <McpResourceDetail resource={selectedResource} />
               </CardContent>
             </Card>
           </div>
@@ -1830,56 +1726,20 @@ export function McpManagerPage({
             data-column-count={Math.min(filteredServers.length, 4)}
           >
             {filteredServers.map((server) => (
-              <Card
+              <McpServerCard
                 key={server.name}
-                size="sm"
-                role="button"
-                tabIndex={0}
-                aria-label={server.name}
-                className="cursor-pointer transition-colors hover:bg-accent/30 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-                onClick={() => openServer(server)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    openServer(server);
-                  }
-                }}
-              >
-                <CardHeader className="block">
-                  <div className="flex items-start gap-3">
-                    <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
-                      <ServerIcon className="size-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-start justify-between gap-2">
-                        <CardTitle className="min-w-0 flex-1 truncate">
-                          {server.name}
-                        </CardTitle>
-                        <Badge
-                          variant="secondary"
-                          className={`${statusBadgeClass(server)} shrink-0 text-[10px]`}
-                        >
-                          {statusLabel(server, t)}
-                        </Badge>
-                      </div>
-                      <CardDescription className="mt-1 min-w-0 text-xs">
-                        <TooltipProvider delayDuration={300}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="block truncate">
-                                {server.description?.trim() || '-'}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              {server.description?.trim() || '-'}
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      </CardDescription>
-                    </div>
-                  </div>
-                </CardHeader>
-              </Card>
+                name={server.name}
+                description={server.description}
+                status={
+                  <Badge
+                    variant="secondary"
+                    className={`${statusBadgeClass(server)} shrink-0 text-[10px]`}
+                  >
+                    {statusLabel(server, t)}
+                  </Badge>
+                }
+                onOpen={() => openServer(server)}
+              />
             ))}
           </div>
         ) : (

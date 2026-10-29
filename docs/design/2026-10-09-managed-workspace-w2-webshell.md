@@ -2,6 +2,8 @@
 
 [English](2026-10-09-managed-workspace-w2-webshell.md) | [简体中文](2026-10-09-managed-workspace-w2-webshell.zh-CN.md)
 
+Current status: new directory-change admission and UI are retired; only existing operation query/settlement remains. See [retirement design](2026-10-26-retire-managed-cwd-change.md).
+
 ## Problem and baseline
 
 The W2 control plane (#13247) already admits durable, idempotent same-Workspace cwd changes and publishes `session.context.changed`. WebShell shows the bound directory but cannot change it. Session summaries omit the context revision in their TypeScript contract, and the event projector ignores context changes. Baseline: main past `5b1c701400`; #13545 (actor roles) has landed and this branch converges on its role model, while #13564 (Hosted instruction cache invalidation) remains open.

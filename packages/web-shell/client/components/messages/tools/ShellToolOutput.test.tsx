@@ -77,6 +77,46 @@ function result(overrides: Record<string, unknown> = {}) {
 }
 
 describe('shell result presentation', () => {
+  it('does not open an empty execution details list for elapsed-only metadata', () => {
+    render(
+      tool('', {
+        args: undefined,
+        content: undefined,
+        startTime: 1000,
+        endTime: 4000,
+      }),
+    );
+    expect(container.textContent).toContain('Completed3s');
+    expect(container.textContent).not.toContain('Execution details');
+    expect(container.querySelector('dl')).toBeNull();
+  });
+
+  it.each([
+    { field: 'totalLines', label: 'Output lines', value: 3 },
+    { field: 'totalBytes', label: 'Output bytes', value: 9 },
+  ])(
+    'shows execution details for a lone $field counter',
+    ({ field, label, value }) => {
+      render(
+        tool('', {
+          status: 'in_progress',
+          args: undefined,
+          content: undefined,
+          rawOutput: { ansiOutput: [], [field]: value },
+        }),
+      );
+      expect(container.querySelector('dl')?.textContent).toBe(
+        `${label}${value}`,
+      );
+    },
+  );
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    render(tool('', { content: undefined, rawOutput: { type: 'structured' } }));
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
   it('uses an intact text fallback for documents without structured metadata', () => {
     const text = envelope('failed output');
     render(tool(text, { status: 'failed' }), true);

@@ -14,7 +14,9 @@
  * `/goal` and the SDK registered for this session.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import wrapAnsi from 'wrap-ansi';
+import type { ScrollBoxRenderable } from '@opentui/core';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
@@ -46,7 +48,12 @@ import {
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
-import { regionListWindow, wrappedRows } from './dialogs-core.js';
+import {
+  chromeRows,
+  regionListWindow,
+  scrollDialogLayout,
+  wrappedRows,
+} from './dialogs-core.js';
 
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
@@ -60,6 +67,37 @@ import { C } from './theme.js';
 
 const MAX_ROWS = 12;
 const DETAIL_LABEL_WIDTH = 18;
+
+function DetailText({
+  value,
+  width,
+  dim = false,
+  bold = false,
+}: {
+  value: string;
+  width: number;
+  dim?: boolean;
+  bold?: boolean;
+}) {
+  return (
+    <box width={width} flexDirection="column" flexShrink={0}>
+      {/* Separate physical rows avoid native multiline Text losing its tail when scrolled. */}
+      {wrapAnsi(value, width, { hard: true, trim: false })
+        .split('\n')
+        .map((line, index) => (
+          <text
+            key={index}
+            height={1}
+            flexShrink={0}
+            fg={dim ? C.dim : C.text}
+            attributes={bold ? 1 : 0}
+          >
+            {line}
+          </text>
+        ))}
+    </box>
+  );
+}
 
 export type HooksDialogView =
   | { step: 'events' }
@@ -378,36 +416,49 @@ export function OpenTuiHooksDialog({
       : view.step === 'detail'
         ? t('Esc to go back')
         : t('Enter to select · Esc to go back');
-  const eventsWindow = regionListWindow(
+  const listChrome = (measuredRows: number) => ({
+    fixed: 7,
+    runs: [{ text: footerText, width: contentWidth }],
+    measuredRows,
+  });
+  const eventsChrome = listChrome(
+    headerRows + noticeRows + bannerRows + eventsNoteRows,
+  );
+  const matchersChrome = listChrome(
+    headerRows + matchersHeaderRows + noticeRows + bannerRows,
+  );
+  const handlersChrome = listChrome(
+    headerRows + handlersHeaderRows + noticeRows + bannerRows,
+  );
+  const detailChrome = {
+    ...listChrome(headerRows + noticeRows + bannerRows),
+    fixed: 6,
+  };
+  const currentChrome =
+    view.step === 'events'
+      ? eventsChrome
+      : view.step === 'matchers'
+        ? matchersChrome
+        : view.step === 'handlers' ||
+            (view.step === 'detail' && !handlerRows[view.index])
+          ? handlersChrome
+          : detailChrome;
+  const bodyLayout = scrollDialogLayout(
     regionHeight,
-    {
-      fixed: 7,
-      runs: [{ text: footerText, width: contentWidth }],
-      measuredRows: headerRows + noticeRows + bannerRows + eventsNoteRows,
-    },
-    eventItems.length,
+    chromeRows(currentChrome),
     MAX_ROWS,
   );
-  const matchersWindow = regionListWindow(
-    regionHeight,
-    {
-      fixed: 7,
-      runs: [{ text: footerText, width: contentWidth }],
-      measuredRows: headerRows + matchersHeaderRows + noticeRows + bannerRows,
-    },
-    matcherItems.length,
-    MAX_ROWS,
-  );
-  const handlersWindow = regionListWindow(
-    regionHeight,
-    {
-      fixed: 7,
-      runs: [{ text: footerText, width: contentWidth }],
-      measuredRows: headerRows + handlersHeaderRows + noticeRows + bannerRows,
-    },
-    handlerItems.length,
-    MAX_ROWS,
-  );
+  const windowFor = (chrome: typeof eventsChrome, count: number) =>
+    regionListWindow(
+      regionHeight,
+      bodyLayout.compact ? { fixed: bodyLayout.border ? 2 : 0 } : chrome,
+      count,
+      MAX_ROWS,
+    );
+  const eventsWindow = windowFor(eventsChrome, eventItems.length);
+  const matchersWindow = windowFor(matchersChrome, matcherItems.length);
+  const handlersWindow = windowFor(handlersChrome, handlerItems.length);
+  const bodyScroll = useRef<ScrollBoxRenderable>(null);
   // Every list row is charged one physical row in the windows above, so each
   // label's runs clip to the columns the row actually owns: the content width
   // minus DialogSelect's indicator and number columns.
@@ -448,7 +499,17 @@ export function OpenTuiHooksDialog({
   });
 
   useKeyboard((key) => {
-    if (toOriginalKey(key).name !== 'escape') return;
+    const name = toOriginalKey(key).name;
+    if (bodyScroll.current) {
+      const scroll = bodyScroll.current;
+      if (name === 'up') scroll.scrollBy(-1);
+      if (name === 'down') scroll.scrollBy(1);
+      if (name === 'pageup') scroll.scrollBy(-bodyLayout.bodyRows);
+      if (name === 'pagedown') scroll.scrollBy(bodyLayout.bodyRows);
+      if (name === 'home') scroll.scrollTo(0);
+      if (name === 'end') scroll.scrollTo(scroll.scrollHeight);
+    }
+    if (name !== 'escape') return;
     const previous = previousHooksDialogView(view);
     if (previous) {
       setView(previous);
@@ -478,12 +539,14 @@ export function OpenTuiHooksDialog({
 
   const renderEvents = () => (
     <box flexDirection="column">
-      <text fg={C.dim}>
-        {t(
-          'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
-        )}
-      </text>
-      <box marginTop={1} flexDirection="column">
+      {!bodyLayout.compact ? (
+        <text fg={C.dim}>
+          {t(
+            'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+          )}
+        </text>
+      ) : null}
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         <DialogSelect
           items={eventItems}
           activeIndex={eventSelect.activeIndex}
@@ -530,18 +593,28 @@ export function OpenTuiHooksDialog({
   );
 
   const renderEmpty = (message: string) => (
-    <box flexDirection="column">
-      <text fg={C.dim}>{message}</text>
-      <text fg={C.dim}>
-        {t('To add hooks, edit settings.json directly or ask Qwen.')}
-      </text>
-    </box>
+    <scrollbox
+      ref={bodyScroll}
+      key={`empty-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+      height={bodyLayout.bodyRows}
+      flexShrink={1}
+      stickyScroll={false}
+    >
+      <DetailText value={message} width={Math.max(1, contentWidth - 1)} dim />
+      <DetailText
+        value={t('To add hooks, edit settings.json directly or ask Qwen.')}
+        width={Math.max(1, contentWidth - 1)}
+        dim
+      />
+    </scrollbox>
   );
 
   const renderMatchers = (event: HookEventName) => (
     <box flexDirection="column">
-      <text fg={C.text}>{`${event} - ${t('Matchers')}`}</text>
-      <box marginTop={1} flexDirection="column">
+      {!bodyLayout.compact ? (
+        <text fg={C.text}>{`${event} - ${t('Matchers')}`}</text>
+      ) : null}
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         {matcherItems.length === 0 ? (
           renderEmpty(t('No hooks configured for this event.'))
         ) : (
@@ -583,13 +656,17 @@ export function OpenTuiHooksDialog({
 
   const renderHandlers = (event: HookEventName, matcher?: string) => (
     <box flexDirection="column">
-      <text fg={C.text}>
-        {matcher === undefined
-          ? event
-          : `${event} - ${t('Matcher:')} ${sanitizeTerminalLine(matcher)}`}
-      </text>
-      <text fg={C.dim}>{getHookShortDescription(event)}</text>
-      <box marginTop={1} flexDirection="column">
+      {!bodyLayout.compact ? (
+        <>
+          <text fg={C.text}>
+            {matcher === undefined
+              ? event
+              : `${event} - ${t('Matcher:')} ${sanitizeTerminalLine(matcher)}`}
+          </text>
+          <text fg={C.dim}>{getHookShortDescription(event)}</text>
+        </>
+      ) : null}
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         {handlerItems.length === 0 ? (
           renderEmpty(
             matcher === undefined
@@ -649,32 +726,54 @@ export function OpenTuiHooksDialog({
     </box>
   );
 
-  const renderDetail = (row: HooksListingRow) => (
-    <box flexDirection="column">
-      <text fg={C.text} attributes={1}>
-        {t('Hook details')}
-      </text>
-      <box marginTop={1} flexDirection="column">
+  const renderDetail = (row: HooksListingRow) => {
+    // The native scrollbox reserves one column for its vertical scrollbar.
+    const scrollContentWidth = Math.max(1, contentWidth - 1);
+    const stacked = scrollContentWidth < DETAIL_LABEL_WIDTH + 2;
+    const valueWidth = stacked
+      ? scrollContentWidth
+      : scrollContentWidth - DETAIL_LABEL_WIDTH;
+    return (
+      <scrollbox
+        ref={bodyScroll}
+        key={`detail-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+        height={bodyLayout.bodyRows}
+        flexShrink={1}
+        stickyScroll={false}
+      >
+        {!bodyLayout.compact ? (
+          <DetailText
+            value={t('Hook details')}
+            width={scrollContentWidth}
+            bold
+          />
+        ) : null}
         {hookDetailFields(row).map(([label, value]) => (
-          <box key={label} flexDirection="row">
-            <box width={DETAIL_LABEL_WIDTH} flexShrink={0}>
-              <text fg={C.dim}>{label}</text>
-            </box>
-            <box flexGrow={1}>
-              <text fg={C.text}>{value}</text>
-            </box>
+          <box
+            key={label}
+            flexDirection={stacked ? 'column' : 'row'}
+            flexShrink={0}
+          >
+            <DetailText
+              value={label}
+              width={stacked ? scrollContentWidth : DETAIL_LABEL_WIDTH}
+              dim
+            />
+            <DetailText value={value} width={valueWidth} />
           </box>
         ))}
-      </box>
-      <box marginTop={1}>
-        <text fg={C.dim}>
-          {t(
-            'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
-          )}
-        </text>
-      </box>
-    </box>
-  );
+        <box marginTop={1}>
+          <DetailText
+            value={t(
+              'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+            )}
+            width={scrollContentWidth}
+            dim
+          />
+        </box>
+      </scrollbox>
+    );
+  };
 
   let body;
   let footer: string;
@@ -706,29 +805,33 @@ export function OpenTuiHooksDialog({
   }
 
   return (
-    <DialogFrame>
-      <box flexDirection="row">
-        <text fg={C.accent} attributes={1}>
-          {t('Hooks')}
-        </text>
-        <text fg={C.dim}>{` · ${countText}`}</text>
-      </box>
-      {notice
-        ? notice.split('\n').map((line, index) => (
-            <text key={`notice-${index}`} fg={C.dim}>
-              {line}
-            </text>
-          ))
-        : null}
-      {banner ? (
-        <box marginTop={1}>
-          <text fg={C.yellow}>{banner}</text>
-        </box>
+    <DialogFrame bodyLayout={bodyLayout}>
+      {!bodyLayout.compact ? (
+        <>
+          <text>
+            <span fg={C.accent} attributes={1}>
+              {t('Hooks')}
+            </span>
+            <span fg={C.dim}>{` · ${countText}`}</span>
+          </text>
+          {notice
+            ? notice.split('\n').map((line, index) => (
+                <text key={`notice-${index}`} fg={C.dim}>
+                  {line}
+                </text>
+              ))
+            : null}
+          {banner ? (
+            <box marginTop={1}>
+              <text fg={C.yellow}>{banner}</text>
+            </box>
+          ) : null}
+        </>
       ) : null}
-      <box marginTop={1} flexDirection="column">
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         {body}
       </box>
-      <FooterHint text={footer} />
+      {!bodyLayout.compact ? <FooterHint text={footer} /> : null}
     </DialogFrame>
   );
 }

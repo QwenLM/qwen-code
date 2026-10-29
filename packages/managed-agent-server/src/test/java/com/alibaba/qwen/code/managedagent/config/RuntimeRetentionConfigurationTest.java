@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.RuntimeRetentionJob;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRetentionJob;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -32,7 +32,7 @@ class RuntimeRetentionConfigurationTest {
         source.setURL("jdbc:h2:mem:retention-config;MODE=MySQL");
         return new ApplicationContextRunner()
                 .withUserConfiguration(Properties.class, RuntimeRetentionConfiguration.class)
-                .withBean(DataSource.class, () -> source)
+                .withBean("managedAgentDataSource", DataSource.class, () -> source)
                 .withBean(RuntimeBindingRepository.class,
                         () -> new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32])))
                 .withBean(RuntimeSessionRepository.class, () -> new JdbcRuntimeSessionRepository(source))
