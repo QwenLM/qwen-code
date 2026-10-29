@@ -536,7 +536,10 @@ class WorkspaceCsiNativeActivationGateTest {
         jdbc.execute(
                 "ALTER TABLE ma_session_journal_tx ADD CONSTRAINT owned_reject_install CHECK"
                         + " (journal_revision < 2)");
-        assertThatThrownBy(() -> commit(1)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> commit(1))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class)
+                .hasRootCauseInstanceOf(java.sql.SQLException.class)
+                .satisfies(error -> assertThat(error.getMessage()).containsIgnoringCase("owned_reject_install"));
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(binding.getVersion());
