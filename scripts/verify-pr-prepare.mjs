@@ -353,6 +353,10 @@ function main(argv) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
   writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  writeFileSync(
+    join(artifacts, 'context.json'),
+    `${JSON.stringify({ headRefOid: context.head })}\n`,
+  );
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach

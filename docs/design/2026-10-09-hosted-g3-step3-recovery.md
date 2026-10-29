@@ -510,8 +510,9 @@ Integration regressions proved that model request preparation failures preserve 
 
 The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are CI steps of the `hosted-failover-e2e` job, which runs apart from the Hosted MySQL verify (see D11), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2, though not their attempt and stream identities, the live SSE view or the admission count.
 
-#14481's second step adds seven packaged fault arms to the same job. Five layer
-one fault on the Allow path: three crash the replacement Harness after a
+#14481's packaged gates add eleven fault arms to the same job. Seven landed with
+the second step. Five layer one fault on the Allow path: three crash the
+replacement Harness after a
 durable A5 barrier — once the Allow decision is recorded (A5's decision row),
 once the approved execution reaches `PREPARED` while the Runtime Broker's
 `:start` is held (A5a's partial prepare), and once the approved result commits
@@ -522,19 +523,23 @@ admission must retry to one Turn row (C4). All five leave the original Action,
 prepare key, digest and Runtime identity in place, start a third generation,
 and require exactly one settled execution, one file effect and one terminal;
 the result-commit arm additionally reuses the saved request and retracts the
-published prefix. Two more cover the next barriers: a committed
+published prefix. Four more cover the next barriers: a committed
 `turn.settled` whose reply is lost must be projected once after replacement
 with zero inference or tool calls (no second store commit is required), and
 the surviving public text must still be the recovered answer (C1); and a
 refused terminal write must leave the payable checkpoint to be compensated
 exactly once by the replacement, with the recovered answer still visible
-(C2). A refused cleanup release followed by another crash (C3) stays focused:
-the packaged arm reproduced a control-plane gap where a delayed replacement
-receives no cleanup retry or adoption, so fixing that path is separate. A
-lost takeover-load reply (A4's load half) stays focused: the packaged arm
-showed the redrive's active handoff leaves the original Turn RUNNING instead
-of projecting its terminal, so fixing that recovery path is separate from
-this acceptance slice. Malformed or foreign refs, snapshot overflow, mixed
+(C2). A refused cleanup release followed by another crash (C3) is packaged
+too: once the Turn is terminal and its generation is dead, the control plane
+re-drives the owed cleanup through a cleanup-only load until the replacement
+confirms it ([cleanup debt retry](2026-10-28-hosted-cleanup-debt-retry.md)).
+A lost takeover-load reply (A4's load half) is packaged as well: the replacement
+loses the reply to its first drive load once (a test-gated hook), the control
+plane redrives the same load into the now-active driver, and the original Turn
+must still project exactly one terminal with the recovered answer — the redrive
+restates the active attachment rather than wedging the Turn. An earlier observed
+stuck-RUNNING variant did not reproduce on the current tree, so the arm gates the
+handoff as a regression rather than marking an open gap. Malformed or foreign refs, snapshot overflow, mixed
 calls and rewritten inputs across a replacement (A3), Hook/MCP/child
 uncertainty (A6), the attempt and stream identities plus the live SSE view
 (B2), the round and cost budgets (B3), the crash between stream Finished and

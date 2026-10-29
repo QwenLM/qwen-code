@@ -115,6 +115,11 @@ public class ManagedArtifactConfiguration {
         return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
     }
 
+    @Bean
+    public ThreadPoolTaskScheduler sessionWorktreeScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("session-worktree-").build();
+    }
+
     /**
      * The 100 ms materialize pass runs sequential JDBC transactions; sharing
      * the one-thread default scheduler would delay turn recovery by a whole

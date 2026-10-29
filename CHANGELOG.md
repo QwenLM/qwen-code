@@ -12,6 +12,87 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.26.4](https://github.com/QwenLM/qwen-code/releases/tag/v0.26.4) - 2026-10-29
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- feat(generated-ui): follow the host theme in generated views ([#15798](https://github.com/QwenLM/qwen-code/pull/15798)) by @qqqys
+- feat(ci): bound autofix takeover with a round budget ([#15388](https://github.com/QwenLM/qwen-code/pull/15388)) by @wenshao
+- feat(verify-pr): make "re-verify after update" a follow-up trigger ([#15816](https://github.com/QwenLM/qwen-code/pull/15816)) by @wenshao
+- feat(extensions): support unscoped npm installation and updates ([#15781](https://github.com/QwenLM/qwen-code/pull/15781)) by @callmeYe
+- feat(web-shell): move no-workspace sessions beside workspaces ([#15319](https://github.com/QwenLM/qwen-code/pull/15319)) by @deggs7
+- feat(managed): add independent worktrees for main sessions ([#15745](https://github.com/QwenLM/qwen-code/pull/15745)) by @doudouOUC
+- feat(web-shell): allow embedding hosts to pick workspace directories ([#15296](https://github.com/QwenLM/qwen-code/pull/15296)) by @jkxiao
+- feat(generated-ui): localize and reshape the card frame ([#15803](https://github.com/QwenLM/qwen-code/pull/15803)) by @qqqys
+- feat(web-shell): show model timing inline in Token Usage ([#15774](https://github.com/QwenLM/qwen-code/pull/15774)) by @qqqys
+- feat(cli): raise workspace skill install limits ([#15030](https://github.com/QwenLM/qwen-code/pull/15030)) by @callmeYe
+- feat(dws): configure quoted replies by conversation type ([#15019](https://github.com/QwenLM/qwen-code/pull/15019)) by @qqqys
+- feat(web-shell): present Generated UI cards as interactive views ([#15831](https://github.com/QwenLM/qwen-code/pull/15831)) by @qqqys
+- feat(autofix-pr): root watches at the session worktree under the daemon ([#15817](https://github.com/QwenLM/qwen-code/pull/15817)) by @wenshao
+- feat(managed-agent): add a phased upgrade command to the reference distribution ([#15792](https://github.com/QwenLM/qwen-code/pull/15792)) by @wenshao
+- feat(desktop): extend the PATH of the daemon the Desktop spawns on macOS ([#15190](https://github.com/QwenLM/qwen-code/pull/15190)) by @4ekuct25
+- feat(verify-pr): stamp model, CLI and skill version on published reports ([#15838](https://github.com/QwenLM/qwen-code/pull/15838)) by @wenshao
+- feat(cua): enable default cursor and live macOS PiP ([#15669](https://github.com/QwenLM/qwen-code/pull/15669)) by @LaZzyMan
+- feat(generated-ui): offer interactive views when users want to adjust values ([#15846](https://github.com/QwenLM/qwen-code/pull/15846)) by @qqqys
+- feat(acp): run the stop point of fresh prompts on the client's chain ([#15695](https://github.com/QwenLM/qwen-code/pull/15695)) by @qqqys
+
+#### Bug Fixes
+
+- fix(config): report controls that were silently dropped ([#15794](https://github.com/QwenLM/qwen-code/pull/15794)) by @yiliang114
+- fix(cli): probe ICU before the UI import so an ICU-less Node fails loud ([#11753](https://github.com/QwenLM/qwen-code/pull/11753)) by @he-yufeng
+- fix(core): keep reasoning and function_call items adjacent through Responses cleanup ([#11684](https://github.com/QwenLM/qwen-code/pull/11684)) by @he-yufeng
+- fix(cli): carry branch points through the session load replay ([#13814](https://github.com/QwenLM/qwen-code/pull/13814)) by @he-yufeng
+- fix(web-shell): pause requests offline and recover automatically ([#14980](https://github.com/QwenLM/qwen-code/pull/14980)) by @ytahdn
+- fix(cli): map held pidfile lock and identity refusals to one stderr line ([#15818](https://github.com/QwenLM/qwen-code/pull/15818)) by @yiliang114
+- fix(release): unblock Managed runtime 0.26.3 backfill ([#15825](https://github.com/QwenLM/qwen-code/pull/15825)) by @yiliang114
+- fix(cli): prevent provider menu overlap in short terminals ([#15807](https://github.com/QwenLM/qwen-code/pull/15807)) by @yiliang114
+- fix(core): infer DeepSeek Flash effort on Alibaba proxies ([#15828](https://github.com/QwenLM/qwen-code/pull/15828)) by @callmeYe
+- fix(ci): exempt surefire-bound IT classes from the failsafe roster ([#15830](https://github.com/QwenLM/qwen-code/pull/15830)) by @yiliang114
+- fix(managed-agent): retry owed Hosted cleanup after its generation dies ([#15824](https://github.com/QwenLM/qwen-code/pull/15824)) by @wenshao
+- fix(verify-pr): bind reports to their round snapshot ([#15746](https://github.com/QwenLM/qwen-code/pull/15746)) by @jianyx1
+- fix(web-shell): standardize workspace and session display copy ([#15315](https://github.com/QwenLM/qwen-code/pull/15315)) by @deggs7
+- fix(web-shell): list and open standalone sessions in the Session Overview ([#13679](https://github.com/QwenLM/qwen-code/pull/13679)) by @4ekuct25
+- fix(cli): limit provider updates to the models served to the stored key ([#15230](https://github.com/QwenLM/qwen-code/pull/15230)) by @qqqys
+- fix(cli): return clean status for confirmed OpenTUI keyboard quits ([#15723](https://github.com/QwenLM/qwen-code/pull/15723)) by @chiga0
+- fix(web-shell): preserve model names after selection ([#15841](https://github.com/QwenLM/qwen-code/pull/15841)) by @callmeYe
+- fix(acp): keep setCoreValue resolving when the output-language write fails ([#15848](https://github.com/QwenLM/qwen-code/pull/15848)) by @yiliang114
+
+#### Performance
+
+- perf(web-templates): reclaim 92 KB of the HTML export renderer bundle ([#15778](https://github.com/QwenLM/qwen-code/pull/15778)) by @yiliang114
+- perf(managed): Bound activation renewal journal growth ([#15813](https://github.com/QwenLM/qwen-code/pull/15813)) by @doudouOUC
+
+#### Documentation
+
+- docs(managed): cite the shared-Session queue decision in the gate design ([#15797](https://github.com/QwenLM/qwen-code/pull/15797)) by @wenshao
+
+#### Internal Changes
+
+- test(managed-agent): pin HostedProcessLiveness.running on every host ([#15791](https://github.com/QwenLM/qwen-code/pull/15791)) by @wenshao
+- test: settle the two loaded-host waits from #15593 ([#15639](https://github.com/QwenLM/qwen-code/pull/15639)) by @2SinceJuly
+- test(core,cli): stop flat 30s budgets shadowing the raised ECS timeout ceiling ([#15801](https://github.com/QwenLM/qwen-code/pull/15801)) by @yiliang114
+- test(managed-agent): qualify test fixtures onto the managed JdbcTemplate ([#15809](https://github.com/QwenLM/qwen-code/pull/15809)) by @yiliang114
+- ci(java): remove MariaDB full integration lane ([#15827](https://github.com/QwenLM/qwen-code/pull/15827)) by @doudouOUC
+- test(managed-agent): bind the full-application suites to the managed beans ([#15802](https://github.com/QwenLM/qwen-code/pull/15802)) by @yiliang114
+- test(managed-agent): verify journal constraint rollback across databases ([#15842](https://github.com/QwenLM/qwen-code/pull/15842)) by @yiliang114
+
+### New Contributors
+
+- @2SinceJuly made their first contribution in [#15639](https://github.com/QwenLM/qwen-code/pull/15639)
+- @jianyx1 made their first contribution in [#15746](https://github.com/QwenLM/qwen-code/pull/15746)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.26.3...v0.26.4
+
 ## [0.26.3](https://github.com/QwenLM/qwen-code/releases/tag/v0.26.3) - 2026-10-28
 
 ### Highlights

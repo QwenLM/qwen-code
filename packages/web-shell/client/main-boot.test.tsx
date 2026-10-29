@@ -301,9 +301,9 @@ describe('web shell boot', () => {
     );
     expect(probes.length).toBeGreaterThan(0);
     for (const [, init] of probes) {
-      expect(init).toMatchObject({
-        headers: { Authorization: 'Bearer still-valid-device-credential' },
-      });
+      expect(new Headers(init?.headers).get('Authorization')).toBe(
+        'Bearer still-valid-device-credential',
+      );
     }
   });
 
@@ -335,9 +335,9 @@ describe('web shell boot', () => {
     );
     expect(probes.length).toBeGreaterThan(0);
     for (const [, init] of probes) {
-      expect(init).toMatchObject({
-        headers: { Authorization: 'Bearer stale-device-credential' },
-      });
+      expect(new Headers(init?.headers).get('Authorization')).toBe(
+        'Bearer stale-device-credential',
+      );
     }
     // …but its rejection must surface the rescan recovery, not the
     // terminal-token copy a phone user cannot act on.
