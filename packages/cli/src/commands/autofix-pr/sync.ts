@@ -31,7 +31,7 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
-  repoRoot,
+  trustAnchor,
   resolveWatchRoot,
   requireState,
   withWatchLock,
@@ -102,7 +102,7 @@ function syncLocked(
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root, discard, repoRoot());
+  requireWorktree(paths, prNumber, root, discard, trustAnchor(state));
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.

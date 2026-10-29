@@ -30,6 +30,7 @@ import {
   readState,
   repoRoot,
   resolveWatchRoot,
+  trustAnchor,
   requireState,
   withWatchLock,
   writeState,
@@ -191,6 +192,7 @@ export function runCleanup(
       paths,
       state ? [state.lastKnownHeadSha, ...state.pushedShas] : null,
       () => (state ? livePrHead(state, prNumber) : null),
+      state ? trustAnchor(state) : repoRoot(),
     );
     if (reason) {
       // The watch has ended all the same. A round of it that still runs —

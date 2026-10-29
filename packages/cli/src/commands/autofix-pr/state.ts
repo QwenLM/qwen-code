@@ -51,6 +51,13 @@ export interface AutofixPrState {
   baseRefName: string;
   branch: string;
   worktreePath: string;
+  /** The genuine clone (main worktree) recorded when the watch was prepared,
+   * while the session's working directory was still trusted. The trust anchor
+   * for gitfile validation: a helper must not re-derive it from its own cwd,
+   * whose `.git` a round's code can repoint at a replacement repository. The
+   * state file sits outside the fix agent's worktree, so under the daemon the
+   * agent cannot rewrite this field. Absent on a watch from before it existed. */
+  trustRoot?: string;
   viewer: string;
   prAuthor: string;
   lastKnownHeadSha: string;
@@ -324,7 +331,16 @@ export function findWatchRoot(prNumber: number): string | null {
   let found: string | null = null;
   for (const root of vouchedScanRoots(cloneWorktreeRoots())) {
     const paths = autofixPrPaths(root, prNumber);
-    if (!isRegularFile(paths.statePath)) continue;
+    // A sibling whose `.qwen/tmp` is a regular file or inaccessible throws
+    // ENOTDIR/EACCES here; isolate it so a healthy watch elsewhere is still
+    // discovered (the listing isolates the same failure).
+    let hasState: boolean;
+    try {
+      hasState = isRegularFile(paths.statePath);
+    } catch {
+      continue;
+    }
+    if (!hasState) continue;
     if (
       found === null ||
       (!existsSync(autofixPrPaths(found, prNumber).worktreePath) &&
@@ -349,6 +365,18 @@ export function resolveWatchRoot(prNumber: number): string {
 }
 
 /**
+ * The genuine clone a watch's gitfile is validated against. Prefers the root
+ * recorded when the watch was prepared (the session's working directory was
+ * trusted then); a helper must not re-derive it from its own cwd, whose `.git`
+ * a round's code can repoint at a replacement repository — `repoRoot()` run
+ * from such a cwd returns the replacement, not the genuine clone. Falls back
+ * to `repoRoot()` only for a watch prepared before the field existed.
+ */
+export function trustAnchor(state: { trustRoot?: string }): string {
+  return state.trustRoot ?? repoRoot();
+}
+
+/**
  * The worktree roots a watch scan may read, main first. Drops watch worktrees
  * nested in another root's `.qwen/tmp` (a state file force-added there would
  * forge a watch), and vouches each remaining root against the genuine clone: a
@@ -369,12 +397,16 @@ export function vouchedScanRoots(roots: string[]): string[] {
   let genuineCommon: string;
   let genuineWorktrees: string;
   try {
-    genuineCommon = realpathSync(join(main, '.git'));
+    // A non-bare main worktree keeps its git dir in `.git`; a bare clone's
+    // main entry IS the git dir (it has no `.git` child).
+    const dotGit = join(main, '.git');
+    genuineCommon = realpathSync(existsSync(dotGit) ? dotGit : main);
     genuineWorktrees = realpathSync(join(genuineCommon, 'worktrees'));
   } catch {
-    // No linked-worktree entries yet, or the main git dir is unreadable:
-    // nothing to vouch against, so keep the enumerated roots.
-    return notNested;
+    // The genuine anchor cannot be established (no linked-worktree entries
+    // yet, or an unreadable git dir). An unavailable anchor is not validation
+    // success: do not fail open to unvouched siblings, trust only the primary.
+    return notNested.slice(0, 1);
   }
   return notNested.filter(
     (r) => r === main || vouchesForClone(r, genuineCommon, genuineWorktrees),

@@ -674,4 +674,21 @@ describe('runCleanup (real git)', () => {
       rmSync(linked, { recursive: true, force: true });
     }
   });
+
+  it('ends the watch despite a sibling worktree with a malformed .qwen/tmp', () => {
+    const sibling = join(dirname(repo), `${basename(repo)}-sibling`);
+    run(repo, 'worktree', 'add', '-q', '--detach', sibling);
+    mkdirSync(join(sibling, '.qwen'), { recursive: true });
+    writeFileSync(join(sibling, '.qwen', 'tmp'), 'not a directory');
+    try {
+      // Discovery must isolate the sibling's ENOTDIR, not abort: the healthy
+      // main-rooted watch is still found and ended.
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(branchExists()).toBe(false);
+    } finally {
+      run(repo, 'worktree', 'remove', '--force', sibling);
+      rmSync(sibling, { recursive: true, force: true });
+    }
+  });
 });

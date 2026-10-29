@@ -107,13 +107,18 @@ daemon 会话——而它们今天是死角。
 关键在于传给它们的 `root` 是谁。clone 全量列表会在兄弟 worktree 里发现
 watch，但兄弟检出的 `.git` 是一个 gitfile，在其中运行过的代码可以把它改写成
 指向一个替换仓库——所以绝不能把发现来的 worktree 当作信任根，否则它会为自己
-嵌套的 watch 担保，`status` 就会执行替换仓库的 `core.fsmonitor`。因此列表把
-每一次信任检查（以及 `unsavedWork`）都锚定到 `repoRoot()`，即 genuine clone
-的主 worktree，它的 `.git` 是兄弟无法改写的真实目录。rooted 在 linked
-worktree 的 watch 仍按 genuine clone 的 worktree 登记项来校验，所以合法 watch
-依旧受信任。写路径同样锚定：`requireWorktree` 接收独立的 `trustRoot`
-（genuine clone），与其 `root`（watch 根，仍作为符号链接 walk 的停止点）分开；
-`push`/`sync` 传入 `repoRoot()`。发现来的 watch 根绝不作信任锚。
+嵌套的 watch 担保，`status` 就会执行替换仓库的 `core.fsmonitor`。
+
+锚还必须独立于 helper **当前的** cwd：`repoRoot()` 从该 cwd 跑 git，所以一个
+`.git` 已被改指向替换仓库的 cwd 会让 `repoRoot()` 返回替换仓库、而非 genuine
+clone。因此 `prepare` 在会话工作目录还可信时，把 genuine clone 记入 state 的
+`trustRoot` 字段，每个 helper 都按 `trustAnchor(state)` 校验——即记录的根，
+仅对该字段存在之前 prepare 的 watch 才回退到 `repoRoot()`。state 文件在修复
+agent 的 worktree 之外，daemon 下 agent 改不了这个字段。列表把每个 watch 的
+信任检查（及 `unsavedWork`）锚定到 `trustAnchor(state)`；写路径的
+`requireWorktree` 接收独立的 `trustRoot`（genuine clone），与其 `root`（watch
+根，仍作为符号链接 walk 的停止点）分开，`push`/`sync` 传入
+`trustAnchor(state)`。发现来的 watch 根、或从 cwd 推导的根，都绝不作信任锚。
 
 ### 3. 按 clone 全量列出 watch
 
@@ -131,12 +136,17 @@ flag。
 所以 daemon 仍只用一次 git 调用）：丢弃嵌套在另一根 `.qwen/tmp` 里的 watch
 worktree（在那里 force-add 一个状态文件会伪造 watch），并把每个剩余的根对照
 genuine clone 的 worktree 登记项做担保——被无关仓库占据的失效条目、或 `.git`
-被改写的兄弟，都不会被当成本 clone 的 watch 读取。然后每个 worktree 的目录
-扫描相互隔离：某个兄弟的 `.qwen/tmp` 是普通文件或不可访问（ENOTDIR/EACCES）
-时跳过它，而不会让其余所有 worktree 的 watch 列表整体中止（经 daemon 那会是
-整个 clone 的 500）。**主根**的读取失败会被抛出（surface），而不是吞成空列表
-——主 `.qwen/tmp` 不可读是真实的诊断信号。daemon 视图会对 `unreadable[].error`
-里的兄弟绝对路径与状态文件名脱敏（CLI 保留完整路径）。
+被改写的兄弟，都不会被当成本 clone 的 watch 读取。genuine 公共目录对两种布局
+都能解析：非 bare 主 worktree 的 `.git` 目录，或 bare clone 的主条目——它本身
+就是 git 目录（没有 `.git` 子目录）。锚无法解析时**不**当作校验通过：扫描只
+信主根，绝不对未担保的兄弟 fail-open。然后每个 worktree 的目录扫描相互隔离：
+某个兄弟的 `.qwen/tmp` 是普通文件或不可访问（ENOTDIR/EACCES）时跳过它，而不会
+让其余所有 worktree 的 watch 列表整体中止（经 daemon 那会是整个 clone 的
+500）。**主根**的读取失败会被抛出（surface），而不是吞成空列表——主
+`.qwen/tmp` 不可读是真实的诊断信号。同样的逐根隔离也用于 watch 发现
+（`findWatchRoot`），所以畸形兄弟不会挡住 helper 在别处找到并结束一个健康
+watch。daemon 视图会对 `unreadable[].error` 里的兄弟绝对路径与状态文件名脱敏
+（CLI 保留完整路径）。
 
 ### 4. prepare 拒绝作为安全网保留
 
@@ -173,9 +183,13 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
   会话可以直接 `cleanup` 一个主 worktree 落盘的 watch——无需切到拥有它的
   worktree。要把 watch 迁到另一个 worktree，`cleanup` 它（当它属于另一个会话
   时加 `--take-over`，否则 `assertOwnedBySession` 会拒绝），再在目标重新
-  `prepare`。`prepare` 会跨 clone 的各 worktree 导入并**合并**该 PR 的 history，
-  使已处理评论、已发回复与 CI 重跑记录即便多跳迁移也保留，而不是被再次回应。
-  cleanup 会保留持有工作的 worktree；不会静默丢失数据。
+  `prepare`。新建 prepare 时，`reconcileHistory` 跨 clone 的各 worktree 合并该
+  PR 的 history，**含目标自身的副本**，所以返回曾经离开的主根不会丢掉后续跳
+  已结算的内容。已结算列表（已处理评论、已发回复、已花费的检查/重跑）取并集；
+  pending 列表（重跑 hold、deferred run、已宣告的回复）是结算态，取最近写入的
+  副本，并丢弃 floor 已被花费的 hold——迁移绝不复活后续 watch 已花费的 hold
+  （否则会重跑一个已结算的检查）。cleanup 会保留持有工作的 worktree；不会静默
+  丢失数据。
 - **跨环境操作。** 在 daemon 下于 linked worktree prepare 的 watch 就落在
   那里；从该 worktree 操作它。plain-CLI 的 `status` 仍通过按 clone 全量扫描
   发现它。

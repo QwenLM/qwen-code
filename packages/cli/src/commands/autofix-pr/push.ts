@@ -23,7 +23,7 @@ import {
   autofixPrPaths,
   isBranchName,
   isCommandSafeName,
-  repoRoot,
+  trustAnchor,
   resolveWatchRoot,
   requireState,
   withWatchLock,
@@ -231,7 +231,7 @@ function pushLocked(
   assertWatching(state, task);
   assertNoFixInFlight(paths, prNumber);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root, false, repoRoot());
+  requireWorktree(paths, prNumber, root, false, trustAnchor(state));
   if (hasUncommittedChanges(worktree)) {
     throw new Error(
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,

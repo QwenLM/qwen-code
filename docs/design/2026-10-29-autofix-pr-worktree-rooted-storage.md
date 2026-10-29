@@ -121,15 +121,22 @@ given. The clone-wide listing discovers watches in sibling worktrees, but a
 sibling checkout's `.git` is a gitfile that code running inside it can
 rewrite to point at a replacement repository — so a discovered worktree must
 never be passed as the trust root, or it would vouch for its own nested
-watches and `status` would execute the replacement's `core.fsmonitor`. The
-listing therefore anchors every trust check (and `unsavedWork`) to
-`repoRoot()`, the genuine clone's main worktree, whose `.git` is a real
-directory a sibling cannot rewrite. A watch rooted in a linked worktree is
-still validated against the genuine clone's worktree entries, so legitimate
-watches stay trusted. The write path is anchored the same way: `requireWorktree`
-takes a separate `trustRoot` (the genuine clone) distinct from its `root` (the
-watch root, which stays the stop of the symlink walk), and `push`/`sync` pass
-`repoRoot()`. A discovered watch root is never the trust anchor.
+watches and `status` would execute the replacement's `core.fsmonitor`.
+
+The anchor must also be independent of the helper's _current_ cwd:
+`repoRoot()` runs git from that cwd, so a cwd whose `.git` has been repointed
+at a replacement repository makes `repoRoot()` return the replacement, not
+the genuine clone. `prepare` therefore records the genuine clone in the
+state's `trustRoot` field while the session's working directory is still
+trusted, and every helper validates against `trustAnchor(state)` — the
+recorded root, falling back to `repoRoot()` only for a watch prepared before
+the field existed. The state file sits outside the fix agent's worktree, so
+under the daemon the agent cannot rewrite the field. The listing anchors each
+watch's trust check (and `unsavedWork`) to `trustAnchor(state)`; the write
+path's `requireWorktree` takes a separate `trustRoot` (the genuine clone)
+distinct from its `root` (the watch root, which stays the stop of the symlink
+walk), and `push`/`sync` pass `trustAnchor(state)`. Neither a discovered watch
+root nor a cwd-derived root is ever the trust anchor.
 
 ### 3. Clone-wide watch listing
 
@@ -150,13 +157,20 @@ watch worktrees nested in another root's `.qwen/tmp` (a state file force-added
 there would forge a watch), and vouches each remaining root against the
 genuine clone's worktree entries — a stale entry an unrelated repository now
 occupies, or a sibling whose `.git` was rewritten, is not read as this clone's
-watch. Each worktree's directory scan is then isolated: a sibling whose
-`.qwen/tmp` is a regular file or inaccessible (ENOTDIR/EACCES) is skipped, not
-allowed to abort the listing of every other worktree's watches (a 500 for the
-whole clone via the daemon). The **primary** root's read failure is surfaced
-(thrown), not swallowed into an empty listing — an unreadable main `.qwen/tmp`
-is a real diagnostic. The daemon view redacts sibling absolute paths and
-state-file names from `unreadable[].error` (the CLI keeps the full path).
+watch. The genuine common dir is resolved for both layouts: a non-bare main
+worktree's `.git` directory, or a bare clone's main entry, which _is_ the git
+dir (no `.git` child). An anchor that cannot be resolved is **not** validation
+success: the scan then trusts only the primary root, never failing open to
+unvouched siblings. Each worktree's directory scan is isolated: a sibling
+whose `.qwen/tmp` is a regular file or inaccessible (ENOTDIR/EACCES) is
+skipped, not allowed to abort the listing of every other worktree's watches (a
+500 for the whole clone via the daemon). The **primary** root's read failure
+is surfaced (thrown), not swallowed into an empty listing — an unreadable main
+`.qwen/tmp` is a real diagnostic. The same per-root isolation applies to watch
+discovery (`findWatchRoot`), so a malformed sibling cannot stop a helper from
+finding and ending a healthy watch elsewhere. The daemon view redacts sibling
+absolute paths and state-file names from `unreadable[].error` (the CLI keeps
+the full path).
 
 ### 4. prepare refusal stays as a safety net
 
@@ -197,10 +211,15 @@ to prepare from.
   need to change directory to the owning worktree. To move a watch to another
   worktree, `cleanup` it (adding `--take-over` when it belongs to another
   session, which `assertOwnedBySession` otherwise refuses) and re-`prepare` in
-  the target. `prepare` imports and **merges** the PR's history across the
-  clone's worktrees, so handled comments, posted replies and CI rerun records
-  survive even a multi-hop relocation instead of being answered again.
-  `cleanup` keeps a worktree that holds work; no silent data loss.
+  the target. On a fresh prepare, `reconcileHistory` merges the PR's history
+  across the clone's worktrees **including the destination's own copy**, so a
+  return hop to a former root does not lose what a later hop settled. The
+  settled lists (handled comments, posted replies, spent checks/reruns) are
+  unioned; the pending lists (rerun holds, deferred runs, announced posts) are
+  settlement state, taken from the most recently written copy with any hold
+  whose floor was already spent dropped — a relocation never resurrects a hold
+  a later watch spent (which would re-run an already-settled check). `cleanup`
+  keeps a worktree that holds work; no silent data loss.
 - **Cross-environment operation.** A watch prepared under the daemon in a
   linked worktree lives there; operate it from that worktree. Plain-CLI
   `status` still discovers it via the clone-wide scan.

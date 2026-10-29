@@ -83,6 +83,8 @@ import {
   autofixPrPaths,
   historyPath,
   readState,
+  repoRoot,
+  trustAnchor,
   withWatchLock,
   writeState,
 } from './state.js';
@@ -426,6 +428,97 @@ describe('runPrepare (real git)', () => {
       expect(
         readState(autofixPrPaths(linkedB, 7).statePath)!.handledCommentIds,
       ).toEqual(['X', 'Y']);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
+  it('anchors trust to the recorded genuine clone, not a cwd-derived root', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const state = readState(autofixPrPaths(clone, 7).statePath)!;
+    const genuine = realpathSync(clone);
+    expect(state.trustRoot).toBe(genuine);
+    // Move cwd to an unrelated clone: repoRoot() now resolves to it, but the
+    // production anchor (trustAnchor) must stay the recorded genuine clone.
+    const other = join(dir, 'other-clone');
+    run(dir, 'init', '-q', '-b', 'main', other);
+    process.chdir(other);
+    try {
+      expect(realpathSync(repoRoot())).not.toBe(genuine);
+      expect(trustAnchor(state)).toBe(genuine);
+    } finally {
+      process.chdir(clone);
+    }
+  });
+
+  it('keeps settled history on a return hop to a former root', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledCommentIds: ['X'],
+    });
+    runCleanup(7, false);
+    const linkedA = join(dir, 'linkedA');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherA', linkedA, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedA);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const aPaths = autofixPrPaths(linkedA, 7);
+    writeState(aPaths.statePath, {
+      ...readState(aPaths.statePath)!,
+      handledCommentIds: ['X', 'Y'],
+    });
+    runCleanup(7, false);
+    // Return to main, which still holds its old [X] history: reconciliation
+    // must union A's [X,Y], not skip because main has a local history.
+    process.chdir(clone);
+    delete process.env['QWEN_CODE_SERVE'];
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(mainPaths.statePath)!.handledCommentIds).toEqual([
+      'X',
+      'Y',
+    ]);
+  });
+
+  it('does not resurrect a spent rerun hold when reconciling histories', () => {
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const floor = `check@${'a'.repeat(40)}@123`;
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      heldChecks: [`123:${floor}`],
+      deferredRuns: [123],
+    });
+    runCleanup(7, false);
+    // Age main's history so the linked copy is unambiguously the newest.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(historyPath(mainPaths, repository), old, old);
+    const linkedA = join(dir, 'linkedA');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherA', linkedA, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedA);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const aPaths = autofixPrPaths(linkedA, 7);
+    // A spends the hold: the floor settles into rerunChecks, the hold clears.
+    writeState(aPaths.statePath, {
+      ...readState(aPaths.statePath)!,
+      rerunChecks: [floor],
+      heldChecks: [],
+      deferredRuns: [],
+    });
+    runCleanup(7, false);
+    const linkedB = join(dir, 'linkedB');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherB', linkedB, 'origin/main');
+    process.chdir(linkedB);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      const st = readState(autofixPrPaths(linkedB, 7).statePath)!;
+      expect(st.rerunChecks).toContain(floor);
+      expect(st.heldChecks ?? []).toEqual([]);
+      expect(st.deferredRuns ?? []).toEqual([]);
     } finally {
       process.chdir(clone);
       delete process.env['QWEN_CODE_SERVE'];

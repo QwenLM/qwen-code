@@ -24,8 +24,8 @@ import {
   MAX_PUSHES,
   readGateCursor,
   readState,
-  repoRoot,
   sameRepository,
+  trustAnchor,
   vouchedScanRoots,
   type AutofixPrGateCursor,
   type AutofixPrWatchOptions,
@@ -209,11 +209,6 @@ export function runStatus(args: {
       }
     }
   }
-  // Trust is anchored to the genuine clone this process stands in, never to a
-  // discovered worktree: a sibling checkout's `.git` can be rewritten by code
-  // that ran inside it, so it must not vouch for its own nested watches. Only
-  // asked when git checks run — the daemon's `git: false` listing runs no git.
-  const trustRoot = args.git !== false ? repoRoot() : null;
   const numbers = [...rootByPr.keys()].sort((a, b) => a - b);
   const session =
     args.session === undefined ? currentSessionId() : args.session;
@@ -271,11 +266,16 @@ export function runStatus(args: {
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
+        // Trust is anchored to the genuine clone recorded for the watch (or
+        // the main worktree for a legacy watch), never to a discovered
+        // worktree whose `.git` a round's code could rewrite. Only asked when
+        // git checks run — the daemon's `git: false` listing runs no git.
         gitTrusted:
           args.git !== false &&
           existsSync(paths.worktreePath) &&
-          (untrustedGitfile(paths.worktreePath, trustRoot!) ??
-            untrustedSubmodules(paths.worktreePath, trustRoot!)) === null,
+          (untrustedGitfile(paths.worktreePath, trustAnchor(state)) ??
+            untrustedSubmodules(paths.worktreePath, trustAnchor(state))) ===
+            null,
         worktreeWork:
           args.work === false || args.git === false
             ? null
@@ -283,7 +283,7 @@ export function runStatus(args: {
                 paths,
                 [state.lastKnownHeadSha, ...state.pushedShas],
                 undefined,
-                trustRoot!,
+                trustAnchor(state),
               ),
         fix: fixOf(paths, now),
       });

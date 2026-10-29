@@ -10,7 +10,7 @@
 // resumes without losing its cursor or work in progress.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { realpathNearestExisting } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { isWithinRoot } from '../../config/path-comparison.js';
@@ -39,6 +39,7 @@ import {
   vouchedScanRoots,
   readHistory,
   readState,
+  repoRoot,
   watchRoot,
   requireState,
   sameRepository,
@@ -413,40 +414,55 @@ function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
 }
 
 /**
- * A PR's history an earlier watch kept in another worktree of this clone. The
- * supported migration cleans up in the old owning worktree — which keeps the
- * history beside the old state — and prepares in a new one, so the fresh watch
- * imports it rather than answering the same comments again. Several worktrees
- * may hold a history (one per relocation hop), so they are merged with the same
- * union `keepHistory` uses: a first-match would import a stale copy and
- * re-answer what a later hop already handled. Only the JSON metadata is read;
+ * Reconcile a PR's history across the clone on a fresh prepare (a new watch or
+ * a relocation). Several worktrees may hold a history — one per hop, including
+ * the destination's own when a watch returns to a root it left — so the settled
+ * lists (handled comments, posted replies, spent checks/reruns) are unioned
+ * across every copy: a first-match would import a stale copy and re-answer what
+ * a later hop handled, and skipping the destination's copy would lose what a
+ * later hop settled on a return. The pending lists (holds, deferred runs,
+ * announced posts) are settlement state, not a union: they come from the most
+ * recently written copy, and a hold whose floor was already spent is dropped,
+ * so a relocation never resurrects a hold a later watch spent (`keepHistory`
+ * avoids merging these back for the same reason). Only JSON metadata is read;
  * no git command runs in a discovered worktree.
  */
-function importHistory(
+function reconcileHistory(
   prNumber: number,
   repository: { host: string; owner: string; repo: string },
-  excludeRoot: string,
+  local: AutofixPrHistory | null,
+  localRoot: string,
 ): AutofixPrHistory | null {
-  const exclude = realpathNearestExisting(excludeRoot);
   const union = (a: string[] = [], b: string[] = []) => [
     ...new Set([...a, ...b]),
   ];
-  let merged: AutofixPrHistory | null = null;
+  const copies: Array<{ history: AutofixPrHistory; mtimeMs: number }> = [];
+  const consider = (h: AutofixPrHistory | null, path: string) => {
+    if (!h || !sameRepository(h, repository)) return;
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      // An unreadable mtime only loses the recency tie-break.
+    }
+    copies.push({ history: h, mtimeMs });
+  };
+  consider(local, historyPath(autofixPrPaths(localRoot, prNumber), repository));
+  const exclude = realpathNearestExisting(localRoot);
   for (const root of vouchedScanRoots(cloneWorktreeRoots())) {
     if (realpathNearestExisting(root) === exclude) continue;
-    let history: AutofixPrHistory | null = null;
+    const path = historyPath(autofixPrPaths(root, prNumber), repository);
+    let h: AutofixPrHistory | null = null;
     try {
-      history = readHistory(
-        historyPath(autofixPrPaths(root, prNumber), repository),
-      );
+      h = readHistory(path);
     } catch {
       continue;
     }
-    if (!history || !sameRepository(history, repository)) continue;
-    if (merged === null) {
-      merged = { ...history };
-      continue;
-    }
+    consider(h, path);
+  }
+  if (copies.length === 0) return null;
+  let merged: AutofixPrHistory = { ...copies[0]!.history };
+  for (const { history } of copies.slice(1)) {
     merged = {
       ...merged,
       handledCommentIds: union(
@@ -459,22 +475,22 @@ function importHistory(
       ),
       handledChecks: union(merged.handledChecks, history.handledChecks),
       rerunChecks: union(merged.rerunChecks, history.rerunChecks),
-      heldChecks: union(merged.heldChecks, history.heldChecks),
       handledConflictSha:
         merged.handledConflictSha ?? history.handledConflictSha ?? null,
-      pendingPosts: [
-        ...(merged.pendingPosts ?? []),
-        ...(history.pendingPosts ?? []),
-      ],
-      deferredRuns: [
-        ...new Set([
-          ...(merged.deferredRuns ?? []),
-          ...(history.deferredRuns ?? []),
-        ]),
-      ],
     };
   }
-  return merged;
+  const newest = copies.reduce((a, b) =>
+    b.mtimeMs > a.mtimeMs ? b : a,
+  ).history;
+  const settledFloors = new Set(merged.rerunChecks ?? []);
+  return {
+    ...merged,
+    heldChecks: (newest.heldChecks ?? []).filter(
+      (hold) => !settledFloors.has(hold.replace(/^\d+:/, '')),
+    ),
+    deferredRuns: newest.deferredRuns ?? [],
+    pendingPosts: newest.pendingPosts ?? [],
+  };
 }
 
 export function runPrepare(args: PrepareArgs): void {
@@ -733,12 +749,17 @@ export function runPrepare(args: PrepareArgs): void {
     if (history && !sameRepository(history, { host, owner, repo: repoName })) {
       history = null;
     }
-    // The supported migration cleans up in the old owning worktree (keeping
-    // the history beside the old state) and prepares in a new one. Import that
-    // history so the fresh watch does not forget the comments it already
-    // handled and answer them again.
-    if (!history && !existing) {
-      history = importHistory(args.pr, { host, owner, repo: repoName }, root);
+    // A fresh prepare (a new watch or a relocation) reconciles the PR's history
+    // across the clone, including the destination's own copy, so neither a
+    // first move nor a return hop forgets what an earlier watch handled or
+    // settled. A resume (`existing`) keeps the running watch's state as it is.
+    if (!existing) {
+      history = reconcileHistory(
+        args.pr,
+        { host, owner, repo: repoName },
+        history,
+        root,
+      );
     }
     const state: AutofixPrState = {
       version: 1,
@@ -753,6 +774,9 @@ export function runPrepare(args: PrepareArgs): void {
       baseRefName: pr.baseRefName,
       branch: paths.branch,
       worktreePath: paths.worktreePath,
+      // The genuine clone, recorded while this session's cwd is still trusted;
+      // helpers validate gitfiles against it rather than a cwd-derived root.
+      trustRoot: existing?.trustRoot ?? repoRoot(),
       viewer,
       prAuthor: pr.author?.login ?? '',
       authorCanPush: canPush,
