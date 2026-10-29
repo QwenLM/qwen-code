@@ -221,6 +221,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
 }));
 
+vi.mock('../RemoteAccessSettingsCard', () => ({
+  RemoteAccessSettingsCard: () => null,
+}));
+
 const { DaemonConnectionsSettings, DaemonStatusDialog } = await import(
   './DaemonStatusDialog'
 );
@@ -339,6 +343,47 @@ describe('DaemonStatusDialog', () => {
     act(() => vi.advanceTimersByTime(15_000));
     expect(summaryReload).not.toHaveBeenCalled();
     expect(fullReload).not.toHaveBeenCalled();
+  });
+
+  it('rejects a mixed-content target before passing its token to navigation', () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(
+      window,
+      'location',
+    )!;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: new URL('https://shell.example/'),
+    });
+    const onAddConnection = vi.fn();
+    try {
+      mountConnections(onAddConnection);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'http://remote.example:4173');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const token = typeToken('secret');
+      act(() => {
+        token
+          .closest('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(onAddConnection).not.toHaveBeenCalled();
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'HTTPS page cannot connect',
+      );
+      expect(container!.textContent).toContain('Allow remote connections');
+      expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
   });
 
   it('adds a new remote origin without replacing the current target', () => {
@@ -581,6 +626,7 @@ describe('DaemonStatusDialog', () => {
   // a failed probe keeps the old token instead of navigating.
   it.each([
     [401, 'rejected'],
+    [403, 'HTTP 403'],
     [503, 'did not accept'],
   ])(
     'keeps the stored credential when a same-target probe returns %i',
@@ -628,7 +674,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -665,7 +711,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');

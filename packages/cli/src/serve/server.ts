@@ -55,6 +55,8 @@ import {
   LocalControlService,
 } from './local-control/index.js';
 import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
+import { RemoteAccessService } from './remote-access.js';
+import { registerRemoteAccessRoutes } from './routes/remote-access.js';
 import { registerWebShellPairingRoutes } from './routes/web-shell-pairing.js';
 import type {
   DeviceFlowProvider,
@@ -2373,7 +2375,7 @@ export function createServeApp(
   });
   if (healthRoutes.exposeHealthPreAuth) {
     app.use('/health', (req, res, next) => {
-      if (listenerIdentityOf(req).kind === 'local-control') {
+      if (listenerIdentityOf(req).kind !== 'primary') {
         authenticate(req, res, next);
         return;
       }
@@ -4276,6 +4278,26 @@ export function createServeApp(
         : undefined,
   });
   app.locals['localControlService'] = localControlService;
+
+  const remoteAccessService = new RemoteAccessService({
+    app,
+    credentials,
+    getPort,
+    attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
+    detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
+    tlsPaths:
+      opts.tlsCert && opts.tlsKey
+        ? { cert: opts.tlsCert, key: opts.tlsKey }
+        : undefined,
+  });
+  app.locals['remoteAccessService'] = remoteAccessService;
+  registerRemoteAccessRoutes(app, {
+    service: remoteAccessService,
+    primaryHostname: opts.hostname,
+    trustedLoopbackMode,
+    mutate,
+    isDraining: deps.isChannelControlDraining,
+  });
 
   registerWorkspaceLocalControlRoutes(app, {
     service: localControlService,

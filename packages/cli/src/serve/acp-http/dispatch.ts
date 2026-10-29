@@ -6388,7 +6388,10 @@ export class AcpDispatcher {
         );
       }
     } finally {
-      if (binding.promptAbort === abort) binding.promptAbort = undefined;
+      if (binding.promptAbort === abort) {
+        binding.promptAbort = undefined;
+        conn.promptSettled(sessionId);
+      }
     }
   }
 

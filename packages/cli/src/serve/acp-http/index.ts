@@ -22,7 +22,10 @@ import {
   type DesktopRelayCredentialClaim,
   type ListenerScopedCredentials,
 } from '../local-control/credentials.js';
-import { listenerIdentityOfSocket } from '../local-control/listener-identity.js';
+import {
+  listenerIdentityOf,
+  listenerIdentityOfSocket,
+} from '../local-control/listener-identity.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
@@ -1012,6 +1015,9 @@ export function mountAcpHttp(
     // `initialize` mints a connection and replies inline (200 + JSON).
     if (isRequest(message) && message.method === 'initialize') {
       const conn = mount.registry.create(isLoopbackReq(req));
+      if (conn)
+        conn.preserveRunningPromptsOnDisconnect =
+          listenerIdentityOf(req).kind === 'remote-access';
       if (!conn) {
         // Connection cap reached — shed load rather than grow unbounded.
         writeStderrLine(
@@ -1661,7 +1667,7 @@ export function mountAcpHttp(
       // domain resolves to 127.0.0.1 and the browser sends the
       // attacker's Host header. Match the full host:port string like
       // the REST middleware does; extract port from the socket.
-      if (upgradeListenerIdentity.kind === 'local-control') {
+      if (upgradeListenerIdentity.kind !== 'primary') {
         const authority = upgradeListenerIdentity.authority;
         const browserHost =
           upgradeListenerIdentity.origin === undefined
@@ -1735,12 +1741,14 @@ export function mountAcpHttp(
           const isPrimaryOrigin =
             authenticatedRemoteBind &&
             new URL(`${scheme}://${host}`).origin === origin;
-          if (
-            !isLoopbackOrigin &&
-            !isAllowlistedOrigin &&
-            !isListenerOrigin &&
-            !isPrimaryOrigin
-          ) {
+          const allowed =
+            upgradeListenerIdentity.kind === 'remote-access'
+              ? upgradeListenerIdentity.allowedOrigins?.allows(origin) === true
+              : isLoopbackOrigin ||
+                isAllowlistedOrigin ||
+                isListenerOrigin ||
+                isPrimaryOrigin;
+          if (!allowed) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
@@ -2361,6 +2369,9 @@ export function mountAcpHttp(
             }
 
             const conn = activeMount.registry.create(fromLoopback);
+            if (conn)
+              conn.preserveRunningPromptsOnDisconnect =
+                upgradeListenerIdentity.kind === 'remote-access';
             if (!conn) {
               ws.send(
                 JSON.stringify(
@@ -2389,7 +2400,27 @@ export function mountAcpHttp(
                 writeStderrLine(
                   `qwen serve: ${activeMount.routeLabel} WS closed (${conn.connectionId.slice(0, 8)})`,
                 );
-                activeMount.registry.delete(conn.connectionId);
+                if (!conn.preserveRunningPromptsOnDisconnect) {
+                  activeMount.registry.delete(conn.connectionId);
+                  return;
+                }
+                conn.onSessionGraceExpired = () => {
+                  if (
+                    !conn.hasLiveSessionStream() &&
+                    !conn.hasRecoverableSession()
+                  ) {
+                    activeMount.registry.delete(conn.connectionId);
+                  }
+                };
+                for (const binding of conn.sessions.values()) {
+                  if (binding.stream)
+                    conn.detachSessionStream(
+                      binding.sessionId,
+                      binding.stream,
+                      SESSION_GRACE_MS,
+                    );
+                }
+                conn.onSessionGraceExpired();
               },
               () => conn.touch(),
             );

@@ -140,6 +140,7 @@ import {
   parseAllowOriginPatterns,
 } from './auth.js';
 import type { LocalControlService } from './local-control/index.js';
+import type { RemoteAccessService } from './remote-access.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -5269,6 +5270,15 @@ async function runQwenServeImpl(
     // serialized disable runs on the next microtask and wins before further IO;
     // ACP disposal below also removes the upgrade listeners while the daemon
     // mount is being torn down.
+    const remoteAccessService = app.locals?.['remoteAccessService'] as
+      | RemoteAccessService
+      | undefined;
+    if (remoteAccessService) {
+      void remoteAccessService.dispose().catch((error: unknown) => {
+        daemonLog.warn(`Remote access dispose error: ${String(error)}`);
+      });
+    }
+
     const localControlService = app.locals?.['localControlService'] as
       | LocalControlService
       | undefined;
