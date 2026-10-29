@@ -1149,56 +1149,60 @@ describe('runNonInteractiveStreamJson', () => {
     expect(turnControllers[1]?.signal.aborted).toBe(false);
   });
 
-  it('emits a terminal error result when an accepted continuation is abandoned by shutdown', async () => {
-    const { continueResults, getControlContext } = installContinueDispatch();
-    createInitializedLlmClient([
-      { role: 'user', parts: [{ text: 'resume me' }] },
-    ]);
-    const initRequest = createControlRequest('initialize');
-    const userMessage = createUserMessage('first turn');
+  it.each(['SIGTERM', 'SIGHUP'] as const)(
+    'emits a terminal error result when an accepted continuation is abandoned by %s shutdown',
+    async (signal) => {
+      const { continueResults, getControlContext } = installContinueDispatch();
+      createInitializedLlmClient([
+        { role: 'user', parts: [{ text: 'resume me' }] },
+      ]);
+      const initRequest = createControlRequest('initialize');
+      const userMessage = createUserMessage('first turn');
 
-    // Block the in-flight user turn so the continuation accepted below stays
-    // queued (pendingContinueTurn) instead of being picked up by the work loop.
-    let releaseFirstTurn!: () => void;
-    runNonInteractiveMock.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          releaseFirstTurn = resolve;
+      // Block the in-flight user turn so the continuation accepted below stays
+      // queued (pendingContinueTurn) instead of being picked up by the work loop.
+      let releaseFirstTurn!: () => void;
+      runNonInteractiveMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseFirstTurn = resolve;
+          }),
+      );
+
+      mockInputReader.read = async function* () {
+        yield initRequest;
+        yield userMessage;
+        // Wait until the first (user-message) turn is actually running.
+        await vi.waitFor(() => {
+          expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+          expect(getControlContext()).toBeDefined();
+        });
+        // Accept a continuation: an interrupted turn exists and no continuation is
+        // pending yet, so pendingContinueTurn becomes true. ensureProcessingStarted
+        // is a no-op because the user-message work loop is already running.
+        continueResults.push(await getControlContext()?.onContinueLastTurn?.());
+        // Begin a real session shutdown before the continuation can run, then
+        // let the work loop unwind. Its abort guard skips the pending work.
+        process.emit(signal, signal);
+        releaseFirstTurn();
+      };
+
+      await runNonInteractiveStreamJson(config, '');
+
+      expect(continueResults).toEqual([
+        { accepted: true, interruption: 'interrupted_prompt' },
+      ]);
+      // The continuation itself never ran (only the first user turn did).
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage:
+            'Continuation abandoned: session shut down before it ran',
         }),
-    );
-
-    mockInputReader.read = async function* () {
-      yield initRequest;
-      yield userMessage;
-      // Wait until the first (user-message) turn is actually running.
-      await vi.waitFor(() => {
-        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
-        expect(getControlContext()).toBeDefined();
-      });
-      // Accept a continuation: an interrupted turn exists and no continuation is
-      // pending yet, so pendingContinueTurn becomes true. ensureProcessingStarted
-      // is a no-op because the user-message work loop is already running.
-      continueResults.push(await getControlContext()?.onContinueLastTurn?.());
-      // Begin a real session shutdown before the continuation can run, then
-      // let the work loop unwind. Its abort guard skips the pending work.
-      process.emit('SIGTERM', 'SIGTERM');
-      releaseFirstTurn();
-    };
-
-    await runNonInteractiveStreamJson(config, '');
-
-    expect(continueResults).toEqual([
-      { accepted: true, interruption: 'interrupted_prompt' },
-    ]);
-    // The continuation itself never ran (only the first user turn did).
-    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
-    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
-      expect.objectContaining({
-        isError: true,
-        errorMessage: 'Continuation abandoned: session shut down before it ran',
-      }),
-    );
-  });
+      );
+    },
+  );
 
   it('emits an error result when a scheduled continue turn fails', async () => {
     const { continueResults } = installContinueDispatch();
