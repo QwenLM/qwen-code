@@ -49,6 +49,8 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
             new ArrayBlockingQueue<>(64), Thread.ofPlatform().daemon().name("runtime-ssh-provisioner-", 0).factory());
     private final ConcurrentMap<List<Object>, Owned> owned = new ConcurrentHashMap<>();
     private volatile boolean closed;
+    private String managedExtensionCacheDirectory;
+    private String managedExtensionCgroupRoot;
 
     public SshRuntimeProvisioner(Function<String, SshRuntimeNode> nodes,
             Function<RuntimeScope, SshRuntimeStorage> storages, SshConnectionManager connections,
@@ -57,6 +59,16 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         this.storages = java.util.Objects.requireNonNull(storages, "storages");
         this.connections = java.util.Objects.requireNonNull(connections, "connections");
         this.transport = java.util.Objects.requireNonNull(transport, "transport");
+    }
+
+    public SshRuntimeProvisioner withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
+        if (directory == null || !java.nio.file.Path.of(directory).isAbsolute()) {
+            throw new IllegalArgumentException("Extension cache must be absolute");
+        }
+        this.managedExtensionCacheDirectory = directory;
+        this.managedExtensionCgroupRoot = cgroupRoot;
+        transport.withManagedExtensionCacheDirectory(directory, cgroupRoot);
+        return this;
     }
 
     @Override
@@ -174,7 +186,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         return binding != null && KIND.equals(binding.getRequest().getProvisionerKind())
                 && binding.getRequest().isManagedContext()
                 && WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
-                && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest());
+                && WorkspaceExecutionProfile.admitsCapabilityDigest(binding.getRequest().getScope().getCapabilityDigest());
     }
 
     @Override
@@ -201,8 +213,17 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
                 throw stopUnconfirmed();
             }
             RuntimeProvisionSeed seed = binding.getProvisionSeed();
-            if (!proof.keySet().equals(PROOF_FIELDS)
-                    || !number(proof.get("version"), 1)
+            boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
+            Set<String> proofFields = new java.util.HashSet<>(PROOF_FIELDS);
+            if (extended) {
+                proofFields.add("executionMode");
+                proofFields.add("scope");
+            }
+            String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
+            String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
+            if (!proof.keySet().equals(proofFields)
+                    || !number(proof.get("version"), extended ? 2 : 1)
+                    || extended && (!mode.equals(proof.get("executionMode")) || !proofScope.equals(proof.get("scope")))
                     || !text(handle, "resourceId").equals(proof.get("resourceId"))
                     || !binding.getBindingId().equals(proof.get("bindingId"))
                     || !number(proof.get("bindingGeneration"), binding.getGeneration())
@@ -226,7 +247,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
                 connections.forget(binding.getLease());
             }
             return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
-                    seed.getProvisionRequestId(), handle, stoppedAt);
+                    seed.getProvisionRequestId(), handle, stoppedAt, mode, proofScope);
         });
     }
 
@@ -248,12 +269,20 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         }
     }
 
+    private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        String digest = request.getScope().getCapabilityDigest();
+        return ManagedContextProtocol.boot(request, seed,
+                com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(digest)
+                        ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(digest,
+                                managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null);
+    }
+
     private RuntimeLease ready(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, SshRuntimeNode node, Map<String, Object> result, RuntimeLease lastLease) {
         if (!(result.get("ready") instanceof Map<?, ?> raw)) {
             throw conflict();
         }
-        URI endpoint = ManagedContextProtocol.ready(object(raw), ManagedContextProtocol.boot(request, seed));
+        URI endpoint = ManagedContextProtocol.ready(object(raw), contextBoot(request, seed));
         RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(), endpoint, seed.getToken(),
                 seed.getLeaseId(), seed.getEpoch());
         if (lastLease != null && (!seed.matches(lastLease) || !lastLease.getEndpoint().equals(lease.getEndpoint()))) {
@@ -325,7 +354,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
         Map<String, Object> registration = object((Map<?, ?>) handle.getValue().get("registration"));
         command.put("bindingId", seed.getProvisionalRuntimeId());
         command.put("bindingGeneration", seed.getEpoch());
-        command.put("boot", ManagedContextProtocol.boot(request, seed));
+        command.put("boot", contextBoot(request, seed));
         command.put("identity", registration.get("identity"));
         command.put("marker", registration.get("marker"));
         command.put("expectedQwenVersion", registration.get("qwenVersion"));
@@ -354,7 +383,7 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
     private static void requireRequest(RuntimeProvisionRequest request) {
         if (request == null || !KIND.equals(request.getProvisionerKind()) || !request.isManagedContext()
                 || !WorkspaceExecutionProfile.admitsIsolationClass(request.getScope().getIsolationClass())
-                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+                || !WorkspaceExecutionProfile.admitsCapabilityDigest(request.getScope().getCapabilityDigest())) {
             throw conflict();
         }
     }

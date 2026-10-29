@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -109,7 +110,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -146,6 +150,7 @@ const definition: AutomationDefinition = Object.freeze({
   catchUp: 'none',
   catchUpLimit: null,
   enabled: true,
+  gate: null,
 });
 
 async function prompt(harness: Harness): Promise<ManagedSessionDurableRef> {
@@ -388,6 +393,45 @@ describe('managed session authority automation runs', () => {
       expect(authority.taskViews().map((view) => view.kind)).toEqual([
         'automation_run',
       ]);
+    });
+  });
+
+  it('closes a run over its gate output resource', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const schedule = await openSchedule(harness, authority);
+      const dangling: ManagedSessionDurableRef = {
+        resourceId: 'gate-x',
+        kind: AUTOMATION_RESOURCE_KINDS.gateOutput,
+        schemaVersion: 1,
+        byteLength: 40,
+        digest: 'a'.repeat(64),
+      };
+      await expect(
+        commitRun(
+          authority,
+          automationRunClaimBody({
+            schedule,
+            occurrenceKey,
+            gateOutputRef: dangling,
+          }),
+          1,
+        ),
+      ).rejects.toThrow(/resource gate-x is not present/);
+      const held = await harness.store.publish(
+        AUTOMATION_RESOURCE_KINDS.gateOutput,
+        Buffer.from('{"gate":"./probe.sh"}', 'utf8'),
+      );
+      const receipt = await commitRun(
+        authority,
+        automationRunClaimBody({
+          schedule,
+          occurrenceKey,
+          gateOutputRef: held,
+        }),
+        1,
+      );
+      expect(receipt.revision).toBe(1);
     });
   });
 

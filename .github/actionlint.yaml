@@ -11,3 +11,10 @@ self-hosted-runner:
     - 'ecs-update-hk-5'
 
 config-variables: null
+
+paths:
+  .github/workflows/main-ci-failure-issue.yml:
+    ignore:
+      # GitHub supports queue: max; actionlint 1.7.12 does not recognize it yet.
+      # https://github.blog/changelog/2026-05-07-github-actions-concurrency-groups-now-allow-larger-queues/
+      - 'unexpected key "queue" for "concurrency" section'

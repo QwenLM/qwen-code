@@ -336,6 +336,16 @@ export interface AgentTask extends TaskBase {
    * one-shot executors and paused tasks blocked from recovery.
    */
   resumeBlockedReason?: string;
+  /**
+   * Asked once, as the terminal notification is built: text the session
+   * adds to it for the model, outside the agent's own result, or undefined.
+   */
+  notificationFollowUp?: () => string | undefined;
+  /**
+   * Present when `send_message` must not reach the running task, though
+   * its own inputs (a Monitor it started) still do.
+   */
+  messagesBlockedReason?: string;
   stats?: AgentCompletionStats;
   toolUseId?: string;
   /**
@@ -1930,6 +1940,12 @@ export class BackgroundTaskRegistry {
     // sees the flag and short-circuits, rather than firing twice.
     if (entry.notified) return;
     entry.notified = true;
+    let followUp: string | undefined;
+    try {
+      followUp = entry.notificationFollowUp?.();
+    } catch (error) {
+      debugLogger.error('Failed to build a notification follow-up:', error);
+    }
 
     // Foreground entries return their result through the parent's normal
     // tool-result channel (the `returnDisplay` field on the synchronous
@@ -1994,6 +2010,9 @@ export class BackgroundTaskRegistry {
         `<duration_ms>${entry.stats.durationMs}</duration_ms>`,
         '</usage>',
       );
+    }
+    if (followUp) {
+      xmlParts.push(`<follow-up>${escapeXml(followUp)}</follow-up>`);
     }
     xmlParts.push('</task-notification>');
 

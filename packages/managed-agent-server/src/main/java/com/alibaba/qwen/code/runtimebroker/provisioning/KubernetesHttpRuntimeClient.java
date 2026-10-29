@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 
 import javax.net.ssl.SSLContext;
@@ -10,6 +11,7 @@ import javax.net.ssl.TrustManagerFactory;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.nio.ByteBuffer;
@@ -23,6 +25,9 @@ import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
 import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -32,6 +37,8 @@ import java.util.concurrent.TimeUnit;
 public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClient {
     private static final int RESPONSE_LIMIT = 1024 * 1024;
     private static final int CONFIG_MAP_RESPONSE_LIMIT = RESPONSE_LIMIT + 64 * 1024;
+    private static final int DELETE_REQUEST_LIMIT = 16 * 1024;
+    private static final int DELETE_RESPONSE_LIMIT = 64 * 1024;
     private final URI origin;
     private final Path tokenFile;
     private final HttpClient client;
@@ -92,6 +99,97 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
         return exchange("/api/v1/namespaces/" + namespace + "/" + resource, body);
     }
 
+    public CompletionStage<DeleteResponse> deletePod(String namespace, String podName, byte[] deleteOptions) {
+        return mutatePod(namespace, podName, "DELETE", "application/json", deleteOptions);
+    }
+
+    public CompletionStage<DeleteResponse> patchPodFinalizers(String namespace, String podName, byte[] patch) {
+        return mutatePod(namespace, podName, "PATCH", "application/json-patch+json", patch);
+    }
+
+    public CompletionStage<Map<String, Object>> getNodeLease(String nodeName) {
+        dnsSubdomain(nodeName);
+        return exchange("/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/" + nodeName, null);
+    }
+
+    public CompletionStage<List<Map<String, Object>>> listPersistentVolumes() {
+        return list("/api/v1/persistentvolumes", "PersistentVolumeList");
+    }
+
+    public CompletionStage<List<Map<String, Object>>> listVolumeAttachments() {
+        return list("/apis/storage.k8s.io/v1/volumeattachments", "VolumeAttachmentList");
+    }
+
+    public CompletionStage<List<Map<String, Object>>> listPods(String namespace) {
+        dnsLabel(namespace);
+        return list("/api/v1/namespaces/" + namespace + "/pods", "PodList");
+    }
+
+    private CompletionStage<List<Map<String, Object>>> list(String path, String kind) {
+        return listPage(path, kind, "", null, new ArrayList<>(), new HashSet<>(), new HashSet<>());
+    }
+
+    private CompletionStage<List<Map<String, Object>>> listPage(String path, String kind, String token,
+            String revision, List<Map<String, Object>> items, Set<String> identities, Set<String> tokens) {
+        if (tokens.size() >= 8 || !tokens.add(token)) {
+            return CompletableFuture.failedFuture(failure(502, false));
+        }
+        return exchange(path + "?limit=128&continue=" + URLEncoder.encode(token, StandardCharsets.UTF_8), null).thenCompose(page -> {
+            if (page == null || !kind.equals(page.get("kind")) || !(page.get("metadata") instanceof Map<?, ?> metadata)
+                    || !(metadata.get("resourceVersion") instanceof String observed) || observed.isBlank()
+                    || revision != null && !revision.equals(observed) || !(page.get("items") instanceof List<?> values)) {
+                throw failure(502, false);
+            }
+            for (Object value : values) {
+                var item = WorkspaceCsiRuntimeIdentity.map(value);
+                var identity = WorkspaceCsiRuntimeIdentity.map(item.get("metadata"));
+                if (!(identity.get("uid") instanceof String uid) || uid.isBlank() || !identities.add(uid)
+                        || items.size() >= 1024) {
+                    throw failure(502, false);
+                }
+                items.add(item);
+            }
+            Object next = metadata.get("continue");
+            if (next == null || "".equals(next)) {
+                return CompletableFuture.completedFuture(List.copyOf(items));
+            }
+            if (!(next instanceof String continuation) || continuation.length() > 16 * 1024) {
+                throw failure(502, false);
+            }
+            return listPage(path, kind, continuation, observed, items, identities, tokens);
+        });
+    }
+
+    private CompletionStage<DeleteResponse> mutatePod(String namespace, String podName, String method,
+            String contentType, byte[] deleteOptions) {
+        dnsLabel(namespace);
+        dnsSubdomain(podName);
+        if (deleteOptions == null || deleteOptions.length == 0 || deleteOptions.length > DELETE_REQUEST_LIMIT) {
+            throw new IllegalArgumentException("Pod deletion options must contain at most 16 KiB");
+        }
+        HttpRequest request;
+        try {
+            request = requestBuilder("/api/v1/namespaces/" + namespace + "/pods/" + podName)
+                    .header("Content-Type", contentType)
+                    .method(method, HttpRequest.BodyPublishers.ofByteArray(deleteOptions.clone())).build();
+        } catch (IOException error) {
+            return CompletableFuture.failedFuture(error);
+        }
+        var exchange = client.sendAsync(request,
+                ignored -> new HttpRuntimeTransport.BoundedBodySubscriber(DELETE_RESPONSE_LIMIT));
+        var result = exchange.thenApply(response -> new DeleteResponse(response.statusCode(),
+                response.body().bytes(), !response.body().overflow()))
+                .orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        result.whenCompleteAsync((ignored, error) -> {
+            if (error != null) {
+                exchange.cancel(true);
+            }
+        });
+        return result;
+    }
+
+    public record DeleteResponse(int status, byte[] body, boolean complete) { }
+
     @Override
     public CompletionStage<String> readCsiPodLog(String podName) {
         dnsSubdomain(podName);
@@ -133,16 +231,7 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
     private CompletionStage<byte[]> exchangeBytes(String path, Map<String, Object> body, int responseLimit) {
         HttpRequest request;
         try {
-            byte[] tokenBytes;
-            try (var input = Files.newInputStream(tokenFile)) {
-                tokenBytes = input.readNBytes(16 * 1024 + 1);
-            }
-            String token = new String(tokenBytes, StandardCharsets.US_ASCII).strip();
-            if (tokenBytes.length > 16 * 1024 || !token.matches("[A-Za-z0-9._~-]+")) {
-                throw new IOException("Invalid token file");
-            }
-            var builder = HttpRequest.newBuilder(origin.resolve(path)).timeout(timeout)
-                    .header("Authorization", "Bearer " + token).header("Accept", "application/json");
+            var builder = requestBuilder(path);
             if (body != null) {
                 byte[] bytes = JsonCodec.encode(body);
                 if (bytes.length > RESPONSE_LIMIT) {
@@ -181,6 +270,19 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
             }
             return CompletableFuture.failedFuture(cause instanceof RuntimeBrokerException ? cause : failure(503, true));
         });
+    }
+
+    private HttpRequest.Builder requestBuilder(String path) throws IOException {
+        byte[] tokenBytes;
+        try (var input = Files.newInputStream(tokenFile)) {
+            tokenBytes = input.readNBytes(16 * 1024 + 1);
+        }
+        String token = new String(tokenBytes, StandardCharsets.US_ASCII).strip();
+        if (tokenBytes.length > 16 * 1024 || !token.matches("[A-Za-z0-9._~-]+")) {
+            throw new IOException("Invalid token file");
+        }
+        return HttpRequest.newBuilder(origin.resolve(path)).timeout(timeout)
+                .header("Authorization", "Bearer " + token).header("Accept", "application/json");
     }
 
     public static void dnsLabel(String value) {

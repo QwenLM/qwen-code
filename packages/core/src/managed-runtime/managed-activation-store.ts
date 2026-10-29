@@ -7,6 +7,7 @@
 import { appendFile, mkdir, readFile, stat, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { FileManagedTerminalIdentityStore } from './managed-terminal-identity-store.js';
 import {
   encodeManagedJournalSnapshot,
   MANAGED_JOURNAL_COMPACT_BYTES,
@@ -291,11 +292,17 @@ export class FileManagedActivationStore {
   /** File bytes known to end at a complete event boundary. */
   private syncedBytes = 0;
   private snapshotBytes = 0;
+  private readonly terminals: FileManagedTerminalIdentityStore<ManagedActivationSnapshot>;
 
   private constructor(
     readonly filePath: string,
     private readonly clock: () => number,
-  ) {}
+  ) {
+    this.terminals = new FileManagedTerminalIdentityStore(
+      filePath,
+      'activation',
+    );
+  }
 
   static async open(
     filePath: string,
@@ -373,7 +380,13 @@ export class FileManagedActivationStore {
             `Managed activation '${activation.activationId}' was reused with different data.`,
           );
         }
-        return { created: false, activation: snapshot(existing) };
+        return {
+          created: false,
+          activation:
+            existing.status === 'released'
+              ? await this.readTerminalState(existing)
+              : snapshot(existing),
+        };
       }
 
       const queued = [...this.activations.values()].filter(
@@ -521,6 +534,28 @@ export class FileManagedActivationStore {
       });
       return snapshot(this.activations.get(activationKey(currentLease))!);
     });
+  }
+
+  readTerminal(
+    input: ManagedActivationIdentity,
+  ): Promise<ManagedActivationSnapshot | undefined> {
+    const captured = structuredClone(input);
+    return this.serial(async () => {
+      const state = this.activations.get(activationKey(identity(captured)));
+      return state?.status === 'released'
+        ? this.readTerminalState(state)
+        : undefined;
+    });
+  }
+
+  private readTerminalState(
+    state: ActivationState,
+  ): Promise<ManagedActivationSnapshot> {
+    const { tenantId, sessionId, activationId } = state.descriptor;
+    return this.terminals.read(
+      [tenantId, sessionId, activationId],
+      snapshot(state),
+    );
   }
 
   get(input: ManagedActivationIdentity): ManagedActivationSnapshot | undefined {

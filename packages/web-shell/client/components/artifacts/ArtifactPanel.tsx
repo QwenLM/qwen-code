@@ -97,6 +97,7 @@ import {
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
+  isDocxFile,
   isExcelFile,
   isPdfArtifact,
   normalizeArtifactMimeType,
@@ -117,15 +118,21 @@ import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { ArtifactIcon } from './ArtifactIcon';
+import DocxPreview from './DocxPreview';
 import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
 import type { WebShellModelManagementOptions } from '../../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../../unavailableModels';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { DaemonConnectionBanner } from '../DaemonConnectionBanner';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
@@ -512,6 +519,8 @@ interface ArtifactPanelProps {
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   workflow?: {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
@@ -694,6 +703,8 @@ export function ArtifactPanel({
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
@@ -1081,6 +1092,7 @@ export function ArtifactPanel({
           </button>
         </div>
       </div>
+      {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
@@ -1557,6 +1569,10 @@ export function ArtifactPanel({
             </div>
           ) : activeTab.sourcePreview &&
             activeTab.previewData &&
+            !isDocxFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
             !isExcelFile(
               activeTab.workspacePath,
               activeTab.previewMimeType || activeTab.previewData.type,
@@ -1654,6 +1670,8 @@ export function ArtifactPanel({
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             modelManagement={modelManagement}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'image' ? (
@@ -3308,7 +3326,8 @@ function ArtifactDetail({
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     if (
       isDownloadOnlyWorkspaceArtifact(artifact) ||
-      ((isExcelFile(artifact.workspacePath, artifact.mimeType) ||
+      ((isDocxFile(artifact.workspacePath, artifact.mimeType) ||
+        isExcelFile(artifact.workspacePath, artifact.mimeType) ||
         isPdfArtifact(artifact)) &&
         artifact.status !== 'available' &&
         artifact.status !== 'changed')
@@ -3707,6 +3726,7 @@ function SourceDetail({
           {t('common.loading')}
         </div>
       ) : data &&
+        !isDocxFile(path, data.type) &&
         !isExcelFile(path, data.type) &&
         !isPdfArtifact({ workspacePath: path, mimeType: data.type }) &&
         !normalizeTextMediaType(data.type, path) ? (
@@ -3729,6 +3749,9 @@ function SourceDetail({
             onLoadError={setError}
             previewData={data}
             previewOnly={locator.type === 'attachment'}
+            downloadName={
+              locator.type === 'attachment' ? source.title : undefined
+            }
             previewMimeType={data?.type}
             previewKind={
               /\.html?$/i.test(path) ||
@@ -3796,8 +3819,10 @@ function WorkspaceFilePreview({
   previewOnly,
   onLoadError,
   sourceRenderer,
+  downloadName,
 }: {
   sourceRenderer?: (content: string) => ReactNode;
+  downloadName?: string;
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
@@ -3811,6 +3836,17 @@ function WorkspaceFilePreview({
   onLoadError?: (error: string) => void;
 }) {
   const { t } = useI18n();
+  if (isDocxFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <DocxPreview
+        workspacePath={workspacePath}
+        workspaceActions={workspaceActions}
+        data={previewData}
+        artifactVersion={artifactVersion}
+        downloadName={downloadName}
+      />
+    );
+  }
   if (isExcelFile(workspacePath, previewMimeType || previewData?.type)) {
     return (
       <ErrorBoundary

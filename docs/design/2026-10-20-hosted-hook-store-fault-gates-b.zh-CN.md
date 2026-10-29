@@ -17,7 +17,10 @@ FG13b 在真实 Session store 事务内逐一拒绝 Hook 的持久化提交：�
 `StoreFaultGate`（仅测试用）新增四个 Hook phase：`HOOK_INTENT`、
 `HOOK_DISPATCH_STARTED`、`HOOK_SETTLED`、`HOOK_PLAN_SETTLED`。它按
 `hookExecutionId` 匹配 `hook_execution` 记录，并用 `hookId == "__plan__"`
-区分 plan marker。`FaultingExtensionRecordStore` 已经包住 store bean；Hook IT
+区分 plan marker。`HOOK_PLAN_SETTLED` 还要求 `eventName == "PreToolUse"`：
+`SessionStart` 与 `UserPromptSubmit` 在没有匹配 Hook 时同样会提交一个已结算
+的空 marker，只判 `__plan__` 会先拒掉那个无关记录。
+`FaultingExtensionRecordStore` 已经包住 store bean；Hook IT
 通过测试用 `@Configuration` 注册它，因此每次提交仍在真实事务中执行。
 
 ## 用例
@@ -34,8 +37,11 @@ FG13b 在真实 Session store 事务内逐一拒绝 Hook 的持久化提交：�
 
 以下均在 `hosted-harness-mysql` 车道上单点改造实测。
 
-- arm 错 phase，或不 arm：`attempts` 恒为 0，用例以该等待的
+- arm 一个永不匹配的 phase，或不 arm：`attempts` 恒为 0，用例以该等待的
   `ConditionTimeout` 变红。
+- arm 比用例预期更早的 phase（结果格用 `HOOK_INTENT`）：`attempts` 会触发、
+  Turn 进入 recovery-blocked，但 Hook 从未运行，用例红在「一次 `hook.call`」
+  断言上（`Expected size: 1 but was: 0`），而不是红在等待上。
 - 只匹配 MCP 域，Hook 提交永远不会被拒绝：注入不触发，同样是 `attempts`
   等待的 `ConditionTimeout`。
 - gate 仍 arm 但让每次提交通过：现装的 2–3 秒窗口太短看不见，用例保持绿。

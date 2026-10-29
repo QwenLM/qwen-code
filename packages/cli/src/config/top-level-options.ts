@@ -192,6 +192,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     description:
       'Advisor model selector for this session. Use "off" to disable native Advisor for this run.',
   },
+  'workflow-mode': {
+    type: 'string' as const,
+    choices: ['on', 'off'] as const,
+    description: 'Set the persistent Workflow guidance mode for this session.',
+  },
   'fallback-model': {
     type: 'array' as const,
     description:

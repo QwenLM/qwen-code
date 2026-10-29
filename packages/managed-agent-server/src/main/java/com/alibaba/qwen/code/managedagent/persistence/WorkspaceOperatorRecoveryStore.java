@@ -181,15 +181,9 @@ public final class WorkspaceOperatorRecoveryStore {
     }
 
     public void requireHeld(Operation operation) {
-        List<Boolean> holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation,"
-                + " runtime_session_id FROM ma_storage_owner"
-                + " WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
-                (row, index) -> operation.holderKey().equals(row.getString("holder_key"))
-                        && operation.bindingId().equals(row.getString("binding_id"))
-                        && operation.generation() == row.getLong("runtime_generation")
-                        && operation.runtimeSessionId().equals(row.getString("runtime_session_id")),
-                operation.storageKey());
-        if (holders.size() != 1 || !holders.getFirst()) {
+        Holder current = holder(requireBinding(operation.bindingId(), operation.generation()), true);
+        if (!operation.holderKey().equals(current.holderKey()) || !operation.storageKey().equals(current.storageKey())
+                || !operation.runtimeSessionId().equals(current.runtimeSessionId())) {
             throw blocked();
         }
     }
@@ -291,24 +285,19 @@ public final class WorkspaceOperatorRecoveryStore {
         String bindingId = binding.getBindingId();
         long generation = binding.getGeneration();
         String storageKey = LocalStorageOwners.key(jdbc, binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId());
-        String sql = "SELECT storage_key, holder_key, binding_id, runtime_generation,"
-                + " runtime_session_id FROM ma_storage_owner"
-                + " WHERE storage_key = ? AND storage_kind = 'LOCAL' " + (locked ? " FOR UPDATE" : "");
-        List<Holder> holders = jdbc.query(sql, (row, index) -> new Holder(
-                row.getString("storage_key"), row.getString("holder_key"),
-                row.getString("binding_id"), row.getLong("runtime_generation"),
-                row.getString("runtime_session_id")), storageKey);
-        if (holders.size() != 1 || holders.getFirst().holderKey() == null
-                || holders.getFirst().runtimeSessionId() == null
-                || !bindingId.equals(holders.getFirst().bindingId())
-                || generation != holders.getFirst().generation()
-                || !holders.getFirst().storageKey().equals(storageKey)
-                || !holders.getFirst().holderKey().equals(digest(
-                        bindingId + "\u0000" + generation + "\u0000"
-                                + holders.getFirst().runtimeSessionId()))) {
+        var owners = jdbc.queryForList("SELECT storage_key FROM ma_storage_owner"
+                + " WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                + " AND holder_key IS NULL AND maintenance_id IS NULL" + (locked ? " FOR UPDATE" : ""),
+                String.class, storageKey);
+        var members = jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
+                + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
+                + (locked ? " FOR UPDATE" : ""), String.class, storageKey, bindingId, generation);
+        if (owners.size() != 1 || members.size() != 1) {
             throw blocked();
         }
-        return holders.getFirst();
+        String sessionId = members.getFirst();
+        return new Holder(storageKey, digest(bindingId + "\u0000" + generation + "\u0000" + sessionId),
+                bindingId, generation, sessionId);
     }
 
     private Capture capture(String bindingId, long generation, String sessionId) {

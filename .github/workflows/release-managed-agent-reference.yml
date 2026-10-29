@@ -10,6 +10,7 @@ on:
       - 'scripts/contract-version-utils.js'
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/tests/package-managed-agent-reference.test.mjs'
+      - 'scripts/tests/managed-agent-upgrade.test.mjs'
       - 'packages/sdk-java/qwencode/**'
       - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
@@ -223,8 +224,36 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -285,8 +314,8 @@ jobs:
             mysql -uroot -proot \
             --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
 
-      - name: 'Test the packager'
-        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
+      - name: 'Test the packager and the upgrade command'
+        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs scripts/tests/managed-agent-upgrade.test.mjs'
 
       - name: 'Build Java components'
         run: |-
@@ -366,8 +395,10 @@ jobs:
           retention-days: 14
 
       # The host's docker cleanup service reaps qwen-code-* containers only
-      # after a 24h age gate, so a cancelled job would strand a running mysqld
-      # on the shared pool for up to a day.
+      # after a strict >24h age gate. It fires once a day, and its 30m jitter
+      # spaces consecutive fires 23.5-24.5h apart, so a container the gate
+      # skips at one fire waits for a later one: a cancelled job can strand a
+      # running mysqld for up to ~48.5h.
       - name: 'Remove the MySQL container'
         if: '${{ always() }}'
         shell: 'bash'
@@ -375,7 +406,7 @@ jobs:
           set -uo pipefail
           if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
             docker rm --force "${MYSQL_CONTAINER}" ||
-              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it after 24h"
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48.5h"
           fi
 
   publish:

@@ -250,6 +250,8 @@ jobs:
               --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi
 
+          gh pr update-branch "${pr_url}"
+
           echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
           echo "SHOULD_MERGE=true" >> "${GITHUB_OUTPUT}"
 

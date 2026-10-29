@@ -10,13 +10,59 @@ import { result } from './managed-tool-result.test-fixtures';
 function event(
   id: number,
   type: ManagedAgentSessionEvent['type'],
-  data?: unknown,
+  data?: Record<string, unknown>,
   turnId = 'p1',
 ): ManagedAgentSessionEvent {
-  return { id, at: id * 100, type, sessionId: 's1', turnId, data };
+  return {
+    id,
+    at: id * 100,
+    type,
+    sessionId: 's1',
+    turnId,
+    data: type.startsWith('tool_') ? { itemId: 'item-1', ...data } : data,
+  };
 }
 
 describe('Managed transcript projection', () => {
+  it('keeps distinct Items separate even when their tool call id matches', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_started', {
+          itemId: 'first',
+          toolCallId: 'shared',
+          toolName: 'read_file',
+        }),
+        event(2, 'tool_started', {
+          itemId: 'second',
+          toolCallId: 'shared',
+          toolName: 'read_file',
+        }),
+        event(3, 'tool_completed', { itemId: 'second', toolCallId: 'shared' }),
+        event(4, 'tool_completed', { itemId: 'first', toolCallId: 'shared' }),
+      ],
+      '[truncated]',
+    );
+    const tools = messages.flatMap((message) =>
+      message.role === 'tool_group' ? message.tools : [],
+    );
+    expect(tools).toMatchObject([
+      {
+        callId: 'p1:first',
+        toolCallId: 'shared',
+        status: 'completed',
+        startTime: 100,
+        endTime: 400,
+      },
+      {
+        callId: 'p1:second',
+        toolCallId: 'shared',
+        status: 'completed',
+        startTime: 200,
+        endTime: 300,
+      },
+    ]);
+  });
+
   it('retains completed Turn duration when replayed text parts share their Item creation time', () => {
     const messages = managedEventsToMessages(
       [
@@ -956,10 +1002,7 @@ it.each([undefined, null, '', 1, ['item-1'], {}])(
       ],
       '[truncated]',
     );
-    expect(messages[0]).toMatchObject({ tools: [{ status: 'pending' }] });
-    expect(
-      messages[0].role === 'tool_group' && messages[0].tools[0].toolResult,
-    ).toBeUndefined();
+    expect(messages).toEqual([]);
   },
 );
 

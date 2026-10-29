@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,12 +36,13 @@ import java.util.UUID;
 import java.util.function.Function;
 
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class ManagedActionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
 
-    public ManagedActionStore(JdbcTemplate jdbc, AgentStateStore sessions) {
+    public ManagedActionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, AgentStateStore sessions) {
         this.jdbc = jdbc;
         this.sessions = sessions;
     }
@@ -226,6 +228,10 @@ public class ManagedActionStore {
             if (options.path("v").asLong() == 3) {
                 optionFields.add("continuationRef");
             }
+            if (options.has("requiresHumanDecision")) {
+                optionFields.add("requiresHumanDecision");
+                require(options.path("requiresHumanDecision").isBoolean() && options.path("requiresHumanDecision").booleanValue());
+            }
             closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
@@ -255,7 +261,21 @@ public class ManagedActionStore {
                 require(text(option.path("label")));
             }
             if (options.has("inputRef")) {
-                resource(options.path("inputRef"), "managed-tool-input", resources);
+                String inputKind = options.path("inputRef").path("kind").asText();
+                boolean command = options.path("v").asLong() == 3 && "managed-extension-command-input".equals(inputKind);
+                resource(options.path("inputRef"), command ? inputKind : "managed-tool-input", resources);
+                if (command) {
+                    JsonNode continuation = read(new String(resource(options.path("continuationRef"),
+                            "hosted-approval-continuation", resources).bytes(), StandardCharsets.UTF_8));
+                    JsonNode step = continuation.path("commandStep");
+                    String toolName = "shell".equals(step.path("toolName").asText()) ? "run_shell_command" : "read_file";
+                    int ordinal = continuation.path("approvalOrdinal").asInt(-1);
+                    require(ordinal >= 0 && ordinal < continuation.path("calls").size()
+                            && options.path("inputRef").equals(step.path("inputRef"))
+                            && toolName.equals(options.path("toolName").asText())
+                            && id.equals(continuation.path("actionId").asText())
+                            && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
+                }
             }
             if (options.path("v").asLong() == 3) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
@@ -305,8 +325,8 @@ public class ManagedActionStore {
                             && continuation.path("calls").get(0).path("actionId").asText().equals(id));
                     jdbc.update("UPDATE ma_session SET plan_enabled=FALSE, approval_revision=approval_revision+1,"
                                     + " version=version+1, gmt_modified=? WHERE tenant_id=? AND session_id=? AND plan_enabled=TRUE"
-                                    + " AND approval_revision=(SELECT approval_revision FROM ma_turn WHERE tenant_id=?"
-                                    + " AND session_id=? AND prompt_id=? AND plan_enabled=TRUE)",
+                                    + " AND EXISTS (SELECT 1 FROM ma_turn WHERE tenant_id=? AND session_id=?"
+                                    + " AND prompt_id=? AND plan_enabled=TRUE AND status IN ('ACCEPTED','RUNNING'))",
                             event.path("occurredAt").asLong(), tenantId, sessionId, tenantId, sessionId,
                             options.path("turnId").asText());
                 }
@@ -397,6 +417,30 @@ public class ManagedActionStore {
                         ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, id)
                 .stream()
                 .findFirst();
+    }
+
+    public record ScopedAction(String sessionId, Action action) { }
+
+    public List<ScopedAction> listWithChildren(String tenant, String parent, Long before,
+            String beforeSession, String beforeId, int limit) {
+        List<Object> args = new ArrayList<>(List.of(tenant, parent, parent));
+        String cursor = "";
+        if (before != null) {
+            cursor = " AND (r.gmt_create < ? OR r.gmt_create = ? AND (r.session_id < ?"
+                    + " OR r.session_id = ? AND r.action_id < ?))";
+            args.addAll(List.of(before, before, beforeSession, beforeSession, beforeId));
+        }
+        args.add(limit);
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns("r")
+                        + " FROM ma_session_record r JOIN ma_session s ON s.tenant_id=r.tenant_id"
+                        + " AND s.session_id=r.session_id WHERE r.tenant_id=? AND r.record_kind='ACTION'"
+                        + " AND r.state='requested' AND s.deleted_at IS NULL AND (s.session_id=?"
+                        + " OR s.parent_session_id=? AND s.public_child_agents_version=1)" + cursor
+                        + " ORDER BY r.gmt_create DESC, r.session_id DESC, r.action_id DESC LIMIT ?",
+                (row, index) -> new ScopedAction(row.getString("session_id"),
+                        new Action(row.getString("action_id"), row.getString("state"),
+                                read(row.getString("options_json")), row.getString("decision_receipt_id"),
+                                row.getString("decision_digest"))), args.toArray());
     }
 
     public List<Action> list(

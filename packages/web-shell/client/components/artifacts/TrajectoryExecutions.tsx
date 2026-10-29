@@ -12,7 +12,6 @@ import {
   useState,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { PauseIcon } from 'lucide-react';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import type { TrajectoryLifecycleProjection } from '../../trajectory/project-trajectory-lifecycle';
 import { useI18n } from '../../i18n';
@@ -42,32 +41,26 @@ function anchoredOffset(anchor: ScrollAnchor, keys: string[]): number {
 
 export function TrajectoryExecutions({
   rows,
-  omitted,
-  incomplete,
-  outsideWindow,
   selectedKey,
   onSelect,
   following,
   liveStatus,
   historySnapshot,
   onPause,
-  onReturnToLatest,
-  canReturn,
-  returning,
+  onUpdatedChange,
+  onFocusLost,
 }: {
   rows: readonly TrajectoryExecutionRow[];
-  omitted: number;
-  incomplete: boolean;
-  outsideWindow: number;
   selectedKey?: string;
   onSelect: (key: string) => void;
   following: boolean;
   liveStatus: TrajectoryLifecycleProjection['status'];
   historySnapshot: object | undefined;
   onPause: () => void;
-  onReturnToLatest: () => void;
-  canReturn: boolean;
-  returning: boolean;
+  /** New executions arrived while the reader was not following. */
+  onUpdatedChange?: (updated: boolean) => void;
+  /** The focused grid went away with nothing of the strip left to take it. */
+  onFocusLost?: () => void;
 }) {
   const { t, language } = useI18n();
   const [expanded, setExpanded] = useState(true);
@@ -82,19 +75,20 @@ export function TrajectoryExecutions({
     followingRef.current = false;
     onPause();
   };
+  const onFocusLostRef = useRef(onFocusLost);
+  useLayoutEffect(() => {
+    onFocusLostRef.current = onFocusLost;
+  }, [onFocusLost]);
   const setScrollElement = useCallback((node: HTMLDivElement | null) => {
     const previous = scrollRef.current;
     if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
       // Resolve the fallback after siblings have finished updating.
       const root = previous.getRootNode();
       queueMicrotask(() => {
-        const target = scrollRef.current ?? toggleRef.current;
-        if (
-          !previous.isConnected &&
-          isFocusUnclaimed(root) &&
-          target?.isConnected
-        ) {
-          target.focus({ preventScroll: true });
+        if (!previous.isConnected && isFocusUnclaimed(root)) {
+          const target = scrollRef.current ?? toggleRef.current;
+          if (target?.isConnected) target.focus({ preventScroll: true });
+          else onFocusLostRef.current?.();
         }
       });
     }
@@ -123,6 +117,13 @@ export function TrajectoryExecutions({
       if (rows.some((row) => !keys.has(row.key))) setUpdated(true);
     }
   }, [rows, following, liveStatus, historySnapshot]);
+  const onUpdatedChangeRef = useRef(onUpdatedChange);
+  useLayoutEffect(() => {
+    onUpdatedChangeRef.current = onUpdatedChange;
+  }, [onUpdatedChange]);
+  useEffect(() => {
+    onUpdatedChangeRef.current?.(updated);
+  }, [updated]);
   const rememberScroll = (element: HTMLElement) => {
     const index = Math.floor(element.scrollTop / ROW_HEIGHT);
     anchorRef.current = {
@@ -144,9 +145,12 @@ export function TrajectoryExecutions({
     document.addEventListener('visibilitychange', update);
     return () => document.removeEventListener('visibilitychange', update);
   }, []);
+  // The strip renders nothing until the first execution arrives, so the panel
+  // can only be observed from then on.
+  const present = rows.length > 0;
   useEffect(() => {
     const panel = rootRef.current?.parentElement;
-    if (!panel) return;
+    if (!present || !panel) return;
     let frame = 0;
     const observer = new ResizeObserver(([entry]) => {
       if (entry) setCompact(entry.contentRect.height < 480);
@@ -160,7 +164,7 @@ export function TrajectoryExecutions({
       observer.disconnect();
       cancelAnimationFrame(frame);
     };
-  }, []);
+  }, [present]);
   useEffect(() => {
     if (!open || !visible || !running) return;
     setNow(Date.now());
@@ -222,6 +226,9 @@ export function TrajectoryExecutions({
     rows.findIndex((row) => row.key === (activeKey ?? selectedKey)),
   );
   const items = virtualizer.getVirtualItems();
+  // Rendered as nothing rather than unmounted, so the first execution to arrive
+  // is compared against an empty list and counts as new.
+  if (rows.length === 0) return null;
   return (
     <section
       ref={rootRef}
@@ -241,65 +248,9 @@ export function TrajectoryExecutions({
         >
           {open ? '▾' : '▸'} {t('trajectory.executions.title')} ({rows.length})
         </button>
-        <div className={styles.followControls}>
-          <span role="status" data-testid="trajectory-follow-status">
-            {t(
-              returning
-                ? 'trajectory.executions.returning'
-                : !following
-                  ? 'trajectory.executions.paused'
-                  : liveStatus === 'live'
-                    ? 'trajectory.executions.following'
-                    : 'trajectory.executions.waiting',
-            )}
-            {updated && !following && (
-              <span> · {t('trajectory.executions.updated')}</span>
-            )}
-          </span>
-          <button
-            type="button"
-            aria-label={t('trajectory.executions.pause')}
-            title={t('trajectory.executions.pause')}
-            aria-disabled={!following && !returning}
-            onClick={() => {
-              if (following || returning) pause();
-            }}
-            data-testid="trajectory-follow-pause"
-          >
-            <PauseIcon size={12} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            aria-disabled={!canReturn}
-            onClick={() => {
-              if (canReturn) onReturnToLatest();
-            }}
-            data-testid="trajectory-follow-return"
-          >
-            {t('trajectory.executions.return')}
-          </button>
-        </div>
       </div>
       {open && (
         <>
-          <div className={styles.notice}>
-            {t('trajectory.executions.scope')}
-            {outsideWindow > 0 && (
-              <span>
-                {' '}
-                · {t('trajectory.executions.outside', { count: outsideWindow })}
-              </span>
-            )}
-            {omitted > 0 && (
-              <span>
-                {' '}
-                · {t('trajectory.executions.omitted', { count: omitted })}
-              </span>
-            )}
-            {incomplete && (
-              <span> · {t('trajectory.lifecycleIncomplete')}</span>
-            )}
-          </div>
           {from !== undefined && to !== undefined && (
             <div
               className={styles.axis}
@@ -310,142 +261,138 @@ export function TrajectoryExecutions({
               <span>{new Date(to).toLocaleTimeString(language)}</span>
             </div>
           )}
-          {rows.length === 0 ? (
-            <p className={styles.notice}>{t('trajectory.executions.empty')}</p>
-          ) : (
-            <div
-              ref={setScrollElement}
-              className={styles.scroll}
-              role="grid"
-              tabIndex={0}
-              aria-label={t('trajectory.executions.title')}
-              aria-rowcount={rows.length}
-              aria-activedescendant={
-                items.some((item) => item.index === activeIndex)
-                  ? `${id}-${activeIndex}`
-                  : undefined
-              }
-              onWheel={(event) => {
-                if (event.deltaY !== 0) pause();
-              }}
-              onScroll={(event) => {
-                if (event.currentTarget.clientHeight === 0) return;
-                const anchor = anchorRef.current;
-                const previousTop = anchor
-                  ? anchor.index * ROW_HEIGHT + anchor.offset
-                  : 0;
-                if (event.currentTarget.scrollTop !== previousTop) pause();
-                rememberScroll(event.currentTarget);
-              }}
-              onKeyDown={(event) => {
-                let next = activeIndex;
-                if (event.key === 'ArrowDown') next++;
-                else if (event.key === 'ArrowUp') next--;
-                else if (event.key === 'Home') next = 0;
-                else if (event.key === 'End') next = rows.length - 1;
-                else if (event.key === 'PageDown' || event.key === 'PageUp') {
-                  pause();
-                  return;
-                } else if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  pause();
-                  if (rows[activeIndex]) onSelect(rows[activeIndex].key);
-                  return;
-                } else return;
+          <div
+            ref={setScrollElement}
+            className={styles.scroll}
+            role="grid"
+            tabIndex={0}
+            aria-label={t('trajectory.executions.title')}
+            aria-rowcount={rows.length}
+            aria-activedescendant={
+              items.some((item) => item.index === activeIndex)
+                ? `${id}-${activeIndex}`
+                : undefined
+            }
+            onWheel={(event) => {
+              if (event.deltaY !== 0) pause();
+            }}
+            onScroll={(event) => {
+              if (event.currentTarget.clientHeight === 0) return;
+              const anchor = anchorRef.current;
+              const previousTop = anchor
+                ? anchor.index * ROW_HEIGHT + anchor.offset
+                : 0;
+              if (event.currentTarget.scrollTop !== previousTop) pause();
+              rememberScroll(event.currentTarget);
+            }}
+            onKeyDown={(event) => {
+              let next = activeIndex;
+              if (event.key === 'ArrowDown') next++;
+              else if (event.key === 'ArrowUp') next--;
+              else if (event.key === 'Home') next = 0;
+              else if (event.key === 'End') next = rows.length - 1;
+              else if (event.key === 'PageDown' || event.key === 'PageUp') {
+                pause();
+                return;
+              } else if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
                 pause();
-                next = Math.max(0, Math.min(rows.length - 1, next));
-                setActiveKey(rows[next]!.key);
-                virtualizer.scrollToIndex(next, { align: 'auto' });
-                if (scrollRef.current) rememberScroll(scrollRef.current);
-              }}
+                if (rows[activeIndex]) onSelect(rows[activeIndex].key);
+                return;
+              } else return;
+              event.preventDefault();
+              pause();
+              next = Math.max(0, Math.min(rows.length - 1, next));
+              setActiveKey(rows[next]!.key);
+              virtualizer.scrollToIndex(next, { align: 'auto' });
+              if (scrollRef.current) rememberScroll(scrollRef.current);
+            }}
+          >
+            <div
+              className={styles.body}
+              style={{ height: virtualizer.getTotalSize() }}
             >
-              <div
-                className={styles.body}
-                style={{ height: virtualizer.getTotalSize() }}
-              >
-                {items.map((item) => {
-                  const row = rows[item.index]!;
-                  const start = row.startedAt;
-                  const end =
-                    row.durationMs !== undefined && start !== undefined
-                      ? start + row.durationMs
-                      : row.status === 'running' &&
-                          start !== undefined &&
-                          now >= start
-                        ? now
-                        : undefined;
-                  const point = start ?? row.endedAt;
-                  const elapsed =
-                    row.status === 'running'
-                      ? start !== undefined && now >= start
-                        ? t('trajectory.executions.elapsed', {
-                            duration: formatDuration(now - start),
-                          })
-                        : t('trajectory.executions.uncertain')
-                      : row.durationMs !== undefined
-                        ? formatDuration(row.durationMs)
-                        : '—';
-                  return (
-                    <div
-                      key={row.key}
-                      id={`${id}-${item.index}`}
-                      role="row"
-                      aria-rowindex={item.index + 1}
-                      aria-selected={selectedKey === row.key}
-                      data-active={activeIndex === item.index || undefined}
-                      className={styles.row}
-                      data-status={row.status}
-                      data-execution-key={row.key}
-                      data-testid="trajectory-execution-row"
-                      style={{ transform: `translateY(${item.start}px)` }}
-                      onClick={() => {
-                        pause();
-                        setActiveKey(row.key);
-                        onSelect(row.key);
-                      }}
+              {items.map((item) => {
+                const row = rows[item.index]!;
+                const start = row.startedAt;
+                const end =
+                  row.durationMs !== undefined && start !== undefined
+                    ? start + row.durationMs
+                    : row.status === 'running' &&
+                        start !== undefined &&
+                        now >= start
+                      ? now
+                      : undefined;
+                const point = start ?? row.endedAt;
+                const elapsed =
+                  row.status === 'running'
+                    ? start !== undefined && now >= start
+                      ? t('trajectory.executions.elapsed', {
+                          duration: formatDuration(now - start),
+                        })
+                      : t('trajectory.executions.uncertain')
+                    : row.durationMs !== undefined
+                      ? formatDuration(row.durationMs)
+                      : '—';
+                return (
+                  <div
+                    key={row.key}
+                    id={`${id}-${item.index}`}
+                    role="row"
+                    aria-rowindex={item.index + 1}
+                    aria-selected={selectedKey === row.key}
+                    data-active={activeIndex === item.index || undefined}
+                    className={styles.row}
+                    data-status={row.status}
+                    data-execution-key={row.key}
+                    data-testid="trajectory-execution-row"
+                    style={{ transform: `translateY(${item.start}px)` }}
+                    onClick={() => {
+                      pause();
+                      setActiveKey(row.key);
+                      onSelect(row.key);
+                    }}
+                  >
+                    <span
+                      role="gridcell"
+                      className={styles.name}
+                      title={row.name}
                     >
-                      <span
-                        role="gridcell"
-                        className={styles.name}
-                        title={row.name}
-                      >
-                        {row.name}
-                      </span>
-                      <span role="gridcell" className={styles.status}>
-                        {t(`trajectory.executions.status.${row.status}`)}
-                      </span>
-                      <span
-                        role="gridcell"
-                        className={styles.track}
-                        aria-hidden="true"
-                      >
-                        {point !== undefined && from !== undefined && (
-                          <span
-                            className={styles.bar}
-                            data-running={row.status === 'running' || undefined}
-                            data-marker={
-                              end === undefined ||
-                              end === start ||
-                              span === 0 ||
-                              undefined
-                            }
-                            style={{
-                              left: `${span > 0 ? ((point - from) / span) * 100 : 0}%`,
-                              width: `${span > 0 && end !== undefined && start !== undefined ? (Math.max(0, end - start) / span) * 100 : 0}%`,
-                            }}
-                          />
-                        )}
-                      </span>
-                      <span role="gridcell" className={styles.duration}>
-                        {elapsed}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+                      {row.name}
+                    </span>
+                    <span role="gridcell" className={styles.status}>
+                      {t(`trajectory.executions.status.${row.status}`)}
+                    </span>
+                    <span
+                      role="gridcell"
+                      className={styles.track}
+                      aria-hidden="true"
+                    >
+                      {point !== undefined && from !== undefined && (
+                        <span
+                          className={styles.bar}
+                          data-running={row.status === 'running' || undefined}
+                          data-marker={
+                            end === undefined ||
+                            end === start ||
+                            span === 0 ||
+                            undefined
+                          }
+                          style={{
+                            left: `${span > 0 ? ((point - from) / span) * 100 : 0}%`,
+                            width: `${span > 0 && end !== undefined && start !== undefined ? (Math.max(0, end - start) / span) * 100 : 0}%`,
+                          }}
+                        />
+                      )}
+                    </span>
+                    <span role="gridcell" className={styles.duration}>
+                      {elapsed}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
-          )}
+          </div>
         </>
       )}
     </section>

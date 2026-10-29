@@ -116,7 +116,7 @@ class HostedWorkspaceRecoveryWorkerIT {
                 assertThat(released.getLossEvidence()).isEqualTo(firstLoss);
                 assertThat(released.getStopEvidence().source()).isEqualTo("trusted-host-reboot");
                 assertThat(fixture.sessions.countActiveByBinding(original.getBindingId(), original.getGeneration())).isZero();
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
                         Long.class, original.getBindingId())).isZero();
                 assertThat(fixture.bindings.findActive(original.getRequest())).isNull();
                 assertThat(worker.isAlive()).isFalse();
