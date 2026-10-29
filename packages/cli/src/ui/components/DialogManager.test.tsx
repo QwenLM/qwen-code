@@ -39,10 +39,22 @@ const createUIState = (overrides: Partial<UIState>): UIState =>
 const renderDialogManager = (
   uiState: UIState,
   config: Partial<Config>,
+  uiActions: Partial<UIActions> = {},
 ): ReturnType<typeof renderWithProviders> =>
   renderWithProviders(
     <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={{} as UIActions}>
+      <UIActionsContext.Provider
+        value={
+          {
+            auth: {
+              closeAuthDialog: vi.fn(),
+              handleProviderSubmit: vi.fn(),
+              onAuthError: vi.fn(),
+            },
+            ...uiActions,
+          } as unknown as UIActions
+        }
+      >
         <DialogManager addItem={vi.fn()} terminalWidth={100} />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
@@ -78,6 +90,34 @@ describe('DialogManager', () => {
       const frame = lastFrame() ?? '';
       expect(frame).toContain('Loading output styles…');
       expect(frame).not.toContain('1. default');
+    });
+  });
+
+  describe('auth dialog', () => {
+    it('passes the constrained listDialogHeight into the auth dialog budget', async () => {
+      const terminalHeight = 14;
+      const { lastFrame } = renderDialogManager(
+        createUIState({
+          terminalHeight,
+          mainAreaWidth: 36,
+          auth: {
+            isAuthDialogOpen: true,
+          } as unknown as UIState['auth'],
+        }),
+        {
+          getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+          getAuthType: vi.fn().mockReturnValue(undefined),
+        },
+      );
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame() ?? '';
+          expect(frame).toContain('Qwen');
+          expect(frame.split('\n').length).toBeLessThanOrEqual(terminalHeight);
+        },
+        { timeout: 5000 },
+      );
     });
   });
 });
