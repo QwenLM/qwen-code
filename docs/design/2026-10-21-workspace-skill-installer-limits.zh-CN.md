@@ -383,6 +383,10 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
   同样为 `500 skill_staging_failed`。
 - 空包、非法路径、重复路径和过深目录：`invalid_skill_package` 的文案和
   HTTP 400 不变。
+- ZIP 条目无论先后顺序，只要同一条路径既作为文件又作为目录出现：
+  `400 invalid_skill_package`，文案为
+  `Skill package has conflicting file and directory entries: <路径>`，
+  其中 `<路径>` 是后出现的条目。
 - 展开后超过 6 MiB、但仍在新上限内的文件夹或 ZIP 可以安装。2 MiB 再加
   1 字节的文件可以安装。
 - 路径长度、深度、符号链接、加密、绝对路径和 `..` 的拒绝行为不变。

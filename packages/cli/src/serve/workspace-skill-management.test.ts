@@ -5,7 +5,8 @@ import { PassThrough, Readable } from 'node:stream';
 
 import archiver from 'archiver';
 import { Storage } from '@qwen-code/qwen-code-core';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { ZipFile, type Entry } from 'yauzl';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import {
   deleteWorkspaceSkill,
@@ -99,6 +100,40 @@ async function zipSized(
   await archive.finalize();
   await complete;
   return Buffer.concat(chunks).toString('base64');
+}
+
+function zipWithInvalidDeflate(name: string): string {
+  const fileName = Buffer.from(name);
+  const payload = Buffer.alloc(64, 0xff);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(8, 8);
+  local.writeUInt32LE(payload.length, 18);
+  local.writeUInt32LE(payload.length, 22);
+  local.writeUInt16LE(fileName.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(payload.length, 20);
+  central.writeUInt32LE(payload.length, 24);
+  central.writeUInt16LE(fileName.length, 28);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + fileName.length, 12);
+  end.writeUInt32LE(local.length + fileName.length + payload.length, 16);
+  return Buffer.concat([
+    local,
+    fileName,
+    payload,
+    central,
+    fileName,
+    end,
+  ]).toString('base64');
 }
 
 async function createSparseFile(filePath: string, size: number): Promise<void> {
@@ -1074,12 +1109,46 @@ describe('workspace Skill management', () => {
     await expectNoPartialInstall(workspace, 'zip-staging-fault');
   });
 
+  it('reports an invalid ZIP entry stream without wedging the install', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'zip-invalid-deflate',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: zipWithInvalidDeflate('SKILL.md'),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'invalid_skill_package',
+      statusCode: 400,
+      message: 'invalid block type',
+    });
+    await expectNoPartialInstall(workspace, 'zip-invalid-deflate');
+  });
+
   it.skipIf(!arePermissionBitsEnforced())(
     'reports a ZIP staging write fault without wedging the install',
     async () => {
       const workspace = await temporaryDirectory('qwen-skill-workspace-');
       const nativeMkdir = fs.mkdir.bind(fs);
       const denied: string[] = [];
+      const destroySpies: Array<MockInstance<(error?: Error) => Readable>> = [];
+      const nativeOpenReadStream = ZipFile.prototype.openReadStream;
+      vi.spyOn(ZipFile.prototype, 'openReadStream').mockImplementation(
+        function (
+          this: ZipFile,
+          entry: Entry,
+          callback: (error: Error | null, stream: Readable) => void,
+        ) {
+          return nativeOpenReadStream.call(this, entry, (error, stream) => {
+            if (stream) destroySpies.push(vi.spyOn(stream, 'destroy'));
+            callback(error, stream);
+          });
+        } as typeof ZipFile.prototype.openReadStream,
+      );
       vi.spyOn(fs, 'mkdir').mockImplementation((async (
         ...args: Parameters<typeof fs.mkdir>
       ) => {
@@ -1117,6 +1186,8 @@ describe('workspace Skill management', () => {
           await fs.chmod(root, 0o700).catch(() => undefined);
         }
       }
+      expect(destroySpies).toHaveLength(1);
+      expect(destroySpies[0]).toHaveBeenCalledTimes(1);
       await expectNoPartialInstall(workspace, 'zip-write-denied');
     },
   );

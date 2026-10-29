@@ -457,6 +457,10 @@ too many files (max 2000)`.
   finalize is also `500 skill_staging_failed`.
 - Empty package, bad paths, duplicates, and excess depth: unchanged
   `invalid_skill_package` messages and status 400.
+- A ZIP entry that would make one path both a file and a directory, in
+  either order: `400 invalid_skill_package`, message
+  `Skill package has conflicting file and directory entries: <path>` with
+  the later entry's path.
 - A folder or ZIP whose expanded size is over 6 MiB and within the new
   caps installs. A file of 2 MiB plus one byte installs.
 - Path length, depth, symlink, encryption, absolute path, and `..`
