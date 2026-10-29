@@ -2914,6 +2914,35 @@ describe('PermissionManager', () => {
         pm.listRules().some((entry) => entry.rule.raw === 'Bash(docker *'),
       ).toBe(true);
     });
+
+    it('rejects a malformed session allow rule before AUTO stashing', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ approvalMode: 'auto' });
+      pm.addSessionAllowRule('Bash(ansible *');
+
+      // `addSessionAllowRule` reports an invalid rule and returns before it is
+      // pushed, so the session half of the AUTO filter has nothing to keep:
+      // the rule can be neither stashed nor listed.
+      expect(pm.stripDangerousRulesForAutoMode().session).toEqual([]);
+      expect(pm.getStrippedDangerousRules()?.session).toEqual([]);
+      expect(
+        pm.listRules().some((entry) => entry.rule.raw === 'Bash(ansible *'),
+      ).toBe(false);
+      warnSpy.mockRestore();
+    });
+
+    it('keeps the durable debug-log record of a dropped rule', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      debugLoggerMock.warn.mockClear();
+      pm = makePm({ permissionsDeny: ['Bash(flux *'] });
+
+      // A run with stderr discarded still has to record the dropped rule in
+      // the debug log file.
+      expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Ignoring malformed deny rule'),
+      );
+      warnSpy.mockRestore();
+    });
   });
 
   describe('hasMatchingAskRule', () => {
