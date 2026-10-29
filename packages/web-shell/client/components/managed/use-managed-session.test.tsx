@@ -55,6 +55,180 @@ describe('useManagedSession', () => {
     return null;
   }
 
+  it('replaces streamed fragments when an older Item page supplies their complete body', async () => {
+    const assembled = (id: number, itemId: string, text: string) => ({
+      ...event(id),
+      assembledFromItem: true,
+      data: { itemId, text },
+    });
+    let emitNew!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      emitNew = resolve;
+    });
+    const api = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn().mockImplementation(async (_session, options) =>
+        options.before
+          ? {
+              events: [assembled(1, 'old', 'complete AB')],
+              lastEventId: 12,
+              history: 'items',
+            }
+          : {
+              events: [assembled(10, 'new', 'new message')],
+              lastEventId: 10,
+              olderCursor: 'older',
+              history: 'items',
+            },
+      ),
+      async *subscribeEvents(_id: string, options: { signal: AbortSignal }) {
+        yield { ...event(11), data: { itemId: 'old', text: 'A' } };
+        yield { ...event(12), data: { itemId: 'old', text: 'B' } };
+        await gate;
+        if (options.signal.aborted) return;
+        yield { ...event(13), data: { itemId: 'old', text: 'C' } };
+        await new Promise((resolve) =>
+          options.signal.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    mountReact(<Probe provider={api} />);
+    await flushReact();
+    expect(latest!.events.map((row) => row.id)).toEqual([10, 11, 12]);
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(latest!.events.map((row) => row.id)).toEqual([1, 10]);
+    expect(latest!.events[0]!.data).toEqual({
+      itemId: 'old',
+      text: 'complete AB',
+    });
+    await act(async () => {
+      emitNew();
+    });
+    expect(latest!.events.map((row) => row.id)).toEqual([1, 10, 13]);
+    expect(api.getTranscript).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores only delayed fragments already covered by an older Item page', async () => {
+    let deliver!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      deliver = resolve;
+    });
+    const assembled = (id: number, itemId: string, text: string) => ({
+      ...event(id),
+      assembledFromItem: true,
+      data: { itemId, text },
+    });
+    const api = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn().mockImplementation(async (_session, options) =>
+        options.before
+          ? {
+              events: [assembled(1, 'old', 'AB')],
+              lastEventId: 12,
+              history: 'items',
+            }
+          : {
+              events: [assembled(10, 'new', 'new')],
+              lastEventId: 10,
+              olderCursor: 'older',
+              history: 'items',
+            },
+      ),
+      async *subscribeEvents(_id: string, options: { signal: AbortSignal }) {
+        await gate;
+        if (options.signal.aborted) return;
+        yield {
+          ...event(11),
+          data: { itemId: 'unreturned', text: 'independent' },
+        };
+        yield { ...event(12), data: { itemId: 'old', text: 'B' } };
+        yield { ...event(13), data: { itemId: 'old', text: 'C' } };
+        await new Promise((resolve) =>
+          options.signal.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    mountReact(<Probe provider={api} />);
+    await flushReact();
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(latest!.events.map((row) => row.id)).toEqual([1, 10]);
+    await act(async () => {
+      deliver();
+    });
+    expect(latest!.events.map((row) => row.id)).toEqual([1, 10, 11, 13]);
+    expect(latest!.events[0]!.data).toEqual({ itemId: 'old', text: 'AB' });
+    expect(latest!.events.at(-1)!.data).toEqual({ itemId: 'old', text: 'C' });
+  });
+
+  it('resets Item paging and its cursor together on a stream-gap resync', async () => {
+    let emitGap!: () => void;
+    let generation = 0;
+    const gap = new Promise<void>((resolve) => {
+      emitGap = resolve;
+    });
+    const api = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn().mockImplementation(async (_session, options) => {
+        const id = options.before
+          ? generation
+            ? 20
+            : 1
+          : generation
+            ? 30
+            : 10;
+        return {
+          events: [
+            {
+              ...event(id),
+              assembledFromItem: true,
+              data: { itemId: `item-${id}`, text: String(id) },
+            },
+          ],
+          lastEventId: generation ? 30 : 10,
+          history: 'items',
+          olderCursor: `older-${id}`,
+        };
+      }),
+      async *subscribeEvents(_id: string, options: { signal: AbortSignal }) {
+        if (!generation) {
+          await gap;
+          if (options.signal.aborted) return;
+          generation++;
+          yield { ...event(30), type: 'stream_gap' as const };
+          return;
+        }
+        await new Promise((resolve) =>
+          options.signal.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    mountReact(<Probe provider={api} />);
+    await flushReact();
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(latest!.events.map((row) => row.id)).toEqual([1, 10]);
+    await act(async () => {
+      emitGap();
+    });
+    await vi.waitFor(() =>
+      expect(latest!.events.map((row) => row.id)).toEqual([30]),
+    );
+    expect(latest!.olderCursor).toBe('older-30');
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(api.getTranscript).toHaveBeenLastCalledWith(
+      'session-1',
+      expect.objectContaining({ before: 'older-30', limit: 100 }),
+    );
+    expect(latest!.events.map((row) => row.id)).toEqual([20, 30]);
+  });
+
   it('keeps a confirmed title when an earlier summary read returns and accepts a later external rename', async () => {
     let resolve!: (value: { sessionId: string; title: string }) => void;
     const getSession = vi
@@ -5233,7 +5407,7 @@ describe('useManagedSession', () => {
                 JSON.parse(javaDelta(2, 'two')),
                 JSON.parse(javaDelta(7, 'after')),
               ],
-        coveredSequence: 0,
+        coveredSequence: lastSequence,
         hasMore: false,
         lastSequence,
       });
@@ -5316,7 +5490,7 @@ describe('useManagedSession', () => {
               JSON.parse(javaDelta(1, 'one')),
               JSON.parse(javaDelta(2, 'two')),
             ],
-            coveredSequence: 0,
+            coveredSequence: 2,
             hasMore: false,
             lastSequence: 2,
           }),
@@ -5452,7 +5626,7 @@ describe('useManagedSession', () => {
               JSON.parse(javaDelta(1, 'one')),
               JSON.parse(javaDelta(2, 'two')),
             ],
-            coveredSequence: 0,
+            coveredSequence: 2,
             hasMore: false,
             lastSequence: 2,
           }),
@@ -5657,7 +5831,7 @@ describe('useManagedSession', () => {
                     JSON.parse(javaDelta(1, 'one')),
                     JSON.parse(javaDelta(2, 'two')),
                   ],
-                  coveredSequence: 0,
+                  coveredSequence: 2,
                   hasMore: false,
                   lastSequence: 2,
                 }
@@ -5678,7 +5852,7 @@ describe('useManagedSession', () => {
                     },
                     JSON.parse(javaDelta(4, 'four')),
                   ],
-                  coveredSequence: 0,
+                  coveredSequence: 4,
                   hasMore: false,
                   lastSequence: 4,
                 },

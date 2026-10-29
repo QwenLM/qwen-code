@@ -3444,6 +3444,33 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('warns about an unavailable runtime only for an explicit opt-in', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const byDefault = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+        });
+        expectUnavailable(byDefault, 'workspace-untrusted');
+        expect(byDefault.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+        const requested = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+          bundledGeneratedUi: { ...candidate, explicit: true },
+        });
+        expectUnavailable(requested, 'workspace-untrusted');
+        expect(requested.getWarnings()).toContainEqual(
+          expect.stringContaining(
+            'Bundled Generated UI is unavailable (workspace-untrusted)',
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it.each([
       { allowedMcpServers: [] },
       { excludedMcpServers: ['generated-*'] },
