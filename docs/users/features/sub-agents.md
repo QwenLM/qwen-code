@@ -100,13 +100,13 @@ Like `fork_tools`, a fork profile is a caller-selected restriction rather than a
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                        |
-| ------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                              |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                |
-| Tools         | Configured declaration set without interactive question tools  | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` can independently narrow it without changing that declaration |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                        |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                         |
+|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                                                                                                                                              |
+| ------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                                                                                                                                                    |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                                                                                                                                      |
+| Tools         | Configured declaration set without interactive question tools  | In `direct` mode, keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` narrow execution without changing that declaration. In hybrid `tools.mode: "code_mode"` the effective execution allowlist also filters the top-level declarations |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                                                                                                                                              |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                                                                                                                                               |
 
 ### When Fork is Used
 
@@ -118,7 +118,7 @@ The AI automatically uses fork when it needs to:
 
 ### Prompt Cache Sharing
 
-All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
+In `direct` mode, all forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents. Under hybrid `tools.mode: "code_mode"`, `fork_tools`, `fork_profile`, and the inherited execution allowlist filter the fork's tool declarations, so the tools portion of the prefix can differ from the parent's.
 
 ### Recursive Delegation Prevention
 
@@ -133,7 +133,7 @@ Fork children cannot spawn any further sub-agent. This is enforced at runtime �
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
 - **Context Inheritance**: Fork subagents inherit the full conversation by default and can select a bounded number of recent parent turns
-- **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
+- **Prompt Cache Sharing**: In `direct` mode, fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus
 - **Progress Visibility**: Monitor agent execution with real-time progress updates
