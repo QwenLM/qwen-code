@@ -363,6 +363,11 @@ type PendingPermissionLookup =
 type CollectBufferEntry = {
   text: string;
   envelope: Envelope;
+  /**
+   * Arrival ordinal shared with the mid-turn queue, so a message taken back
+   * from that queue can be merged into this buffer in true arrival order.
+   */
+  sequence: number;
   /** Admitted by the bounded inject-rejection fallback, not plain `collect`. */
   injectFallback?: boolean;
 };
@@ -370,6 +375,8 @@ type CollectBufferEntry = {
 type PendingInjectedMessage = {
   text: string;
   envelope: Envelope;
+  /** Arrival ordinal shared with the collect buffer, for ordered settlement. */
+  sequence: number;
 };
 type NamedTurnBinding = {
   sessionId: string | null;
@@ -540,6 +547,13 @@ export abstract class ChannelBase {
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
   private readonly activeBtw: Map<string, ActiveBtw> = new Map();
+  /**
+   * Arrival ordinal stamped on every message admitted to the collect buffer or
+   * the mid-turn queue. Both structures hold messages of the same turn and are
+   * merged at its boundary, so only a shared counter can restore their
+   * interleaved arrival order.
+   */
+  private inboundOrdinal = 0;
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
   /**
@@ -2158,9 +2172,17 @@ export abstract class ChannelBase {
       buffer = [];
       this.collectBuffers.set(sessionId, buffer);
     }
+    // A message the bounded fallback parked after these injections were
+    // accepted must not be replayed ahead of them, so merge by arrival ordinal
+    // rather than appending the recovered tail.
     for (const entry of replay) {
-      buffer.push({ text: entry.text, envelope: entry.envelope });
+      buffer.push({
+        text: entry.text,
+        envelope: entry.envelope,
+        sequence: entry.sequence,
+      });
     }
+    buffer.sort((a, b) => a.sequence - b.sequence);
     process.stderr.write(
       `[${this.name}] inject: ${replay.length} mid-turn message(s) were not drained before the turn ended; replaying as a new turn for session ${sessionId}\n`,
     );
@@ -3066,6 +3088,10 @@ export abstract class ChannelBase {
     );
   }
 
+  private nextInboundOrdinal(): number {
+    return ++this.inboundOrdinal;
+  }
+
   private recordInjectedMessage(
     sessionId: string,
     text: string,
@@ -3076,7 +3102,7 @@ export abstract class ChannelBase {
       pending = [];
       this.midTurnInjections.set(sessionId, pending);
     }
-    pending.push({ text, envelope });
+    pending.push({ text, envelope, sequence: this.nextInboundOrdinal() });
   }
 
   private notifyPromptInjected(
@@ -7411,7 +7437,11 @@ export abstract class ChannelBase {
               buffer = [];
               this.collectBuffers.set(sessionId, buffer);
             }
-            const entry: CollectBufferEntry = { text: promptText, envelope };
+            const entry: CollectBufferEntry = {
+              text: promptText,
+              envelope,
+              sequence: this.nextInboundOrdinal(),
+            };
             if (injectFallback) entry.injectFallback = true;
             buffer.push(entry);
             try {

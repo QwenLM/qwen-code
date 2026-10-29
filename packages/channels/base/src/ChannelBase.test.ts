@@ -24932,6 +24932,120 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('replays an undrained injection ahead of a message parked after it', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-order-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // A is accepted by the mid-turn queue and never drained.
+        await ch.handleInbound(
+          envelope({ text: 'first injected', messageId: 'm-order-2' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+        // B arrives later, is rejected by the queue, and parks in the fallback.
+        queueMidTurnMessage.mockReturnValueOnce({
+          accepted: false,
+          reason: 'capacity',
+        });
+        await ch.handleInbound(
+          envelope({ text: 'second parked', messageId: 'm-order-3' }),
+        );
+        expect(
+          collectBuffers(ch)
+            .get(sessionId)
+            ?.map((entry) => (entry as { text: string }).text),
+        ).toEqual(['second parked']);
+
+        // The turn ends with A still in the bridge queue: it must be replayed
+        // BEFORE B, which arrived after it.
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce(['first injected']);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(replay).toContain('first injected');
+        expect(replay.indexOf('first injected')).toBeLessThan(
+          replay.indexOf('second parked'),
+        );
+        expect(replay.indexOf('first injected')).toBe(
+          replay.lastIndexOf('first injected'),
+        );
+
+        // B was never handed to the bridge, so it is not reported delivered.
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(
+          logged.match(/inject: delivered mid-turn message/g) ?? [],
+        ).toHaveLength(1);
+        expect(logged).toContain('inject: NOT delivered mid-turn (capacity)');
+        expect(logged).toContain(
+          'inject: 1 mid-turn message(s) were not drained',
+        );
+
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('does not replay an injection the running turn drained', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-drained-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // A is accepted and actually drained by the running turn.
+        await ch.handleInbound(
+          envelope({ text: 'drained injected', messageId: 'm-drained-2' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+        // B is rejected and parked after it.
+        queueMidTurnMessage.mockReturnValueOnce({
+          accepted: false,
+          reason: 'capacity',
+        });
+        await ch.handleInbound(
+          envelope({ text: 'parked later', messageId: 'm-drained-3' }),
+        );
+        expect(collectBuffers(ch).get(sessionId)).toHaveLength(1);
+
+        // takeUndrainedMidTurnMessages returns []: nothing was left behind, so
+        // the drained A must not surface in the replay.
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(replay).toContain('parked later');
+        expect(replay).not.toContain('drained injected');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('drops queued injections when the running turn is cancelled', async () => {
       const queueMidTurnMessage = enableInjection();
       const dropMidTurnMessages = enableInjectionDrop();
