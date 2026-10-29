@@ -1356,7 +1356,12 @@ describe('classifyProbeRun', () => {
             testResults: [
               {
                 name: '/w/SRC/A.test.ts',
-                assertionResults: [{ status: 'failed' }],
+                assertionResults: [
+                  {
+                    status: 'failed',
+                    failureMessages: ['AssertionError: expected 1 to be 2'],
+                  },
+                ],
               },
             ],
           }),
@@ -1386,7 +1391,12 @@ describe('classifyProbeRun', () => {
             testResults: [
               {
                 name: '/w/vendor/other\\src/a.test.ts',
-                assertionResults: [{ status: 'failed' }],
+                assertionResults: [
+                  {
+                    status: 'failed',
+                    failureMessages: ['AssertionError: expected 1 to be 2'],
+                  },
+                ],
               },
             ],
           }),
@@ -1468,7 +1478,12 @@ describe('classifyProbeRun', () => {
           testResults: [
             {
               name: '/w/vendor/other-src/a.test.ts',
-              assertionResults: [{ status: 'failed' }],
+              assertionResults: [
+                {
+                  status: 'failed',
+                  failureMessages: ['AssertionError: expected 1 to be 2'],
+                },
+              ],
             },
           ],
         }),
