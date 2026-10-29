@@ -61,7 +61,9 @@ changing codes, details or causes. Preserve protocol strings, JSON names, nulls,
 ordering, encodings and digest inputs. Move pure request-identity calculations and
 provider-kind constants out of JDBC/provider classes.
 
-`ManagedAgentSettings` supplies read-only views of existing settings groups.
+`ManagedAgentSettings` supplies read-only views needed outside server. Authentication,
+internal listeners, the service account, trusted headers and credential-loading
+state remain server settings without shared contract declarations.
 `ManagedAgentProperties` remains server-owned and implements those views, retaining
 binding annotations, duration units, environment access, credential-file reads and
 startup checks. Consumers receive views or existing scalar values. This introduces
@@ -84,6 +86,7 @@ DataSource identity, writer/generation checks or locking. Missing capabilities k
 the existing refusal behavior. A neutral store failure preserves genuine-outage
 classification without exposing JDBC exception types. A Broker operations
 interface includes the operations consumed outside its implementation module.
+Convenience overloads without those consumers remain on the implementation only.
 
 Move recovery queries and SQL-backed evidence into persistence. Inject the
 existing Channel repository interfaces rather than constructing JDBC repositories
@@ -260,8 +263,12 @@ exceptions and `Error` propagation.
 
 Regression coverage adds nested configuration binding, hidden internal state,
 normalization and collection semantics, immediate and deferred SDK failures, both
-stream entry points and archive exclusion. Source comparison confirms unchanged
-JavaBean signatures and delegate call sites. These new Java regressions have not
+stream entry points and archive exclusion. Standalone Harness composition is checked
+through session creation, resource publication and the resulting SDK request, rather
+than connector private fields. Unused test-factory overloads and private service
+forwarders are removed; existing behavioral test cases are retained.
+Source comparison confirms unchanged JavaBean signatures and SDK delegate call
+sites. These new Java regressions have not
 run locally: the shared budget remains exhausted, and earlier Java passes do not
 validate this increment. Final compilation, quality checks and regressions remain
 pending CI.

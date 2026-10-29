@@ -203,7 +203,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        List<Map<String, Object>> input = input(blocks, false);
+        List<Map<String, Object>> input = inputPolicy.input(blocks, false);
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
@@ -401,7 +401,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(401,
                     "actor_required", "A trusted actor is required.");
         }
-        List<Map<String, Object>> input = input(blocks, false);
+        List<Map<String, Object>> input = inputPolicy.input(blocks, false);
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
@@ -522,7 +522,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         List<InputBlock> blocks = List.of(new InputBlock("input_text",
                 description.isBlank() ? prompt
                         : "[" + description + "]\n\n" + prompt));
-        List<Map<String, Object>> input = input(blocks, false);
+        List<Map<String, Object>> input = inputPolicy.input(blocks, false);
         String title = description.isBlank() ? "child agent"
                 : StringUtils.truncate(description, 256);
         return insertChildSession(tenantId, parentSessionId, childRunId,
@@ -531,7 +531,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public CommandAdmission createPublicChildSession(String tenantId, String parentSessionId,
             String childRunId, String description, String prompt, com.fasterxml.jackson.databind.JsonNode snapshot) {
-        List<Map<String, Object>> input = input(List.of(new InputBlock("input_text",
+        List<Map<String, Object>> input = inputPolicy.input(List.of(new InputBlock("input_text",
                 description.isBlank() ? prompt : "[" + description + "]\n\n" + prompt)), false);
         return insertChildSession(tenantId, parentSessionId, childRunId,
                 description.isBlank() ? "child agent" : StringUtils.truncate(description, 256), input, false, snapshot);
@@ -661,7 +661,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        List<Map<String, Object>> input = input(blocks, true);
+        List<Map<String, Object>> input = inputPolicy.input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
         SessionRecord session = store.requireSession(tenantId, sessionId);
@@ -671,7 +671,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // would meet below the replay, so a reused key's 409 never leaks to
         // one, and a below-OPERATOR reader never reaches a recorded key —
         // the command family's replay is not actor-scoped (#13619).
-        requireSubmitterRole(session, actorId);
+        inputPolicy.requireSubmitterRole(session, actorId);
         // Replay before the visibility and availability gates, so a
         // recorded submit still answers after a delete and through a
         // Harness outage. See createSession. The gates above pass every
@@ -695,8 +695,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // certifies new work only, so a recorded outcome always answers —
         // a re-registration, a DRAINING row or a creator demotion must not
         // retire it.
-        requireVisibleSession(session);
-        requireSubmitterFacts(session, actorId);
+        inputPolicy.requireVisibleSession(session);
+        inputPolicy.requireSubmitterFacts(session, actorId);
         requireReadyWorktree(session);
         requireHarness();
         String payloadDigest = harnessRules.payloadDigest(input);
@@ -738,7 +738,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             dispatch(tenantId, replay, session.workspace() != null);
             return body;
         }
-        requireVisibleSession(session);
+        inputPolicy.requireVisibleSession(session);
         requireCancellerShape(session, actorId);
         Admission admission;
         try {
@@ -834,7 +834,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             // from a fresh key's.
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
-            requireSubmitterRole(session, actorId);
+            inputPolicy.requireSubmitterRole(session, actorId);
             if (!recordedByCaller(recorded, actorId)) {
                 requireReplayCreator(session, actorId);
             }
@@ -857,9 +857,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // The fresh-key half answers a tombstone 404, as every other
         // Session read does; the recorded rename above is the only outcome
         // that survives the delete.
-        SessionRecord current = requireVisibleSession(tenantId, sessionId);
-        requireSubmitterRole(current, actorId);
-        requireSubmitterFacts(current, actorId);
+        SessionRecord current = inputPolicy.requireVisibleSession(tenantId, sessionId);
+        inputPolicy.requireSubmitterRole(current, actorId);
+        inputPolicy.requireSubmitterFacts(current, actorId);
         requireReadyWorktree(current);
         String effectiveTitle = validRenameTitle(title);
         requireHarness();
@@ -972,7 +972,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             return store.unarchiveWorkspaceSession(tenantId, sessionId, actorId,
                     scopedKey, lifecycleDigest(sessionId, UNARCHIVE));
         }
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
+        inputPolicy.requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 UNARCHIVE, idempotencyKey, requestDigest, sessionId,
@@ -1377,7 +1377,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // Cwd admission has no Turn execution-profile restriction. One role
         // grant read covers the workspaces of both shapes; the executable
         // facts read covers both id sets, retaining each capability's gates.
-        Set<String> shaped = sessions.stream().filter(session -> maySubmitShape(session, worktrees.get(session.sessionId())))
+        Set<String> shaped = sessions.stream().filter(session -> inputPolicy.maySubmitShape(session, worktrees.get(session.sessionId())))
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
         Set<String> contextShaped = sessions.stream().filter(session -> mayChangeContextShape(session, worktrees.get(session.sessionId())))
@@ -1415,7 +1415,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         retention(session, closed),
                         session.workspace() == null || lifecycleOwners.contains(session.sessionId()),
                         lifecycleOperations.get(session.sessionId()),
-                        maySubmitWorkspaceTurn(session, grants, executable, worktrees.get(session.sessionId())),
+                        inputPolicy.maySubmitWorkspaceTurn(session, grants, executable, worktrees.get(session.sessionId())),
                         mayChangeContext(session, grants, executable, worktrees.get(session.sessionId())),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
@@ -1710,27 +1710,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 "sessionId", sessionId, "operation", operation));
     }
 
-    // Later Turns of a Workspace-bound Session run under the creator's
-    // Workspace grants (WorkspaceExecutionStore.authorize), so new-work
-    // admission certifies two conjuncts: the caller holds OPERATOR
-    // (requireSubmitterRole), and the Session's creator-keyed execution
-    // facts still hold (requireSubmitterFacts). The command family's
-    // replay is NOT actor-scoped (#13619), so the role gate runs before
-    // the replay: below-OPERATOR never reaches a recorded key. The facts
-    // gate follows the replay: it certifies new work only, so a recorded
-    // completed outcome always answers — a Workspace re-registration, a
-    // DRAINING row or a creator demotion must not retire it. Cancelling
-    // has its own, narrower rule (requireCancellerRole/Shape).
-    private void requireSubmitterRole(SessionRecord session,
-            String actorId) {
-        inputPolicy.requireSubmitterRole(session, actorId);
-    }
-
-    private void requireSubmitterFacts(SessionRecord session,
-            String actorId) {
-        inputPolicy.requireSubmitterFacts(session, actorId);
-    }
-
     private void requireReadyWorktree(SessionRecord session) {
         var worktree = store.findSessionWorktree(session.tenantId(), session.sessionId());
         if (!ready(worktree)) {
@@ -1783,14 +1762,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && !workspaces.accessOf(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId())
                         .atLeast(WorkspaceAccess.OPERATOR)) {
-            requireLegacyWorkspace(session, actorId);
+            inputPolicy.requireLegacyWorkspace(session, actorId);
         }
     }
 
     private void requireCancellerShape(SessionRecord session,
             String actorId) {
-        if (session.workspace() != null && !maySubmitShape(session, null)) {
-            requireLegacyWorkspace(session, actorId);
+        if (session.workspace() != null && !inputPolicy.maySubmitShape(session, null)) {
+            inputPolicy.requireLegacyWorkspace(session, actorId);
         }
     }
 
@@ -1828,21 +1807,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
     }
 
-    private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            String actorId) {
-        return inputPolicy.maySubmitWorkspaceTurn(session, actorId);
-    }
-
-    // The page rule also requires readiness; its permission facts use the
-    // batch reads the assembler already made — the caller's role from the
-    // grant batch, the creator-keyed facts of each submit-shaped Session
-    // from the facts batch.
-    private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
-            java.util.Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
-        return inputPolicy.maySubmitWorkspaceTurn(session, grants, executable, worktree);
-    }
-
     // Model, approval and plan changes share the caller and execution
     // authority checks for changing an existing Session context.
     private boolean mayChangeContext(SessionRecord session,
@@ -1854,10 +1818,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         var grant = grants.get(session.workspace().getWorkspaceId());
         return grant != null && grant.canCreateSession()
                 && executable.contains(session.sessionId());
-    }
-
-    private boolean maySubmitShape(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
-        return inputPolicy.maySubmitShape(session, worktree);
     }
 
     private boolean mayCompressShape(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
@@ -1887,18 +1847,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         inputPolicy.requireLegacyWorkspace(tenantId, actorId, sessionId);
     }
 
-    // The submitter family's bound-refusal split: an actor without a read
-    // grant gets the invisible 404, a readable actor below OPERATOR the
-    // 403 of the sibling lifecycle refusal, and an OPERATOR blocked by the
-    // shape gates or the creator-keyed facts the family's domain 409.
-    private void requireLegacyWorkspace(SessionRecord session,
-            String actorId) {
-        inputPolicy.requireLegacyWorkspace(session, actorId);
-    }
-
     public SessionRecord requireReadableSession(String tenantId,
             String actorId, String sessionId) {
-        SessionRecord session = requireVisibleSession(tenantId, sessionId);
+        SessionRecord session = inputPolicy.requireVisibleSession(tenantId, sessionId);
         requireReadGrant(session, actorId);
         return session;
     }
@@ -1920,15 +1871,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
         requireEventCursor(afterSequence);
         return replayableEvents(session, afterSequence, STREAM_PAGE);
-    }
-
-    private SessionRecord requireVisibleSession(String tenantId,
-            String sessionId) {
-        return inputPolicy.requireVisibleSession(tenantId, sessionId);
-    }
-
-    private SessionRecord requireVisibleSession(SessionRecord session) {
-        return inputPolicy.requireVisibleSession(session);
     }
 
     private static ManagedAgentException dependencyUnavailable(String code,
@@ -2025,11 +1967,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public List<Map<String, Object>> userMessageInput(List<InputBlock> blocks) {
         return inputPolicy.userMessageInput(blocks);
-    }
-
-    private List<Map<String, Object>> input(List<InputBlock> blocks,
-            boolean required) {
-        return inputPolicy.input(blocks, required);
     }
 
     /** The input the digest and the column both describe: an unpaired

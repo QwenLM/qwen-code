@@ -39,13 +39,13 @@ public class WorkspaceCsiWorkerAckStoreTest {
     private Fixture fixture;
 
     @BeforeEach
-    public void setUp() throws Exception {
+    void setUp() throws Exception {
         fixture = fixture("jdbc:h2:mem:ack-document-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
     }
 
     @Test
-    public void inspectDecodesHistoricalDocumentWithoutWorkerOrObjectIoOrInsert() {
+    void inspectDecodesHistoricalDocumentWithoutWorkerOrObjectIoOrInsert() {
         var first = fixture.store().inspect(fixture.selector());
         var second = fixture.store().inspect(fixture.selector());
         assertThat(first.document()).isEqualTo(fixture.document());
@@ -57,7 +57,7 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @Test
-    public void absentHistoricalAckReturnsNullWithoutRpcOrInsert() {
+    void absentHistoricalAckReturnsNullWithoutRpcOrInsert() {
         fixture.jdbc().update("DELETE FROM ma_operation_work");
         assertThat(fixture.store().inspect(fixture.selector())).isNull();
         assertThat(fixture.rows()).isZero();
@@ -65,23 +65,10 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "",
-                "/original",
-                "/original/sessionKey",
-                "/original/terminalRef",
-                "/original/outcomeRef",
-                "/confirmation",
-                "/confirmation/context",
-                "/confirmation/storage",
-                "/confirmation/pod",
-                "/confirmation/reference",
-                "/confirmation/acknowledgement",
-                "/confirmation/acknowledgement/manifest",
-                "/confirmation/captureIdentity"
-            })
-    public void everyClosedObjectRejectsMissingAndUnknownFields(String pointer) {
+    @ValueSource(strings = {"", "/original", "/original/sessionKey", "/original/terminalRef", "/original/outcomeRef", "/confirmation",
+            "/confirmation/context", "/confirmation/storage", "/confirmation/pod", "/confirmation/reference",
+            "/confirmation/acknowledgement", "/confirmation/acknowledgement/manifest", "/confirmation/captureIdentity"})
+    void everyClosedObjectRejectsMissingAndUnknownFields(String pointer) {
         for (boolean missing : List.of(true, false)) {
             var document = fixture.document().deepCopy();
             ObjectNode object = (ObjectNode) document.at(pointer);
@@ -96,26 +83,15 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "4294967297",
-                "9007199254740992",
-                "18446744073709551617",
-                "1.0",
-                "1e0",
-                "0",
-                "-1"
-            })
-    public void schemaCannotWrapOrAcceptNoncanonicalNumberTokens(String number) {
+    @ValueSource(strings = {"4294967297", "9007199254740992", "18446744073709551617", "1.0", "1e0", "0", "-1"})
+    void schemaCannotWrapOrAcceptNoncanonicalNumberTokens(String number) {
         fixture.save(fixture.document().toString().replaceFirst("\"schemaVersion\":1", "\"schemaVersion\":" + number));
         refused();
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {"/original/terminalRef", "/original/outcomeRef"})
-    public void
-            referenceSchemaCannotWrapToOne(String pointer) {
+    @ValueSource(strings = {"/original/terminalRef", "/original/outcomeRef"})
+    void referenceSchemaCannotWrapToOne(String pointer) {
         var document = fixture.document().deepCopy();
         ((ObjectNode) document.at(pointer)).put("schemaVersion", 4_294_967_297L);
         fixture.save(document.toString());
@@ -123,15 +99,8 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "bindingGeneration",
-                "authorizedDispatchGeneration",
-                "authorizedBindingVersion",
-                "receiptJournalRevision",
-                "receiptSequence"
-            })
-    public void stringRevisionsRejectOverflowAndNoncanonicalForms(String field) {
+    @ValueSource(strings = {"bindingGeneration", "authorizedDispatchGeneration", "authorizedBindingVersion", "receiptJournalRevision", "receiptSequence"})
+    void stringRevisionsRejectOverflowAndNoncanonicalForms(String field) {
         for (String value : List.of("9223372036854775808", "0", "01", "1.0", "-1")) {
             var document = fixture.document().deepCopy();
             ((ObjectNode) document.path("original")).put(field, value);
@@ -141,19 +110,9 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "bindingGeneration",
-                "authorizedDispatchGeneration",
-                "authorizedBindingVersion",
-                "receiptJournalRevision",
-                "receiptSequence",
-                "bindingId",
-                "finishOperationId",
-                "terminalRef/resourceId",
-                "outcomeRef/resourceId"
-            })
-    public void numericOneCannotBeCoercedIntoARequiredString(String path) {
+    @ValueSource(strings = {"bindingGeneration", "authorizedDispatchGeneration", "authorizedBindingVersion", "receiptJournalRevision", "receiptSequence",
+            "bindingId", "finishOperationId", "terminalRef/resourceId", "outcomeRef/resourceId"})
+    void numericOneCannotBeCoercedIntoARequiredString(String path) {
         var document = fixture.document().deepCopy();
         int slash = path.indexOf('/');
         ObjectNode parent = (ObjectNode) (slash < 0 ? document.path("original") : document.path("original").path(path.substring(0, slash)));
@@ -181,18 +140,8 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "retirement",
-                "tenant",
-                "workspace",
-                "session",
-                "execution",
-                "generation",
-                "sequence",
-                "publication"
-            })
-    public void historicalIdentityCannotEscapeSelectedRow(String field) {
+    @ValueSource(strings = {"retirement", "tenant", "workspace", "session", "execution", "generation", "sequence", "publication"})
+    void historicalIdentityCannotEscapeSelectedRow(String field) {
         var document = fixture.document().deepCopy();
         ObjectNode confirmation = (ObjectNode) document.path("confirmation");
         switch (field) {
@@ -210,17 +159,8 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "publicationBindingDigest",
-                "bindingId",
-                "bindingGeneration",
-                "sessionKey",
-                "reference",
-                "turnId",
-                "captureId"
-            })
-    public void historicalDocumentMustMatchTheSavedPublicationBinding(String field) {
+    @ValueSource(strings = {"publicationBindingDigest", "bindingId", "bindingGeneration", "sessionKey", "reference", "turnId", "captureId"})
+    void historicalDocumentMustMatchTheSavedPublicationBinding(String field) {
         var document = fixture.document().deepCopy();
         ObjectNode original = (ObjectNode) document.path("original");
         ObjectNode confirmation = (ObjectNode) document.path("confirmation");
@@ -243,16 +183,8 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "digest",
-                "hash-alias",
-                "timestamp-zero",
-                "timestamp-negative",
-                "publication-digest",
-                "publication-row-alias"
-            })
-    public void persistedColumnPinsAreVerifiedIndependently(String damage) {
+    @ValueSource(strings = {"digest", "hash-alias", "timestamp-zero", "timestamp-negative", "publication-digest", "publication-row-alias"})
+    void persistedColumnPinsAreVerifiedIndependently(String damage) {
         switch (damage) {
             case "digest" -> fixture.jdbc().update("UPDATE ma_operation_work SET evidence_sha256 = ?", "f".repeat(64));
             case "hash-alias" -> fixture.jdbc().update("UPDATE ma_operation_work SET target_id = X'666f726569676e'");
@@ -265,7 +197,7 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @Test
-    public void invalidJsonAndWireBoundsFailEvenWithAnUpdatedDigest() {
+    void invalidJsonAndWireBoundsFailEvenWithAnUpdatedDigest() {
         String valid = fixture.document().toString();
         for (String invalid : List.of(valid + "{}", valid.replaceFirst("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1"),
                 "[" + valid + "]", valid + " ".repeat(32 * 1024))) {
@@ -275,7 +207,7 @@ public class WorkspaceCsiWorkerAckStoreTest {
     }
 
     @Test
-    public void selectorsRejectInvalidUtf16NonNfcControlAndUtf8ByteOverflow() {
+    void selectorsRejectInvalidUtf16NonNfcControlAndUtf8ByteOverflow() {
         var original = fixture.selector();
         for (String value : List.of("", "\ud800", "e\u0301", "bad\nvalue", "界".repeat(171))) {
             assertThatThrownBy(() -> new WorkspaceCsiWorkerAckStore.Selector(original.retirementId(), "tenant", value, "session", "pub"))

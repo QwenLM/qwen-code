@@ -44,6 +44,17 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
         return worktree == null || "ready".equals(worktree.state());
     }
 
+    // Later Turns of a Workspace-bound Session run under the creator's
+    // Workspace grants (WorkspaceExecutionStore.authorize), so new-work
+    // admission certifies two conjuncts: the caller holds OPERATOR
+    // (requireSubmitterRole), and the Session's creator-keyed execution
+    // facts still hold (requireSubmitterFacts). The command family's
+    // replay is NOT actor-scoped (#13619), so the role gate runs before
+    // the replay: below-OPERATOR never reaches a recorded key. The facts
+    // gate follows the replay: it certifies new work only, so a recorded
+    // completed outcome always answers — a Workspace re-registration, a
+    // DRAINING row or a creator demotion must not retire it. Cancelling
+    // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
         if (session.workspace() != null
@@ -91,6 +102,10 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
                         session.sessionId());
     }
 
+    // The page rule also requires readiness; its permission facts use the
+    // batch reads the assembler already made — the caller's role from the
+    // grant batch, the creator-keyed facts of each submit-shaped Session
+    // from the facts batch.
     boolean maySubmitWorkspaceTurn(SessionRecord session,
             Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
             java.util.Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
@@ -125,6 +140,10 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
                 actorId);
     }
 
+    // The submitter family's bound-refusal split: an actor without a read
+    // grant gets the invisible 404, a readable actor below OPERATOR the
+    // 403 of the sibling lifecycle refusal, and an OPERATOR blocked by the
+    // shape gates or the creator-keyed facts the family's domain 409.
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
         if (session.workspace() != null) {

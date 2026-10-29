@@ -13,8 +13,6 @@ public interface RuntimeBrokerOperations {
 
     public boolean supportsDrainedStop();
 
-    public boolean supportsDrainedStop(RuntimeBindingRecord binding);
-
     public void requestHarnessDrain(String tenantId, String harnessSessionId);
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId);
@@ -43,29 +41,13 @@ public interface RuntimeBrokerOperations {
 
     public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId, RuntimeLifecycleAuthority authority);
 
-    public CompletionStage<RuntimeSessionRecord> acquire(
-            String harnessSessionId, String runtimeSessionId,
-            String turnKind);
-
-    public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
-            String turnKind, RuntimeLifecycleAuthority authority);
-
     public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
             String turnKind, RuntimeLifecycleAuthority authority, String mountClaimId);
-
-    public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
-            String bindingId, long generation);
-
-    public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
-            String bindingId, long generation, RuntimeLifecycleAuthority authority);
 
     public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
             String bindingId, long generation, RuntimeLifecycleAuthority authority, String mountClaimId);
 
     public CompletionStage<RuntimeScope> authorizeLifecycle(String harnessSessionId, RuntimeLifecycleAuthority authority);
-
-    public CompletionStage<Object> control(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> operation);
 
     public CompletionStage<Object> control(String harnessSessionId,
             String runtimeSessionId, Map<String, Object> operation, RuntimeLifecycleAuthority authority);
@@ -74,15 +56,8 @@ public interface RuntimeBrokerOperations {
             String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference);
 
-    public CompletionStage<ToolExecutionRecord> prepareExecution(
-            String harnessSessionId, String runtimeSessionId,
-            String idempotencyKey, Map<String, Object> reference);
-
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
-
-    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
-            String promptId, String batchId);
 
     public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
             String promptId, String batchId, Map<String, Object> recoveryOwner);
@@ -90,16 +65,7 @@ public interface RuntimeBrokerOperations {
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference,
-            String payloadDigest);
-
-    public CompletionStage<ToolExecutionRecord> prepareExecution(
-            String harnessSessionId, String runtimeSessionId,
-            String idempotencyKey, Map<String, Object> reference,
             String payloadDigest, String publicationId);
-
-    public CompletionStage<ToolExecutionRecord> startExecution(
-            String harnessSessionId, String runtimeSessionId,
-            String executionCallId, String payloadJson);
 
     public CompletionStage<ToolExecutionRecord> startExecution(
             String harnessSessionId, String runtimeSessionId,
@@ -136,19 +102,7 @@ public interface RuntimeBrokerOperations {
             String executionCallId);
 
     public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
-            String bindingId, long generation);
-
-    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
-            String bindingId, long generation, RuntimeLifecycleAuthority authority);
-
-    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
             String bindingId, long generation, RuntimeLifecycleAuthority authority, boolean drain);
-
-    public CompletionStage<Boolean> release(String harnessSessionId,
-            String runtimeSessionId);
-
-    public CompletionStage<Boolean> release(String harnessSessionId,
-            String runtimeSessionId, boolean drain);
 
     public CompletionStage<Boolean> release(String harnessSessionId,
             String runtimeSessionId, boolean drain, RuntimeLifecycleAuthority authority);

@@ -758,8 +758,7 @@ public class ManagedAgentProperties
 
     @Getter
     @Setter
-    public static class Auth
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Auth {
+    public static class Auth {
         private String mode = "auto";
         private String signingKey = "";
         // MILLIS, deliberately against the sweep's SECONDS: a stale
@@ -775,9 +774,7 @@ public class ManagedAgentProperties
 
     @Getter
     @Setter
-    public static class InternalServer
-            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
-                    .InternalServer {
+    public static class InternalServer {
         private int port;
         private String address = "127.0.0.1";
 

@@ -7,8 +7,6 @@ import java.util.Map;
 public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
-    public Auth getAuth();
-    public InternalServer getInternalServer();
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();
@@ -28,10 +26,6 @@ public interface ManagedAgentSettings {
         public String getModelId();
         public String getLabel();
     }
-    public String getTrustedActorHeader();
-    public String getServiceUser();
-    public boolean harnessCredentialsApplied();
-    public String harnessBrokerUrl();
     public interface Harness {
         public HarnessPool getPool();
         public Duration getApprovalTimeout();
@@ -77,17 +71,6 @@ public interface ManagedAgentSettings {
         public Duration getWriterLeaseDuration();
         public String getBindingKey();
         public boolean isAllowInsecureHttp();
-    }
-    public interface Auth {
-        public String getMode();
-        public String getSigningKey();
-        public long getMaxSignedBodyBytes();
-        public Duration getAllowedDrift();
-        public boolean isAllowInsecureBind();
-    }
-    public interface InternalServer {
-        public int getPort();
-        public String getAddress();
     }
     public interface ToolPublication {
         public boolean isAsyncVerificationEnabled();
