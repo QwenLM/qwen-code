@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ReadFileToolParams } from './read-file.js';
 import { ReadFileTool } from './read-file.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import os from 'node:os';
@@ -586,6 +587,49 @@ describe('ReadFileTool', () => {
       expect(() =>
         tool.build({ file_path: inRoot('test.ipynb'), pages }),
       ).not.toThrow();
+    });
+  });
+
+  describe('imagesReadable branch', () => {
+    // The `imagesReadable=false` branch is reached only when the model takes no
+    // image input and no vision bridge transcribes them. The default mock config
+    // in `beforeEach` advertises image input, so a text-only tool must be built
+    // explicitly. The bridge arm is toggled per test via the mocked
+    // shouldRunVisionBridge, which drives the real `imagesReadable` predicate.
+    function textOnlyTool(modalities: InputModalities): ReadFileTool {
+      return new ReadFileTool({
+        getEffectiveInputModalities: () => modalities,
+      } as unknown as Config);
+    }
+
+    it('omits images and notes the placeholder when image is absent and no bridge', () => {
+      visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(false);
+      const description = textOnlyTool({}).schema.description;
+      expect(description).not.toContain('images (PNG');
+      expect(description).toContain('returns a placeholder');
+      expect(description).not.toContain('audio, video');
+    });
+
+    it('advertises images when a vision bridge transcribes them', () => {
+      visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(true);
+      const description = textOnlyTool({}).schema.description;
+      expect(description).toContain('images (PNG');
+      expect(description).not.toContain('returns a placeholder');
+    });
+
+    it('advertises images when the modalities advertise image', () => {
+      visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(false);
+      const description = textOnlyTool({ image: true }).schema.description;
+      expect(description).toContain('images (PNG');
+      expect(description).not.toContain('returns a placeholder');
+    });
+
+    it('lands the second return path with imageNote for audio/video with image disabled', () => {
+      visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(false);
+      const description = textOnlyTool({ audio: true, video: true }).schema
+        .description;
+      expect(description).toContain('audio, video');
+      expect(description).toContain('returns a placeholder');
     });
   });
 
