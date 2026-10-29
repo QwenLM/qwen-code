@@ -33,7 +33,7 @@ defaults:
 jobs:
   build:
     name: 'prebuild ${{ matrix.os }} (${{ matrix.arch }})'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'' && startsWith(matrix.os, ''ubuntu'')) && fromJSON(format(''["self-hosted", "linux", "{0}", "ecs-qwen-release-host"]'', matrix.arch)) || matrix.runner }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true && startsWith(matrix.os, ''ubuntu'')) && fromJSON(format(''["self-hosted", "linux", "{0}", "ecs-qwen-release-host"]'', matrix.arch)) || matrix.runner }}'
     strategy:
       fail-fast: false
       matrix:
@@ -97,7 +97,7 @@ jobs:
   collect:
     name: 'collect prebuilds'
     needs: 'build'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
       - uses: '$/.github/actions/prepare-release-runner'
 

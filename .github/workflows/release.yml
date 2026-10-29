@@ -540,7 +540,7 @@ jobs:
       ${{
         always() &&
         github.repository == 'QwenLM/qwen-code' &&
-        vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true' &&
+        true &&
         needs.prepare.result == 'success' &&
         needs.audio_capture_prebuilds.result == 'success' &&
         (
@@ -656,7 +656,7 @@ jobs:
         needs.prepare.result == 'success' &&
         (
           needs.build_release.result == 'success' ||
-          (needs.build_release.result == 'skipped' && (github.repository != 'QwenLM/qwen-code' || vars.ECS_RELEASE_HOST_RUNNER_ENABLED != 'true'))
+          (needs.build_release.result == 'skipped' && (github.repository != 'QwenLM/qwen-code' || false))
         ) &&
         (
           github.repository != 'QwenLM/qwen-code' ||

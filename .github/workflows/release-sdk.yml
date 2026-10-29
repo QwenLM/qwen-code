@@ -62,7 +62,7 @@ jobs:
     env:
       BUILD_SDK: 'true'
     if: |-
-      ${{ vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true' &&
+      ${{ true &&
         github.repository == 'QwenLM/qwen-code' &&
         (
           github.event_name != 'release' ||
@@ -404,7 +404,7 @@ jobs:
     if: |-
       ${{
         always() && !cancelled() &&
-        (needs.build-sdk.result == 'success' || (needs.build-sdk.result == 'skipped' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED != 'true')) &&
+        (needs.build-sdk.result == 'success' || (needs.build-sdk.result == 'skipped' && false)) &&
         github.repository == 'QwenLM/qwen-code' &&
         (
           github.event_name != 'release' ||
