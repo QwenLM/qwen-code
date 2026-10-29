@@ -49,6 +49,7 @@ import { resolveLanguage, resolveLanguageSetting } from '../i18n/index.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
+import { WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS } from './workspace-service/index.js';
 
 export interface WorkspaceSkillsStatusProvider {
   (workspaceCwd: string): Promise<ServeWorkspaceSkillsStatus>;
@@ -82,13 +83,20 @@ const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
 ]);
 
 /**
- * Re-discover Skills at most this often per workspace. Mirrors the runtime
- * Skills snapshot in `workspace-service/index.ts`: file changes are applied by
- * the `SkillManager` watchers as they happen, and this interval only bounds the
- * background revalidation that covers changes a watcher could not observe
- * (a Skills directory created after the watchers started, a dropped event).
+ * Re-discover Skills at most this often per workspace. It is the runtime Skills
+ * snapshot's interval (`workspace-service/index.ts`), so the two cannot drift:
+ * file changes are applied by the `SkillManager` watchers as they happen, and
+ * this interval only bounds the background revalidation that covers changes a
+ * watcher could not observe (a Skills directory created after the watchers
+ * started, a dropped event).
  */
-export const SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
+export const SKILLS_REVALIDATE_INTERVAL_MS =
+  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS;
+
+// The two levels the `SkillManager` watchers subscribe to (bundled Skills are
+// immutable and extension Skills are managed by the extension system), so a
+// watcher-driven revalidation rescans the same set instead of every level.
+const WATCHED_SKILL_LEVELS = ['project', 'user'] as const;
 
 /**
  * Every watcher the daemon-local catalog starts, tracked per workspace so the
@@ -406,10 +414,13 @@ async function buildWorkspaceSkillsStatus(
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager, extensionSkillStates } = cached;
     // A workspace removal stops the watchers but keeps this provider alive, so
-    // the next read after it must re-subscribe instead of trusting the cache.
+    // the next read over the retained manager must re-subscribe. A manager this
+    // read built and did not install never gets here: nothing will read it, and
+    // a subscription for it would outlive its catalog.
     if (
       watchEnabled &&
-      !watchingManagers.get(workspaceCwd)?.has(skillManager)
+      managers.get(workspaceCwd) === cached &&
+      !skillManager.hasActiveWatcher()
     ) {
       await startSkillsWatcher(workspaceCwd, skillManager);
     }
@@ -507,6 +518,14 @@ async function startSkillsWatcher(
 ): Promise<boolean> {
   try {
     await manager.startWatching();
+    if (!manager.hasActiveWatcher()) {
+      // chokidar can report an attach failure after `startWatching()` resolves;
+      // recording that as a live watcher would leave the failure invisible.
+      writeStderrLine(
+        `qwen serve: daemon-local Skills watcher attached to no directory for ${workspaceCwd}`,
+      );
+      return false;
+    }
     trackWatchingManager(workspaceCwd, manager);
     return true;
   } catch (error) {
@@ -533,11 +552,14 @@ function scheduleSkillsRevalidation(
   managers: Map<string, WorkspaceSkillManagers>,
 ): void {
   if (cached.refreshing) return;
-  if (Date.now() - cached.revalidatedAt < SKILLS_REVALIDATE_INTERVAL_MS) return;
+  const elapsed = Date.now() - cached.revalidatedAt;
+  // A backwards clock step makes `elapsed` negative; treating that as fresh
+  // would freeze the fallback until the clock caught up.
+  if (elapsed >= 0 && elapsed < SKILLS_REVALIDATE_INTERVAL_MS) return;
   if (managers.get(workspaceCwd) !== cached) return;
   cached.revalidatedAt = Date.now();
   cached.refreshing = cached.skillManager
-    .listSkills({ force: true })
+    .refreshCache({ levels: WATCHED_SKILL_LEVELS })
     .then(
       () => undefined,
       (error: unknown) => {
