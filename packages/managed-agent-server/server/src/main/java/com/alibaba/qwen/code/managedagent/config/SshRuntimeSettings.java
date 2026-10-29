@@ -1,24 +1,16 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.util.List;
 
+@Getter
+@Setter
 public class SshRuntimeSettings implements com.alibaba.qwen.code.managedagent.settings.SshSettings {
     private boolean enabled;
     private List<Node> nodes = List.of();
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
-    }
-
-    public List<Node> getNodes() {
-        return nodes;
-    }
 
     public void setNodes(List<Node> nodes) {
         this.nodes = List.copyOf(nodes);

@@ -114,6 +114,8 @@ mvn -f server/pom.xml spring-boot:run
 
 Embedding imports `ManagedAgentConfiguration`; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Add the ordinary server artifact as the dependency; Maven resolves the other five modules transitively. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
 
+Server configuration accessors use Lombok through the server POM's annotation processor; enable annotation processing when compiling through an IDE. Keep accessors with normalization, copying or fallback logic explicit. Lombok is excluded from executable and maintenance JARs and is not a runtime dependency of embedding applications.
+
 See the complete Maven boundary design: [English](../../docs/design/2026-10-29-managed-agent-maven-modules.md) | [简体中文](../../docs/design/2026-10-29-managed-agent-maven-modules.zh-CN.md).
 
 ## Integration status

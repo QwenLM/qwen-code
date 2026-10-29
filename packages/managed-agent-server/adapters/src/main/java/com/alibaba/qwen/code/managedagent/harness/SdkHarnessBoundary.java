@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /** Converts SDK failures at the adapter boundary, including deferred stream reads. */
 public final class SdkHarnessBoundary implements HarnessConnector {
@@ -17,504 +18,288 @@ public final class SdkHarnessBoundary implements HarnessConnector {
 
     @Override
     public boolean isAvailable() {
-        try {
-            return delegate.isAvailable();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::isAvailable);
     }
 
     @Override
     public void recoverForWake(String tenantId, String sessionId) {
-        try {
-            delegate.recoverForWake(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.recoverForWake(tenantId, sessionId));
     }
 
     @Override
     public boolean supportsPublicChildAgents() {
-        try {
-            return delegate.supportsPublicChildAgents();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsPublicChildAgents);
     }
 
     @Override
     public String closeSession(OperationRecord operation) {
-        try {
-            return delegate.closeSession(operation);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.closeSession(operation));
     }
 
     @Override
     public void runLifecycleChildOperation(OperationRecord operation, Map<String, Object> body) {
-        try {
-            delegate.runLifecycleChildOperation(operation, body);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.runLifecycleChildOperation(operation, body));
     }
 
     @Override
     public Map<String, Object> drainInstance(String instanceId, String operationId) {
-        try {
-            return delegate.drainInstance(instanceId, operationId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.drainInstance(instanceId, operationId));
     }
 
     @Override
     public Map<String, Object> releaseOwnership(String tenantId, String sessionId,
             String operationId, long expectedPlacementEpoch) {
-        try {
-            return delegate.releaseOwnership(tenantId, sessionId, operationId, expectedPlacementEpoch);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.releaseOwnership(tenantId, sessionId, operationId, expectedPlacementEpoch));
     }
 
     @Override
     public boolean supportsApprovalSelection() {
-        try {
-            return delegate.supportsApprovalSelection();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsApprovalSelection);
     }
 
     @Override
     public boolean supportsLiveApprovalSelection() {
-        try {
-            return delegate.supportsLiveApprovalSelection();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsLiveApprovalSelection);
     }
 
     @Override
     public boolean supportsAutoApproval() {
-        try {
-            return delegate.supportsAutoApproval();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsAutoApproval);
     }
 
     @Override
     public boolean supportsPermissionRules() {
-        try {
-            return delegate.supportsPermissionRules();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsPermissionRules);
     }
 
     @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
-        try {
-            return delegate.supportsAgentDefinitionApprovalSelection();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsAgentDefinitionApprovalSelection);
     }
 
     @Override
     public boolean supportsModelSelection() {
-        try {
-            return delegate.supportsModelSelection();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsModelSelection);
     }
 
     @Override
     public boolean supportsUserMessageQueue() {
-        try {
-            return delegate.supportsUserMessageQueue();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsUserMessageQueue);
     }
 
     @Override
     public boolean supportsContextCompression() {
-        try {
-            return delegate.supportsContextCompression();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsContextCompression);
     }
 
     @Override
     public ContextCompressionSubmission prepareContextCompression(String tenantId, String sessionId,
             Map<String, Object> body) {
-        try {
+        return call(() -> {
             var prepared = delegate.prepareContextCompression(tenantId, sessionId, body);
-            return () -> {
-                try {
-                    return prepared.submit();
-                } catch (RuntimeException error) {
-                    throw HarnessSdkValues.runtime(error);
-                }
-            };
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+            return () -> call(prepared::submit);
+        });
     }
 
     @Override
     public Map<String, Object> runContextCompression(String tenantId, String sessionId,
             Map<String, Object> body) {
-        try {
-            return delegate.runContextCompression(tenantId, sessionId, body);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.runContextCompression(tenantId, sessionId, body));
     }
 
     @Override
     public Map<String, Object> readContextCompression(String tenantId, String sessionId,
             String operationId) {
-        try {
-            return delegate.readContextCompression(tenantId, sessionId, operationId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.readContextCompression(tenantId, sessionId, operationId));
     }
 
     @Override
     public boolean supportsPlanMode() {
-        try {
-            return delegate.supportsPlanMode();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsPlanMode);
     }
 
     @Override
     public boolean supportsInputAttachments() {
-        try {
-            return delegate.supportsInputAttachments();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsInputAttachments);
     }
 
     @Override
     public boolean supportsSessionSkills() {
-        try {
-            return delegate.supportsSessionSkills();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsSessionSkills);
     }
 
     @Override
     public boolean supportsMcpManagement() {
-        try {
-            return delegate.supportsMcpManagement();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsMcpManagement);
     }
 
     @Override
     public Map<String, Object> mcpManagement(String tenantId, String sessionId) {
-        try {
-            return delegate.mcpManagement(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.mcpManagement(tenantId, sessionId));
     }
 
     @Override
     public Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
-        try {
-            return delegate.manageMcp(tenantId, sessionId, command);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.manageMcp(tenantId, sessionId, command));
     }
 
     @Override
     public Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
-        try {
-            return delegate.mcpManagementOperation(tenantId, sessionId, operationId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.mcpManagementOperation(tenantId, sessionId, operationId));
     }
 
     @Override
     public boolean supportsSessionExtensions() {
-        try {
-            return delegate.supportsSessionExtensions();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsSessionExtensions);
     }
 
     @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
-        try {
-            return delegate.applyExtensions(tenantId, sessionId, command);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.applyExtensions(tenantId, sessionId, command));
     }
 
     @Override
     public Map<String, Object> continueExtensionOperation(String tenantId, String sessionId, String operationId, boolean recoverPrevious) {
-        try {
-            return delegate.continueExtensionOperation(tenantId, sessionId, operationId, recoverPrevious);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.continueExtensionOperation(tenantId, sessionId, operationId, recoverPrevious));
     }
 
     @Override
     public boolean isWorkspaceFilesAvailable() {
-        try {
-            return delegate.isWorkspaceFilesAvailable();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::isWorkspaceFilesAvailable);
     }
 
     @Override
     public boolean supportsLifecycle() {
-        try {
-            return delegate.supportsLifecycle();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsLifecycle);
     }
 
     @Override
     public boolean supportsLifecycle(String profile) {
-        try {
-            return delegate.supportsLifecycle(profile);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.supportsLifecycle(profile));
     }
 
     @Override
-    public void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
-        try {
-            delegate.prepareLifecycleResources(operation);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+    public void prepareLifecycleResources(OperationRecord operation) {
+        run(() -> delegate.prepareLifecycleResources(operation));
     }
 
     @Override
-    public void settleLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
-        try {
-            delegate.settleLifecycleResources(operation);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+    public void settleLifecycleResources(OperationRecord operation) {
+        run(() -> delegate.settleLifecycleResources(operation));
     }
 
     @Override
     public boolean supportsFencedTitles() {
-        try {
-            return delegate.supportsFencedTitles();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::supportsFencedTitles);
     }
 
     @Override
-    public JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
-        try {
-            return delegate.settleLifecycle(operation);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+    public JsonNode settleLifecycle(OperationRecord operation) {
+        return call(() -> delegate.settleLifecycle(operation));
     }
 
     @Override
-    public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
-        try {
-            delegate.detachLifecycle(operation);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+    public void detachLifecycle(OperationRecord operation) {
+        run(() -> delegate.detachLifecycle(operation));
     }
 
     @Override
     public Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting) {
-        try {
-            return delegate.createOrLoad(tenantId, sessionId, loadExisting);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.createOrLoad(tenantId, sessionId, loadExisting));
     }
 
     @Override
     public Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
-        try {
-            return delegate.createOrLoad(tenantId, sessionId, loadExisting, passiveManagedRuntimeRecovery);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.createOrLoad(tenantId, sessionId, loadExisting, passiveManagedRuntimeRecovery));
     }
 
     @Override
     public Attachment recoverManagedRuntime(String tenantId, String sessionId,
             boolean cancellation) {
-        try {
-            return delegate.recoverManagedRuntime(tenantId, sessionId, cancellation);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recoverManagedRuntime(tenantId, sessionId, cancellation));
     }
 
     @Override
     public Attachment recoverManagedRuntime(String tenantId, String sessionId,
             boolean cancellation, String promptId) {
-        try {
-            return delegate.recoverManagedRuntime(tenantId, sessionId, cancellation, promptId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recoverManagedRuntime(tenantId, sessionId, cancellation, promptId));
     }
 
     @Override
     public Attachment recoverManagedCancellation(String tenantId,
             String sessionId) {
-        try {
-            return delegate.recoverManagedCancellation(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recoverManagedCancellation(tenantId, sessionId));
     }
 
     @Override
     public Attachment recoverManagedCancellation(String tenantId,
             String sessionId, String promptId) {
-        try {
-            return delegate.recoverManagedCancellation(tenantId, sessionId, promptId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recoverManagedCancellation(tenantId, sessionId, promptId));
     }
 
     @Override
     public Attachment recoverManagedFailureCancellation(String tenantId,
             String sessionId, String turnId, String dispatchOwner) {
-        try {
-            return delegate.recoverManagedFailureCancellation(tenantId, sessionId, turnId, dispatchOwner);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recoverManagedFailureCancellation(tenantId, sessionId, turnId, dispatchOwner));
     }
 
     @Override
     public Attachment recoverManagedFailureCancellation(String tenantId,
             String sessionId, String turnId, String dispatchOwner, String promptId) {
-        try {
-            return delegate.recoverManagedFailureCancellation(tenantId, sessionId, turnId, dispatchOwner, promptId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recoverManagedFailureCancellation(tenantId, sessionId, turnId, dispatchOwner, promptId));
     }
 
     @Override
     public void discardManagedRecovery(String tenantId, String sessionId) {
-        try {
-            delegate.discardManagedRecovery(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.discardManagedRecovery(tenantId, sessionId));
     }
 
     @Override
     public RecoveryStatus inspectRecovery(String tenantId, String sessionId, String promptId) {
-        try {
-            return delegate.inspectRecovery(tenantId, sessionId, promptId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.inspectRecovery(tenantId, sessionId, promptId));
     }
 
     @Override
     public Attachment cachedRecoveryAttachment(String tenantId, String sessionId) {
-        try {
-            return delegate.cachedRecoveryAttachment(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.cachedRecoveryAttachment(tenantId, sessionId));
     }
 
     @Override
     public boolean recheckRecoveryCleanup(String tenantId, String sessionId, String promptId) {
-        try {
-            return delegate.recheckRecoveryCleanup(tenantId, sessionId, promptId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.recheckRecoveryCleanup(tenantId, sessionId, promptId));
     }
 
     @Override
     public Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
-        try {
-            return delegate.submit(tenantId, sessionId, promptId, input, payloadDigest);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.submit(tenantId, sessionId, promptId, input, payloadDigest));
     }
 
     @Override
     public Admission continueManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
-        try {
-            return delegate.continueManagedRuntime(tenantId, sessionId, promptId, checkpointId, activationId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.continueManagedRuntime(tenantId, sessionId, promptId, checkpointId, activationId));
     }
 
     @Override
     public Admission cancelManagedRuntime(String tenantId, String sessionId,
             String promptId, String checkpointId, String activationId) {
-        try {
-            return delegate.cancelManagedRuntime(tenantId, sessionId, promptId, checkpointId, activationId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.cancelManagedRuntime(tenantId, sessionId, promptId, checkpointId, activationId));
     }
 
     @Override
     public SourceStream stream(String tenantId, String sessionId, long lastEventId,
             String eventEpoch) {
-        try {
-            return streamBoundary(delegate.stream(tenantId, sessionId, lastEventId, eventEpoch));
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> streamBoundary(delegate.stream(tenantId, sessionId, lastEventId, eventEpoch)));
     }
 
     @Override
     public SourceStream observeStream(String tenantId, String sessionId, String bootId,
             long lastEventId, String eventEpoch) {
-        try {
-            return streamBoundary(delegate.observeStream(tenantId, sessionId, bootId, lastEventId, eventEpoch));
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> streamBoundary(delegate.observeStream(tenantId, sessionId, bootId, lastEventId, eventEpoch)));
     }
 
     @Override
@@ -523,129 +308,89 @@ public final class SdkHarnessBoundary implements HarnessConnector {
             String sessionId,
             String actionId,
             JsonNode response) {
-        try {
-            delegate.resolveAction(tenantId, sessionId, actionId, response);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.resolveAction(tenantId, sessionId, actionId, response));
     }
 
     @Override
     public void cancel(String tenantId, String sessionId) {
-        try {
-            delegate.cancel(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.cancel(tenantId, sessionId));
     }
 
     @Override
     public void cancelOriginalTurn(String tenantId, String sessionId, String promptId) {
-        try {
-            delegate.cancelOriginalTurn(tenantId, sessionId, promptId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.cancelOriginalTurn(tenantId, sessionId, promptId));
     }
 
     @Override
     public Map<String, Object> runAutomationOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
-        try {
-            return delegate.runAutomationOperation(tenantId, sessionId, body);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.runAutomationOperation(tenantId, sessionId, body));
     }
 
     @Override
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
-        try {
-            delegate.runChildOperation(tenantId, sessionId, body);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.runChildOperation(tenantId, sessionId, body));
     }
 
     @Override
     public Map<String, Object> runMessageOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
-        try {
-            return delegate.runMessageOperation(tenantId, sessionId, body);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.runMessageOperation(tenantId, sessionId, body));
     }
 
     @Override
     public Map<String, Object> runChannelOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
-        try {
-            return delegate.runChannelOperation(tenantId, sessionId, body);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.runChannelOperation(tenantId, sessionId, body));
     }
 
     @Override
     public void rename(String tenantId, String sessionId, String title) {
-        try {
-            delegate.rename(tenantId, sessionId, title);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.rename(tenantId, sessionId, title));
     }
 
     @Override
     public void rename(String tenantId, String sessionId, String title, long revision) {
-        try {
-            delegate.rename(tenantId, sessionId, title, revision);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        run(() -> delegate.rename(tenantId, sessionId, title, revision));
     }
 
     @Override
     public String closeSession(String tenantId, String sessionId) {
-        try {
-            return delegate.closeSession(tenantId, sessionId);
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(() -> delegate.closeSession(tenantId, sessionId));
     }
 
     @Override
     public List<AttachedSession> attachedSessions() {
-        try {
-            return delegate.attachedSessions();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::attachedSessions);
     }
 
     @Override
     public String writerIdentity() {
-        try {
-            return delegate.writerIdentity();
-        } catch (RuntimeException error) {
-            throw HarnessSdkValues.runtime(error);
-        }
+        return call(delegate::writerIdentity);
     }
 
     @Override
     public boolean activateForWake(String tenantId, String sessionId) {
+        return call(() -> delegate.activateForWake(tenantId, sessionId));
+    }
+
+    @Override
+    public void close() {
+        run(delegate::close);
+    }
+
+    private static <T> T call(Supplier<T> operation) {
         try {
-            return delegate.activateForWake(tenantId, sessionId);
+            return operation.get();
         } catch (RuntimeException error) {
             throw HarnessSdkValues.runtime(error);
         }
     }
 
-    @Override
-    public void close() {
+    private static void run(Runnable operation) {
         try {
-            delegate.close();
+            operation.run();
         } catch (RuntimeException error) {
             throw HarnessSdkValues.runtime(error);
         }
@@ -655,38 +400,22 @@ public final class SdkHarnessBoundary implements HarnessConnector {
         return new SourceStream() {
             @Override
             public String eventEpoch() {
-                try {
-                    return stream.eventEpoch();
-                } catch (RuntimeException error) {
-                    throw HarnessSdkValues.runtime(error);
-                }
+                return call(stream::eventEpoch);
             }
 
             @Override
             public SourceEvent next() {
-                try {
-                    return stream.next();
-                } catch (RuntimeException error) {
-                    throw HarnessSdkValues.runtime(error);
-                }
+                return call(stream::next);
             }
 
             @Override
             public boolean recoveryBlocked(long afterEventId) {
-                try {
-                    return stream.recoveryBlocked(afterEventId);
-                } catch (RuntimeException error) {
-                    throw HarnessSdkValues.runtime(error);
-                }
+                return call(() -> stream.recoveryBlocked(afterEventId));
             }
 
             @Override
             public void close() {
-                try {
-                    stream.close();
-                } catch (RuntimeException error) {
-                    throw HarnessSdkValues.runtime(error);
-                }
+                run(stream::close);
             }
         };
     }

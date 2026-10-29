@@ -237,4 +237,31 @@ passed 196 cases, CLI consumers passed 288 cases, and selected Maven/workflow ch
 passed 22 cases. The earlier Java results above predate this integration. The shared
 598-second budget was not reset: compilation, style checks and Java regressions for
 the integrated revision remain pending CI, including the new repository boundary
-and migrated upstream tests. The PR is a draft until final verification succeeds.
+and migrated upstream tests. Final acceptance requires those checks to pass.
+
+## Boilerplate reduction
+
+The server configuration classes use Lombok `@Getter` and `@Setter` for 349 simple
+accessors. Keep normalization, defensive copies, fallback values and the
+`EnvironmentAware` callback explicit. Internal credential-loading state remains
+excluded from generated accessors. Existing records, field defaults and
+`@DurationUnit` annotations remain unchanged; `@Data` is not used. Lombok is an
+optional provided dependency of `server`, with its version inherited from Spring
+Boot and an explicit compiler annotation processor. Exclude it from every Boot
+executable and operator archive; other production modules do not require it.
+
+The SDK wrapper retains explicit interface implementations and delegates repeated
+runtime-exception conversion to two private helpers for value and void calls.
+Its size falls from 693 to 422 lines without reflection or a proxy framework.
+Context-compression submission stays deferred, and stream epoch reads, event
+reads, recovery checks and close operations still convert SDK failures after
+stream creation. Preserve result identity, arguments, call order, unrelated
+exceptions and `Error` propagation.
+
+Regression coverage adds nested configuration binding, hidden internal state,
+normalization and collection semantics, immediate and deferred SDK failures, both
+stream entry points and archive exclusion. Source comparison confirms unchanged
+JavaBean signatures and delegate call sites. These new Java regressions have not
+run locally: the shared budget remains exhausted, and earlier Java passes do not
+validate this increment. Final compilation, quality checks and regressions remain
+pending CI.

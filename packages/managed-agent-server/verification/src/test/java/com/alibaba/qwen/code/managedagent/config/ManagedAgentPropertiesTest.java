@@ -17,6 +17,8 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -29,6 +31,65 @@ public class ManagedAgentPropertiesTest {
     private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";
     private static final String TRUSTED_KEY =
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
+
+    @Test
+    void generatedAccessorsKeepNestedBindingAndInternalStatePrivate() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues(
+                        "qwen.managed-agent.service-user=  worker  ",
+                        "qwen.managed-agent.model-catalog[0].model-id=model-one",
+                        "qwen.managed-agent.model-catalog[0].label=Model One",
+                        "qwen.managed-agent.harness.enabled=false",
+                        "qwen.managed-agent.harness.load-timeout=12",
+                        "qwen.managed-agent.automation.scan-delay=1200",
+                        "qwen.managed-agent.runtime-broker.retention.batch-size=42",
+                        "qwen.managed-agent.harness-credentials-applied=true",
+                        "qwen.managed-agent.harness-broker-url=http://untrusted")
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var properties = started.getBean(ManagedAgentProperties.class);
+                    assertThat(properties.getServiceUser()).isEqualTo("worker");
+                    assertThat(properties.getModelCatalog()).singleElement().satisfies(model -> {
+                        assertThat(model.getModelId()).isEqualTo("model-one");
+                        assertThat(model.getLabel()).isEqualTo("Model One");
+                    });
+                    assertThat(properties.getHarness().getLoadTimeout()).isEqualTo(Duration.ofSeconds(12));
+                    assertThat(properties.getAutomation().getScanDelay()).isEqualTo(Duration.ofMillis(1200));
+                    assertThat(properties.getRuntimeBroker().getRetention().getBatchSize()).isEqualTo(42);
+                    assertThat(properties.harnessCredentialsApplied()).isFalse();
+                    assertThat(properties.harnessBrokerUrl()).isEmpty();
+                });
+    }
+
+    @Test
+    void customAccessorsKeepNormalizationCopiesAndSharedCollections() {
+        var properties = new ManagedAgentProperties();
+        properties.setServiceUser(null);
+        assertThat(properties.getServiceUser()).isEmpty();
+        properties.setServiceUser("  worker  ");
+        assertThat(properties.getServiceUser()).isEqualTo("worker");
+        properties.getInternalServer().setAddress("  ");
+        assertThat(properties.getInternalServer().getAddress()).isEqualTo("127.0.0.1");
+
+        var model = new ManagedAgentProperties.ModelOption();
+        model.setModelId("model-one");
+        var catalog = new ArrayList<>(List.of(model));
+        properties.setModelCatalog(catalog);
+        catalog.clear();
+        assertThat(properties.getModelCatalog()).containsExactly(model);
+        var actors = new ArrayList<>(List.of("actor"));
+        properties.getExtensions().setAllowedActors(actors);
+        actors.clear();
+        assertThat(properties.getExtensions().getAllowedActors()).containsExactly("actor");
+
+        var mounts = new ArrayList<ManagedAgentProperties.RuntimeBroker.WorkspaceMount>();
+        properties.getRuntimeBroker().setWorkspaceMounts(mounts);
+        assertThat(properties.getRuntimeBroker().getWorkspaceMounts()).isSameAs(mounts);
+        var nodes = new ArrayList<SshRuntimeSettings.Node>();
+        properties.getRuntimeBroker().getSsh().setNodes(nodes);
+        assertThat(properties.getRuntimeBroker().getSsh().getNodes()).isNotSameAs(nodes).isEmpty();
+    }
 
     @Test
     public void verifiedFileRuntimeCanResolvePersistedImportsWithNewImportsDisabled() {

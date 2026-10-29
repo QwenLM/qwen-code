@@ -5,6 +5,9 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import jakarta.annotation.PostConstruct;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +38,8 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 @ConfigurationProperties("qwen.managed-agent")
+@Getter
+@Setter
 public class ManagedAgentProperties
         implements EnvironmentAware,
                 com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings {
@@ -81,14 +86,15 @@ public class ManagedAgentProperties
     // The account the server runs as; preflight checks file access as it.
     private String serviceUser = "";
     // Validation may run more than once; the file is read only the first time.
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
     private boolean harnessCredentialsApplied;
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
     private String harnessBrokerUrl = "";
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
+    @Getter(AccessLevel.NONE)
     private Environment environment;
-
-    public Harness getHarness() {
-        return harness;
-    }
 
     public boolean admitsPublicChildAgents() {
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
@@ -97,109 +103,17 @@ public class ManagedAgentProperties
                 && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
     }
 
-    public Auth getAuth() {
-        return auth;
-    }
-
-    public InternalServer getInternalServer() {
-        return internalServer;
-    }
-
-    public Automation getAutomation() {
-        return automation;
-    }
-
-    public Channels getChannels() {
-        return channels;
-    }
-
-    public EventTransport getEventTransport() {
-        return eventTransport;
-    }
-
-    public SessionStore getSessionStore() {
-        return sessionStore;
-    }
-
-    public ToolPublication getToolPublication() {
-        return toolPublication;
-    }
-
-    public Artifacts getArtifacts() {
-        return artifacts;
-    }
-
-    public ManagedExtensions getManagedExtensions() { return managedExtensions; }
-
-    public Extensions getExtensions() {
-        return extensions;
-    }
-
-    public Dispatch getDispatch() {
-        return dispatch;
-    }
-
-    public Events getEvents() {
-        return events;
-    }
-
-    public RuntimeBroker getRuntimeBroker() {
-        return runtimeBroker;
-    }
-
-    public String getAgentRevision() {
-        return agentRevision;
-    }
-
-    public void setAgentRevision(String agentRevision) {
-        this.agentRevision = agentRevision;
-    }
-    public List<String> getDefinitionToolProfiles() {
-        return definitionToolProfiles;
-    }
-    public void setDefinitionToolProfiles(
-            List<String> definitionToolProfiles) {
-        this.definitionToolProfiles = definitionToolProfiles;
-    }
-
-    public List<String> getDefinitionModels() {
-        return definitionModels;
-    }
-
-    public void setDefinitionModels(List<String> definitionModels) {
-        this.definitionModels = definitionModels;
-    }
-
-    public List<ModelOption> getModelCatalog() {
-        return modelCatalog;
-    }
-
     public void setModelCatalog(List<ModelOption> modelCatalog) {
         this.modelCatalog = List.copyOf(modelCatalog);
     }
 
+    @Getter
+    @Setter
     public static class ModelOption
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .ModelOption {
         private String modelId;
         private String label;
-
-        public String getModelId() { return modelId; }
-        public void setModelId(String modelId) { this.modelId = modelId; }
-        public String getLabel() { return label; }
-        public void setLabel(String label) { this.label = label; }
-    }
-
-    public String getTrustedActorHeader() {
-        return trustedActorHeader;
-    }
-
-    public void setTrustedActorHeader(String trustedActorHeader) {
-        this.trustedActorHeader = trustedActorHeader;
-    }
-
-    public String getServiceUser() {
-        return serviceUser;
     }
 
     public void setServiceUser(String serviceUser) {
@@ -760,13 +674,11 @@ public class ManagedAgentProperties
         }
     }
 
+    @Getter
+    @Setter
     public static class Harness
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Harness {
         private final HarnessPool pool = new HarnessPool();
-
-        public HarnessPool getPool() {
-            return pool;
-        }
 
         private boolean enabled;
         private boolean workspaceFilesEnabled;
@@ -781,14 +693,6 @@ public class ManagedAgentProperties
         // un-annotated Duration silently binds milliseconds.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration approvalTimeout = Duration.ofMinutes(10);
-
-        public Duration getApprovalTimeout() {
-            return approvalTimeout;
-        }
-
-        public void setApprovalTimeout(Duration value) {
-            approvalTimeout = value;
-        }
 
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration connectTimeout = Duration.ofSeconds(5);
@@ -806,116 +710,10 @@ public class ManagedAgentProperties
          */
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration turnDeadline = Duration.ofMinutes(30);
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public boolean isWorkspaceFilesEnabled() {
-            return workspaceFilesEnabled;
-        }
-
-        public void setWorkspaceFilesEnabled(boolean workspaceFilesEnabled) {
-            this.workspaceFilesEnabled = workspaceFilesEnabled;
-        }
-
-        public boolean isWorkspaceChildAgentsEnabled() { return workspaceChildAgentsEnabled; }
-
-        public void setWorkspaceChildAgentsEnabled(boolean value) { workspaceChildAgentsEnabled = value; }
-
-        public boolean isWorkspaceShellEnabled() {
-            return workspaceShellEnabled;
-        }
-
-        public void setWorkspaceShellEnabled(boolean workspaceShellEnabled) {
-            this.workspaceShellEnabled = workspaceShellEnabled;
-        }
-
-        public String getBaseUrl() {
-            return baseUrl;
-        }
-
-        public void setBaseUrl(String baseUrl) {
-            this.baseUrl = baseUrl;
-        }
-
-        public String getToken() {
-            return token;
-        }
-
-        public void setToken(String token) {
-            this.token = token;
-        }
-
-        public String getCapabilityDigest() {
-            return capabilityDigest;
-        }
-
-        public void setCapabilityDigest(String capabilityDigest) {
-            this.capabilityDigest = capabilityDigest;
-        }
-
-        public String getCredentialsFile() {
-            return credentialsFile;
-        }
-
-        public void setCredentialsFile(String credentialsFile) {
-            this.credentialsFile = credentialsFile;
-        }
-
-        public String getApprovalMode() {
-            return approvalMode;
-        }
-
-        public Duration getLoadTimeout() {
-            return loadTimeout;
-        }
-
-        public void setLoadTimeout(Duration value) {
-            loadTimeout = value;
-        }
-
-        public void setApprovalMode(String approvalMode) {
-            this.approvalMode = approvalMode;
-        }
-
-        public Duration getConnectTimeout() {
-            return connectTimeout;
-        }
-
-        public void setConnectTimeout(Duration connectTimeout) {
-            this.connectTimeout = connectTimeout;
-        }
-
-        public Duration getRequestTimeout() {
-            return requestTimeout;
-        }
-
-        public void setRequestTimeout(Duration requestTimeout) {
-            this.requestTimeout = requestTimeout;
-        }
-
-        public Duration getHeartbeatInterval() {
-            return heartbeatInterval;
-        }
-
-        public void setHeartbeatInterval(Duration heartbeatInterval) {
-            this.heartbeatInterval = heartbeatInterval;
-        }
-
-        public Duration getTurnDeadline() {
-            return turnDeadline;
-        }
-
-        public void setTurnDeadline(Duration turnDeadline) {
-            this.turnDeadline = turnDeadline;
-        }
     }
 
+    @Getter
+    @Setter
     public static class HarnessPool
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .HarnessPool {
@@ -933,142 +731,19 @@ public class ManagedAgentProperties
         private String serviceName = "";
         private String serviceUid = "";
         private String portName = "https";
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean value) {
-            enabled = value;
-        }
-
-        public String getDiscovery() {
-            return discovery;
-        }
-
-        public void setDiscovery(String value) {
-            discovery = value;
-        }
-
-        public List<HarnessInstance> getInstances() {
-            return instances;
-        }
-
-        public void setInstances(List<HarnessInstance> value) {
-            instances = value;
-        }
-
-        public String getKeyStoreFile() {
-            return keyStoreFile;
-        }
-
-        public void setKeyStoreFile(String value) {
-            keyStoreFile = value;
-        }
-
-        public String getKeyStorePasswordFile() {
-            return keyStorePasswordFile;
-        }
-
-        public void setKeyStorePasswordFile(String value) {
-            keyStorePasswordFile = value;
-        }
-
-        public String getTrustStoreFile() {
-            return trustStoreFile;
-        }
-
-        public void setTrustStoreFile(String value) {
-            trustStoreFile = value;
-        }
-
-        public String getTrustStorePasswordFile() {
-            return trustStorePasswordFile;
-        }
-
-        public void setTrustStorePasswordFile(String value) {
-            trustStorePasswordFile = value;
-        }
-
-        public String getKubernetesApiUrl() {
-            return kubernetesApiUrl;
-        }
-
-        public void setKubernetesApiUrl(String value) {
-            kubernetesApiUrl = value;
-        }
-
-        public String getKubernetesTokenFile() {
-            return kubernetesTokenFile;
-        }
-
-        public void setKubernetesTokenFile(String value) {
-            kubernetesTokenFile = value;
-        }
-
-        public String getKubernetesCaFile() {
-            return kubernetesCaFile;
-        }
-
-        public void setKubernetesCaFile(String value) {
-            kubernetesCaFile = value;
-        }
-
-        public String getNamespace() {
-            return namespace;
-        }
-
-        public void setNamespace(String value) {
-            namespace = value;
-        }
-
-        public String getServiceName() {
-            return serviceName;
-        }
-
-        public void setServiceName(String value) {
-            serviceName = value;
-        }
-
-        public String getServiceUid() {
-            return serviceUid;
-        }
-
-        public void setServiceUid(String value) {
-            serviceUid = value;
-        }
-
-        public String getPortName() {
-            return portName;
-        }
-
-        public void setPortName(String value) {
-            portName = value;
-        }
     }
 
+    @Getter
+    @Setter
     public static class HarnessInstance
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .HarnessInstance {
         private String instanceId = "";
         private String baseUrl = "";
-        public String getInstanceId() {
-            return instanceId;
-        }
-
-        public void setInstanceId(String value) {
-            instanceId = value;
-        }
-
-        public String getBaseUrl() {
-            return baseUrl;
-        }
-
-        public void setBaseUrl(String value) {
-            baseUrl = value;
-        }
     }
 
+    @Getter
+    @Setter
     public static class SessionStore
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .SessionStore {
@@ -1079,56 +754,10 @@ public class ManagedAgentProperties
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
         private String bindingKey = "";
         private boolean allowInsecureHttp;
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public String getBaseUrl() {
-            return baseUrl;
-        }
-
-        public void setBaseUrl(String baseUrl) {
-            this.baseUrl = baseUrl;
-        }
-
-        public String getWorkspaceId() {
-            return workspaceId;
-        }
-
-        public void setWorkspaceId(String workspaceId) {
-            this.workspaceId = workspaceId;
-        }
-
-        public Duration getWriterLeaseDuration() {
-            return writerLeaseDuration;
-        }
-
-        public void setWriterLeaseDuration(Duration writerLeaseDuration) {
-            this.writerLeaseDuration = writerLeaseDuration;
-        }
-
-        public String getBindingKey() {
-            return bindingKey;
-        }
-
-        public void setBindingKey(String bindingKey) {
-            this.bindingKey = bindingKey;
-        }
-
-        public boolean isAllowInsecureHttp() {
-            return allowInsecureHttp;
-        }
-
-        public void setAllowInsecureHttp(boolean allowInsecureHttp) {
-            this.allowInsecureHttp = allowInsecureHttp;
-        }
     }
 
+    @Getter
+    @Setter
     public static class Auth
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Auth {
         private String mode = "auto";
@@ -1142,61 +771,15 @@ public class ManagedAgentProperties
         private Duration allowedDrift = Duration.ofMinutes(5);
         private boolean allowInsecureBind;
         private long maxSignedBodyBytes = 10 * 1024 * 1024;
-
-        public String getMode() {
-            return mode;
-        }
-
-        public void setMode(String mode) {
-            this.mode = mode;
-        }
-
-        public String getSigningKey() {
-            return signingKey;
-        }
-
-        public void setSigningKey(String signingKey) {
-            this.signingKey = signingKey;
-        }
-
-        public long getMaxSignedBodyBytes() {
-            return maxSignedBodyBytes;
-        }
-
-        public void setMaxSignedBodyBytes(long maxSignedBodyBytes) {
-            this.maxSignedBodyBytes = maxSignedBodyBytes;
-        }
-
-        public Duration getAllowedDrift() {
-            return allowedDrift;
-        }
-
-        public void setAllowedDrift(Duration allowedDrift) {
-            this.allowedDrift = allowedDrift;
-        }
-
-        public boolean isAllowInsecureBind() {
-            return allowInsecureBind;
-        }
-
-        public void setAllowInsecureBind(boolean allowInsecureBind) {
-            this.allowInsecureBind = allowInsecureBind;
-        }
     }
 
+    @Getter
+    @Setter
     public static class InternalServer
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .InternalServer {
         private int port;
         private String address = "127.0.0.1";
-
-        public int getPort() {
-            return port;
-        }
-
-        public void setPort(int port) {
-            this.port = port;
-        }
 
         // A blank value comes from an unset template variable; both the
         // startup guard and the connector must read it as the default.
@@ -1204,12 +787,10 @@ public class ManagedAgentProperties
             return StringUtils.isBlank(address) ? "127.0.0.1"
                     : address;
         }
-
-        public void setAddress(String address) {
-            this.address = address;
-        }
     }
 
+    @Getter
+    @Setter
     public static class ToolPublication
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .ToolPublication {
@@ -1235,45 +816,10 @@ public class ManagedAgentProperties
         private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
-        public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
-        public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
-        public int getVerificationConcurrency() { return verificationConcurrency; }
-        public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
-        public boolean isGcEnabled() { return gcEnabled; }
-        public void setGcEnabled(boolean value) { gcEnabled = value; }
-        public Duration getDeletionGrace() { return deletionGrace; }
-        public void setDeletionGrace(Duration value) { deletionGrace = value; }
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean enabled) { this.enabled = enabled; }
-        public String getOssEndpoint() { return ossEndpoint; }
-        public void setOssEndpoint(String value) { ossEndpoint = value; }
-        public String getOssRegion() { return ossRegion; }
-        public void setOssRegion(String value) { ossRegion = value; }
-        public String getOssBucket() { return ossBucket; }
-        public void setOssBucket(String value) { ossBucket = value; }
-        public String getServiceBaseUrl() { return serviceBaseUrl; }
-        public void setServiceBaseUrl(String value) { serviceBaseUrl = value; }
-        public Long getExecutionBytes() { return executionBytes; }
-        public void setExecutionBytes(Long value) { executionBytes = value; }
-        public Long getSessionBytes() { return sessionBytes; }
-        public void setSessionBytes(Long value) { sessionBytes = value; }
-        public Long getTenantBytes() { return tenantBytes; }
-        public void setTenantBytes(Long value) { tenantBytes = value; }
-        public Long getActiveCaptures() { return activeCaptures; }
-        public void setActiveCaptures(Long value) { activeCaptures = value; }
-        public Integer getEntryConcurrency() { return entryConcurrency; }
-        public void setEntryConcurrency(Integer value) { entryConcurrency = value; }
-        public Duration getOperationTimeout() { return operationTimeout; }
-        public void setOperationTimeout(Duration value) { operationTimeout = value; }
-        public Duration getClaimTimeout() { return claimTimeout; }
-        public void setClaimTimeout(Duration value) { claimTimeout = value; }
-        public Long getVerificationBytesPerSecond() { return verificationBytesPerSecond; }
-        public void setVerificationBytesPerSecond(Long value) { verificationBytesPerSecond = value; }
-        public Duration getMaxVerificationTimeout() { return maxVerificationTimeout; }
-        public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
     }
 
+    @Getter
+    @Setter
     public static class ManagedExtensions
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .ManagedExtensions {
@@ -1281,30 +827,21 @@ public class ManagedAgentProperties
         private String mode = "linux-cgroup";
         private String cacheDirectory = "";
         private String cgroupRoot = "";
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean value) { enabled = value; }
-        public String getMode() { return mode; }
-        public void setMode(String value) { mode = value; }
-        public String getCacheDirectory() { return cacheDirectory; }
-        public void setCacheDirectory(String value) { cacheDirectory = value; }
-        public String getCgroupRoot() { return cgroupRoot; }
-        public void setCgroupRoot(String value) { cgroupRoot = value; }
     }
 
+    @Getter
+    @Setter
     public static class Extensions
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean enabled) { this.enabled = enabled; }
-        public String getArtifactDirectory() { return artifactDirectory; }
-        public void setArtifactDirectory(String value) { artifactDirectory = value; }
-        public List<String> getAllowedActors() { return allowedActors; }
         public void setAllowedActors(List<String> value) { allowedActors = List.copyOf(value); }
     }
 
+    @Getter
+    @Setter
     public static class Artifacts
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Artifacts {
         private boolean enabled;
@@ -1313,24 +850,13 @@ public class ManagedAgentProperties
         private int maxConcurrentReads = 4;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration readTimeout = Duration.ofMinutes(2);
+        /** How often a download re-verifies content access; PT0S checks on every chunk. */
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration readRevalidationInterval = Duration.ofSeconds(5);
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean value) { enabled = value; }
-        public boolean isPublishOriginal() { return publishOriginal; }
-        public void setPublishOriginal(boolean value) { publishOriginal = value; }
-        public boolean isPublishPreview() { return publishPreview; }
-        public void setPublishPreview(boolean value) { publishPreview = value; }
-        public int getMaxConcurrentReads() { return maxConcurrentReads; }
-        public void setMaxConcurrentReads(int value) { maxConcurrentReads = value; }
-        public Duration getReadTimeout() { return readTimeout; }
-        public void setReadTimeout(Duration value) { readTimeout = value; }
-        /** How often a download re-verifies content access; PT0S checks on every chunk. */
-        public Duration getReadRevalidationInterval() { return readRevalidationInterval; }
-        public void setReadRevalidationInterval(Duration value) { readRevalidationInterval = value; }
     }
 
+    @Getter
+    @Setter
     public static class Dispatch
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Dispatch {
         // No typed scan-delay field. The deployed default comes from
@@ -1352,64 +878,10 @@ public class ManagedAgentProperties
         private int maxPreAdmissionRetries = 5;
         private int maxPostAdmissionRetries = 10;
         private int maxOperationRetries = 10;
-
-        public Duration getLeaseDuration() {
-            return leaseDuration;
-        }
-
-        public void setLeaseDuration(Duration leaseDuration) {
-            this.leaseDuration = leaseDuration;
-        }
-
-        public Duration getLeaseRenewInterval() {
-            return leaseRenewInterval;
-        }
-
-        public void setLeaseRenewInterval(Duration leaseRenewInterval) {
-            this.leaseRenewInterval = leaseRenewInterval;
-        }
-
-        public Duration getRetryInitialDelay() {
-            return retryInitialDelay;
-        }
-
-        public void setRetryInitialDelay(Duration retryInitialDelay) {
-            this.retryInitialDelay = retryInitialDelay;
-        }
-
-        public Duration getRetryMaxDelay() {
-            return retryMaxDelay;
-        }
-
-        public void setRetryMaxDelay(Duration retryMaxDelay) {
-            this.retryMaxDelay = retryMaxDelay;
-        }
-
-        public int getMaxPreAdmissionRetries() {
-            return maxPreAdmissionRetries;
-        }
-
-        public void setMaxPreAdmissionRetries(int maxPreAdmissionRetries) {
-            this.maxPreAdmissionRetries = maxPreAdmissionRetries;
-        }
-
-        public int getMaxPostAdmissionRetries() {
-            return maxPostAdmissionRetries;
-        }
-
-        public void setMaxPostAdmissionRetries(int maxPostAdmissionRetries) {
-            this.maxPostAdmissionRetries = maxPostAdmissionRetries;
-        }
-
-        public int getMaxOperationRetries() {
-            return maxOperationRetries;
-        }
-
-        public void setMaxOperationRetries(int maxOperationRetries) {
-            this.maxOperationRetries = maxOperationRetries;
-        }
     }
 
+    @Getter
+    @Setter
     public static class Events
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Events {
         @DurationUnit(ChronoUnit.SECONDS)
@@ -1418,6 +890,10 @@ public class ManagedAgentProperties
         private Duration heartbeatInterval = Duration.ofSeconds(15);
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration streamTimeout = Duration.ofMinutes(30);
+        /**
+         * How often a stream re-verifies the subscriber's read grant; PT0S
+         * checks before every event.
+         */
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration readGrantRecheckInterval = Duration.ofSeconds(5);
         @DurationUnit(ChronoUnit.MILLIS)
@@ -1426,99 +902,21 @@ public class ManagedAgentProperties
         private Duration materializeInterval = Duration.ofMillis(100);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
-        private boolean replayFloorEnabled;
-
-        public Duration getPollInterval() {
-            return pollInterval;
-        }
-
-        public void setPollInterval(Duration pollInterval) {
-            this.pollInterval = pollInterval;
-        }
-
-        /**
-         * How often a stream re-verifies the subscriber's read grant; PT0S
-         * checks before every event.
-         */
-        public Duration getReadGrantRecheckInterval() {
-            return readGrantRecheckInterval;
-        }
-
-        public void setReadGrantRecheckInterval(
-                Duration readGrantRecheckInterval) {
-            this.readGrantRecheckInterval = readGrantRecheckInterval;
-        }
-
-        public Duration getHeartbeatInterval() {
-            return heartbeatInterval;
-        }
-
-        public void setHeartbeatInterval(Duration heartbeatInterval) {
-            this.heartbeatInterval = heartbeatInterval;
-        }
-
-        public Duration getStreamTimeout() {
-            return streamTimeout;
-        }
-
-        public void setStreamTimeout(Duration streamTimeout) {
-            this.streamTimeout = streamTimeout;
-        }
-
-        public Duration getBatchInterval() {
-            return batchInterval;
-        }
-
-        public void setBatchInterval(Duration batchInterval) {
-            this.batchInterval = batchInterval;
-        }
-
-        public Duration getMaterializeInterval() {
-            return materializeInterval;
-        }
-
-        public void setMaterializeInterval(Duration materializeInterval) {
-            this.materializeInterval = materializeInterval;
-        }
-
-        public int getBatchMaxEvents() {
-            return batchMaxEvents;
-        }
-
-        public void setBatchMaxEvents(int batchMaxEvents) {
-            this.batchMaxEvents = batchMaxEvents;
-        }
-
-        public int getBatchMaxBytes() {
-            return batchMaxBytes;
-        }
-
-        public void setBatchMaxBytes(int batchMaxBytes) {
-            this.batchMaxBytes = batchMaxBytes;
-        }
-
         /**
          * Whether the scheduled pass raises each Session's replay floor as
          * far as its Snapshot proves safe. Disabled by default; events are
          * never deleted here either way.
          */
-        public boolean isReplayFloorEnabled() {
-            return replayFloorEnabled;
-        }
-
-        public void setReplayFloorEnabled(boolean replayFloorEnabled) {
-            this.replayFloorEnabled = replayFloorEnabled;
-        }
+        private boolean replayFloorEnabled;
     }
 
+    @Getter
+    @Setter
     public static class RuntimeBroker
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .RuntimeBroker {
         private final SshRuntimeSettings ssh = new SshRuntimeSettings();
 
-        public SshRuntimeSettings getSsh() {
-            return ssh;
-        }
         private boolean enabled;
         private final Retention retention = new Retention();
         private String host = "127.0.0.1";
@@ -1567,15 +965,19 @@ public class ManagedAgentProperties
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
         private boolean sessionWorktreesEnabled;
+        /**
+         * Whether hosted Sessions may launch read-only snapshot children
+         * (#13753 I3). A relay from before snapshots would create one as a
+         * shared writer, so this is turned on only after every control-plane
+         * replica runs this version.
+         */
         private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
 
-        public Retention getRetention() {
-            return retention;
-        }
-
+        @Getter
+        @Setter
         public static class Retention
                 implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                         .RuntimeBroker.Retention {
@@ -1586,15 +988,6 @@ public class ManagedAgentProperties
             @DurationUnit(ChronoUnit.MILLIS)
             private Duration scanDelay = Duration.ofMinutes(1);
 
-            public boolean isEnabled() { return enabled; }
-            public void setEnabled(boolean value) { enabled = value; }
-            public Duration getMaxAge() { return maxAge; }
-            public void setMaxAge(Duration value) { maxAge = value; }
-            public int getBatchSize() { return batchSize; }
-            public void setBatchSize(int value) { batchSize = value; }
-            public Duration getScanDelay() { return scanDelay; }
-            public void setScanDelay(Duration value) { scanDelay = value; }
-
             void validate() {
                 if (maxAge == null || maxAge.isZero() || maxAge.isNegative()
                         || maxAge.compareTo(Duration.ofMillis(1)) < 0
@@ -1604,130 +997,6 @@ public class ManagedAgentProperties
                             + " (at least 1ms), and batch-size between 1 and 1000");
                 }
             }
-        }
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public String getHost() {
-            return host;
-        }
-
-        public void setHost(String host) {
-            this.host = host;
-        }
-
-        public int getPort() {
-            return port;
-        }
-
-        public void setPort(int port) {
-            this.port = port;
-        }
-
-        public boolean isAllowNonLoopback() {
-            return allowNonLoopback;
-        }
-
-        public void setAllowNonLoopback(boolean allowNonLoopback) {
-            this.allowNonLoopback = allowNonLoopback;
-        }
-
-        public Duration getV3ResultWindow() {
-            return v3ResultWindow;
-        }
-
-        public void setV3ResultWindow(Duration v3ResultWindow) {
-            this.v3ResultWindow = v3ResultWindow;
-        }
-
-        public String getToken() {
-            return token;
-        }
-
-        public void setToken(String token) {
-            this.token = token;
-        }
-
-        public String getProvisioner() {
-            return provisioner;
-        }
-
-        public void setProvisioner(String provisioner) {
-            this.provisioner = provisioner;
-        }
-
-        public String getWorkspaceId() {
-            return workspaceId;
-        }
-
-        public void setWorkspaceId(String workspaceId) {
-            this.workspaceId = workspaceId;
-        }
-
-        public String getWorkspaceGeneration() {
-            return workspaceGeneration;
-        }
-
-        public void setWorkspaceGeneration(String workspaceGeneration) {
-            this.workspaceGeneration = workspaceGeneration;
-        }
-
-        public String getWorkspaceCwd() {
-            return workspaceCwd;
-        }
-
-        public void setWorkspaceCwd(String workspaceCwd) {
-            this.workspaceCwd = workspaceCwd;
-        }
-
-        public String getIsolationClass() {
-            return isolationClass;
-        }
-
-        public String getBoundSessionIsolationClass() {
-            return boundSessionIsolationClass;
-        }
-
-        public void setBoundSessionIsolationClass(String boundSessionIsolationClass) {
-            this.boundSessionIsolationClass = boundSessionIsolationClass;
-        }
-
-        public boolean isSessionCreateWarm() {
-            return sessionCreateWarm;
-        }
-
-        public void setSessionCreateWarm(boolean sessionCreateWarm) {
-            this.sessionCreateWarm = sessionCreateWarm;
-        }
-
-        public List<WorkspaceMount> getWorkspaceMounts() {
-            return workspaceMounts;
-        }
-
-        public void setWorkspaceMounts(List<WorkspaceMount> workspaceMounts) {
-            this.workspaceMounts = workspaceMounts;
-        }
-
-        public String getWorkspaceCreationRoot() {
-            return workspaceCreationRoot;
-        }
-
-        public void setWorkspaceCreationRoot(String workspaceCreationRoot) {
-            this.workspaceCreationRoot = workspaceCreationRoot;
-        }
-
-        public boolean isLocalDirectoryImportEnabled() {
-            return localDirectoryImportEnabled;
-        }
-
-        public void setLocalDirectoryImportEnabled(boolean localDirectoryImportEnabled) {
-            this.localDirectoryImportEnabled = localDirectoryImportEnabled;
         }
 
         public record WorkspaceMount(String tenantId, String storageId, String root)
@@ -1765,237 +1034,12 @@ public class ManagedAgentProperties
             }
         }
 
-        public List<ResidentWorkspace> getResidentWorkspaces() { return residentWorkspaces; }
         public void setResidentWorkspaces(List<ResidentWorkspace> value) { residentWorkspaces = List.copyOf(value); }
-        public String getResidentKubernetesApiUrl() { return residentKubernetesApiUrl; }
-        public void setResidentKubernetesApiUrl(String value) { residentKubernetesApiUrl = value; }
-        public String getResidentKubernetesTokenFile() { return residentKubernetesTokenFile; }
-        public void setResidentKubernetesTokenFile(String value) { residentKubernetesTokenFile = value; }
-        public String getResidentKubernetesCaFile() { return residentKubernetesCaFile; }
-        public void setResidentKubernetesCaFile(String value) { residentKubernetesCaFile = value; }
-
-        public void setIsolationClass(String isolationClass) {
-            this.isolationClass = isolationClass;
-        }
-
-        public boolean isDurableLocalProcess() {
-            return durableLocalProcess;
-        }
-
-        public void setDurableLocalProcess(boolean durableLocalProcess) {
-            this.durableLocalProcess = durableLocalProcess;
-        }
-
-        public boolean isTrustedLocalRebootRecovery() {
-            return trustedLocalRebootRecovery;
-        }
-
-        public void setTrustedLocalRebootRecovery(boolean trustedLocalRebootRecovery) {
-            this.trustedLocalRebootRecovery = trustedLocalRebootRecovery;
-        }
-
-        public boolean isOperatorRecoveryEnabled() {
-            return operatorRecoveryEnabled;
-        }
-
-        public void setOperatorRecoveryEnabled(boolean operatorRecoveryEnabled) {
-            this.operatorRecoveryEnabled = operatorRecoveryEnabled;
-        }
-
-        public boolean isVerifiedWorkspaceRecoveryEnabled() {
-            return verifiedWorkspaceRecoveryEnabled;
-        }
-
-        public boolean isChildWorkspacesEnabled() {
-            return childWorkspacesEnabled;
-        }
-
-        public boolean isSessionWorktreesEnabled() {
-            return sessionWorktreesEnabled;
-        }
-
-        public void setSessionWorktreesEnabled(boolean sessionWorktreesEnabled) {
-            this.sessionWorktreesEnabled = sessionWorktreesEnabled;
-        }
-
-        public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
-            this.childWorkspacesEnabled = childWorkspacesEnabled;
-        }
-
-        /**
-         * Whether hosted Sessions may launch read-only snapshot children
-         * (#13753 I3). A relay from before snapshots would create one as a
-         * shared writer, so this is turned on only after every control-plane
-         * replica runs this version.
-         */
-        public boolean isChildSnapshotsEnabled() {
-            return childSnapshotsEnabled;
-        }
-
-        public void setChildSnapshotsEnabled(boolean childSnapshotsEnabled) {
-            this.childSnapshotsEnabled = childSnapshotsEnabled;
-        }
-
-        public String getChildWorkspaceGit() {
-            return childWorkspaceGit;
-        }
-
-        public void setChildWorkspaceGit(String childWorkspaceGit) {
-            this.childWorkspaceGit = childWorkspaceGit;
-        }
-
-        public Duration getChildWorkspaceGitTimeout() {
-            return childWorkspaceGitTimeout;
-        }
-
-        public void setChildWorkspaceGitTimeout(Duration childWorkspaceGitTimeout) {
-            this.childWorkspaceGitTimeout = childWorkspaceGitTimeout;
-        }
-
-        public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
-            this.verifiedWorkspaceRecoveryEnabled = verifiedWorkspaceRecoveryEnabled;
-        }
-
-        public String getStateDirectory() {
-            return stateDirectory;
-        }
-
-        public void setStateDirectory(String stateDirectory) {
-            this.stateDirectory = stateDirectory;
-        }
-
-        public String getCredentialKeyId() {
-            return credentialKeyId;
-        }
-
-        public void setCredentialKeyId(String credentialKeyId) {
-            this.credentialKeyId = credentialKeyId;
-        }
-
-        public String getCredentialKey() {
-            return credentialKey;
-        }
-
-        public void setCredentialKey(String credentialKey) {
-            this.credentialKey = credentialKey;
-        }
-
-        public Map<String, String> getPreviousCredentialKeys() {
-            return previousCredentialKeys;
-        }
-
-        public void setPreviousCredentialKeys(
-                Map<String, String> previousCredentialKeys) {
-            this.previousCredentialKeys = previousCredentialKeys;
-        }
-
-        public String getNodeExecutable() {
-            return nodeExecutable;
-        }
-
-        public void setNodeExecutable(String nodeExecutable) {
-            this.nodeExecutable = nodeExecutable;
-        }
-
-        public String getWorkerEntry() {
-            return workerEntry;
-        }
-
-        public void setWorkerEntry(String workerEntry) {
-            this.workerEntry = workerEntry;
-        }
-
-        public String getStaticEndpoint() {
-            return staticEndpoint;
-        }
-
-        public void setStaticEndpoint(String staticEndpoint) {
-            this.staticEndpoint = staticEndpoint;
-        }
-
-        public String getStaticToken() {
-            return staticToken;
-        }
-
-        public void setStaticToken(String staticToken) {
-            this.staticToken = staticToken;
-        }
-
-        public String getExternalProviderUrl() {
-            return externalProviderUrl;
-        }
-
-        public void setExternalProviderUrl(String externalProviderUrl) {
-            this.externalProviderUrl = externalProviderUrl;
-        }
-
-        public String getExternalProviderToken() {
-            return externalProviderToken;
-        }
-
-        public void setExternalProviderToken(String externalProviderToken) {
-            this.externalProviderToken = externalProviderToken;
-        }
-
-        public String getExternalProviderId() {
-            return externalProviderId;
-        }
-
-        public void setExternalProviderId(String externalProviderId) {
-            this.externalProviderId = externalProviderId;
-        }
-
-        public Duration getExternalRequestTimeout() {
-            return externalRequestTimeout;
-        }
-
-        public void setExternalRequestTimeout(Duration externalRequestTimeout) {
-            this.externalRequestTimeout = externalRequestTimeout;
-        }
-
-        public Duration getExternalStartupTimeout() {
-            return externalStartupTimeout;
-        }
-
-        public void setExternalStartupTimeout(Duration externalStartupTimeout) {
-            this.externalStartupTimeout = externalStartupTimeout;
-        }
-
-        public String getStaticRuntimeInstanceId() {
-            return staticRuntimeInstanceId;
-        }
-
-        public void setStaticRuntimeInstanceId(
-                String staticRuntimeInstanceId) {
-            this.staticRuntimeInstanceId = staticRuntimeInstanceId;
-        }
-
-        public String getStaticLeaseId() {
-            return staticLeaseId;
-        }
-
-        public void setStaticLeaseId(String staticLeaseId) {
-            this.staticLeaseId = staticLeaseId;
-        }
-
-        public long getStaticEpoch() {
-            return staticEpoch;
-        }
-
-        public void setStaticEpoch(long staticEpoch) {
-            this.staticEpoch = staticEpoch;
-        }
-
-        public Map<String, String> getEnvironment() {
-            return environment;
-        }
-
-        public void setEnvironment(Map<String, String> environment) {
-            this.environment = environment;
-        }
     }
 
     /** H6b/H6c: the automation scanner, its lease and the slot window. */
+    @Getter
+    @Setter
     public static class Automation
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
         private boolean enabled;
@@ -2010,73 +1054,11 @@ public class ManagedAgentProperties
         private int maxSlotsPerTick = 1000;
         private int concurrency = 4;
         private int scannerThreads = 4;
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public Duration getScanDelay() {
-            return scanDelay;
-        }
-
-        public void setScanDelay(Duration scanDelay) {
-            this.scanDelay = scanDelay;
-        }
-
-        public Duration getLease() {
-            return lease;
-        }
-
-        public void setLease(Duration lease) {
-            this.lease = lease;
-        }
-
-        public Duration getLateTolerance() {
-            return lateTolerance;
-        }
-
-        public void setLateTolerance(Duration lateTolerance) {
-            this.lateTolerance = lateTolerance;
-        }
-
-        public Duration getLookback() {
-            return lookback;
-        }
-
-        public void setLookback(Duration lookback) {
-            this.lookback = lookback;
-        }
-
-        public int getMaxSlotsPerTick() {
-            return maxSlotsPerTick;
-        }
-
-        public void setMaxSlotsPerTick(int maxSlotsPerTick) {
-            this.maxSlotsPerTick = maxSlotsPerTick;
-        }
-
-        public int getConcurrency() {
-            return concurrency;
-        }
-
-        public void setConcurrency(int concurrency) {
-            this.concurrency = concurrency;
-        }
-
-        public int getScannerThreads() {
-            return scannerThreads;
-        }
-
-        public void setScannerThreads(int scannerThreads) {
-            this.scannerThreads = scannerThreads;
-        }
     }
 
     /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
+    @Getter
+    @Setter
     public static class Channels
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Channels {
         // No typed scan-delay field. The deployed default comes from
@@ -2087,22 +1069,6 @@ public class ManagedAgentProperties
         private boolean enabled;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration claimLease = Duration.ofMinutes(10);
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public Duration getClaimLease() {
-            return claimLease;
-        }
-
-        public void setClaimLease(Duration claimLease) {
-            this.claimLease = claimLease;
-        }
     }
 
     /**
@@ -2113,6 +1079,8 @@ public class ManagedAgentProperties
      * topic, and the capability-probe, wake-bootstrap and owner groups must be pre-created as LITE
      * groups bound to it — see EventTransportConfiguration for the deployment prerequisites.
      */
+    @Getter
+    @Setter
     public static class EventTransport
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .EventTransport {
@@ -2138,70 +1106,5 @@ public class ManagedAgentProperties
         // Unit-less operator overrides must bind in the annotated unit.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration ownerReconcileInterval = Duration.ofSeconds(1);
-
-        public String getCapabilityProbeGroup() {
-            return capabilityProbeGroup;
-        }
-
-        public void setCapabilityProbeGroup(String capabilityProbeGroup) {
-            this.capabilityProbeGroup = capabilityProbeGroup;
-        }
-
-        public String getWakeBootstrapLiteTopic() {
-            return wakeBootstrapLiteTopic;
-        }
-
-        public void setWakeBootstrapLiteTopic(String wakeBootstrapLiteTopic) {
-            this.wakeBootstrapLiteTopic = wakeBootstrapLiteTopic;
-        }
-
-        public String getWakeBootstrapGroup() {
-            return wakeBootstrapGroup;
-        }
-
-        public void setWakeBootstrapGroup(String wakeBootstrapGroup) {
-            this.wakeBootstrapGroup = wakeBootstrapGroup;
-        }
-
-        public String getOwnerGroup() {
-            return ownerGroup;
-        }
-
-        public void setOwnerGroup(String ownerGroup) {
-            this.ownerGroup = ownerGroup;
-        }
-
-        public Duration getOwnerReconcileInterval() {
-            return ownerReconcileInterval;
-        }
-
-        public void setOwnerReconcileInterval(
-                Duration ownerReconcileInterval) {
-            this.ownerReconcileInterval = ownerReconcileInterval;
-        }
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public String getEndpoints() {
-            return endpoints;
-        }
-
-        public void setEndpoints(String endpoints) {
-            this.endpoints = endpoints;
-        }
-
-        public String getTopic() {
-            return topic;
-        }
-
-        public void setTopic(String topic) {
-            this.topic = topic;
-        }
     }
 }
