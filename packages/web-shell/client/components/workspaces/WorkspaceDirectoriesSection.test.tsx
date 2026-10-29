@@ -50,6 +50,10 @@ beforeEach(() => {
     primaryDirectory: '/ws',
     directories: ['/extra'],
   });
+  actions.suggestWorkspacePaths.mockResolvedValue({
+    suggestions: [],
+    sep: '/',
+  });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
