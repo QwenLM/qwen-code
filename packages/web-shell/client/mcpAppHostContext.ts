@@ -16,6 +16,8 @@ export const McpAppSessionContext = createContext<string | undefined>(
 export interface McpAppMessageRequest {
   serverName: string;
   resourceUri: string;
+  /** Set only for the bundled Generated UI server, as core marks it. */
+  requiredFeature?: 'generated-ui';
   text: string;
   signal: AbortSignal;
 }
@@ -106,13 +108,29 @@ export const McpAppGeneratedUiOwnerContext = createContext<
 
 export const McpAppVisibilityContext = createContext(true);
 
+const BUNDLED_GENERATED_UI_RESOURCE =
+  'ui://qwen-code-generated-ui/view-v1.html';
+
+/**
+ * Whether core marked this App as the bundled Generated UI server's. Unlike
+ * {@link isBuiltInGeneratedUi}, the resource URI alone does not count: any
+ * server can claim it, so presentation that hides the App's origin keys on
+ * this instead.
+ */
+export function isBundledGeneratedUi(display?: {
+  requiredFeature?: 'generated-ui';
+}): boolean {
+  return display?.requiredFeature === 'generated-ui';
+}
+
+// Admission errs toward the feature gate, so a claimed URI also counts.
 export function isBuiltInGeneratedUi(display?: {
   resourceUri: string;
   requiredFeature?: 'generated-ui';
 }): boolean {
   return (
     display?.requiredFeature === 'generated-ui' ||
-    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html'
+    display?.resourceUri === BUNDLED_GENERATED_UI_RESOURCE
   );
 }
 

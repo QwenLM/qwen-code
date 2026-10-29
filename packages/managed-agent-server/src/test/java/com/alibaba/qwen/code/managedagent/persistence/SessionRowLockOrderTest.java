@@ -147,8 +147,13 @@ class SessionRowLockOrderTest {
             "WakeRecoveryStore.java",
             "WorkspaceFileStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
+    // HostedCleanupDebtStore reads ma_turn only inside a read-only NOT EXISTS
+    // guard that skips Sessions with live work; it takes no row lock and never
+    // writes, so it is a turn reader but not a session locker and stays out of
+    // the session-first order audit below.
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
+            "HostedCleanupDebtStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
             "ManagedToolResultProjector.java", "ManagedUserMessageStore.java",
             "SessionWorktreeStore.java",

@@ -247,7 +247,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "previous_commit_digest:CHAR,commit_digest:CHAR,writer_generation:BIGINT,writer_id:VARBINARY,"
                     + "writer_token_hash:CHAR,activation_epoch:BIGINT,latest_checkpoint_resource_id:VARBINARY,"
                     + "record_encoding:VARCHAR,record_bytes:MEDIUMBLOB,byte_length:BIGINT,record_digest:CHAR,"
-                    + "gmt_create:BIGINT"),
+                    + "activation_lease_until:BIGINT,activation_renewal_seq:BIGINT,gmt_create:BIGINT"),
             declaration("ma_session_record", "session_scope_key,record_key",
                     "session_scope_key:CHAR,record_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "session_id:VARBINARY,domain:VARCHAR,record_id:VARBINARY,operation_hash:CHAR,revision:BIGINT,"

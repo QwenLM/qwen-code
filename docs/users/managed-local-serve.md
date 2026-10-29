@@ -81,7 +81,7 @@ An occupied public port follows the ordinary daemon's bounded nearby-port
 retry; use the browser address printed by the launcher.
 
 This one command starts both the ordinary daemon and Managed Agent. The same
-WebShell lists ordinary and Managed workspaces and sessions together under Projects, with a Managed label on Managed workspaces and no execution-mode tabs. New task follows the selected workspace or conversation. Local sessions use
+WebShell lists ordinary and Managed workspaces and sessions together under Workspaces, with a Managed label on Managed workspaces and no execution-mode tabs. New session follows the selected workspace or conversation. Local sessions use
 the directory where you ran the command, while Managed sessions use their
 application-created Workspaces or explicitly imported local projects. Both use
 the same authenticated browser origin;
@@ -89,7 +89,7 @@ you do not need a second daemon command or browser page.
 
 In **Add workspace**, choose **Local (daemon)** or **Managed (Managed Agent)**
 before submitting. The choice defaults to the current conversation's service.
-Workspace rows and **New task** show that service, and new tasks inherit the
+Workspace rows and **New session** show that service, and new sessions inherit the
 selected workspace. The daemon's existing SSH workspace support remains
 available; Managed SSH registration is not integrated into this shared dialog.
 

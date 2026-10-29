@@ -43,6 +43,7 @@ class ManagedMcpSettingsStoreTest {
     @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager transactionManager;
 
     @Test
