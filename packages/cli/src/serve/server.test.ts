@@ -10386,7 +10386,59 @@ describe('createServeApp', () => {
       },
     );
 
-    it('rejects an npm extension install with ref before queuing', async () => {
+    it.each(['some-package', 'some-package@beta', '@scope/ext:plugin'])(
+      'installs npm source %s with a registry override',
+      async (source) => {
+        let installMetadata: ExtensionInstallMetadata | undefined;
+        const restore = mockExtensionManagerMethods({
+          async prepareExtensionInstall(options) {
+            installMetadata = options.installMetadata;
+            return testExtension('npm-extension');
+          },
+        });
+        try {
+          const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+          const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+          const app = createServeApp(
+            { ...tokenOpts, workspace: WS_BOUND },
+            undefined,
+            { bridge },
+          );
+          const res = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source,
+              registry: 'https://registry.npmjs.org',
+              consent: true,
+            });
+          expect(res.status).toBe(202);
+          await vi.waitFor(() => {
+            expect(bridge.extensionEvents.at(-1)).toMatchObject({
+              status: 'installed',
+              name: 'npm-extension',
+            });
+          });
+          expect(installMetadata).toMatchObject({
+            source: source.split(':')[0],
+            type: 'npm',
+            registryUrl: 'https://registry.npmjs.org',
+            ...(source.endsWith(':plugin') ? { pluginName: 'plugin' } : {}),
+          });
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it.each([
+      '@scope/ext',
+      'some-package',
+      'some-package@beta',
+      '@scope/ext:plugin',
+    ])('rejects npm source %s with ref before queuing', async (source) => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -10400,7 +10452,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
-        .send({ source: '@scope/ext', ref: 'v1', consent: true });
+        .send({ source, ref: 'v1', consent: true });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe(

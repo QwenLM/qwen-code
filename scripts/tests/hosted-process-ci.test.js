@@ -298,20 +298,14 @@ describe('Hosted real-process gates', () => {
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    // The non-Hosted slice runs once per engine, so the Hosted lane stays the
-    // only place Hosted*IT executes while MariaDB keeps a real leg (#14971).
+    // Hosted*IT executes only in the separate Hosted lane.
     const nonHostedLane = java.jobs['mysql-integration'];
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mysql:8.4.6' }),
-    );
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mariadb:10.11.18' }),
-    );
+    expect(nonHostedLane.strategy).toBeUndefined();
     expect(
       nonHostedLane.steps.find(
         (step) => step.name === 'Start the database without native AIO',
       ).run,
-    ).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',

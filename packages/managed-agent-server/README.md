@@ -296,6 +296,11 @@ reclaim anything. If the database check fails, capacity remains skipped.
 - Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
 
+MySQL is the supported database family; full integration CI uses MySQL 8.4.
+MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
+Existing dialect handling remains in place; this change does not reject
+connections that previously worked or introduce a catalog migration.
+
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
 dual-path development entry below). It supports durable no-tool Sessions and
@@ -874,8 +879,7 @@ Then **Workspace → Choose existing directory** browses this computer directly,
 without a pre-registered parent or grant. Import keeps the project in place,
 automatically registers its projects parent outside Git worktrees, grants the
 current actor OWNER access, and sets the project as the initial working directory.
-The parent shares file access and its physical-owner lease across projects; this
-is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+The parent shares file access and catalog-local leases across projects; this is not a filesystem sandbox or a global parent-directory claim. New imports use `imported-<receipt key>` storage IDs and private registration metadata below `runtime-broker.state-directory/imported-projects/<storage ID>`. Independent local catalogs may import the same project while leaving any global storage marker untouched. Whole-storage migration, physical recovery and exclusive file-history rewind are unavailable for these shared imports; own-process Runtime recovery remains available. Existing owned roots are reused while sessions run.
 Private Runtime state and creation roots must stay outside imported parents.
 Remote listeners cannot enable this local feature, including with the insecure
 bind override. Signed mode retains signature validation and does not accept a
@@ -888,7 +892,7 @@ and idempotency key. These fields are exclusive with Workspace-relative source
 fields. `localDirectoryImport` advertises the capability independently; pending
 receipts pin native root identity and completed receipts resolve imported roots
 after restart or disabling further imports. Neither retry nor restart repairs a
-missing/foreign marker or restores revoked access. See the
+missing or mismatched registration metadata or restores revoked access. Legacy `created-` imports and application-owned roots keep their global marker contract; no existing receipt or marker is converted automatically. See the
 [local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
 
 For other deployments, the existing authorized-root flow remains available.
@@ -1173,7 +1177,8 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay` and `wake-recovery.scan-delay` — also read a bare number as milliseconds,
+`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
 

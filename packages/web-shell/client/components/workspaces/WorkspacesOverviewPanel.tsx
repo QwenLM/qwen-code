@@ -5,6 +5,11 @@
  */
 
 import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -99,10 +104,17 @@ function useWorkspaceGitStatus(
   cwd: string,
   enabled: boolean,
 ) {
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const [status, setStatus] = useState<DaemonWorkspaceGitStatus>();
   const failedRef = useRef(false);
   const load = useCallback(async () => {
-    if (!enabled) return;
+    if (
+      !available ||
+      !enabled ||
+      (availability && availability.getSnapshot() !== 'available')
+    )
+      return;
     try {
       const next = await client.workspaceByCwd(cwd).workspaceGit({
         wait: true,
@@ -110,17 +122,23 @@ function useWorkspaceGitStatus(
       failedRef.current = false;
       setStatus(next);
     } catch (err) {
+      if (
+        isDaemonUnavailableError(err) ||
+        (availability && availability.getSnapshot() !== 'available')
+      )
+        return;
       if (!failedRef.current) {
         console.warn('[WorkspacesOverviewPanel] git status failed:', err);
         failedRef.current = true;
       }
     }
-  }, [client, cwd, enabled]);
+  }, [availability, available, client, cwd, enabled]);
   useEffect(() => {
     if (!enabled) {
       setStatus(undefined);
       return;
     }
+    if (!available) return;
     void load();
     const onFocus = () => void load();
     window.addEventListener('focus', onFocus);
@@ -131,7 +149,7 @@ function useWorkspaceGitStatus(
       window.removeEventListener('focus', onFocus);
       window.clearInterval(timer);
     };
-  }, [enabled, load]);
+  }, [available, enabled, load]);
   return status;
 }
 

@@ -828,6 +828,42 @@ public class ManagedSessionStore {
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
+        if (request.activation() != null) {
+            var activation = request.activation();
+            validateStableId(activation.activationId(), "activationId");
+            validateCounter(activation.epoch(), "activation epoch", 1);
+            validateCounter(activation.renewalSeq(), "activation renewalSeq", 1);
+            validateLeaseMillis(activation.leaseDurationMs());
+            if (!"READY".equals(head.recoveryStatus()) || !"active".equals(head.activationPhase())
+                    || !Objects.equals(head.activationHeadRevision(), head.journalRevision())
+                    || !activation.activationId().equals(head.activationId())
+                    || !Objects.equals(head.activationEventEpoch(), activation.epoch())) {
+                throw conflict("managed_session_activation_conflict", "The activation is no longer current.");
+            }
+            var row = activationLeaseRow(head);
+            if (!request.writerId().equals(row.workerId())
+                    || activation.renewalSeq() < row.lease().renewalSeq()
+                    || activation.renewalSeq() > row.lease().renewalSeq() + 1) {
+                throw conflict("managed_session_activation_conflict", "The activation renewal is stale or out of order.");
+            }
+            long until = row.lease().expiresAt();
+            if (activation.renewalSeq() != row.lease().renewalSeq()) {
+                until = Math.max(until, plusMillis(now, activation.leaseDurationMs()).getTime());
+                requireCsiLease(continuation, row.lease().expiresAt(), until);
+                jdbc.update("UPDATE ma_session_journal_tx SET activation_lease_until = ?, activation_renewal_seq = ?"
+                                + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                        until, activation.renewalSeq(), tenantId, sessionId, row.revision());
+                jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?"
+                                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                        until, JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+            }
+            var lease = new ManagedSessionStoreModels.ActivationLease(
+                    activation.activationId(), activation.epoch(), activation.renewalSeq(), until);
+            return new WriterGrant(head.writerGeneration(), epochMillis(leaseUntil), head.journalRevision(),
+                    head.committedSequence(), head.lastCommitDigest(), head.activationEpoch(), false,
+                    ManagedSessionReaderVersion.SUPPORTED, true, lease);
+        }
         return grant(head, leaseUntil, false);
     }
 
@@ -1436,13 +1472,68 @@ public class ManagedSessionStore {
         return restoreHead(head);
     }
 
-    private static RestoreHead restoreHead(HeadRow head) {
+    private RestoreHead restoreHead(HeadRow head) {
+        boolean renewed = "active".equals(head.activationPhase()) && !jdbc.queryForList(
+                "SELECT 1 FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                        + " AND activation_epoch = ? AND activation_lease_until IS NOT NULL LIMIT 1",
+                head.tenantId(), head.sessionId(), head.activationEpoch()).isEmpty();
+        var lease = renewed ? activationLeaseRow(head).lease() : null;
         return new RestoreHead(head.state(), head.storageVersion(),
                 head.writerGeneration(), head.journalRevision(),
                 head.committedSequence(), head.lastCommitDigest(),
                 head.activationEpoch(), head.latestCheckpointResourceId(),
                 head.compactedThroughRevision(), head.recoveryStatus(),
-                head.recoveryDetailCode());
+                head.recoveryDetailCode(), lease);
+    }
+
+    private record ActivationLeaseRow(long revision, String workerId, ManagedSessionStoreModels.ActivationLease lease) {
+    }
+
+    private ActivationLeaseRow activationLeaseRow(HeadRow head) {
+        var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, activation_lease_until,"
+                        + " activation_renewal_seq FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                        + " AND activation_epoch = ? AND operation IN ('installActivation', 'renewActivation')"
+                        + " ORDER BY journal_revision DESC LIMIT 1", (result, index) -> {
+                            try {
+                                byte[] raw = result.getBytes("record_bytes");
+                                if (raw == null || !sha256(raw).equals(result.getString("record_digest"))) {
+                                    throw journalCorrupt();
+                                }
+                                String first = new String(raw, StandardCharsets.UTF_8).split("\n", 2)[0];
+                                JsonNode event = CSI_TERMINAL_JSON.readTree(first).path("managedSession");
+                                JsonNode payload = event.path("payload");
+                                if (!"activation.changed".equals(event.path("kind").asText())
+                                        || !"active".equals(payload.path("phase").asText())) {
+                                    throw journalCorrupt();
+                                }
+                                long renewal = payload.path("renewalSeq").asLong(0);
+                                long until = payload.path("expiresAt").asLong(-1);
+                                Long savedUntil = result.getObject("activation_lease_until", Long.class);
+                                Long savedRenewal = result.getObject("activation_renewal_seq", Long.class);
+                                if ((savedUntil == null) != (savedRenewal == null)
+                                        || savedUntil != null && (savedUntil < until || savedRenewal <= renewal
+                                                || savedRenewal > ManagedSessionStoreModels.MAX_SAFE_COUNTER)) {
+                                    throw journalCorrupt();
+                                }
+                                var lease = new ManagedSessionStoreModels.ActivationLease(
+                                        payload.path("activationId").textValue(), payload.path("epoch").asLong(),
+                                        savedRenewal == null ? renewal : savedRenewal,
+                                        savedUntil == null ? until : savedUntil);
+                                if (!Objects.equals(head.activationId(), lease.activationId())
+                                        || !Objects.equals(head.activationEventEpoch(), lease.epoch())
+                                        || !Objects.equals(head.activationExpiresAt(), lease.expiresAt())) {
+                                    throw journalCorrupt();
+                                }
+                                return new ActivationLeaseRow(result.getLong("journal_revision"),
+                                        payload.path("workerId").textValue(), lease);
+                            } catch (java.io.IOException error) {
+                                throw journalCorrupt();
+                            }
+                        }, head.tenantId(), head.sessionId(), head.activationEpoch());
+        if (rows.size() != 1) {
+            throw journalCorrupt();
+        }
+        return rows.getFirst();
     }
 
     @Transactional(readOnly = true)

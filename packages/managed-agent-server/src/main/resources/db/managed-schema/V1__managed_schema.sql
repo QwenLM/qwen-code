@@ -236,10 +236,13 @@ CREATE TABLE ma_session_journal_tx (
     record_bytes MEDIUMBLOB NOT NULL,
     byte_length BIGINT NOT NULL,
     record_digest CHAR(64) NOT NULL,
+    activation_lease_until BIGINT UNSIGNED,
+    activation_renewal_seq BIGINT,
     gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, journal_revision),
     CONSTRAINT uq_managed_session_command
-        UNIQUE (tenant_id, session_id, command_key_hash)
+        UNIQUE (tenant_id, session_id, command_key_hash),
+    CONSTRAINT ck_ma_activation_lease CHECK ((activation_lease_until IS NULL AND activation_renewal_seq IS NULL) OR (activation_lease_until IS NOT NULL AND activation_lease_until <= 9007199254740991 AND activation_renewal_seq IS NOT NULL AND activation_renewal_seq > 0 AND activation_renewal_seq <= 9007199254740991))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_event_stream (
@@ -684,7 +687,7 @@ CREATE TABLE ma_operation (
     CONSTRAINT uq_ma_operation_request UNIQUE (scope_key, operation_kind, target_key, actor_key, idempotency_digest),
     CONSTRAINT ck_ma_operation_generation CHECK (claim_generation >= 0 AND attempt_count >= 0 AND payload_version > 0),
     CONSTRAINT ck_ma_operation_mode CHECK ((CASE execution_mode WHEN 'SYNC' THEN 4 WHEN 'ASYNC' THEN 5 ELSE -1 END = CHAR_LENGTH(execution_mode))),
-    CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CSI_RETIREMENT' THEN 14 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 WHEN 'WORKSPACE_UPLOAD' THEN 16 ELSE -1 END = CHAR_LENGTH(operation_kind))),
+    CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'SESSION_WORKTREE' THEN 16 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CSI_RETIREMENT' THEN 14 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 WHEN 'WORKSPACE_UPLOAD' THEN 16 ELSE -1 END = CHAR_LENGTH(operation_kind))),
     progress_format VARCHAR(64),
     progress_version BIGINT,
     progress_stage VARCHAR(16),
@@ -1281,3 +1284,28 @@ CREATE INDEX ix_ma_head_wake ON ma_session_head (wake_scan_pending, wake_retry_a
 CREATE INDEX ix_ma_ref_binding ON ma_resource_ref (owner_kind, runtime_binding_key, owner_revision);
 CREATE INDEX ix_ma_head_session ON ma_session_head (tenant_key, session_id, head_kind);
 CREATE INDEX ix_ma_runtime_execution_storage ON ma_runtime_session (execution_storage_key);
+
+CREATE TABLE ma_session_worktree (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    storage_id VARBINARY(512) NOT NULL,
+    physical_key CHAR(64) NOT NULL,
+    worktree_id CHAR(32) NOT NULL,
+    owner_actor_key VARBINARY(2048) NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    revision BIGINT NOT NULL,
+    plan_json LONGTEXT NOT NULL,
+    identity_json LONGTEXT,
+    operation_id VARBINARY(512) NOT NULL,
+    failure_code VARCHAR(128),
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (tenant_id, session_id),
+    CONSTRAINT uq_ma_session_worktree UNIQUE (tenant_id, worktree_id),
+    CONSTRAINT ck_ma_session_worktree_state CHECK ((CASE state WHEN 'PREPARING' THEN 9 WHEN 'READY' THEN 5 WHEN 'FAILED' THEN 6 WHEN 'BLOCKED' THEN 7 WHEN 'REMOVING' THEN 8 WHEN 'REMOVED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
+    CONSTRAINT ck_ma_session_worktree_revision CHECK (revision > 0)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_ma_session_worktree_workspace ON ma_session_worktree (tenant_id, workspace_id, gmt_create);
+CREATE INDEX ix_ma_session_worktree_storage ON ma_session_worktree (physical_key, state);
