@@ -58,15 +58,23 @@ recoverable debts behind it.
 
 ## Retry and concurrency
 
+The tick runs on `managedAgentScheduler`, the same named scheduler as every
+other dispatch scan in the module; an unqualified `@Scheduled` would fall to a
+shared one-thread pool that a blocking Git scan already owns.
+
 An attempt that reports no actionable evidence, or that throws, is paced in
-memory: 10 seconds for the first retry, doubling to a 5-minute cap. A pacing
-entry is dropped once it has been idle for twice the cap, which only happens
-after its debt has been confirmed and left the projection; rotation therefore
-never resets a still-owed debt's backoff. An attempt that loses the daemon,
-sees a moved generation or a vanished reference also drops the connector's
-cached attachment, so the next one performs its own cold cleanup load instead
-of reusing a reference to the dead generation. A named refusal (live work,
-recovery required) only backs off: evicting that attachment would churn a
+memory on an explicit ladder — 10s, 20s, 40s, 80s, 160s, then the 5-minute cap.
+A pacing entry is dropped once it has been idle for twice the cap, which only
+happens after its debt has been confirmed and left the projection; rotation
+therefore never resets a still-owed debt's backoff. Whether a failed attempt
+also drops the connector's cached attachment is decided by an explicit
+whitelist that mirrors `HarnessPoolConnector`'s own reachability classification:
+transport loss, a moved generation and an unknown mutation outcome, plus a
+vanished reference (404) and a 5xx that may front a dead daemon. Those mean the
+cached generation is unreachable, so the next attempt performs its own cold
+cleanup load. A named refusal — a declined load
+(`HostedHarnessRecoveryDeclinedException`), `harness_pool_unavailable`, or a 4xx
+— is not staleness and only backs off: evicting that attachment would churn a
 Session whose Turn is still running. At most one debt per Session is attempted
 per tick.
 

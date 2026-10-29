@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.DaemonTransportException;
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore.CleanupDebt;
@@ -69,7 +72,7 @@ public class HostedCleanupRetryCoordinator {
         this.clock = clock;
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void retryOwedCleanup() {
         if (!harness.isAvailable()) {
@@ -146,16 +149,27 @@ public class HostedCleanupRetryCoordinator {
     }
 
     /**
-     * A named refusal (live work, recovery required) is not evidence that the
-     * cached generation is dead, and evicting it would churn a Session whose
-     * Turn is still running. Transport loss, a moved generation and a vanished
-     * reference are.
+     * Only an unreachable generation justifies evicting the cached attachment.
+     * The whitelist mirrors {@code HarnessPoolConnector.call}'s own
+     * reachability classification — transport loss, a moved generation and an
+     * unknown mutation outcome — plus a vanished reference (404) and a 5xx
+     * that may come from an intermediary in front of a dead daemon. A named
+     * refusal is not staleness: {@code HostedHarnessRecoveryDeclinedException},
+     * {@code harness_pool_unavailable} and a 4xx all mean the Session is still
+     * owned or the load was declined, and evicting would churn a Session whose
+     * Turn is still running, so they only back off.
      */
     private static boolean staleAttachment(RuntimeException error) {
-        if (error instanceof DaemonHttpException http) {
-            return http.getStatusCode() == 404;
+        if (error instanceof DaemonTransportException
+                || error instanceof HostedHarnessGenerationException
+                || error instanceof MutationOutcomeUnknownException) {
+            return true;
         }
-        return true;
+        if (error instanceof DaemonHttpException http) {
+            int status = http.getStatusCode();
+            return status == 404 || status >= 500;
+        }
+        return false;
     }
 
     private static String paceKey(CleanupDebt debt) {
@@ -165,6 +179,8 @@ public class HostedCleanupRetryCoordinator {
     private void backoff(CleanupDebt debt, RuntimeException error) {
         Attempt previous = attempts.get(paceKey(debt));
         int failures = Math.min(previous == null ? 1 : previous.failures() + 1, 8);
+        // Explicit ladder: 10s, 20s, 40s, 80s, 160s, then the 5-minute cap.
+        // The shift doubles until it would exceed the cap, which clamps it.
         long delay = Math.min(MAX_DELAY.toMillis(),
                 INITIAL_DELAY.toMillis() << Math.min(failures - 1, 5));
         long now = clock.millis();

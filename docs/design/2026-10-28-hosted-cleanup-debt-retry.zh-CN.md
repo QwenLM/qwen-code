@@ -46,13 +46,21 @@ load。该 load 用原 Runtime 身份完成释放，并在同一 cleanup ID 下�
 
 ## 重试与并发
 
-一次尝试如果没有可行动的证词或抛出异常，会在内存中退避：首次重试 10 秒，
-逐次翻倍、上限 5 分钟。一条退避记录在空闲达到上限两倍后才被清除，而那只会
-发生在它的欠债已确认、离开投影之后；因此轮转绝不会重置一笔仍欠付债务的
-退避。丢失 daemon、代际移动或引用消失的尝试还会丢弃连接器缓存的
-attachment，使下一次尝试自行发起冷 cleanup load，而不复用指向已死代际的
-引用。具名拒绝（仍有活跃工作、需要恢复）只退避：淘汰那个 attachment 会搅动
-Turn 仍在运行的 Session。每个 tick 对每个 Session 最多尝试一笔欠债。
+该 tick 运行在 `managedAgentScheduler` 上，与本模块其它所有 dispatch 扫描用
+同一个具名调度器；裸写的 `@Scheduled` 会落到一个已被阻塞式 Git 扫描占用的
+共享单线程池。
+
+一次尝试如果没有可行动的证词或抛出异常，会在内存中按显式阶梯退避——
+10s、20s、40s、80s、160s，然后封顶 5 分钟。一条退避记录在空闲达到上限两倍后
+才被清除，而那只会发生在它的欠债已确认、离开投影之后；因此轮转绝不会重置
+一笔仍欠付债务的退避。失败的尝试是否同时丢弃连接器缓存的 attachment，由一份
+显式白名单决定，它与 `HarnessPoolConnector` 自身的可达性分类一致：传输丢失、
+代际移动、未知 mutation 结果，外加引用消失（404）与可能挡在已死 daemon 前面
+的 5xx。这些意味着缓存代际不可达，于是下一次尝试自行发起冷 cleanup load。
+具名拒绝——被拒的 load（`HostedHarnessRecoveryDeclinedException`）、
+`harness_pool_unavailable`、或 4xx——不是陈旧证据，只退避：淘汰那个
+attachment 会搅动 Turn 仍在运行的 Session。每个 tick 对每个 Session 最多尝试
+一笔欠债。
 
 两个控制面可能扫到同一笔欠债。cleanup load 是幂等的：存在活跃工作时 Harness
 会拒绝并发 attachment，失败方退避；一旦确认清理删除投影，另一侧扫描就看不到
