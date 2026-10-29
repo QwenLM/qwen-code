@@ -78,6 +78,7 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private ManagedAgentDefinitionStore definitions;
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Test

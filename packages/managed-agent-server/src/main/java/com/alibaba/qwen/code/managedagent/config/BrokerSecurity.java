@@ -44,8 +44,7 @@ public class BrokerSecurity {
     public BrokerSecurity(ManagedAgentProperties properties,
             ServerProperties server, WebMvcProperties mvc) {
         ManagedAgentProperties.Auth auth = properties.getAuth();
-        String configured = auth.getMode() == null
-                ? "auto" : auth.getMode().trim().toLowerCase(Locale.ROOT);
+        String configured = configuredMode(auth);
         this.allowInsecureBind = auth.isAllowInsecureBind();
         java.util.List<String> skippedGuards = new java.util.ArrayList<>();
         InetAddress publicAddress = server.getAddress();
@@ -412,6 +411,12 @@ public class BrokerSecurity {
 
     public Mode getMode() {
         return mode;
+    }
+
+    /** The configured mode as startup reads it: trimmed, lower case, auto when unset. */
+    public static String configuredMode(ManagedAgentProperties.Auth auth) {
+        return auth.getMode() == null
+                ? "auto" : auth.getMode().trim().toLowerCase(Locale.ROOT);
     }
 
     public byte[] getSigningKey() {

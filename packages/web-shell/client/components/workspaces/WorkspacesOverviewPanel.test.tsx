@@ -322,7 +322,7 @@ describe('WorkspacesOverviewPanel', () => {
     expect(workspaceByCwd).not.toHaveBeenCalledWith('/locked');
     const locked = rowByLabel('/locked');
     const newTask = Array.from(locked.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('New task'),
+      (button) => button.textContent?.includes('New session'),
     );
     expect(newTask?.disabled).toBe(true);
   });
@@ -384,7 +384,7 @@ describe('WorkspacesOverviewPanel', () => {
     expect(refreshed.textContent).not.toContain('untrusted');
     expect(
       Array.from(refreshed.querySelectorAll('button')).some((candidate) =>
-        candidate.textContent?.includes('New task'),
+        candidate.textContent?.includes('New session'),
       ),
     ).toBe(true);
   });
@@ -425,7 +425,7 @@ describe('WorkspacesOverviewPanel', () => {
     await render({ onNewSession });
     const clickNewTask = async (row: HTMLTableRowElement) => {
       const button = Array.from(row.querySelectorAll('button')).find(
-        (candidate) => candidate.textContent?.includes('New task'),
+        (candidate) => candidate.textContent?.includes('New session'),
       )!;
       await act(async () => {
         button.click();
@@ -565,7 +565,7 @@ describe('WorkspacesOverviewPanel', () => {
     // button node must be re-queried after every click.
     const newTaskButton = () =>
       Array.from(rowByLabel('API').querySelectorAll('button')).find(
-        (candidate) => candidate.textContent?.includes('New task'),
+        (candidate) => candidate.textContent?.includes('New session'),
       )!;
     await act(async () => {
       newTaskButton().click();
@@ -579,7 +579,7 @@ describe('WorkspacesOverviewPanel', () => {
     // another workspace while this one is still creating.
     const otherRowButton = Array.from(
       rowByLabel('/w').querySelectorAll('button'),
-    ).find((candidate) => candidate.textContent?.includes('New task'))!;
+    ).find((candidate) => candidate.textContent?.includes('New session'))!;
     expect(otherRowButton.disabled).toBe(true);
     await act(async () => {
       otherRowButton.click();

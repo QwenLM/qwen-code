@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import {
   useCallback,
   useEffect,
@@ -283,7 +284,12 @@ export function StandaloneAuth({
         timerRef.current = setTimeout(() => setAttempt((n) => n + 1), delayMs);
       };
       try {
-        const response = await fetch(`${baseUrl}/capabilities`, {
+        const response = await createDaemonRestRequest(
+          baseUrl,
+          candidate,
+          undefined,
+          true,
+        )('/capabilities', {
           headers: candidate ? { Authorization: `Bearer ${candidate}` } : {},
           signal: controller.signal,
         });

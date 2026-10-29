@@ -71,12 +71,12 @@ systemd，此命令不依赖它。
 浏览器地址。
 
 这一条命令同时启动普通 daemon 与 Managed Agent。同一个 WebShell 使用已有的
-统一的项目导航同时显示普通与托管工作区及其会话，托管工作区带有标识，不再提供执行方式 tab。“新建任务”跟随所选工作区或当前会话。Local 会话使用命令启动目录，Managed 会话使用应用创建的
+统一的工作区导航同时显示普通与托管工作区及其会话，托管工作区带有标识，不再提供执行方式 tab。“新建会话”跟随所选工作区或当前会话。Local 会话使用命令启动目录，Managed 会话使用应用创建的
 Workspace 或显式导入的本机项目。两者共享一个需要认证的浏览器 origin，无需再启动 daemon 命令或打开
 第二个页面。
 
 在“添加工作区”中，提交前可选择“本地（daemon）”或“托管（Managed Agent）”，
-默认跟随当前会话所属服务。工作区行与“新建任务”显示该服务，新任务继承所选
+默认跟随当前会话所属服务。工作区行与“新建会话”显示该服务，新会话继承所选
 工作区。daemon 已有的 SSH 工作区支持仍然可用；Managed SSH 登记尚未接入此
 统一弹窗。
 
@@ -110,13 +110,12 @@ qwen serve --managed --managed-data-dir /absolute/private/data --open
 
 启动通过现有幂等 Workspace API 创建应用管理的默认 Workspace 和 OWNER 授权。
 使用已有本机项目时，打开“工作区 → 选择已有目录”，浏览或输入绝对路径后添加
-文件夹。服务会自动登记项目父目录并授予 OWNER 权限，已有文件保留原处，
-新任务从所选项目启动。也可创建空 Workspace。
+文件夹。服务自动授予 OWNER 权限，已有文件保留原处，新任务从所选项目启动。新导入是共享外部目录：独立本机实例可以导入同一项目，无需移交父目录，也不替换已有全局存储标记。父目录继续作为各实例内共享的导航及 worktree 布局边界。也可创建空 Workspace。
 
 启动目录仍供 Local 会话使用，不会自动导入。Managed 本地模式继续拒绝
-`--workspace`，请从界面选择项目。`.qwen-managed-storage.json` 维护标记保留在
-Git 工作树之外，不要编辑、删除、stash 或提交。导入的项目文件位于私有 Managed
-数据目录之外，需要单独备份。
+`--workspace`，请从界面选择项目。新导入的实例私有元数据位于 `runtime/imported-projects/<storage ID>/.qwen-managed-storage.json`，应与整个 Managed 数据目录一起保留。已有导入及应用自有存储保留此前的标记契约，不要编辑、删除、stash 或提交这些标记。导入项目的文件位于私有 Managed 数据目录之外，需要单独备份。
+
+共享项目会承担与多个独立终端相同的编辑冲突，需要隔离编辑时使用独立 worktree。新共享导入不支持整存储迁移、物理恢复和独占文件历史 rewind；本实例自身 Runtime 进程的恢复仍可用。不自动转换早期导入。参见[共享项目设计](../design/2026-10-28-managed-local-shared-projects.zh-CN.md)。
 
 Local 会话历史继续使用普通 Qwen 存储，与 Managed 数据目录独立，仅备份 Managed
 目录不会包含 Local 会话历史。
