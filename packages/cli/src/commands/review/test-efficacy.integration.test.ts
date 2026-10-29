@@ -143,7 +143,7 @@ process.stdout.write(JSON.stringify({
   numFailedTests: files.length,
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults: [{ status: 'failed' }],
+    assertionResults: [{ status: 'failed', failureMessages: ['AssertionError: expected probe to pass'] }],
   })),
 }));
 `,
@@ -172,7 +172,7 @@ const st = (f) => {
 process.stdout.write(JSON.stringify({
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults: [{ status: st(f) }],
+    assertionResults: [{ status: st(f), failureMessages: st(f) === 'failed' ? ['AssertionError: expected probe to pass'] : [] }],
   })),
 }));
 `,
@@ -244,7 +244,7 @@ const st = (f) => {
 };
 const results = files.map((f) => ({
   name: path.resolve(f),
-  assertionResults: [{ status: st(f) }],
+  assertionResults: [{ status: st(f), failureMessages: st(f) === 'failed' ? ['AssertionError: expected probe to pass'] : [] }],
 }));
 const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
@@ -658,7 +658,7 @@ import fs from 'node:fs';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
 const st = (f) => {
   try {
-    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return [{ status: 'failed' }];
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return [{ status: 'failed', failureMessages: ['AssertionError: expected probe to pass'] }];
   } catch {}
   return path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }];
 };
@@ -885,7 +885,7 @@ process.stdout.write(JSON.stringify({
   numFailedTests: failed ? files.length : 0,
   testResults: files.map((f) => ({
     name: path.resolve(f),
-    assertionResults: [{ status: failed ? 'failed' : 'passed' }],
+    assertionResults: [{ status: failed ? 'failed' : 'passed', failureMessages: failed ? ['AssertionError: expected probe to pass'] : [] }],
   })),
 }));
 `,
@@ -1230,7 +1230,7 @@ const st = (f) => {
 };
 const results = files.map((f) => ({
   name: path.resolve(f),
-  assertionResults: [{ status: st(f) }],
+  assertionResults: [{ status: st(f), failureMessages: st(f) === 'failed' ? ['AssertionError: expected probe to pass'] : [] }],
 }));
 const nf = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
@@ -1444,7 +1444,7 @@ const status = (f) => {
 };
 const results = files.map((f) => ({
   name: path.resolve(f),
-  assertionResults: [{ status: status(f) }],
+  assertionResults: [{ status: status(f), failureMessages: status(f) === 'failed' ? ['AssertionError: expected probe to pass'] : [] }],
 }));
 const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({

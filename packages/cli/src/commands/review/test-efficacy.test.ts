@@ -1200,13 +1200,99 @@ describe('classifyProbeRun', () => {
         testResults: [
           {
             name: '/w/a.test.ts',
-            assertionResults: [{ status: 'failed' }, { status: 'passed' }],
+            assertionResults: [
+              {
+                status: 'failed',
+                failureMessages: ['AssertionError: expected 1 to be 2'],
+              },
+              { status: 'passed' },
+            ],
           },
         ],
       }),
       ['a.test.ts'],
     );
     expect(only(got).verdict).toBe('gated');
+  });
+
+  it.each([
+    { failureMessages: undefined },
+    { failureMessages: [] },
+    { failureMessages: ['Error: fixture setup failed'] },
+    {
+      failureMessages: [
+        'Error: AssertionError is mentioned in an ordinary error',
+      ],
+    },
+  ])(
+    'does not call a failed test with $failureMessages GATED',
+    ({ failureMessages }) => {
+      const got = only(
+        classifyProbeRun(
+          1,
+          json({
+            testResults: [
+              {
+                name: '/w/a.test.ts',
+                assertionResults: [{ status: 'failed', failureMessages }],
+              },
+            ],
+          }),
+          ['a.test.ts'],
+        ),
+      );
+      expect(got.verdict).toBe('inconclusive');
+      expect(reasonOf(got)).toBe('non-assertion-failure');
+    },
+  );
+
+  it('recognizes a Node assertion failure without counting a runtime error', () => {
+    const got = only(
+      classifyProbeRun(
+        1,
+        json({
+          testResults: [
+            {
+              name: '/w/a.test.ts',
+              status: 'failed',
+              assertionResults: [
+                {
+                  status: 'failed',
+                  failureMessages: ['AssertionError [ERR_ASSERTION]: mismatch'],
+                },
+                {
+                  status: 'failed',
+                  failureMessages: ['Error: runtime failed'],
+                },
+              ],
+            },
+          ],
+        }),
+        ['a.test.ts'],
+      ),
+    );
+    expect(got.verdict).toBe('gated');
+    expect(got.detail).toContain('1 assertion(s) failed');
+  });
+
+  it('keeps a failed suite with passing tests inconclusive', () => {
+    const got = only(
+      classifyProbeRun(
+        1,
+        json({
+          testResults: [
+            {
+              name: '/w/a.test.ts',
+              status: 'failed',
+              assertionResults: [{ status: 'passed' }],
+            },
+          ],
+        }),
+        ['a.test.ts'],
+      ),
+    );
+    expect(got.verdict).toBe('inconclusive');
+    expect(reasonOf(got)).toBe('non-assertion-failure');
   });
 
   it('matches Windows result paths to repository-relative probes', () => {
@@ -1330,7 +1416,12 @@ describe('classifyProbeRun', () => {
           },
           {
             name: '/w/packages/lib/src/gating.test.ts',
-            assertionResults: [{ status: 'failed' }],
+            assertionResults: [
+              {
+                status: 'failed',
+                failureMessages: ['AssertionError: expected 1 to be 2'],
+              },
+            ],
           },
         ],
       }),
@@ -2190,6 +2281,11 @@ describe('collocatedNotGreenDetail', () => {
     ['no-tests', 'collected no tests there', 'compile or import error'],
     ['all-skipped', 'executed none of them', 'collected tests there'],
     [
+      'non-assertion-failure',
+      'reported a suite or test failure',
+      'without a confirmed assertion failure',
+    ],
+    [
       'not-in-results',
       'produced results there but none for it',
       'a path that did not match',
@@ -2315,7 +2411,15 @@ describe('classifyMutantRun', () => {
         {
           testResults: [
             { name: '/w/a.test.ts', assertionResults: [{ status: 'passed' }] },
-            { name: '/w/b.test.ts', assertionResults: [{ status: 'failed' }] },
+            {
+              name: '/w/b.test.ts',
+              assertionResults: [
+                {
+                  status: 'failed',
+                  failureMessages: ['AssertionError: expected 1 to be 2'],
+                },
+              ],
+            },
           ],
         },
         ['a.test.ts', 'b.test.ts'],
@@ -2356,7 +2460,15 @@ describe('classifyMutantRun', () => {
         1,
         {
           testResults: [
-            { name: '/w/a.test.ts', assertionResults: [{ status: 'failed' }] },
+            {
+              name: '/w/a.test.ts',
+              assertionResults: [
+                {
+                  status: 'failed',
+                  failureMessages: ['AssertionError: expected 1 to be 2'],
+                },
+              ],
+            },
           ],
         },
         ['a.test.ts', 'b.test.ts'],
