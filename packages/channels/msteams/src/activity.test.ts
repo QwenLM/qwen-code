@@ -163,6 +163,23 @@ describe('Teams Activity normalization', () => {
       ).toThrow();
   });
 
+  it('rejects a foreign tenant even when both activity tenant fields agree', () => {
+    expect(() =>
+      normalizeActivity(
+        'teams',
+        config,
+        activity({
+          channelData: { tenant: { id: 'another-tenant' } },
+          conversation: {
+            id: 'chat-1',
+            conversationType: 'personal',
+            tenantId: 'another-tenant',
+          },
+        }),
+      ),
+    ).toThrow('Teams tenant does not match the configured tenant.');
+  });
+
   it('does not admit bot messages, attachments-only messages or protocol invokes as prompts', () => {
     expect(
       normalizeActivity(

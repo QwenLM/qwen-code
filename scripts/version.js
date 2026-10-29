@@ -104,9 +104,6 @@ if (cliPackageJson.config?.sandboxImageUri) {
 // link with the stale registry package and the release build would compile
 // against outdated types.
 const channelsDir = resolve(process.cwd(), 'packages/channels');
-const previousBaseVersion = JSON.parse(
-  originalManifests.get('packages/channels/base/package.json'),
-).version;
 for (const entry of readdirSync(channelsDir)) {
   const pkgPath = join(channelsDir, entry, 'package.json');
   if (!existsSync(pkgPath)) continue;
@@ -121,10 +118,13 @@ for (const entry of readdirSync(channelsDir)) {
   }
   const peer = pkg.peerDependencies?.['@qwen-code/channel-base'];
   if (peer) {
+    const previousChannelVersion = JSON.parse(
+      originalManifests.get(`packages/channels/${entry}/package.json`),
+    ).version;
     pkg.peerDependencies['@qwen-code/channel-base'] = peer
       .split(' || ')
       .map((version) =>
-        version === previousBaseVersion ? newVersion : version,
+        version === previousChannelVersion ? newVersion : version,
       )
       .join(' || ');
     changed = true;
