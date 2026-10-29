@@ -243,6 +243,20 @@ describe('sedEditParser', () => {
     expect(parseSedEditCommand("sed -i 's/\\d/X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\</X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\>/X/g' file.txt")).toBeNull();
+    // Under the `u` flag these are JavaScript Unicode property / code-point
+    // escapes, so the simulation used to rewrite files that real sed rejects
+    // (`\p{L}`) or leaves unchanged (`\u{41}`).
+    expect(parseSedEditCommand("sed -E -i 's/\\p{L}/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/\\P{L}/X/g' file.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -E -i 's/\\u{41}/X/g' file.txt"),
+    ).toBeNull();
+  });
+
+  it('declines u-only invalid escapes so the real sed runs', () => {
+    expect(parseSedEditCommand("sed -i 's/a\\-b/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/a\\ b/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/a{/X/g' file.txt")).toBeNull();
   });
 
   it('preserves carriage returns in sed pattern space', () => {

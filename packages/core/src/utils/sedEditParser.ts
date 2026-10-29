@@ -227,8 +227,12 @@ function hasLeadingBracketLiteral(pattern: string): boolean {
   return /\[\^?\]/u.test(pattern);
 }
 
+// `\p{…}`, `\P{…}` and `\u{…}` are literals to sed but Unicode property and
+// code-point escapes to an ES regex with the `u` flag, so the simulation would
+// rewrite a file that real sed rejects or leaves alone. Declining falls back to
+// real sed, which is the module's documented policy for divergent constructs.
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {
-  return /\\[<>dDwWsS]/u.test(pattern);
+  return /\\[<>dDwWsSpPu]/u.test(pattern);
 }
 
 /**
