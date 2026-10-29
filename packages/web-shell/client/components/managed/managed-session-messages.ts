@@ -33,6 +33,7 @@ function carryManagedEventEpoch(
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
+  itemPages = false,
 ): ManagedAgentSessionEvent[] {
   // An empty input cannot ride the ascending check: strictlyAscendingIds
   // loops from index 1, and the fast path dereferences incoming[0].
@@ -49,11 +50,28 @@ export function mergeManagedEvents(
     managedEventEpochs.set(merged, carryManagedEventEpoch(current));
     return merged;
   }
+  const encoder = itemPages ? new TextEncoder() : undefined;
   const merged = [
     ...new Map(
-      [...current, ...incoming].map((event) => [event.id, event]),
+      [...current, ...incoming].map((event) => [
+        itemPages
+          ? `${event.id}:${String(record(event.data)['itemId'] ?? '')}`
+          : event.id,
+        event,
+      ]),
     ).values(),
-  ].sort((a, b) => a.id - b.id);
+  ].sort((a, b) => {
+    const sequence = a.id - b.id;
+    if (sequence || !encoder) return sequence;
+    // SQL orders opaque identities by UTF-8 bytes, rather than locale.
+    const left = encoder.encode(String(record(a.data)['itemId'] ?? ''));
+    const right = encoder.encode(String(record(b.data)['itemId'] ?? ''));
+    for (let index = 0; index < Math.min(left.length, right.length); index++) {
+      const difference = left[index]! - right[index]!;
+      if (difference) return difference;
+    }
+    return left.length - right.length;
+  });
   managedEventEpochs.set(merged, newManagedEventEpoch());
   return merged;
 }
