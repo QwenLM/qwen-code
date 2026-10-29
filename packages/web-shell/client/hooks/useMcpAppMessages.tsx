@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  McpAppMessageRequest,
-  McpAppMessages,
+import {
+  MCP_APP_MESSAGE_REVIEW_META,
+  type McpAppMessageRequest,
+  type McpAppMessages,
 } from '../mcpAppHostContext';
 import type { DaemonSessionOwnerSnapshot } from '../daemon/session/types';
 import {
@@ -98,7 +99,15 @@ export function useMcpAppMessages(host: MessageHost) {
         (previous &&
           (isPending(previous.phase) || previous.phase === 'unknown'))
       ) {
-        return Promise.resolve({ isError: true });
+        // Refused before review: nothing was sent.
+        return Promise.resolve({
+          isError: true,
+          _meta: {
+            [MCP_APP_MESSAGE_REVIEW_META]: input.signal.aborted
+              ? 'cancelled'
+              : 'failed',
+          },
+        });
       }
       return new Promise((resolve) => {
         const controller = new AbortController();
@@ -135,7 +144,19 @@ export function useMcpAppMessages(host: MessageHost) {
           },
           settle: () => {
             request.cleanup();
-            resolve(request.phase === 'accepted' ? {} : { isError: true });
+            resolve(
+              request.phase === 'accepted'
+                ? {}
+                : request.phase === 'cancelled' ||
+                    request.phase === 'expired' ||
+                    request.phase === 'failed'
+                  ? // None reached the session, so the App can say nothing was sent.
+                    {
+                      isError: true,
+                      _meta: { [MCP_APP_MESSAGE_REVIEW_META]: request.phase },
+                    }
+                  : { isError: true },
+            );
           },
           finish: (phase, error) => {
             if (!isPending(request.phase) && request.phase !== 'unknown')
