@@ -488,7 +488,9 @@ export function parseRule(raw: string): PermissionRule {
   const toolPart = trimmed.substring(0, openParen).trim();
 
   if (!trimmed.endsWith(')')) {
-    // Malformed: unbalanced parentheses — mark as invalid so it never matches.
+    // Malformed: it opens a specifier and never closes it — mark as invalid so
+    // it never matches. This is the only shape flagged invalid; a stray `)`
+    // elsewhere still parses as part of the specifier (see #15780).
     return { raw: trimmed, toolName: resolveToolName(toolPart), invalid: true };
   }
 
@@ -571,9 +573,9 @@ export function parseRule(raw: string): PermissionRule {
  * Parse an array of raw rule strings into PermissionRule objects,
  * silently skipping any empty entries.
  *
- * A rule whose parentheses do not balance comes back with `invalid: true`
- * rather than being dropped, so the caller can report it. `PermissionManager`
- * does that; this function stays free of side effects.
+ * A rule that opens a specifier and does not end with `)` comes back with
+ * `invalid: true` rather than being dropped, so the caller can report it.
+ * `PermissionManager` does that; this function does not warn.
  */
 export function parseRules(raws: string[]): PermissionRule[] {
   return raws.filter((r) => r && r.trim()).map(parseRule);
