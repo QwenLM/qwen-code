@@ -1915,6 +1915,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         sessionIds: string[],
         meta?: { attachedSessionId?: string },
       ) => void;
+      standaloneRenameRefreshToken?: number;
       onOpenAddWorkspace?: () => void;
       onOpenGitDiff?: (workspaceCwd: string) => void;
       onOpenCommit?: (workspaceCwd: string) => void;
@@ -1947,6 +1948,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
           'data-current-session-active': String(props.currentSessionActive),
+          'data-standalone-rename-refresh': String(
+            props.standaloneRenameRefreshToken ?? 0,
+          ),
           'data-can-open-sessions-overview': String(
             Boolean(props.canOpenSessionsOverview),
           ),
@@ -43541,6 +43545,11 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.sessionName).toBe(
       'Standalone title',
     );
+    expect(
+      container
+        .querySelector<HTMLElement>('[data-testid="sidebar"]')
+        ?.getAttribute('data-standalone-rename-refresh'),
+    ).toBe('1');
   });
 
   it('reconciles a header title rename with the daemon-stored name', async () => {

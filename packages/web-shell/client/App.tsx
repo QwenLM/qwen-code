@@ -4475,6 +4475,13 @@ export function App({
   const [sessionStatusDisplayName, setSessionStatusDisplayName] = useState<
     string | undefined
   >(undefined);
+  /**
+   * Bumped when a standalone session rename settles outside the sidebar
+   * (pane or header title); WebShellSidebar maps it into its standalone
+   * recents refresh key, which the sidebar's own mutations bump directly.
+   */
+  const [standaloneRenameRefreshToken, setStandaloneRenameRefreshToken] =
+    useState(0);
   const [currentSessionSummary, setCurrentSessionSummary] = useState<
     DaemonSessionSummary | undefined
   >(undefined);
@@ -14836,6 +14843,9 @@ export function App({
         connectionRef.current.sessionContext?.kind === 'standalone'
       ) {
         setSessionStatusDisplayName(displayName);
+        // The sidebar's standalone recents reload only on their own
+        // mutations; refresh them for renames settled outside the sidebar.
+        setStandaloneRenameRefreshToken((value) => value + 1);
       }
     },
     [sessionCatalogController],
@@ -22371,6 +22381,7 @@ export function App({
                     returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
+                  standaloneRenameRefreshToken={standaloneRenameRefreshToken}
                   onSessionsDeleted={(sessionIds, meta) => {
                     closeUsageTabs(sessionIds);
                     // Deleting the attached session must leave the deleted
