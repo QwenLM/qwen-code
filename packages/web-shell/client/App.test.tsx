@@ -46,6 +46,7 @@ import {
   GOAL_PAUSE_REASON_COMMAND,
   type DaemonInputAnnotation,
   type DaemonSessionBtwStreamEvent,
+  type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
   type DaemonSessionSummary,
@@ -56,6 +57,8 @@ import {
   type DaemonBrand,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
+  type DaemonSessionTaskWithWorkflowStatus,
+  type DaemonSessionWorkflowTaskStatus,
   type DaemonSettingDescriptor,
   type DaemonSkillToggleMutation,
   type DaemonWorkspaceMcpServerStatus,
@@ -913,7 +916,9 @@ const {
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
-      latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
+      latestStatusBarTasks: null as
+        | DaemonSessionTaskWithWorkflowStatus[]
+        | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
@@ -2311,7 +2316,7 @@ vi.doMock('./components/StatusBar', async () => {
   const React = await import('react');
   return {
     StatusBar: (props: {
-      tasks?: DaemonSessionMonitorTaskStatus[];
+      tasks?: DaemonSessionTaskWithWorkflowStatus[];
       onOpenTasks?: () => void;
       hideSettings?: boolean;
       onSelectModel?: () => void;
@@ -17671,6 +17676,211 @@ describe('App session callbacks', () => {
     });
 
     expect(testState.latestStatusBarTasks).toEqual([monitor]);
+  });
+
+  it('feeds the footer pill the task snapshot while a background agent runs', () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-running',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    testState.backgroundTasks = [agent, shell];
+
+    renderApp({
+      header: { items: ['title', 'environment', 'rightPanel'] },
+      environmentPanel: {
+        items: [
+          'environment',
+          'sources',
+          'subagents',
+          'backgroundTasks',
+          'artifacts',
+        ],
+      },
+    });
+
+    // The pill must see the unfiltered snapshot (the design doc's
+    // "1 shell, 3 local agents"), not an agents-only projection.
+    expect(testState.latestStatusBarTasks).toEqual([agent, shell]);
+  });
+
+  it('keeps the footer pill suppressed in the shipped entry without a running agent', () => {
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-suppressed',
+      label: 'Watch build',
+      description: 'Watch build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    // A parked (paused) background agent must not re-open the pill: the
+    // gate is hasActiveBackgroundAgent (running only), not a kind check.
+    const pausedAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-paused',
+      label: 'Research',
+      description: 'Research',
+      status: 'paused',
+      startTime: 3,
+      runtimeMs: 30,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [monitor, pausedAgent];
+
+    renderApp();
+
+    expect(testState.latestStatusBarTasks).toEqual([]);
+  });
+
+  it('keeps background agents out of headerless embed footers', () => {
+    // Headerless embeds (e.g. the VS Code companion, header={{ items: [] }})
+    // land on the !environmentTasksReplacementEnabled arm: they keep the
+    // pre-filtered composer tasks, so a live background agent must not
+    // open or feed their footer.
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-embed',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-embed',
+      label: 'Watch build',
+      description: 'Watch build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    testState.backgroundTasks = [agent, monitor];
+
+    renderApp({ header: { items: [] } });
+
+    expect(testState.latestStatusBarTasks).toEqual([monitor]);
+  });
+
+  it('passes agent tasks to a host-provided footer', () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-host',
+      label: 'Refactor',
+      description: 'Refactor',
+      status: 'running',
+      startTime: 3,
+      runtimeMs: 30,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    // The host footer gets composer tasks plus BACKGROUND agents (design
+    // doc); foreground agents are transcript-only and must stay out.
+    const foregroundAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-foreground',
+      label: 'Refactor foreground',
+      description: 'Refactor foreground',
+      status: 'running',
+      startTime: 5,
+      runtimeMs: 50,
+      isBackgrounded: false,
+      subagentType: 'general-purpose',
+    };
+    // Terminal (completed) background agents keep reaching host footers
+    // (design doc), so the predicate must not narrow to running-only.
+    const terminalAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-terminal',
+      label: 'Refactor terminal',
+      description: 'Refactor terminal',
+      status: 'completed',
+      startTime: 6,
+      runtimeMs: 60,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-host',
+      label: 'Watch deploy',
+      description: 'Watch deploy',
+      status: 'running',
+      startTime: 4,
+      runtimeMs: 40,
+    };
+    // Retained workflow history stays out of host footers: the composer
+    // filter is isComposerTask, not a kind-only check.
+    const historicalWorkflow: DaemonSessionWorkflowTaskStatus = {
+      kind: 'workflow',
+      id: 'workflow-historical',
+      label: 'Refactor history',
+      description: 'Refactor history',
+      status: 'completed',
+      startTime: 7,
+      runtimeMs: 70,
+      isBackgrounded: false,
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+      isHistorical: true,
+    };
+    testState.backgroundTasks = [
+      agent,
+      foregroundAgent,
+      terminalAgent,
+      monitor,
+      historicalWorkflow,
+    ];
+    let footerTasks: unknown;
+    renderApp({
+      renderFooter: (props) => {
+        footerTasks = props.tasks;
+        return null;
+      },
+    });
+    expect(footerTasks).toEqual([
+      expect.objectContaining({ kind: 'agent', id: 'agent-host' }),
+      expect.objectContaining({ kind: 'agent', id: 'agent-terminal' }),
+      expect.objectContaining({ kind: 'monitor', id: 'monitor-host' }),
+    ]);
+    expect(footerTasks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'agent-foreground' }),
+      ]),
+    );
+    expect(footerTasks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'workflow-historical' }),
+      ]),
+    );
   });
 
   it('passes terminal background shell task ids to the message list', async () => {

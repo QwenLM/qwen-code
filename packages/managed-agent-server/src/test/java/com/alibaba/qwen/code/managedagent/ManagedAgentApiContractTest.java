@@ -1233,6 +1233,21 @@ class ManagedAgentApiContractTest {
                     .isEqualTo("confirmed");
         }
         awaitMaterialized(tenant, webSessionId);
+        for (var operation : Map.of("webShellTranscript", "/transcript/query",
+                "webShellExportSession", "/sessions/export/query",
+                "webShellRecentTranscriptItems", "/transcript/items/query").entrySet()) {
+            String liveRead = "{\"sessionId\":\"%s\",\"view\":\"messages\",\"limit\":1}".formatted(webSessionId);
+            exchange(drift, operation.getKey(), 200,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant), liveRead);
+            exchange(drift, operation.getKey(), 404,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, otherTenant), liveRead);
+            exchange(drift, operation.getKey(), 400,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant),
+                    liveRead.replace("\"messages\"", "\"unknown\""));
+            exchange(drift, operation.getKey(), 400,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant),
+                    liveRead.replace("\"limit\":1", "\"limit\":101"));
+        }
         exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));

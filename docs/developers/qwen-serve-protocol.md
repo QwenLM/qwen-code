@@ -803,7 +803,9 @@ installation methods can report `available` with `canInstall: false` and manual
 instructions.
 
 Automatic updates require a real CLI lifecycle with POSIX `process.execve`, a
-standalone or managed global npm installation, and operator settings that permit
+standalone installation or a global npm/pnpm/yarn/bun installation running the
+published launcher (a root-owned npm prefix is included, because staging never
+writes to the global prefix), and operator settings that permit
 `general.enableAutoUpdate`. Embedded servers, Windows, unsupported Node runtimes,
 and development mode report `unavailable`. Only global/system settings apply;
 workspace settings cannot enable installation. The connection must use the
@@ -833,13 +835,16 @@ launcher; clients cannot supply a version or command.
   begins or during process replacement are not guaranteed to recover.
 
 Web Shell automatically checks and prepares available supported updates in the
-background, and displays its version-adjacent update button only when ready.
-Preparation and readiness survive workspace runtime reloads. Ordinary daemon
-shutdown discards the prepared download. Activation failures keep the daemon
-running and report `error`; the next check after the one-minute error cache can
-prepare a new download for retry. Disabling automatic updates removes readiness
-and cleans the download before a restart can begin. Clicking the update button
-explicitly restarts the entire daemon and interrupts its active sessions.
+background, and displays its version-adjacent update button when a prepared
+update is ready or when an available update carries manual instructions. In the
+manual-instructions state the button opens a popover with the instructions from
+the check and never prepares or restarts. Preparation and readiness survive workspace runtime
+reloads. Ordinary daemon shutdown discards the prepared download. Activation
+failures keep the daemon running and report `error`; the next check after the
+one-minute error cache can prepare a new download for retry. Disabling automatic
+updates removes readiness and cleans the download before a restart can begin.
+Clicking the button in the ready state explicitly restarts the entire daemon
+and interrupts its active sessions.
 
 ### `GET /daemon/status`
 
