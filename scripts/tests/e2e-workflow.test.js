@@ -148,7 +148,7 @@ describe('TUI product evidence', () => {
   it('still skips a rename contained within the unrelated subtrees', async () => {
     // Pins the negative arm: `previous_filename` present, but itself
     // unrelated. Without it, weakening that arm to a presence check keeps the
-    // suite green while re-running both gates on any server-side restructure.
+    // suite green while re-running both gates on any unrelated restructure.
     expect(
       await required([
         {
