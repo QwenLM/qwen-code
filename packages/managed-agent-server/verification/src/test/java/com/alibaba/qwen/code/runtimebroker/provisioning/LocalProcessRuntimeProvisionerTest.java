@@ -51,7 +51,6 @@ public class LocalProcessRuntimeProvisionerTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
     @Test
-    public
     void keepsTheControlPlaneConfigurationOutOfTheWorkerEnvironment() {
         Map<String, String> environment = new HashMap<>();
         for (String name : List.of("SPRING_DATASOURCE_PASSWORD", "spring_datasource_password",
@@ -70,7 +69,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void refusesPrivateProfileBeforeSpawningOrAdopting(
             @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
         assertPrivateProfileRefused(directory, null);
@@ -153,7 +151,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void refusesDowngradedAndRewrittenReadyRecordsWithoutLeakingChildren() throws Exception {
         requireNode();
         Set<Long> before = childPids();
@@ -173,7 +170,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void managedContextRoundtripUsesFakeWorker() throws Exception {
         requireNode();
         verifyContextRoundtrip(List.of("node", Path.of(
@@ -181,7 +177,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void managedContextRoundtripUsesRealWorkerWhenBundleIsProvided() throws Exception {
         String bundle = System.getProperty("qwen.runtime.worker.bundle");
         assumeTrue(bundle != null, "set qwen.runtime.worker.bundle to the built dist/cli.js");
@@ -247,13 +242,11 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void pinsThePersistedKind() {
         assertEquals("local-process", com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
     }
 
     @Test
-    public
     void reportsUnknownWhenTheProcessIsNotOwned() throws Exception {
         HttpRuntimeTransport transport = new HttpRuntimeTransport();
         try (LocalProcessRuntimeProvisioner provisioner =
@@ -285,7 +278,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void adoptsAWorkerOnlyAfterAttestationAndRejectsToolRoutes()
             throws Exception {
         requireNode();
@@ -353,14 +345,12 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void releasingAnOlderGenerationPreservesTheWinningWorker()
             throws Exception {
         assertReleasePreservesOtherAttempt(false);
     }
 
     @Test
-    public
     void releasingARetriedSeedPreservesTheWinningWorker()
             throws Exception {
         assertReleasePreservesOtherAttempt(true);
@@ -411,13 +401,11 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsReusingADeadWorkersLeaseIdentity() throws Exception {
         assertRejectsReusedWorkerIdentity(false);
     }
 
     @Test
-    public
     void rejectsReusingAReleasedWorkersLeaseIdentity() throws Exception {
         assertRejectsReusedWorkerIdentity(true);
     }
@@ -490,7 +478,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsMalformedCapabilityDigestBeforeSpawning() {
         RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
                 "/runtime/workspace", "sha256:" + "A".repeat(64),
@@ -516,7 +503,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void failsFastWhenReadyRecordExceedsTheLimit() throws Exception {
         requireNode();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
@@ -550,7 +536,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void reportsClosedBeforeReadyWhenTheWorkerExits() throws Exception {
         requireNode();
         RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
@@ -577,7 +562,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void keepsTheWorkerAliveWhenItPrintsAfterReady() throws Exception {
         requireNode();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
@@ -617,7 +601,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsANonLoopbackReadyUrlBeforeSendingTheToken()
             throws Exception {
         requireNode();
@@ -661,7 +644,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsAReadyNumberThatIsNotAnExactIntegerBeforeSendingTheToken()
             throws Exception {
         requireNode();
@@ -745,7 +727,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void fencedProvisioningReapsTheWorker() throws Exception {
         requireNode();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
@@ -788,7 +769,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void observeReportsReadyForAnOwnedAliveLease() throws Exception {
         requireNode();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
@@ -843,7 +823,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void observeReportsNotFoundForADeadWorkerAndReapsItsEntry()
             throws Exception {
         requireNode();
@@ -926,7 +905,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void releaseRacingADeadWorkerReapNeverResurrectsTheTombstone()
             throws Exception {
         requireNode();
@@ -992,7 +970,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity() {
         RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
                 "binding-1", 1);
@@ -1033,7 +1010,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void observeReportsConflictForAForeignSeedOrHandleVersion()
             throws Exception {
         requireNode();

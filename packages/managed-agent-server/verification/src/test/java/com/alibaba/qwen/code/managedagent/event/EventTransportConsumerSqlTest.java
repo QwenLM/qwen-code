@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.apache.rocketmq.client.apis.message.MessageId;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -366,6 +367,9 @@ public class EventTransportConsumerSqlTest {
 
     private void deliver(ManagedEventEnvelope envelope) {
         MessageView message = mock(MessageView.class);
+        MessageId messageId = mock(MessageId.class);
+        when(messageId.toString()).thenReturn("test-message");
+        when(message.getMessageId()).thenReturn(messageId);
         when(message.getBody()).thenReturn(ByteBuffer.wrap(
                 ManagedEventEnvelopes.toJson(envelope)
                         .getBytes(StandardCharsets.UTF_8)));

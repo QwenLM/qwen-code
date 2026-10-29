@@ -8,7 +8,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.lang.reflect.Constructor;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayDeque;
@@ -447,15 +446,8 @@ public final class AutomationHarnessFake {
 
     /** The daemon client's HTTP refusal, as the hosted route answers it. */
     public static HarnessHttpFailure refusal(int status, String code) {
-        try {
-            Constructor<HarnessHttpFailure> constructor = HarnessHttpFailure.class
-                    .getDeclaredConstructor(String.class, int.class, String.class);
-            constructor.setAccessible(true);
-            return constructor.newInstance(
-                    "POST /session/:id/automations/operations", status,
-                    "{\"error\":\"" + code + "\",\"code\":\"" + code + "\"}");
-        } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException(error);
-        }
+        return new HarnessHttpFailure("POST /session/:id/automations/operations", null, status,
+                "{\"error\":\"" + code + "\",\"code\":\"" + code + "\"}",
+                Map.of("error", code, "code", code));
     }
 }

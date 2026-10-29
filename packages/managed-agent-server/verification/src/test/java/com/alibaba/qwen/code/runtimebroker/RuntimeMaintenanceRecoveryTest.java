@@ -97,7 +97,6 @@ public class RuntimeMaintenanceRecoveryTest {
     }
 
     @org.junit.jupiter.api.Test
-    public
     void lateCleanupCompletionCannotRetireAnExpiredClaim() throws Exception {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();
@@ -117,7 +116,6 @@ public class RuntimeMaintenanceRecoveryTest {
     }
 
     @org.junit.jupiter.api.Test
-    public
     void managedGenerationWithoutCleanupCallbackStaysPinned() throws Exception {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();

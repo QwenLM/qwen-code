@@ -39,7 +39,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class JdbcPhysicalStorageReleaseTest {
     @Test
-    public
     void aliasesReleaseOnlyTheirMatchingExecutionMember() throws Exception {
         var source = new JdbcDataSource();
         source.setURL(

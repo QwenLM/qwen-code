@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
@@ -1490,7 +1491,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         Path script = Path.of("src/test/resources/managed-media-retention-generator.mjs").toAbsolutePath();
         Process process = new ProcessBuilder(System.getProperty("node.executable", "node"),
                 script.toString(), tenant, sessionId, output.toString())
-                .directory(Path.of("../..").toRealPath().toFile()).redirectErrorStream(true)
+                .directory(VerificationFixtures.repositoryRoot().toRealPath().toFile()).redirectErrorStream(true)
                 .redirectOutput(log.toFile()).start();
         try {
             assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("native media producer finishes").isTrue();
@@ -1564,8 +1565,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
         var journal = tx.execute(status -> new ExtensionRecordJournal(sessions, tenant,
                 "workspace-1", session).open());
-        JsonNode templates = new ObjectMapper().readTree(Files.readString(Path.of(
-                "../core/src/managed-runtime/contracts/managed-mcp-record-v1.fixtures.json")))
+        JsonNode templates = new ObjectMapper().readTree(Files.readString(VerificationFixtures.moduleRoot().resolve("../core/src/managed-runtime/contracts/managed-mcp-record-v1.fixtures.json")))
                 .required("templates");
         ObjectNode configuration = templates.required("mcp_configuration").deepCopy();
         commitMcp(journal, "configure-intent", "mcp_configuration", configuration, List.of());

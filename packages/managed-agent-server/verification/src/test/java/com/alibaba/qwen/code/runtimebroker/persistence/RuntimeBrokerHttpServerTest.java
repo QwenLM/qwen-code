@@ -56,7 +56,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class RuntimeBrokerHttpServerTest {
     @Test
-    public
     void capabilityReadsResolveAdmissionWithoutAllocatingOrAcquiringARuntime() throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
@@ -96,7 +95,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void residentUnsupportedToolsSettleBeforeDispatchAndDoNotBlockAReadOrRelease() throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
@@ -130,7 +128,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void residentToolRefusalCannotSettleAnExistingDispatchOrUnknownOutcome() throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
@@ -162,7 +159,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void mcpInventoryReadsTheSelectedBindingWithoutAcquiringOrReplacingAnOwner() throws Exception {
         try (Fixture fixture = new Fixture()) {
             String path = "/harness-sessions/harness/mcp-definitions";
@@ -188,7 +184,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void privateRecoveryReadRejectsIncompleteOrNonIntegralInstalledOwner() throws Exception {
         try (Fixture fixture = new Fixture()) {
             Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
@@ -216,7 +211,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void warmAndAcquireExposeTheOriginalScopeIsolationClass() throws Exception {
         for (String capability : List.of("capability", ResidentWorkspaceProfile.CAPABILITY_DIGEST)) {
             var scope = new RuntimeScope("tenant", "workspace", "generation", "/workspace", capability,
@@ -241,7 +235,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void unsupportedOperationsNeverDispatchOrClaimResolution() throws Exception {
         try (Fixture fixture = new Fixture()) {
             HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(
@@ -268,7 +261,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void activeHoldsListsTheHarnessLiveHoldRuntimes() throws Exception {
         // #13930 R1-2: the reloaded Harness restores the close's drain
         // obligation through this read-only route.
@@ -304,7 +296,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void activeHoldsMapsScopeResolutionFailures() throws Exception {
         // #13986 R1-8: every sibling resolver call answers the module's
         // mapped code; an unmapped throw here would escape as the generic
@@ -324,7 +315,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void releaseDecodesTheDrainFlagFromTheWire() throws Exception {
         // #13930 R1-19: the close's drain and the routine release differ
         // only by this body flag; a stringified or renamed key must not
@@ -399,7 +389,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void providerPreparationIsDurableAndVoidControlsKeepTheirNullResult() throws Exception {
         try (Fixture fixture = new Fixture()) {
             String runtime = "550e8400-e29b-41d4-a716-446655440302";
@@ -441,7 +430,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void resultBearingControlsCarryTheTransportResult() throws Exception {
         try (Fixture fixture = new Fixture()) {
             String runtime = "550e8400-e29b-41d4-a716-446655440302";
@@ -456,7 +444,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v2UnknownExecutionReconcilesOnlyWhenExplicitlyRequested() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap")
@@ -506,7 +493,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v2PassiveStatusDoesNotContactAnUnavailableWorker() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -535,7 +521,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void refusesAProtocolVersionThatIsNotExactlyOne() throws Exception {
         try (Fixture fixture = new Fixture()) {
             // Each literal would read as version 1.
@@ -559,7 +544,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void authenticatesBeforeProcessingUnsupportedOperations() throws Exception {
         try (Fixture fixture = new Fixture()) {
             HttpRequest request = HttpRequest.newBuilder(fixture.uri("/executions:prepare"))
@@ -572,7 +556,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void prepareHasNoEffectAndStartUsesOriginalBytesExactlyOnce() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
@@ -623,7 +606,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v3ReservationKeepsCanonicalInputAndExactPayloadDigestsSeparate() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -665,7 +647,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v3ReservationRejectsMixedLocalAndRemotePublicationModes() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -685,7 +666,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v3InstallsOneGrantAndReconcilesTheOriginalFinishedResult() throws Exception {
         try (Fixture fixture = new Fixture(true)) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -725,7 +705,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void nonRetryableV3DispatchOrStatusStopsWithoutRepeatedPolling() throws Exception {
         for (boolean dispatchUnsupported : new boolean[] {true, false}) {
             try (Fixture fixture = new Fixture(true)) {
@@ -769,7 +748,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void immediateExecutionRejectsDeferredReferencesBeforeDispatch() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
@@ -787,7 +765,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void providerStartTheWorkerNeverBeganStaysUnknownForTheCaller() throws Exception {
         // Provider references carry a UUID Runtime Session id.
         String runtime = "550e8400-e29b-41d4-a716-446655440303";
@@ -826,7 +803,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void providerObservesTheOriginalExecutionAfterResponseLoss() throws Exception {
         // Provider references carry a UUID Runtime Session id.
         String runtime = "550e8400-e29b-41d4-a716-446655440302";
@@ -866,7 +842,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void startResponsesNeverServeTheCooldownCache() throws Exception {
         String runtime = "550e8400-e29b-41d4-a716-446655440305";
         try (Fixture fixture = new Fixture()) {
@@ -912,7 +887,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void providerCancelsTheOriginalExecutionAfterResponseLoss() throws Exception {
         // Provider references carry a UUID Runtime Session id.
         String runtime = "550e8400-e29b-41d4-a716-446655440303";
@@ -952,7 +926,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v3UsesSavedSelectionAndObservesTheOriginalExecutionAfterResponseLoss() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1030,7 +1003,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void v3PreparedCancellationNeverStartsAndCarriesNoCapture() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1050,7 +1022,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void cancelPreparedWorkNeverInvokesTransport() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1068,7 +1039,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsExtraReserveFieldsBeforeWritingAReservation() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1088,7 +1058,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsPayloadBearingReserveReferencesBeforeWritingAReservation() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1112,7 +1081,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsANonStringStartPayloadBeforeTouchingTheReservation() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
@@ -1137,7 +1105,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsExtraStartFieldsBeforeChangingTheReservationOrDispatching() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
@@ -1161,7 +1128,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsUnknownControlFieldsBeforeCallingTheTransport() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1177,7 +1143,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsForeignHistoryOwnersBeforeCallingTheTransport() throws Exception {
         try (Fixture fixture = new Fixture()) {
             String harness = "550e8400-e29b-41d4-a716-446655440301";
@@ -1592,7 +1557,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void startWithAnUnencodablePayloadKeepsItsClientInputMapping() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1618,7 +1582,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void settledExecutionServesTheFullWireEnvelope() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1658,7 +1621,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void settlesWithProgressSequenceGreaterThanZeroAndPinsTheGapArms() throws Exception {
         try (Fixture fixture = new Fixture()) {
             ToolExecutionRecord prepared = prepareAndAcquire(fixture);
@@ -1687,7 +1649,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void acceptsAValidProgressCursorAndServesTheFullStatus() throws Exception {
         try (Fixture fixture = new Fixture()) {
             ToolExecutionRecord prepared = prepareAndAcquire(fixture);
@@ -1727,7 +1688,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsInvalidAfterSeqAndDuplicateQueryFields() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -1752,7 +1712,6 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    public
     void rejectsOversizedContentLengthBeforeReadingTheBody() throws Exception {
         try (Fixture fixture = new Fixture()) {
             URI baseUri = fixture.uri("/tool-sessions:acquire");

@@ -49,7 +49,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void createsOnePodAndSecretAndAdoptsTheSameHandleAfterRestart() {
         var api = new FakeKubernetesRuntimeClient();
         RuntimeResourceHandle handle;
@@ -86,7 +85,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void boundsReleasedAndUnknownPlacementsWithoutEvictingOtherLiveSeeds() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -133,7 +131,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void concurrentAdmissionCannotExceedThePlacementCap() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -159,7 +156,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void leaseLookupsNeverScanTheSeedMapAndCheckEveryFence() throws ReflectiveOperationException {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -218,7 +214,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void resolvesALostPodCreateReplyWithoutCreatingAgain() {
         var api = new FakeKubernetesRuntimeClient();
         api.loseCreateReply = "pods";
@@ -231,7 +226,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void doesNotRecreatePodBesideAnAmbiguousExistingSecret() {
         var api = new FakeKubernetesRuntimeClient();
         api.loseCreateReply = "secrets";
@@ -244,7 +238,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsMissingAndChangedObjectsWithoutWritesDuringRecovery() {
         List<Consumer<FakeKubernetesRuntimeClient>> mutations = List.of(
                 api -> api.remove("pods"), api -> api.remove("secrets"),
@@ -283,7 +276,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void refusesContainerSecurityOverridesInTheCreateResponse() {
         for (var override : List.of(Map.<String, Object>of("seccompProfile", Map.of("type", "Unconfined")),
                 Map.<String, Object>of("procMount", "Unmasked"), Map.<String, Object>of("runAsUser", 0),
@@ -299,7 +291,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void acceptsExplicitRuntimeDefaultContainerSecurityControls() {
         var api = new FakeKubernetesRuntimeClient();
         api.podCreated = pod -> map(container(api).get("securityContext")).putAll(Map.of(
@@ -316,7 +307,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void refusesAChangedPlacementBeforeCallingTheApi() {
         var api = new FakeKubernetesRuntimeClient();
         try (var first = provisioner(api);
@@ -332,7 +322,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void observesApiOutageAsUnknownAndNeverReplacesThePod() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -349,7 +338,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void invalidatesTheLocallyUsableLeaseWhenTheObservedEndpointChanges() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -366,7 +354,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void pendingPodStaysStartingAndProvisioningTimesOut() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -381,7 +368,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void requiresAHandleAndRefusesManagedContextBeforeApiCalls() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -396,7 +382,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsUnsafeContainerPathsBeforeCallingTheApi() {
         var api = new FakeKubernetesRuntimeClient();
         try (var provisioner = provisioner(api)) {
@@ -416,7 +401,6 @@ public class KubernetesRuntimeProvisionerTest {
     }
 
     @Test
-    public
     void rejectsEndpointsOutsidePodAddressSemantics() {
         for (String ip : List.of("127.0.0.1", "0.0.0.0", "169.254.169.254", "224.0.0.1", "::1", "fd00::1", "example.com", "10.1")) {
             var api = new FakeKubernetesRuntimeClient();

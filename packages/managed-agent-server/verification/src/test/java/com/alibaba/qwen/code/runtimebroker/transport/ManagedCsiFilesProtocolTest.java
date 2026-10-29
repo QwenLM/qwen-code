@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -10,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class ManagedCsiFilesProtocolTest {
     public static Map<String, Object> fixtures() throws Exception {
         return ManagedCsiFilesProtocol.parse(Files.readAllBytes(
-                Path.of("../cli/src/serve/contracts/managed-csi-files-v2.fixtures.json")));
+                VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-files-v2.fixtures.json")));
     }
 
     public static RuntimeProvisionRequest request(Map<String, Object> fixture) {
@@ -43,7 +43,6 @@ public class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    public
     void sharesTheExactClosedTypeScriptBootAndBothAttestationContracts() throws Exception {
         var fixture = fixtures();
         var expected = map(fixture.get("boot"));
@@ -63,7 +62,6 @@ public class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    public
     void sharesBoot5AndCanonicalAuthorityOriginsWithoutWideningBoot4OrAttestation() throws Exception {
         var fixture = fixtures();
         var expected = map(fixture.get("executionBoot5"));
@@ -93,7 +91,6 @@ public class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    public
     void sharesFinalizationBoot6AndRejectsMissingCrossedOrDowngradedAuthority() throws Exception {
         var fixture = fixtures();
         var expected = map(fixture.get("finalizationBoot6"));
@@ -122,7 +119,6 @@ public class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    public
     void rejectsMissingExtraCrossedAndDowngradedIdentity() throws Exception {
         var fixture = fixtures();
         var boot = map(fixture.get("boot"));
@@ -148,7 +144,6 @@ public class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    public
     void rejectsAmbiguousJsonAndPreservesNativeZeroCounters() throws Exception {
         for (Object text : (List<?>) fixtures().get("invalidJson")) {
             assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.parse(((String) text).getBytes(java.nio.charset.StandardCharsets.UTF_8)));

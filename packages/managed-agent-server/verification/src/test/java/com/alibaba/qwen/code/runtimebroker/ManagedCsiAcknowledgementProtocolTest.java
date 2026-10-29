@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -7,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class ManagedCsiAcknowledgementProtocolTest {
     public static Map<String, Object> fixtures() throws Exception {
         return ManagedCsiProtocol.parseAcknowledgement(Files.readAllBytes(
-                Path.of("../cli/src/serve/contracts/managed-csi-worker-ack-v1.fixtures.json")));
+                VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-worker-ack-v1.fixtures.json")));
     }
 
     @SuppressWarnings("unchecked")
@@ -53,7 +53,6 @@ public class ManagedCsiAcknowledgementProtocolTest {
     }
 
     @Test
-    public
     void consumesTheSharedClosedFixtureAndKeepsDistinctSessionPromptAndGenerationPins() throws Exception {
         var fixture = fixtures();
         var boot = map(fixture.get("boot"));
@@ -75,7 +74,6 @@ public class ManagedCsiAcknowledgementProtocolTest {
     }
 
     @Test
-    public
     void refusesEveryChangedResponseFieldAndEveryCaptureField() throws Exception {
         var fixture = fixtures();
         var boot = map(fixture.get("boot"));
@@ -103,7 +101,6 @@ public class ManagedCsiAcknowledgementProtocolTest {
     }
 
     @Test
-    public
     void validatesReceiptNumericDigestUnicodeAndCanonicalIdentityBoundaries() throws Exception {
         var fixture = fixtures();
         var boot = map(fixture.get("boot"));
@@ -136,7 +133,6 @@ public class ManagedCsiAcknowledgementProtocolTest {
     }
 
     @Test
-    public
     void strictReaderRejectsDuplicateKeysMalformedUtf8TrailingTokensAndOversizeBodies() throws Exception {
         for (String json : new String[] {"{\"a\":null,\"a\":1}", "{\"a\":{\"b\":1,\"b\":2}}", "{} {}", "[]", "null"}) {
             assertThrows(IllegalArgumentException.class, () -> ManagedCsiProtocol.parseAcknowledgement(json.getBytes(StandardCharsets.UTF_8)), json);
@@ -156,7 +152,6 @@ public class ManagedCsiAcknowledgementProtocolTest {
     }
 
     @Test
-    public
     void numericWireTokensMustBeCanonicalPositiveIntegerLiteralsWithoutJsRounding() throws Exception {
         var fixture = fixtures();
         String original = new String(JsonCodec.encode(fixture.get("response")), StandardCharsets.UTF_8);

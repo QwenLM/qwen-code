@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
@@ -7,7 +8,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CsiFileFinalizeProtocolTest {
     private static Map<String, Object> fixture() throws Exception {
         return ManagedCsiFilesProtocol.parse(Files.readAllBytes(
-                Path.of("../cli/src/serve/contracts/managed-csi-file-finalize-v1.fixtures.json")));
+                VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-file-finalize-v1.fixtures.json")));
     }
 
     @Test

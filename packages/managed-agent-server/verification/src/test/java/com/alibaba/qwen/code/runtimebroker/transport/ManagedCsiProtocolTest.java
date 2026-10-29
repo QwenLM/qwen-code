@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ManagedCsiProtocolTest {
     @Test
     void replaysTheSameClosedEnvelopeAndIndependentPhysicalKeyFixturesAsTypescript() throws Exception {
-        var path = Path.of("../cli/src/serve/contracts/managed-csi-v1.fixtures.json");
+        var path = VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-v1.fixtures.json");
         var fixtures = ManagedContextProtocol.parse(Files.readAllBytes(path));
         assertEquals(ManagedCsiProtocol.PROTOCOL, fixtures.get("managedCsi"));
         assertEquals(ManagedCsiProtocol.ATTEST_PATH, fixtures.get("attestPath"));
@@ -43,7 +43,7 @@ class ManagedCsiProtocolTest {
     @Test
     void verifiesIndependentReservationAndMountReceiptsWithoutExtendingContextRecords() throws Exception {
         var fixtures = ManagedContextProtocol.parse(Files.readAllBytes(
-                Path.of("../cli/src/serve/contracts/managed-csi-v1.fixtures.json")));
+                VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-v1.fixtures.json")));
         var boot = map(fixtures.get("boot"));
         var pod = map(fixtures.get("expectedPod"));
         assertEquals(fixtures.get("attestationRequest"), ManagedCsiProtocol.attestationRequest(boot));

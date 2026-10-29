@@ -33,7 +33,7 @@ class ContainerArtifactSelectionTest {
     }
 
     private int select() throws Exception {
-        String dockerfile = Files.readString(Path.of("Dockerfile"));
+        String dockerfile = Files.readString(VerificationFixtures.moduleRoot().resolve("Dockerfile"));
         String start = "main=\"\" && count=0";
         String end = "&& cp \"$main\" /tmp/qwen-managed-agent-server.jar";
         int from = dockerfile.indexOf(start);

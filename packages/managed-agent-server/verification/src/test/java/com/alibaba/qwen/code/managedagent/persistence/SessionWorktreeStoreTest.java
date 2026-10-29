@@ -1,10 +1,13 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles;
 import com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,6 +75,7 @@ class SessionWorktreeStoreTest {
                 .withBean(WorkspaceStorageGuard.class, () -> org.mockito.Mockito.mock(WorkspaceStorageGuard.class))
                 .withBean(SshWorkspaceStore.class, () -> org.mockito.Mockito.mock(SshWorkspaceStore.class))
                 .withBean(ManagedAgentProperties.class, ManagedAgentProperties::new)
+                .withBean(WorktreeFiles.class, LocalWorktreeFiles::new)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(SessionWorktreeStore.class).describe("tenant", "missing")).isNull();
@@ -190,9 +194,9 @@ class SessionWorktreeStoreTest {
             var removal = store.cleanup("tenant", "actor", workspace, id, "remove");
             assertThat(store.cleanup("tenant", "actor", workspace, id, "remove").operationId()).isEqualTo(removal.operationId());
             var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource())));
-            var service = new com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService(store, execution,
+            var service = VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService(store, execution,
                     new ManagedAgentProperties(), org.mockito.Mockito.mock(ManagedAgentStore.class),
-                    org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class));
+                    org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class)));
             try {
                 service.drive(removal);
             } finally {

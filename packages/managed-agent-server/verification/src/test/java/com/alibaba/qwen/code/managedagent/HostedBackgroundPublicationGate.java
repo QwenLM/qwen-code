@@ -106,7 +106,7 @@ public class HostedBackgroundPublicationGate {
                 .toAbsolutePath().normalize();
         assertThat(cli).as("CLI entry -Dqwen.cli.entry=%s", cli).isRegularFile();
         Path moduleDir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
-        Path repoRoot = moduleDir.resolve("../..").normalize();
+        Path repoRoot = VerificationFixtures.repositoryRoot();
         assertThat(repoRoot.resolve("integration-tests/helpers/hosted-recovery-blocked-wedge-driver.ts"))
                 .isRegularFile();
         Path evidence = (System.getProperty("qwen.wedge.evidence") != null

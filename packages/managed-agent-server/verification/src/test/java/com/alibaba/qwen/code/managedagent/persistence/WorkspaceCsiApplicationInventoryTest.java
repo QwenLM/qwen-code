@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
@@ -1762,7 +1763,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void referencedReaderTreatsDeclaredRawOutputAsDataAndRejectsExternalStructuredPayloads() throws Exception {
         var expected = historicalKeys();
         var json = new ObjectMapper();
-        var contract = json.readTree(java.nio.file.Path.of("../core/src/managed-runtime/contracts/managed-tool-publication-v1.fixtures.json").toFile())
+        var contract = json.readTree(VerificationFixtures.moduleRoot().resolve("../core/src/managed-runtime/contracts/managed-tool-publication-v1.fixtures.json").toFile())
                 .path("cases").get(0).path("value");
         byte[] bindingBytes = json.writeValueAsBytes(contract);
         ToolPublicationContract.parseBytes("binding", bindingBytes);

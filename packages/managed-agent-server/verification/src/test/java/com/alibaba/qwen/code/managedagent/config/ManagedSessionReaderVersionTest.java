@@ -5,7 +5,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -56,7 +55,7 @@ class ManagedSessionReaderVersionTest {
     private static void assertUnsupported() {
         var failure = assertThrows(ManagedAgentException.class,
                 () -> new ManagedSessionReaderVersion().requireReadable(2));
-        assertEquals(HttpStatus.CONFLICT, failure.getStatus());
+        assertEquals(409, failure.getStatus());
         assertEquals("managed_session_reader_version_unsupported", failure.getCode());
     }
 }

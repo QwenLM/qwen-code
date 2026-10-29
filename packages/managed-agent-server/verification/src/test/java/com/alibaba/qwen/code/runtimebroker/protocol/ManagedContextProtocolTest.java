@@ -31,7 +31,6 @@ public class ManagedContextProtocolTest {
             .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     @Test
-    public
     void validatesEverySharedBootAndReadyFixtureWithProductionRules()
             throws Exception {
         JsonNode suite = fixtures();
@@ -59,7 +58,6 @@ public class ManagedContextProtocolTest {
     }
 
     @Test
-    public
     void encodesInstallationAndReceiptExactlyLikeTheSharedFixture()
             throws Exception {
         JsonNode suite = fixtures();
@@ -77,7 +75,6 @@ public class ManagedContextProtocolTest {
     }
 
     @Test
-    public
     void optInCannotSilentlyFallBackOrAcceptInvalidScope() {
         try (LocalProcessRuntimeProvisioner legacy = new LocalProcessRuntimeProvisioner(
                 List.of("node"), Path.of("."), new HttpRuntimeTransport());
@@ -102,7 +99,6 @@ public class ManagedContextProtocolTest {
     }
 
     @Test
-    public
     void installationPreservesUnicodeAndRejectsMalformedSessionBeforeSending() {
         String sessionId = "会话-𝄞";
         Map<String, Object> body = ManagedContextProtocol.installation(request(),

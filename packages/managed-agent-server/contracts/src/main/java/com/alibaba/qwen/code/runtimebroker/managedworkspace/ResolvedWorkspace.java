@@ -15,7 +15,7 @@ public final class ResolvedWorkspace {
     private final String cwdRelative;
     private final boolean tenantDefault;
 
-    public ResolvedWorkspace(WorkspaceRecord workspace, String cwdRelative,
+    ResolvedWorkspace(WorkspaceRecord workspace, String cwdRelative,
             boolean tenantDefault) {
         this.tenantId = workspace.getTenantId();
         this.workspaceId = workspace.getWorkspaceId();

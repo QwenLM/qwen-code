@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
@@ -238,7 +239,8 @@ class WorkspaceCsiRuntimeIdentityTest {
                 original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
                 var lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
                 var reservation = storage.inspect(registration);
-                doThrow(outage).when(storage).inspect(registration);
+                doThrow(new StoreFailureException("CSI reservation storage is unavailable", outage))
+                        .when(storage).inspect(registration);
                 for (int retry = 0; retry < 2; retry++) {
                     assertThat(join(provider.reconcile(original.getRequest(), original.getProvisionSeed(), handle, lease)).getOutcome())
                             .isEqualTo(RuntimeObservation.Outcome.UNKNOWN);

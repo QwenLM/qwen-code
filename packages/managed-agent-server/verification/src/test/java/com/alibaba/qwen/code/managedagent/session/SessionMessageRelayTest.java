@@ -113,15 +113,8 @@ class SessionMessageRelayTest {
         }
 
         static HarnessHttpFailure refusal(String code) {
-            try {
-                var ctor = HarnessHttpFailure.class.getDeclaredConstructor(
-                        String.class, int.class, String.class);
-                ctor.setAccessible(true);
-                return ctor.newInstance("runMessageOperation", 409,
-                        "{\"code\":\"" + code + "\"}");
-            } catch (Exception error) {
-                throw new IllegalStateException(error);
-            }
+            return new HarnessHttpFailure("runMessageOperation", null, 409,
+                    "{\"code\":\"" + code + "\"}", Map.of("code", code));
         }
     }
 

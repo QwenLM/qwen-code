@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer.Materiali
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.Outcome;
 import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
 import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
+import org.apache.rocketmq.client.apis.message.MessageId;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,9 @@ class EventTransportConsumerTest {
 
     private static MessageView message(String body) {
         MessageView view = mock(MessageView.class);
+        MessageId messageId = mock(MessageId.class);
+        when(messageId.toString()).thenReturn("test-message");
+        when(view.getMessageId()).thenReturn(messageId);
         // A read-only view: the listener must not depend on a fresh buffer.
         when(view.getBody()).thenReturn(ByteBuffer.wrap(
                 body.getBytes(StandardCharsets.UTF_8)).asReadOnlyBuffer());

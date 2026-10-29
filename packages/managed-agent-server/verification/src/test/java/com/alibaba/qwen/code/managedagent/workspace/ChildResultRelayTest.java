@@ -134,23 +134,15 @@ class ChildResultRelayTest {
         }
 
         /** The route's `409 child_operation_record` — the parent's own
-         * committed veto, never a transient shape: its constructor is
-         * package-private inside qwencode, so the double reaches it
-         * reflectively. */
+         * committed veto, never a transient shape, represented by the
+         * Harness contract boundary. */
         private static HarnessHttpFailure recordRefusal() {
             return refusal("child_operation_record");
         }
 
         static HarnessHttpFailure refusal(String code) {
-            try {
-                var ctor = HarnessHttpFailure.class.getDeclaredConstructor(
-                        String.class, int.class, String.class);
-                ctor.setAccessible(true);
-                return ctor.newInstance("runChildOperation", 409,
-                        "{\"code\":\"" + code + "\"}");
-            } catch (Exception error) {
-                throw new IllegalStateException(error);
-            }
+            return new HarnessHttpFailure("runChildOperation", null, 409,
+                    "{\"code\":\"" + code + "\"}", Map.of("code", code));
         }
     }
 

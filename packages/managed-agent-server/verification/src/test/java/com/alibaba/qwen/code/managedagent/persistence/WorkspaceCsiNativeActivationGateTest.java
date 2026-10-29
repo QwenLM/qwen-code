@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
@@ -879,7 +880,7 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     private void generate(boolean conversation, boolean extracted, boolean legacyTerminal) throws Exception {
-        Path root = Path.of("../..").toRealPath();
+        Path root = VerificationFixtures.repositoryRoot().toRealPath();
         Path input = directory.resolve("input.json");
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
                 .put("capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);

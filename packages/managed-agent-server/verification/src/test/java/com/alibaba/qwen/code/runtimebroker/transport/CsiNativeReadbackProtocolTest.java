@@ -1,12 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,10 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class CsiNativeReadbackProtocolTest {
     @Test
-    public
     void sharesAllThreeClosedActionsAndTheNullablePreparedRule() throws Exception {
-        var fixture = JsonCodec.parseObject(Files.readAllBytes(Path.of(
-                "../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "shared fixture");
+        var fixture = JsonCodec.parseObject(Files.readAllBytes(VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "shared fixture");
         for (Object candidate : (List<?>) fixture.get("valid")) {
             var value = ManagedCsiFilesProtocolTest.map(candidate);
             var request = CsiNativeReadbackProtocol.request(JsonCodec.encode(ManagedCsiFilesProtocolTest.map(value.get("request"))));
@@ -93,10 +91,8 @@ public class CsiNativeReadbackProtocolTest {
         assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.request(new byte[] {(byte) 0xff}));
     }
     @Test
-    public
     void acceptsWorkerSizedUnicodeResultsAndRejectsAnOverLimitBodyOrForeignSubject() throws Exception {
-        var fixture = JsonCodec.parseObject(Files.readAllBytes(Path.of(
-                "../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "fixture");
+        var fixture = JsonCodec.parseObject(Files.readAllBytes(VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "fixture");
         var value = ((List<?>) fixture.get("valid")).stream().map(ManagedCsiFilesProtocolTest::map)
                 .filter(row -> "execute-read-only".equals(row.get("name"))).findFirst().orElseThrow();
         var request = CsiNativeReadbackProtocol.request(ManagedCsiFilesProtocolTest.map(value.get("request")));
@@ -118,10 +114,8 @@ public class CsiNativeReadbackProtocolTest {
     }
 
     @Test
-    public
     void appliesTheCheckpointReaderLimitWithoutWideningOrdinaryReferences() throws Exception {
-        var fixture = JsonCodec.parseObject(Files.readAllBytes(Path.of(
-                "../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "fixture");
+        var fixture = JsonCodec.parseObject(Files.readAllBytes(VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "fixture");
         var valid = ((List<?>) fixture.get("valid")).stream().map(ManagedCsiFilesProtocolTest::map).toList();
         var execute = valid.stream().filter(row -> "execute".equals(row.get("name"))).findFirst().orElseThrow();
         var request = CsiNativeReadbackProtocol.request(ManagedCsiFilesProtocolTest.map(execute.get("request")));

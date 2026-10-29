@@ -1,7 +1,12 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
+import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
@@ -66,6 +71,9 @@ class SessionWorktreeServiceTest {
                 ManagedArtifactConfiguration.class);
         context.registerBean(ManagedAgentProperties.class, ManagedAgentProperties::new);
         context.registerBean(MessageMaterializer.class, () -> mock(MessageMaterializer.class));
+        context.registerBean(WorktreeFiles.class, LocalWorktreeFiles::new);
+        context.registerBean(SessionWorktreeOperations.Factory.class,
+                () -> (git, timeout) -> new SessionWorktreeGit(new ChildWorktreeGit(git, timeout)));
         context.registerBean("worktrees", SessionWorktreeService.class, () -> service);
         try {
             context.refresh();

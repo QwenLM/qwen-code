@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -19,7 +20,7 @@ class WorkspaceCsiHostedFilesTest {
     @ParameterizedTest(name = "cold recovery = {0}")
     @ValueSource(booleans = {false, true})
     void hostedFileTurnsRetainResultsAcrossOriginalAndRecoveredOwners(boolean coldRecovery) throws Exception {
-        Assumptions.assumeTrue(Files.isRegularFile(Path.of("../../packages/cli/dist/src/serve/hosted-csi-text-turn.js")),
+        Assumptions.assumeTrue(Files.isRegularFile(VerificationFixtures.repositoryRoot().resolve("packages/cli/dist/src/serve/hosted-csi-text-turn.js")),
                 "Run npm run build to include the Hosted JavaScript acceptance test");
         var source = new DriverManagerDataSource("jdbc:h2:mem:csi-hosted-files-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");

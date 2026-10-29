@@ -50,6 +50,10 @@ database, network or process operations. Control-plane code may retain Spring
 components, scheduling and transaction support, but not JDBC or concrete external
 clients. Broker orchestration remains independent of Spring.
 
+Separate Maven artifacts make forbidden implementation imports fail during compilation: sibling implementations are absent from each module's compile classpath. Dependency rules and ArchUnit checks supplement that boundary; a single artifact would leave all implementations on the same classpath. The coordinated package migration gives each package one artifact owner without preserving cross-JAR package-private access. This is the agreed internal-isolation scope, with shared versioning and one service delivery.
+
+Source counts do not determine module ownership. Broker requests, identities, records and deterministic wire validators belong to contracts when multiple modules consume them without I/O. Runtime scheduling and recovery decisions belong to the Broker implementation. A small Broker implementation module is therefore expected; moving its shared protocol rules back would introduce implementation dependencies in consumers.
+
 ## Contract and implementation changes
 
 Move existing storage, Harness, Runtime, event and object-store interfaces and
@@ -147,6 +151,8 @@ complete relocated test tree. Checkstyle and SpotBugs still cover every producti
 module. Aggregate coverage includes production classes and source, not only test
 execution data. Verification directly depends on production modules at compile
 scope for that aggregation, without becoming a published artifact.
+
+Tests keep `verification` as their working directory so local `src/test/resources` paths remain valid. Surefire and Failsafe pass `managed.module.root` for shared repository fixtures and `qwen.cli.entry` for the built CLI, including profile overrides. Repository paths are resolved from the module root instead of assuming the old process working directory.
 
 Use test-scoped `com.tngtech.archunit:archunit:1.5.1` under existing JUnit to enforce
 the module matrix, forbidden dependencies, package ownership and nonempty scans.

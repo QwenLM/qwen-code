@@ -345,7 +345,6 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     @Override
-    public
     default void close() {
     }
 

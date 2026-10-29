@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -24,7 +25,6 @@ import java.math.BigDecimal;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -294,7 +294,7 @@ class WorkspaceRuntimeTransportTest {
 
     private static Fixture fixture() throws Exception {
         var fixture = ManagedCsiProtocol.parseAcknowledgement(Files.readAllBytes(
-                Path.of("../cli/src/serve/contracts/managed-csi-worker-ack-v1.fixtures.json")));
+                VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-worker-ack-v1.fixtures.json")));
         var context = with(map(map(fixture.get("boot")).get("context")), "capabilityDigest", WorkspaceExecutionProfile.CAPABILITY_DIGEST);
         var boot = with(map(fixture.get("boot")), "context", context);
         var request = with(map(fixture.get("request")), "context",

@@ -9,7 +9,7 @@ public final class WorkspacePage {
     private final boolean hasMore;
     private final WorkspaceView defaultWorkspace;
 
-    public WorkspacePage(List<WorkspaceView> workspaces, boolean hasMore,
+    WorkspacePage(List<WorkspaceView> workspaces, boolean hasMore,
             WorkspaceView defaultWorkspace) {
         this.workspaces = List.copyOf(workspaces);
         this.hasMore = hasMore;

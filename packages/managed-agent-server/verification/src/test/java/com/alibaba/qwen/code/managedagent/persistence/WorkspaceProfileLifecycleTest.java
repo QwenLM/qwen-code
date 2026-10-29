@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
@@ -577,7 +578,7 @@ class WorkspaceProfileLifecycleTest {
             f.resource(sealId, "managed-tool-result-content", f.json.createObjectNode().put("segmentCount", 0).put("byteLength", 0)
                     .put("digest", ToolPublicationContract.sha256(new byte[0])));
         }
-        var record = f.json.readTree(java.nio.file.Path.of("../core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json").toFile())
+        var record = f.json.readTree(VerificationFixtures.moduleRoot().resolve("../core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json").toFile())
                 .path("templates").path("child_run").deepCopy();
         var shell = (com.fasterxml.jackson.databind.node.ObjectNode) record;
         shell.set("startReceiptRef", f.resource("receipt", "managed-runtime-receipt", f.json.createObjectNode()

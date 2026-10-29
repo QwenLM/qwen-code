@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
@@ -9,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -24,7 +24,7 @@ class ManagedCsiHttpTransportTest {
     @Test
     void sendsOneAuthenticatedCsiRequestAndRefusesCrossedStorageOrContextOnlyReplies() throws Exception {
         var fixtures = ManagedContextProtocol.parse(Files.readAllBytes(
-                Path.of("../cli/src/serve/contracts/managed-csi-v1.fixtures.json")));
+                VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-v1.fixtures.json")));
         var boot = map(fixtures.get("boot"));
         var context = map(boot.get("context"));
         var storage = map(boot.get("storage"));

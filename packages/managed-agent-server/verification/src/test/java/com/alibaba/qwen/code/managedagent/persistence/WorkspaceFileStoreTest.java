@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -30,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -167,7 +169,7 @@ class WorkspaceFileStoreTest {
     void unreadySessionCannotReachTheFileProcess() {
         var locator = session("session");
         try (var worktrees = mockStatic(SessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
-            worktrees.when(() -> SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
+            worktrees.when(() -> SessionWorktreeStore.requireReady(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
                     .thenThrow(new ManagedAgentException(409, "worktree_not_ready", "Not ready"));
             assertThatThrownBy(() -> files.query("tenant", "actor", locator, ".", "", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("worktree_not_ready"));
@@ -185,7 +187,7 @@ class WorkspaceFileStoreTest {
         var identity = Files.readAttributes(root.resolve(".qwen-managed-worktrees/owned"), "unix:dev,ino");
         jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE session_id = ?", cwd, "session");
         try (var worktrees = mockStatic(SessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
-            worktrees.when(() -> SessionWorktreeStore.descriptor(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
+            worktrees.when(() -> SessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
                     .thenReturn(new SessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch", "a".repeat(40), cwd, "op", 2, null));
             process.when(() -> WorkspaceFileProcess.read(anyString(), anyString(), any())).thenAnswer(call -> {
                 Map<String, Object> request = call.getArgument(2);
@@ -199,7 +201,7 @@ class WorkspaceFileStoreTest {
                 return result();
             });
             String revision = files.query("tenant", "actor", locator, ".", "", null).scopeRevision();
-            worktrees.when(() -> SessionWorktreeStore.descriptor(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
+            worktrees.when(() -> SessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
                     .thenReturn(new SessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch", "a".repeat(40), cwd, "op", 3, null));
             assertThatThrownBy(() -> files.query("tenant", "actor", locator, ".", "", revision))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_file_scope_changed"));

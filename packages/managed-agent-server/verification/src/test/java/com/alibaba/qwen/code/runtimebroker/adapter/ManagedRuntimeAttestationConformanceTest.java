@@ -28,7 +28,6 @@ public class ManagedRuntimeAttestationConformanceTest {
             "managed-runtime-tool-v2.schema.json");
 
     @Test
-    public
     void consumesTheSharedRouteAndLimitContract() throws IOException {
         JsonNode suite = read(FIXTURES);
         JsonNode route = suite.required("route");
@@ -45,7 +44,6 @@ public class ManagedRuntimeAttestationConformanceTest {
     }
 
     @Test
-    public
     void consumesEverySharedOutcomeClassification() throws IOException {
         JsonNode cases = read(FIXTURES).required("cases");
         Set<String> ids = new HashSet<>();
@@ -66,7 +64,6 @@ public class ManagedRuntimeAttestationConformanceTest {
     }
 
     @Test
-    public
     void pinsClosedRequestAndResponseShapes() throws IOException {
         JsonNode suite = read(FIXTURES);
         JsonNode success = findCase(suite.required("cases"), "success");
@@ -89,7 +86,6 @@ public class ManagedRuntimeAttestationConformanceTest {
     }
 
     @Test
-    public
     void consumesTheSharedToolRouteContract() throws IOException {
         JsonNode suite = read(TOOL_FIXTURES);
         assertEquals(1, suite.required("contractVersion").intValue());
@@ -117,7 +113,6 @@ public class ManagedRuntimeAttestationConformanceTest {
     }
 
     @Test
-    public
     void consumesEveryToolOutcomeClassification() throws IOException {
         JsonNode suites = read(TOOL_FIXTURES).required("suites");
         assertEquals(4, suites.size());
@@ -159,7 +154,6 @@ public class ManagedRuntimeAttestationConformanceTest {
     }
 
     @Test
-    public
     void pinsClosedToolRequestAndResponseShapes() throws IOException {
         JsonNode suites = read(TOOL_FIXTURES).required("suites");
         for (JsonNode suite : suites) {

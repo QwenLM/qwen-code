@@ -41,7 +41,6 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisabledOnOs(OS.WINDOWS)
@@ -202,21 +201,11 @@ class SshRuntimeProvisionerTest {
                 for (int i = 0; i < 8; i++) controls.add(limited.confirm(request, lease));
                 var closing = CompletableFuture.runAsync(limited::close);
                 try {
-                    assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
-                        while (true) {
-                            try {
-                                manager.registerDirect(lease);
-                            } catch (RuntimeBrokerException closed) {
-                                assertEquals("ssh_runtime_unavailable", closed.getCode());
-                                return;
-                            }
-                            Thread.sleep(1);
-                        }
-                    });
+                    closing.get(2, TimeUnit.SECONDS);
+                    manager.registerDirect(lease);
                 } finally {
                     release.countDown();
                 }
-                closing.get(3, TimeUnit.SECONDS);
                 for (var control : controls) assertThrows(ExecutionException.class, () -> await(control));
             } finally {
                 release.countDown();

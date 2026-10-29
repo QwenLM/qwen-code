@@ -13,7 +13,9 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -185,7 +187,8 @@ class SessionLifecycleServiceResumeTest {
         ObjectProvider<RuntimeBindingRepository> bindings =
                 mock(ObjectProvider.class);
         when(bindings.getIfAvailable())
-                .thenReturn(mock(RuntimeBindingRepository.class));
+                .thenReturn(new JdbcRuntimeBindingRepository(dataSource,
+                        new AesGcmSecretProtector("test", new byte[32])));
         WorkspaceLifecycleStore lifecycle = new WorkspaceLifecycleStore(jdbc,
                 new ObjectMapper(), bindings);
         store.setWorkspaceLifecycleStore(lifecycle);

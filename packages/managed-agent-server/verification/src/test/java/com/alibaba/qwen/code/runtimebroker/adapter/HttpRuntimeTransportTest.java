@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.adapter;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
@@ -979,8 +980,7 @@ class HttpRuntimeTransportTest {
 
     @Test
     void exchangesToolV3WithTheRealTypeScriptHandler() throws Exception {
-        Path repository = Path.of("").toAbsolutePath()
-                .resolve("../..").normalize();
+        Path repository = VerificationFixtures.repositoryRoot();
         Path handler = repository.resolve("packages/cli/dist/src/serve/managed-runtime-tool-v3-routes.js");
         Assumptions.assumeTrue(Files.isRegularFile(handler),
                 "Build the TypeScript workspace before the interop test.");

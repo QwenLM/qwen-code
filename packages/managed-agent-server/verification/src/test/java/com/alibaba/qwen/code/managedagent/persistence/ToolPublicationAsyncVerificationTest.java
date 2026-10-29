@@ -1,13 +1,17 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
+import com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -311,6 +315,8 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> fixture.manager)
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
                 .withBean(ManagedSessionStore.class, () -> fixture.sessions)
+                .withBean(HarnessRules.class, SdkHarnessRules::new)
+                .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
                 .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)
                 .withBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class, () -> fixture.bindings)
                 .withBean(org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder.class,

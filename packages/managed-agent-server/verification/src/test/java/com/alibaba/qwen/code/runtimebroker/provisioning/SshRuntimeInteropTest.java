@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
@@ -82,7 +83,7 @@ class SshRuntimeInteropTest {
     void setUp() throws Exception {
         root = temporary.toRealPath();
         controlDirectory = Files.createTempDirectory(Path.of("/tmp"), "qws-").toRealPath();
-        Path repository = Path.of("").toAbsolutePath().resolve("../..").normalize();
+        Path repository = VerificationFixtures.repositoryRoot();
         Path entry = repository.resolve("packages/cli/dist/index.js");
         assertTrue(Files.isRegularFile(entry), "Build the CLI before running SSH interop");
         String executable = command(List.of("node", "-p", "process.execPath")).strip();
@@ -397,7 +398,7 @@ class SshRuntimeInteropTest {
                         "payload-digest", reference));
                 var claim = executions.claimDispatch(prepared.getExecutionCallId(), "dispatcher", Duration.ofMinutes(1));
                 if (deferred) {
-                    var fixtures = JsonCodec.parseObject(Files.readAllBytes(Path.of("").toAbsolutePath()
+                    var fixtures = JsonCodec.parseObject(Files.readAllBytes(VerificationFixtures.moduleRoot()
                             .resolve("../core/src/managed-runtime/contracts/managed-tool-publication-v1.fixtures.json").normalize()), "publication fixture");
                     Map<String, Object> publication = ((List<?>) fixtures.get("cases")).stream()
                             .map(ProviderRuntimeProtocol::object).filter(item -> "distinct-model-runtime-ids".equals(item.get("id")))

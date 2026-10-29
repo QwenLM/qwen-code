@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessRecoveryStatus;
+import com.alibaba.qwen.code.daemon.HarnessRuntimeExecutionRecovery;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HarnessSessionStatus;
@@ -2587,6 +2588,10 @@ class QwenHostedHarnessConnectorTest {
                 mock(HostedHarnessCapabilities.class);
         HarnessSessionRef session = mock(HarnessSessionRef.class);
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.getCheckpointId()).thenReturn("takeover-checkpoint");
+        when(recovery.getActivationId()).thenReturn("takeover-activation");
+        var expectedRecovery = new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
+                null, "takeover-checkpoint", "takeover-activation", List.of(), false, false, false);
         PromptReceipt receipt = mock(PromptReceipt.class);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(client.capabilities()).thenReturn(capabilities);
@@ -2599,10 +2604,10 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = connector(client);
 
         assertThat(connector.recoverManagedRuntime("tenant-a", SESSION_ID,
-                false).runtimeRecovery()).isSameAs(recovery);
+                false).runtimeRecovery()).isEqualTo(expectedRecovery);
         // Re-entered before the continuation was admitted: still pending.
         assertThat(connector.recoverManagedRuntime("tenant-a", SESSION_ID,
-                false).runtimeRecovery()).isSameAs(recovery);
+                false).runtimeRecovery()).isEqualTo(expectedRecovery);
         connector.continueManagedRuntime("tenant-a", SESSION_ID,
                 "44444444-4444-4444-8444-444444444444", "checkpoint",
                 "activation");
@@ -3897,6 +3902,10 @@ class QwenHostedHarnessConnectorTest {
         when(client.capabilities()).thenReturn(capabilities);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.getCheckpointId()).thenReturn("unknown-create-checkpoint");
+        when(recovery.getActivationId()).thenReturn("unknown-create-activation");
+        var expectedRecovery = new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
+                null, "unknown-create-checkpoint", "unknown-create-activation", List.of(), false, false, false);
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
         when(attached.getHarnessLastEventId()).thenReturn(41L);
@@ -3919,7 +3928,7 @@ class QwenHostedHarnessConnectorTest {
         // The unknown-outcome create must recover by loading, and every
         // Attachment component the coordinator resumes on must travel.
         assertThat(admission.bootId()).isEqualTo(BOOT_ID);
-        assertThat(admission.runtimeRecovery()).isSameAs(recovery);
+        assertThat(admission.runtimeRecovery()).isEqualTo(expectedRecovery);
         assertThat(admission.lastEventId()).isEqualTo(41L);
         assertThat(admission.eventEpoch()).isEqualTo("epoch-7");
         ArgumentCaptor<LoadHarnessSession> load =
@@ -3939,6 +3948,25 @@ class QwenHostedHarnessConnectorTest {
         when(client.capabilities()).thenReturn(capabilities);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        HarnessRuntimeExecutionRecovery execution = mock(HarnessRuntimeExecutionRecovery.class);
+        when(execution.getFunctionCallId()).thenReturn("function-call");
+        when(execution.getToolName()).thenReturn("shell");
+        when(execution.getExecutionCallId()).thenReturn("execution-call");
+        when(execution.getRuntimeSessionId()).thenReturn("runtime-session");
+        when(execution.getProgressCursor()).thenReturn("cursor");
+        when(execution.getOutcome()).thenReturn("known");
+        when(execution.getStatus()).thenReturn(Map.of("state", "settled"));
+        when(recovery.getPhase()).thenReturn("results_ready");
+        when(recovery.getCheckpointId()).thenReturn("checkpoint");
+        when(recovery.getActivationId()).thenReturn("activation");
+        when(recovery.getExecutions()).thenReturn(List.of(execution));
+        when(recovery.isContinuationReady()).thenReturn(true);
+        when(recovery.isCancellationReady()).thenReturn(true);
+        var expectedRecovery = new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
+                "results_ready", "checkpoint", "activation",
+                List.of(new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery.Execution(
+                        "function-call", "shell", "execution-call", "runtime-session", "cursor", "known",
+                        Map.of("state", "settled"))), false, true, true);
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
         when(attached.getHarnessLastEventId()).thenReturn(23L);
@@ -3950,7 +3978,7 @@ class QwenHostedHarnessConnectorTest {
                 connector.createOrLoad("tenant-a", SESSION_ID, true);
 
         assertThat(admission.bootId()).isEqualTo(BOOT_ID);
-        assertThat(admission.runtimeRecovery()).isSameAs(recovery);
+        assertThat(admission.runtimeRecovery()).isEqualTo(expectedRecovery);
         assertThat(admission.lastEventId()).isEqualTo(23L);
         assertThat(admission.eventEpoch()).isEqualTo("epoch-3");
     }

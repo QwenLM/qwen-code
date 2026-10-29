@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
@@ -146,7 +147,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
 
     private static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
             String recoveryCut, int isolation, boolean retirement) throws Exception {
-        Path root = Path.of("../..").toRealPath();
+        Path root = VerificationFixtures.repositoryRoot().toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
                 .as("Run npm run build before this explicitly invoked integration gate").isTrue();
         Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();

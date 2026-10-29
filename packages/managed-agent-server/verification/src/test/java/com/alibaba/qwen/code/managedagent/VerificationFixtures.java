@@ -2,8 +2,18 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.persistence.*;
 
+import java.nio.file.Path;
+
 public final class VerificationFixtures {
     private VerificationFixtures() { }
+
+    public static Path moduleRoot() {
+        return Path.of(System.getProperty("managed.module.root", "..")).toAbsolutePath().normalize();
+    }
+
+    public static Path repositoryRoot() {
+        return moduleRoot().resolve("../..").normalize();
+    }
 
     public static ManagedAgentStore configure(ManagedAgentStore store) {
         store.configureWorktreeFiles(

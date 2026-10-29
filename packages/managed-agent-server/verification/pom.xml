@@ -10,6 +10,7 @@
     <name>Qwen Managed Agent Verification</name>
     <properties>
         <managed.module.root>${project.basedir}/..</managed.module.root>
+        <qwen.cli.entry>${managed.module.root}/../../dist/cli.js</qwen.cli.entry>
         <maven.install.skip>true</maven.install.skip>
         <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
@@ -117,6 +118,10 @@
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <systemPropertyVariables>
+                        <managed.module.root>${managed.module.root}</managed.module.root>
+                        <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                    </systemPropertyVariables>
                     <environmentVariables>
                         <QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>present</QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>
                         <spring_worker_env_probe>present</spring_worker_env_probe>
@@ -148,6 +153,17 @@
                 </executions>
             </plugin>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <managed.module.root>${managed.module.root}</managed.module.root>
+                        <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
                 <version>${jacoco-maven-plugin.version}</version>
@@ -171,9 +187,6 @@
     <profiles>
         <profile>
             <id>fault-gates</id>
-            <properties>
-                <qwen.cli.entry>${managed.module.root}/../../dist/cli.js</qwen.cli.entry>
-            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -184,6 +197,7 @@
                             <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
                             <groups>fault-gate</groups>
                             <systemPropertyVariables>
+                                <managed.module.root>${managed.module.root}</managed.module.root>
                                 <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
                             </systemPropertyVariables>
                         </configuration>

@@ -113,6 +113,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.getCheckpointId()).thenReturn("checkpoint-of-T1");
         when(recovery.getActivationId()).thenReturn("activation-of-T1");
+        var expectedRecovery = new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
+                null, "checkpoint-of-T1", "activation-of-T1", List.of(), false, false, false);
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
@@ -155,13 +157,13 @@ class QwenHostedHarnessColdCancelRegressionTest {
             assertThatThrownBy(() -> connector.cancelOriginalTurn(tenant, session, prompt))
                     .isInstanceOf(IllegalStateException.class);
             assertThat(connector.recoverManagedRuntime(tenant, session, true, prompt).runtimeRecovery())
-                    .isSameAs(recovery);
+                    .isEqualTo(expectedRecovery);
             clearInvocations(client);
             doNothing().when(client).cancelTurn(attached, prompt);
             coordinator.cancel(tenant, session, turn);
             jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
             var retained = connector.recoverManagedRuntime(tenant, session, false).runtimeRecovery();
-            assertThat(retained).isSameAs(recovery);
+            assertThat(retained).isEqualTo(expectedRecovery);
             assertThat(retained.getCheckpointId()).isEqualTo("checkpoint-of-T1");
             assertThat(retained.getActivationId()).isEqualTo("activation-of-T1");
             jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
@@ -273,7 +275,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
             verifyNoInteractions(fixture.client());
             var recovered = fixture.connector().recoverManagedFailureCancellation(
                     fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner(), prompt);
-            assertThat(recovered.runtimeRecovery()).isSameAs(fixture.recovery());
+            assertThat(recovered.runtimeRecovery()).isEqualTo(
+                    new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
+                            null, "failure-checkpoint", "failure-activation", List.of(), false, false, false));
             clearInvocations(fixture.client());
             fixture.connector().recoverManagedFailureCancellation(
                     fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner(), prompt);
@@ -413,6 +417,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         when(attached.getHarnessBootId()).thenReturn(boot);
         when(attached.getApprovalMode()).thenReturn("default");
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.getCheckpointId()).thenReturn("failure-checkpoint");
+        when(recovery.getActivationId()).thenReturn("failure-activation");
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("default");
@@ -429,12 +435,11 @@ class QwenHostedHarnessColdCancelRegressionTest {
             store.recordAdmission(tenant, session, turn, owner, epoch, 1);
         }
         clearInvocations(client);
-        return new RecoveryFixture(tenant, session, turn, owner, store, connector, client, recovery);
+        return new RecoveryFixture(tenant, session, turn, owner, store, connector, client);
     }
 
     private record RecoveryFixture(String tenant, String session, String turn, String owner,
-            ManagedAgentStore store, QwenHostedHarnessConnector connector, HostedHarnessClient client,
-            HarnessRuntimeRecovery recovery) implements AutoCloseable {
+            ManagedAgentStore store, QwenHostedHarnessConnector connector, HostedHarnessClient client) implements AutoCloseable {
         @Override
         public void close() {
             connector.close();

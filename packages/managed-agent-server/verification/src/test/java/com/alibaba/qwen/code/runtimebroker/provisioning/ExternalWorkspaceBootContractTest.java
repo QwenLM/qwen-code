@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -114,7 +115,7 @@ class ExternalWorkspaceBootContractTest {
     @Timeout(120)
     @DisabledOnOs(OS.WINDOWS)
     void theShippedWorkerParserAdmitsTheMintedBoot() throws Exception {
-        Path repoRoot = repoRoot();
+        Path repoRoot = VerificationFixtures.repositoryRoot();
         Assumptions.assumeTrue(Files.isRegularFile(repoRoot.resolve(
                         "packages/cli/src/serve/managed-runtime-attestation-worker.ts")),
                 "needs the qwen-code checkout this module lives in");
@@ -145,12 +146,6 @@ class ExternalWorkspaceBootContractTest {
         Run refused = runParser(repoRoot, bootFile);
         assertNotEquals(0, refused.exitCode(), "a foreign registration must be refused");
         assertTrue(refused.stderr().contains("boot payload is invalid"), refused.stderr());
-    }
-
-    private static Path repoRoot() {
-        Path module = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-        return module.getParent() == null || module.getParent().getParent() == null
-                ? module : module.getParent().getParent();
     }
 
     private static void privateDirectory(Path directory, Set<PosixFilePermission> permissions)

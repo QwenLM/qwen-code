@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -343,7 +344,7 @@ class SessionRecoveryInitialStateTest {
     }
 
     private void prepareGenesis() throws Exception {
-        Path root = Path.of("").toAbsolutePath().getParent().getParent();
+        Path root = VerificationFixtures.repositoryRoot();
         Path output = directory.resolve("initial-journal.json");
         var process = new ProcessBuilder("node", root.resolve(
                 "packages/managed-agent-server/verification/src/test/resources/recovery-initial-journal.mjs").toString(), sessionId)

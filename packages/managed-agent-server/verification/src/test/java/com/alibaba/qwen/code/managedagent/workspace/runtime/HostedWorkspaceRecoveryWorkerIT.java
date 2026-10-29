@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
@@ -53,7 +54,8 @@ class HostedWorkspaceRecoveryWorkerIT {
     @Test
     @Timeout(120)
     void realWorkerAndSpringSqlRecoverSavedHolderAfterSyntheticReboot() throws Exception {
-        Path bundle = Path.of(System.getProperty("qwen.runtime.worker.bundle", "../../dist/cli.js"))
+        Path bundle = Path.of(System.getProperty("qwen.runtime.worker.bundle",
+                VerificationFixtures.repositoryRoot().resolve("dist/cli.js").toString()))
                 .toAbsolutePath().normalize();
         assertThat(bundle).isRegularFile();
         temporary = temporary.toRealPath();

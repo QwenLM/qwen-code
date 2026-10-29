@@ -437,8 +437,7 @@ class ManagedChannelServiceTest {
                 event(1, "1700:98", "hello")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
-                            .isEqualTo(org.springframework.http.HttpStatus
-                                    .BAD_REQUEST);
+                            .isEqualTo(400);
                     assertThat(error.getCode())
                             .isEqualTo("invalid_channel_operation");
                 });
@@ -463,8 +462,7 @@ class ManagedChannelServiceTest {
                 event(1, "1700:97", "hello")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
-                            .isEqualTo(org.springframework.http.HttpStatus
-                                    .SERVICE_UNAVAILABLE);
+                            .isEqualTo(503);
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_writer_conflict");
                 });
@@ -472,8 +470,7 @@ class ManagedChannelServiceTest {
                 event(1, "1700:97", "hello")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
-                            .isEqualTo(org.springframework.http.HttpStatus
-                                    .CONFLICT);
+                            .isEqualTo(409);
                     assertThat(error.getCode())
                             .isEqualTo("channel_operation_conflict");
                 });
@@ -501,8 +498,7 @@ class ManagedChannelServiceTest {
         assertThatThrownBy(() -> service.register(TENANT, channel, moved))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
-                            .isEqualTo(org.springframework.http.HttpStatus
-                                    .CONFLICT);
+                            .isEqualTo(409);
                     assertThat(error.getCode())
                             .isEqualTo("channel_ownership_conflict");
                 });
@@ -713,8 +709,7 @@ class ManagedChannelServiceTest {
                 event(1, "1700:99", "hello")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
-                            .isEqualTo(org.springframework.http.HttpStatus
-                                    .SERVICE_UNAVAILABLE);
+                            .isEqualTo(503);
                     assertThat(error.getCode())
                             .isEqualTo("channel_operation_failed");
                 });

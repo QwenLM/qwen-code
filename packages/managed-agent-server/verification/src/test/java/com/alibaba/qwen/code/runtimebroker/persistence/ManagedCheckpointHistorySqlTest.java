@@ -45,8 +45,7 @@ public class ManagedCheckpointHistorySqlTest {
     }
 
     @BeforeEach
-    public
-    void setUp() throws Exception {
+    public void setUp() throws Exception {
         var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
@@ -87,8 +86,7 @@ public class ManagedCheckpointHistorySqlTest {
     }
 
     @Test
-    public
-    void pageChannelReadsEarlierCommittedOwnershipWhileOrdinaryReadsRemainExact() {
+    public void pageChannelReadsEarlierCommittedOwnershipWhileOrdinaryReadsRemainExact() {
         transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
             var reader = JdbcCsiActivationAdmission.checkpointReader(connection, original, 2,
                     JdbcCsiActivationAdmission.JournalRead.LIVE);
@@ -104,8 +102,7 @@ public class ManagedCheckpointHistorySqlTest {
     }
 
     @Test
-    public
-    void hydratesACommittedPageFromAnEarlierRevision() throws Exception {
+    public void hydratesACommittedPageFromAnEarlierRevision() throws Exception {
         ObjectNode root = commitCheckpoint();
         transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
             var sql = JdbcCsiActivationAdmission.checkpointReader(connection, original, 2,
@@ -126,8 +123,7 @@ public class ManagedCheckpointHistorySqlTest {
     }
 
     @Test
-    public
-    void proofReadsEarlierPagesWhileActiveReferencesStillRequireCurrentOwnership() throws Exception {
+    public void proofReadsEarlierPagesWhileActiveReferencesStillRequireCurrentOwnership() throws Exception {
         ObjectNode root = commitCheckpoint();
         ObjectNode ref = resource("root", "managed-checkpoint", root.toString());
         ref.remove("bytesBase64");
@@ -192,15 +188,13 @@ public class ManagedCheckpointHistorySqlTest {
     }
 
     @Test
-    public
-    void ownershipWithoutItsCommittedTransactionCannotBeReused() {
+    public void ownershipWithoutItsCommittedTransactionCannotBeReused() {
         jdbc.update("DELETE FROM ma_session_journal_tx");
         assertNoHistory();
     }
 
     @Test
-    public
-    void committedOwnershipAfterThePinnedRevisionCannotBeReused() {
+    public void committedOwnershipAfterThePinnedRevisionCannotBeReused() {
         jdbc.update("UPDATE ma_session_journal_tx SET journal_revision = 99");
         jdbc.update("UPDATE ma_resource_ref SET owner_revision = 99, journal_revision = 99");
         assertNoHistory();

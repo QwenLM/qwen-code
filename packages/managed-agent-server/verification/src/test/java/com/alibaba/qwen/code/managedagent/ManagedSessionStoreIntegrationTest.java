@@ -366,7 +366,7 @@ class ManagedSessionStoreIntegrationTest {
             Files.copy(stream, script);
         }
         Process process = new ProcessBuilder(System.getProperty("node.executable", "node"),
-                script.toString(), input.toString(), output.toString()).directory(Path.of("../..").toRealPath().toFile())
+                script.toString(), input.toString(), output.toString()).directory(VerificationFixtures.repositoryRoot().toRealPath().toFile())
                 .redirectErrorStream(true).redirectOutput(log.toFile()).start();
         try {
             assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("client census generator finishes").isTrue();

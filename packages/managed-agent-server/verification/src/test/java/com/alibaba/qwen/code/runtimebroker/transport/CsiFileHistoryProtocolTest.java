@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -15,7 +15,7 @@ class CsiFileHistoryProtocolTest {
     @Test
     void sharesEmptyAndInheritedPreimagePinsAndRejectsCrossedEvidence() throws Exception {
         var json = new ObjectMapper();
-        var fixture = json.readTree(Path.of("../cli/src/serve/contracts/managed-csi-file-history-v1.fixtures.json").toFile());
+        var fixture = json.readTree(VerificationFixtures.moduleRoot().resolve("../cli/src/serve/contracts/managed-csi-file-history-v1.fixtures.json").toFile());
         String owner = fixture.path("request").path("identity").path("sessionId").textValue();
         for (var value : fixture.path("valid")) {
             assertDoesNotThrow(() -> CsiFileHistoryProtocol.observation(value.path("observation"), owner));

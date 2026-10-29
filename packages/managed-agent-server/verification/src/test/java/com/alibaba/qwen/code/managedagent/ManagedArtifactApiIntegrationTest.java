@@ -589,8 +589,7 @@ class ManagedArtifactApiIntegrationTest {
         JsonNode committed =
                 JSON.readTree(
                         Files.readString(
-                                Path.of(
-                                        "../web-shell/client/components/managed/managed-tool-result.java-fixture.json")));
+                                VerificationFixtures.moduleRoot().resolve("../web-shell/client/components/managed/managed-tool-result.java-fixture.json")));
         assertThat(JSON.readTree(normalizeTimes(fixtureJson).toString()))
                 .isEqualTo(JSON.readTree(normalizeTimes(committed).toString()));
     }

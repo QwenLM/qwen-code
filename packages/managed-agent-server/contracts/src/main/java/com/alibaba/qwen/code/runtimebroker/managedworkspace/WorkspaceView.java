@@ -12,7 +12,7 @@ public final class WorkspaceView {
     private final WorkspaceState state;
     private final boolean canCreateSession;
 
-    public WorkspaceView(WorkspaceRecord workspace, WorkspaceAccess access) {
+    WorkspaceView(WorkspaceRecord workspace, WorkspaceAccess access) {
         this.workspaceId = workspace.getWorkspaceId();
         this.displayName = workspace.getDisplayName();
         this.state = workspace.getState();

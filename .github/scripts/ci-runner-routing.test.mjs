@@ -932,7 +932,7 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
     assert.match(
       run('Build Java components'),
-      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/"qwen-managed-agent-\*/,
     );
     assert.match(
       run('Assemble reference distribution'),
