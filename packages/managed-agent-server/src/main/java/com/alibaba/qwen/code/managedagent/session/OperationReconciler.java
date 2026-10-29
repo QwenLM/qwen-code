@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -48,8 +49,8 @@ public class OperationReconciler {
     private final Set<String> active = ConcurrentHashMap.newKeySet();
 
     public OperationReconciler(AgentStateStore store,
-            List<AcceptanceEvidence> evidence, ExecutorService executor,
-            Clock clock) {
+            List<AcceptanceEvidence> evidence, @Qualifier("managedAgentExecutor") ExecutorService executor,
+            @Qualifier("managedAgentClock") Clock clock) {
         this.store = store;
         this.executor = executor;
         this.evidence = new LinkedHashMap<>();
@@ -62,7 +63,7 @@ public class OperationReconciler {
         this.clock = clock;
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void reconcile() {
         for (ParkedOperation parked : store.findParkedOperations(

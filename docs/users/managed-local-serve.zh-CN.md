@@ -148,7 +148,7 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
@@ -164,7 +164,7 @@ runtime 构建器只要求匹配的服务 JAR、Java runtime 和本 checkout 中
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -176,7 +176,7 @@ npm run package:managed-runtime -- \
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```
@@ -201,14 +201,20 @@ Qwen home 下的版本化安装。存在相邻 payload 时，它优先于 Qwen h
 `Release Managed server runtime` workflow 从已公开的 CLI release tag 构建，使用
 相同源码修订的 SDK 和服务。手动运行必须从 `main` 发起，默认是 dry-run。它验证
 CLI 和 Java 模块，构建 `central-release` profile，并将 JAR 与校验文件保留为
-workflow artifact，不修改公开仓库。
+workflow artifact，不修改公开仓库。workflow 优先选择 `-exec.jar` 构建产物，
+对旧 tag 回退到主 JAR；公开的版本化 JAR 名称保持不变。
 
 验证 dry-run 后，发行运维可通过受保护的 `production-release` environment，用
-相同 tag 和 `dry_run=false` 运行。workflow 将服务制品版本设为 CLI 版本，向
-Maven Central 发布 `com.alibaba:qwen-managed-agent-server:<cli-version>` 及源码、
-Javadoc 和签名，再将相同主 JAR 及其 `.sha256` 分发到该 GitHub Release 和现有的
-版本化 OSS 镜像。辅助运维 JAR 不附加到 Central 发布。已有产物逐字节比较，绝不
+相同 tag 和 `dry_run=false` 运行。workflow 将服务制品版本设为 CLI 版本，
+将验证后的可执行 JAR 及其 `.sha256` 分发到该 GitHub Release 和现有的版本化 OSS
+镜像，再将两个公开下载渠道的制品与暂存字节核对。已有产物逐字节比较，绝不
 用不同内容替换。公开的 CLI release 事件也会自动运行该 workflow。
+
+runtime 分发需要现有 OSS 上传凭据和 GitHub release 权限，无需 Central 发布凭据或
+GPG 私钥，不探测服务坐标在 Central 上是否存在，不向 Central 发布或等待其完成。
+Maven 仍负责构建和完整验证 SDK 与服务，正常依赖解析保持不变。
+需要签名发布 Maven 制品时，可独立使用现有 `central-release`
+profile；该操作不阻塞 runtime 交付。
 
 CLI 从 OSS/GitHub 下载，不从 Maven Central 下载，也不要求用户单独解析 SDK：
 可执行服务 JAR 包含其 Java 依赖。精确匹配 CLI release 的 runtime 产物必须已存在，

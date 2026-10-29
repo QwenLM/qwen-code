@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -183,7 +184,7 @@ public class AutomationLedgerStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate commands;
 
-    public AutomationLedgerStore(JdbcTemplate jdbc) {
+    public AutomationLedgerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.commands =
                 new TransactionTemplate(

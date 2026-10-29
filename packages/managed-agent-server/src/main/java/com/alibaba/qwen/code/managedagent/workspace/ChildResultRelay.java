@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -92,7 +93,7 @@ public class ChildResultRelay {
     public ChildResultRelay(ChildResultRelayStore relayStore,
             ManagedAgentService sessions,
             org.springframework.beans.factory.ObjectProvider<RuntimeBrokerService> broker,
-            HarnessConnector harness, ObjectMapper mapper,
+            HarnessConnector harness, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             ChildLifecycleAdmissions childCloses,
             ChildWorkspaceService childWorkspaces) {
         this(relayStore, sessions, broker, harness, mapper, childCloses,

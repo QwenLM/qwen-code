@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -30,8 +31,8 @@ public class WorkspaceExecutionStore {
     private final ResidentWorkspaces residents;
 
     @Autowired
-    public WorkspaceExecutionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
+    public WorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
             com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
