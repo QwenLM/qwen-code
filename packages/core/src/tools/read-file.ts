@@ -612,7 +612,7 @@ export function buildReadFileDescription(
     : '';
   const imageNote = imagesReadable
     ? ''
-    : ' Reading an image returns a placeholder instead of the picture: the selected model does not accept image input and no vision bridge is configured.';
+    : ' Reading an image returns a placeholder instead of the picture: the selected model is not configured to accept image input.';
 
   const nouns: string[] = [];
   const formats: string[] = [];
@@ -648,10 +648,10 @@ export function buildReadFileDescription(
  * the description must not promise a picture the model will never see.
  */
 function imagesReadable(config: Config): boolean {
-  if (config.getEffectiveInputModalities?.()?.image === true) {
-    return true;
-  }
-  return config.getDefaultVisionBridgeModel?.() !== undefined;
+  return (
+    config.getEffectiveInputModalities?.()?.image === true ||
+    shouldRunVisionBridge(config)
+  );
 }
 
 /**
