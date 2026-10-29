@@ -117,7 +117,11 @@ import type {
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
 import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider';
-import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
+import {
+  keepWorkspaceSplitSessionIds,
+  type SplitSessionClassification,
+  type SplitSessionOutcome,
+} from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
@@ -10602,7 +10606,7 @@ export function App({
           (error) =>
             (isStandaloneSessionNotFoundError(error)
               ? 'workspace'
-              : 'failed') as const,
+              : 'failed') as SplitSessionOutcome,
         );
       outcome.then((result) => {
         if (result === 'failed') memo.delete(sessionId);
@@ -10622,7 +10626,7 @@ export function App({
     splitClassificationStartGenerationRef.current = generation;
     const pending =
       requested.length > 0
-        ? { generation, sessionIds: requested }
+        ? { generation, sessionIds: [...requested] }
         : null;
     pendingSplitOpenRef.current = pending;
     setPendingSplitPaneIds(pending);
