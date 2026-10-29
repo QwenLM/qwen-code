@@ -21,6 +21,11 @@
  */
 
 import {
+  findDaemonAvailability,
+  type DaemonAvailability,
+} from '../daemon/availability.js';
+
+import {
   LOCAL_FILES_SERVER_NAME,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -84,6 +89,7 @@ export interface LocalFilesBridgeOptions {
   server: LocalFilesRpcServer;
   openSocket: OpenSocket;
   token?: string;
+  availability?: DaemonAvailability;
   serverName?: string;
   clientInfo?: { name: string; version: string };
   /** Re-warm the ACP child before retrying a failed registration. */
@@ -257,6 +263,9 @@ export class LocalFilesBridge {
   private readonly serverName: string;
   private readonly delay: (ms: number) => Promise<void>;
   private socket: WebSocketLike | undefined;
+  private availability: DaemonAvailability | undefined;
+  private resumeController = new AbortController();
+  private unsubscribeAvailability: (() => void) | undefined;
   private state: LocalFilesBridgeState = { phase: 'idle' };
   private stopped = false;
   private running = false;
@@ -297,6 +306,14 @@ export class LocalFilesBridge {
     if (this.running) return;
     this.running = true;
     this.stopped = false;
+    this.resumeController = new AbortController();
+    this.availability =
+      this.options.availability ??
+      findDaemonAvailability(this.options.baseUrl, this.options.token);
+    this.unsubscribeAvailability = this.availability?.subscribe(() => {
+      if (this.availability?.getSnapshot() !== 'available')
+        this.socket?.close();
+    });
     try {
       const locks = this.options.locks;
       if (!locks) {
@@ -323,6 +340,8 @@ export class LocalFilesBridge {
       // behind the failed status.
       this.fail('start_failed', err);
     } finally {
+      this.unsubscribeAvailability?.();
+      this.unsubscribeAvailability = undefined;
       this.running = false;
     }
   }
@@ -340,6 +359,9 @@ export class LocalFilesBridge {
    */
   private teardown(): void {
     this.stopped = true;
+    this.resumeController.abort();
+    this.unsubscribeAvailability?.();
+    this.unsubscribeAvailability = undefined;
     this.clearTimers();
     const socket = this.socket;
     this.socket = undefined;
@@ -379,7 +401,25 @@ export class LocalFilesBridge {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     const attempt = this.reconnectAttempts + 1;
-    this.setState({ phase: 'connecting', attempt });
+    if (this.state.phase === 'idle' || this.state.phase === 'stopped') {
+      this.setState({ phase: 'connecting', attempt });
+    }
+    try {
+      if (this.availability) {
+        do {
+          await this.availability.waitUntilAvailable(
+            this.resumeController.signal,
+          );
+          if (this.stopped) return;
+        } while (this.availability.getSnapshot() !== 'available');
+      }
+    } catch {
+      return;
+    }
+    if (this.stopped) return;
+    if (this.state.phase !== 'connecting') {
+      this.setState({ phase: 'connecting', attempt });
+    }
     this.registerAttempts = 0;
     let socket: WebSocketLike;
     try {
@@ -677,6 +717,16 @@ export class LocalFilesBridge {
   }
 
   private async scheduleReconnect(code: number, reason: string): Promise<void> {
+    if (this.availability) {
+      await this.availability.check();
+      if (this.stopped) return;
+      if (this.availability.getSnapshot() !== 'available') {
+        this.reconnectAttempts = 0;
+        this.setState({ phase: 'reconnecting', attempt: 0, reason });
+        await this.connect();
+        return;
+      }
+    }
     this.reconnectAttempts += 1;
     const max =
       this.options.maxReconnectAttempts ?? DEFAULTS.maxReconnectAttempts;

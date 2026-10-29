@@ -429,6 +429,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/btw/stream',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/btw/stream',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/btw/stream/:requestId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/btw/stream/:requestId',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/mid-turn-message',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mid-turn-message',
@@ -608,7 +620,8 @@ function matchLegacySessionTelemetryRoute(
       route: entry.route,
       attribution: entry.attribution,
       ...(rawSessionId ? { sessionId: decodePathSegment(rawSessionId) } : {}),
-      ...(requestId !== undefined &&
+      ...(entry.path.endsWith('/permission/:requestId') &&
+      requestId !== undefined &&
       requestId.length <= MAX_CLIENT_ID_LENGTH &&
       CLIENT_ID_RE.test(requestId)
         ? { permissionRequestId: requestId }
@@ -663,6 +676,37 @@ export function resolveDaemonTelemetryRoute(
     /^\/workspaces\/[^/]+\/session-info$/.test(path)
   ) {
     return { route: 'GET /workspace/:id/session-info' };
+  }
+  const workspaceArtifactCollection = path.match(
+    /^\/workspaces\/[^/]+\/artifact-library(?:\/(query|delete))?$/,
+  );
+  if (
+    workspaceArtifactCollection &&
+    ((req.method === 'GET' && !workspaceArtifactCollection[1]) ||
+      (req.method === 'POST' && workspaceArtifactCollection[1]))
+  ) {
+    return {
+      route:
+        `${req.method} /workspaces/:workspace/artifact-library` +
+        (workspaceArtifactCollection[1]
+          ? `/${workspaceArtifactCollection[1]}`
+          : ''),
+    };
+  }
+  const workspaceArtifactLibrary = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/artifact-library(\/[^/]+)?$/,
+  );
+  if (
+    workspaceArtifactLibrary?.[1] &&
+    ((req.method === 'GET' && !workspaceArtifactLibrary[2]) ||
+      (req.method === 'DELETE' && workspaceArtifactLibrary[2]))
+  ) {
+    return {
+      route:
+        `${req.method} /workspaces/:workspace/session/:id/artifact-library` +
+        (req.method === 'DELETE' ? '/:artifactId' : ''),
+      sessionId: decodePathSegment(workspaceArtifactLibrary[1]),
+    };
   }
   const workspaceTranscript = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/transcript$/,

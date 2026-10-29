@@ -12,8 +12,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -39,6 +37,12 @@ public class SessionLifecycleService {
             OperationKind.DELETE, "DELETE_SESSION");
     private final AgentStateStore store;
     private ManagedActionService actions;
+    private ContextCompressionService compressions;
+
+    @Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     @Autowired
     void setActions(ManagedActionService actions) {
@@ -87,6 +91,9 @@ public class SessionLifecycleService {
             String sessionId, String operationId) {
         OperationRecord operation = operation(tenantId, actorId, sessionId,
                 operationId);
+        if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
+            return compressions.publicOperation(operation, false);
+        }
         return operation.kind() == OperationKind.CWD_CHANGE
                 ? publicCwdOperation(operation, false)
                 : publicOperation(operation, false);
@@ -96,70 +103,12 @@ public class SessionLifecycleService {
             String sessionId, String operationId) {
         OperationRecord operation = operation(tenantId, actorId, sessionId,
                 operationId);
+        if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
+            return compressions.webOperation(operation, false);
+        }
         return operation.kind() == OperationKind.CWD_CHANGE
                 ? webShellCwdOperation(operation, false)
                 : webShellOperation(operation, false);
-    }
-
-    public PublicCwdOperation admitPublicCwdChange(String tenantId,
-            String actorId, String sessionId, String idempotencyKey,
-            String cwdRelative, Long expectedContextRevision) {
-        OperationAdmission admission = admitCwdChange(tenantId, actorId,
-                sessionId, idempotencyKey, cwdRelative,
-                expectedContextRevision);
-        return publicCwdOperation(admission.operation(),
-                admission.replayed());
-    }
-
-    public WebShellCwdOperation admitWebShellCwdChange(String tenantId,
-            String actorId, String sessionId, String idempotencyKey,
-            String cwdRelative, Long expectedContextRevision) {
-        OperationAdmission admission = admitCwdChange(tenantId, actorId,
-                sessionId, idempotencyKey, cwdRelative,
-                expectedContextRevision);
-        return webShellCwdOperation(admission.operation(),
-                admission.replayed());
-    }
-
-    private OperationAdmission admitCwdChange(String tenantId, String actorId,
-            String sessionId, String idempotencyKey, String cwdRelative,
-            Long expectedContextRevision) {
-        // Actor before key, on the service itself: the published refusal
-        // order must not rest on argument-evaluation order at the routes.
-        if (actorId == null || actorId.isEmpty()) {
-            throw new ManagedAgentException(HttpStatus.UNAUTHORIZED, "actor_required",
-                    "A trusted actor is required.");
-        }
-        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
-        if (cwdRelative == null) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_request",
-                    "cwd_relative is required.");
-        }
-        String normalized;
-        try {
-            normalized = WorkspaceRelativePath.normalize(cwdRelative);
-        } catch (WorkspaceException error) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_cwd",
-                    "The working directory is invalid.");
-        }
-        if (expectedContextRevision == null || expectedContextRevision < 1) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_request",
-                    "expected_context_revision must be at least 1.");
-        }
-        String requestDigest = digests.digest(Map.of("sessionId", sessionId,
-                "operation", "CWD_CHANGE", "cwdRelative", normalized,
-                "expectedContextRevision",
-                Long.toString(expectedContextRevision)));
-        OperationAdmission admission = store.beginCwdChangeOperation(
-                tenantId, sessionId, actorId, actorDigest(actorId),
-                idempotencyKey, requestDigest, normalized,
-                expectedContextRevision);
-        OperationRecord operation = admission.operation();
-        if ("PENDING".equals(operation.state())) {
-            coordinator.dispatch(tenantId, sessionId,
-                    operation.operationId());
-        }
-        return admission;
     }
 
     public PublicCwdOperation publicCwdOperation(OperationRecord operation,

@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -67,6 +68,7 @@ class ManagedExtensionRecordStoreTest {
     private AgentStateStore state;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Test
@@ -284,7 +286,18 @@ class ManagedExtensionRecordStoreTest {
                 "must be derived from its definition and occurrence",
                 () -> journal.commit(journal.requestDomain("run-renamed",
                         "automation_run", renamed, List.of(), 1_000)));
-        commitDomain(journal, "run-1", "automation_run", run, List.of());
+        // A run citing gate output the Session does not hold refuses; the
+        // same run with the resource commits, closed over it like a prompt.
+        CommitResource gateOutput = hookResource("gate-1",
+                "managed-automation-gate-output",
+                "{\"gate\":\"./probe.sh\"}".getBytes(StandardCharsets.UTF_8));
+        run.set("gateOutputRef", hookRef(gateOutput));
+        assertRefused("a run citing gate output the Session does not hold",
+                sessionId, ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                null, () -> journal.commit(journal.requestDomain("run-1",
+                        "automation_run", run, List.of(), 1_000)));
+        commitDomain(journal, "run-1", "automation_run", run,
+                List.of(gateOutput));
         assertThat(records.findTask(TENANT, sessionId,
                 ManagedExtensionProjection.taskId(ManagedExtensionProjection
                         .recordKey(sessionId, "automation_run",

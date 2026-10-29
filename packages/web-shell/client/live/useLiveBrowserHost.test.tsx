@@ -10,6 +10,30 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  listener: undefined as (() => void) | undefined,
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    assertAvailable: () => {
+      if (!availabilityMock.available) throw new Error('Daemon unavailable');
+    },
+    check: vi.fn(async () => {}),
+    subscribe: (listener: () => void) => {
+      availabilityMock.listener = listener;
+      return () => {
+        availabilityMock.listener = undefined;
+      };
+    },
+  },
+}));
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 import {
   useLiveBrowserHost,
   type UseLiveBrowserHostResult,
@@ -137,8 +161,11 @@ class MockAudioContext {
     start: ReturnType<typeof vi.fn>;
     stop: ReturnType<typeof vi.fn>;
   }> = [];
+  static initialState: 'running' | 'suspended' = 'running';
+  static resumeRejectsOnClose = false;
 
-  state = 'running';
+  state = MockAudioContext.initialState;
+  rejectResume: (() => void) | undefined;
   currentTime = 0;
   readonly sampleRate: number;
   readonly destination = {};
@@ -171,9 +198,19 @@ class MockAudioContext {
     MockAudioContext.sources.push(source);
     return source;
   });
-  resume = vi.fn(async () => {});
+  resume = vi.fn(async () => {
+    if (!MockAudioContext.resumeRejectsOnClose) return;
+    if (this.state === 'closed') {
+      throw new DOMException('closed', 'InvalidStateError');
+    }
+    await new Promise<void>((_resolve, reject) => {
+      this.rejectResume = () =>
+        reject(new DOMException('closed', 'InvalidStateError'));
+    });
+  });
   close = vi.fn(async () => {
     this.state = 'closed';
+    this.rejectResume?.();
   });
 
   constructor(options?: { sampleRate?: number }) {
@@ -239,6 +276,9 @@ function speak(samples: number[] = [0.5, -0.5]): void {
 }
 
 beforeEach(() => {
+  availabilityMock.enabled = false;
+  availabilityMock.available = true;
+  availabilityMock.listener = undefined;
   host = undefined;
   token = undefined;
   onStatus.mockReset();
@@ -268,6 +308,8 @@ beforeEach(() => {
   MockAudioContext.processor = undefined;
   MockAudioContext.sources = [];
   MockAudioContext.addModule = undefined;
+  MockAudioContext.initialState = 'running';
+  MockAudioContext.resumeRejectsOnClose = false;
   MockWorkletNode.instances = [];
   MockWorkletNode.failConstruction = false;
   Object.defineProperty(globalThis, 'AudioWorkletNode', {
@@ -298,6 +340,60 @@ afterEach(async () => {
 });
 
 describe('useLiveBrowserHost', () => {
+  it('blocks capture while unavailable and ends an active host without restarting on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    await render();
+    await act(async () => host!.connect());
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(0);
+    availabilityMock.available = true;
+    await connected();
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(track.stop).toHaveBeenCalled();
+    expect(host!.phase).toBe('error');
+    await act(async () => {
+      availabilityMock.available = true;
+      availabilityMock.listener?.();
+    });
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it('stops a granted microphone when an outage ends connect mid-handshake', async () => {
+    availabilityMock.enabled = true;
+    MockAudioContext.initialState = 'suspended';
+    MockAudioContext.resumeRejectsOnClose = true;
+    let resolveMic!: (stream: MediaStream) => void;
+    getUserMedia.mockImplementation(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveMic = resolve;
+        }),
+    );
+    await render();
+    act(() => {
+      host!.connect();
+    });
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(host!.phase).toBe('error');
+    const stream = {
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+    } as unknown as MediaStream;
+    await act(async () => {
+      resolveMic(stream);
+      await Promise.resolve();
+    });
+    expect(track.stop).toHaveBeenCalled();
+  });
+
   it('takes the lease on /live/web with the reduced browser hello', async () => {
     token = 'secret-token';
     await render();

@@ -24,6 +24,8 @@ Verify desktop switch/strength changes against the emitted request, preserve the
 
 ## Scope and status
 
+After synchronizing with main, the subscription entry uses the bounded provider menu and includes its New badge in row measurements. OpenTUI preserves the complete submission metadata and returns the admission result while dismissing subscription hints; success styling coexists with canonical history metadata. Existing subscription UI and account/workspace boundaries remain unchanged.
+
 The subscription authorization view is separate from the legacy OAuth progress view, preserving the legacy title, countdown and cancellation behavior. Core owns subscription authorization expiry; the subscription view only renders its state and permits link copying until the grant's original expiresAt deadline. Remove unused initial-checking states and the unused CLI paid-summary branch; the active CLI history summary and GUI paid summary remain unchanged.
 
 Desktop only adds Qwen sign-in to the existing `/auth` dialog. The separate login onboarding page and persistent subscription button are struck out in the PRD and excluded from development tasks.

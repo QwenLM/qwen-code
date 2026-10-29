@@ -21,6 +21,7 @@ import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -73,6 +74,7 @@ class ChildWorkspaceServiceTest {
     @Autowired
     private WorkspaceExecutionStore leases;
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
     @TempDir
     Path temp;
@@ -714,21 +716,23 @@ class ChildWorkspaceServiceTest {
         ContextBinding storage = parent.workspace();
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", storage, clock.get());
         Row other = store.admit(parent.tenantId(), parent.sessionId(), "run-2", storage, clock.get());
-        Row first = store.claim(row, "a", clock.get(), 1_000);
-        Row rival = store.claim(other, "a", clock.get(), 1_000);
+        // Physical admission uses the database clock; expiry is forced below.
+        clock.set(System.currentTimeMillis());
+        Row first = store.claim(row, "a", clock.get(), ChildWorkspaceService.LEASE_MS);
+        Row rival = store.claim(other, "a", clock.get(), ChildWorkspaceService.LEASE_MS);
 
         String firstStep = leases.holdForMaintenance(storage, first.childWorkspaceId(), first.claimGeneration());
         assertBroker(() -> leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration()),
                 "workspace_busy");
-        clock.addAndGet(1_001);
+        clock.addAndGet(ChildWorkspaceService.LEASE_MS + 1);
         jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_kind = 'CHILD_WORKSPACE'");
         assertThat(jdbc.queryForObject("SELECT claim_until < " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE tenant_id = ? AND operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", Boolean.class,
                 parent.tenantId(), rival.childWorkspaceId())).isTrue();
-        assertThat(store.claim(row, "b", clock.get(), 1_000)).isNull();
+        assertThat(store.claim(row, "b", clock.get(), ChildWorkspaceService.LEASE_MS)).isNull();
         assertThat(holder(storage)).isEqualTo(maintenanceHolder(first));
         assertThat(store.find(parent.tenantId(), parent.sessionId(), "run-1").claimGeneration()).isEqualTo(first.claimGeneration());
         leases.releaseMaintenance(storage, first.childWorkspaceId(), first.claimGeneration(), firstStep);
-        Row second = store.claim(row, "b", clock.get(), 1_000);
+        Row second = store.claim(row, "b", clock.get(), ChildWorkspaceService.LEASE_MS);
         assertBroker(() -> leases.holdForMaintenance(storage, first.childWorkspaceId(), first.claimGeneration()),
                 "workspace_unavailable");
         String secondStep = leases.holdForMaintenance(storage, second.childWorkspaceId(), second.claimGeneration());
@@ -739,7 +743,7 @@ class ChildWorkspaceServiceTest {
         // A new physical step requires a live claim, even after a prior worker returned.
         assertBroker(() -> leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration()),
                 "workspace_unavailable");
-        Row rivalReplacement = store.claim(other, "c", clock.get(), 1_000);
+        Row rivalReplacement = store.claim(other, "c", clock.get(), ChildWorkspaceService.LEASE_MS);
         String rivalStep = leases.holdForMaintenance(storage, rivalReplacement.childWorkspaceId(), rivalReplacement.claimGeneration());
         assertThat(holder(storage)).isEqualTo(maintenanceHolder(rivalReplacement));
         leases.releaseMaintenance(storage, rivalReplacement.childWorkspaceId(), rivalReplacement.claimGeneration(), rivalStep);
@@ -1068,10 +1072,13 @@ class ChildWorkspaceServiceTest {
     void aSettledProjectionAndExpiredClaimCannotProveTheGitStepStopped() throws Exception {
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
-        Row dead = store.claim(row, "dead-worker", clock.get(), 1_000);
+        clock.set(System.currentTimeMillis());
+        Row dead = store.claim(row, "dead-worker", clock.get(), ChildWorkspaceService.LEASE_MS);
         String step = leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
         updateChild("UPDATE ma_workspace SET child_state = 'merged' WHERE child_workspace_id = ?", dead.childWorkspaceId());
-        clock.addAndGet(1_001);
+        jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE tenant_id = ?"
+                + " AND operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", parent.tenantId(), dead.childWorkspaceId());
+        clock.set(dead.claimedUntil() + 1);
         service.scan();
         assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
         assertThat(leases.releaseStaleMaintenance(clock.get(), 0)).isZero();

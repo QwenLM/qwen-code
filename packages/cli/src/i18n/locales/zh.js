@@ -14,6 +14,9 @@ export default {
   'Loading models from provider…': '正在加载服务商模型…',
   'Recommended models · provider list unavailable, showing built-ins':
     '推荐模型 · 无法获取服务商列表，显示内置模型',
+  'Generated UI': 'Generated UI 生成式界面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
 
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
@@ -214,6 +217,7 @@ export default {
   'toolDisplayName.CronCreate': '创建定时任务',
   'toolDisplayName.CronList': '定时任务列表',
   'toolDisplayName.CronDelete': '删除定时任务',
+  'toolDisplayName.AutofixPr': 'PR 自动修复',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.ListAgents': '列出 Agent',

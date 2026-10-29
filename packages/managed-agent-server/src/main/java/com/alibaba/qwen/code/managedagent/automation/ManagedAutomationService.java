@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AutomationDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationGateStatus;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationRun;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -21,6 +22,7 @@ import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.Sche
 import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.SchedulePage;
 import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessConflictCodes;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -28,6 +30,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -79,7 +82,7 @@ public class ManagedAutomationService {
     public ManagedAutomationService(AutomationLedgerStore ledger,
             ManagedAgentStore sessions, ManagedWorkspaceRegistry workspaces,
             HarnessConnector harness, AutomationScanner scanner,
-            RequestDigests digests, ObjectMapper mapper,
+            RequestDigests digests, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             ManagedAgentProperties properties) {
         this(ledger, sessions, workspaces, harness, scanner, digests, mapper,
                 properties.getAutomation(),
@@ -468,7 +471,8 @@ public class ManagedAutomationService {
      * binding its successful sibling owns.
      */
     private static final Set<String> PRE_COMMIT_REFUSALS = Set.of(
-            "automation_mode_disabled");
+            "automation_mode_disabled", "automation_gate_unsupported",
+            "automation_gate_invalid");
 
     /**
      * The relay of a claimed mutation. Only a refusal in
@@ -584,7 +588,10 @@ public class ManagedAutomationService {
                     schedule.required("catchUpLimit").isNull() ? null
                             : schedule.required("catchUpLimit").asLong(),
                     schedule.required("enabled").asBoolean(), row.state(),
-                    row.createdAt(), row.updatedAt());
+                    row.createdAt(), row.updatedAt(),
+                    schedule.required("gate").isTextual()
+                            ? schedule.required("gate").textValue() : null,
+                    null);
         }
         return publicAutomation(row);
     }
@@ -606,6 +613,35 @@ public class ManagedAutomationService {
         }
         if (request.enabled() != null) {
             definition.put("enabled", request.enabled());
+        }
+        // An explicit null clears a committed gate; a command is checked here
+        // for the shape the mirror column and the record contract bound, and
+        // by the Harness for the scheduled-task gate's rule on backgrounding.
+        if (request.gate() != null) {
+            if (request.gate().isNull()) {
+                definition.put("gate", null);
+            } else if (request.gate().isTextual()
+                    && !request.gate().textValue().isBlank()) {
+                String gate = request.gate().textValue();
+                if (gate.getBytes(StandardCharsets.UTF_8).length
+                        > ManagedExtensionRecords.SCHEDULE_GATE_MAX_BYTES) {
+                    throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                            "invalid_automation", "gate exceeds "
+                            + ManagedExtensionRecords.SCHEDULE_GATE_MAX_BYTES
+                            + " bytes.");
+                }
+                if (gate.chars().anyMatch(character -> character <= 0x1f
+                        || (character >= 0x7f && character <= 0x9f))) {
+                    throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                            "invalid_automation",
+                            "gate must not contain control characters.");
+                }
+                definition.put("gate", gate);
+            } else {
+                throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                        "invalid_automation",
+                        "gate must be a non-empty shell command or null.");
+            }
         }
         if (create) {
             for (String field : List.of("goal", "cron", "timezone", "prompt")) {
@@ -871,7 +907,11 @@ public class ManagedAutomationService {
                 row.definitionDigest(), row.goal(), row.cron(), row.timezone(),
                 row.sessionMode(), row.overlap(), row.catchUp(),
                 row.catchUpLimit(), row.enabled() && AutomationLedgerStore.STATE_LIVE.equals(row.state()), row.state(),
-                row.createdAt(), row.updatedAt());
+                row.createdAt(), row.updatedAt(), row.gate(),
+                row.gateLastOutcome() == null || row.gateLastAt() == null ? null
+                        : new PublicAutomationGateStatus(row.gateLastOutcome(),
+                                row.gateLastAt(), row.gateQuietSinceDelivery(),
+                                row.gateFailures(), row.gateLastError()));
     }
 
     static PublicAutomationRun publicRun(OccurrenceView view) {

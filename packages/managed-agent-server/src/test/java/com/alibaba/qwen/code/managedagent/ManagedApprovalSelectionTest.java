@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -50,11 +51,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class ManagedApprovalSelectionTest {
     private static final String BASE = "/api/agent/web-shell/v1";
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private MockMvc mvc;
     @Autowired private ManagedWorkspaceRegistry registry;
     @Autowired private ManagedAgentDefinitionStore definitions;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager manager;
 
     @ParameterizedTest

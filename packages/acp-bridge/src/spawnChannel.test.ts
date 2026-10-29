@@ -134,6 +134,7 @@ describe('createSpawnChannelFactory env policy', () => {
   let originalSimple: string | undefined;
   let originalServerToken: string | undefined;
   let originalGuardToken: string | undefined;
+  let originalBrokerToken: string | undefined;
   let originalCliEntry: string | undefined;
   let originalRuntimeOnlyForTest: string | undefined;
 
@@ -142,12 +143,14 @@ describe('createSpawnChannelFactory env policy', () => {
     originalSimple = process.env['QWEN_CODE_SIMPLE'];
     originalServerToken = process.env['QWEN_SERVER_TOKEN'];
     originalGuardToken = process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+    originalBrokerToken = process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
     originalCliEntry = process.env['QWEN_CLI_ENTRY'];
     originalRuntimeOnlyForTest = process.env['RUNTIME_ONLY_FOR_TEST'];
     process.argv[1] = '/tmp/qwen.js';
     process.env['QWEN_CODE_SIMPLE'] = '1';
     process.env['QWEN_SERVER_TOKEN'] = 'secret';
     process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'broker-secret';
   });
 
   afterEach(() => {
@@ -166,6 +169,11 @@ describe('createSpawnChannelFactory env policy', () => {
       delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     } else {
       process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = originalGuardToken;
+    }
+    if (originalBrokerToken === undefined) {
+      delete process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
+    } else {
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = originalBrokerToken;
     }
     if (originalCliEntry === undefined) {
       delete process.env['QWEN_CLI_ENTRY'];
@@ -187,6 +195,7 @@ describe('createSpawnChannelFactory env policy', () => {
       QWEN_CODE_SIMPLE: '1',
       QWEN_SERVER_TOKEN: 'override-secret',
       QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN: 'override-guard-secret',
+      QWEN_MANAGED_RUNTIME_BROKER_TOKEN: 'override-broker-secret',
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
@@ -202,6 +211,9 @@ describe('createSpawnChannelFactory env policy', () => {
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(spawnOptions?.env).not.toHaveProperty(
       'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+    );
+    expect(spawnOptions?.env).not.toHaveProperty(
+      'QWEN_MANAGED_RUNTIME_BROKER_TOKEN',
     );
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
   });

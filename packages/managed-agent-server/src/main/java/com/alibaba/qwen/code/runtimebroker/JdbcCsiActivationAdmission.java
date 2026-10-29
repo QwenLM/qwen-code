@@ -155,7 +155,7 @@ public final class JdbcCsiActivationAdmission {
                     && metadata.path("writerGeneration").longValue() == history.activation().writerGeneration());
             var next = CsiNativeActivationProof.advance(parsed, metadata, original.request(), writerId,
                     history.genesis(), history.activation(), previousRevision, previousSequence, history.prefix(),
-                    ref -> resource(connection, original, ref, previousRevision + 1));
+                    checkpointReader(connection, original, previousRevision + 1, JournalRead.LIVE));
             requireExistingContinuation(original, history.prefix(), next, operation);
             boolean dispatchCheckpoint = "commitCheckpoint".equals(operation)
                     && history.prefix().checkpoint() != null && next.checkpoint().state().path("tools").path("items").size()
@@ -187,7 +187,7 @@ public final class JdbcCsiActivationAdmission {
         }
         var activation = CsiNativeActivationProof.activation(parsed, metadata, original.request(), writerId,
                 history.genesis().definitionDigest(), history.activation(),
-                ref -> resource(connection, original, ref, previousRevision + 1));
+                checkpointReader(connection, original, previousRevision + 1, JournalRead.LIVE));
         progress.requireLease(connection,
                 first || "installActivation".equals(metadata.path("operation").textValue())
                         ? activation.expiresAt() : history.activation().expiresAt(), activation.expiresAt());
@@ -248,7 +248,8 @@ public final class JdbcCsiActivationAdmission {
         };
         var parsed = CsiNativeActivationProof.transaction(records, metadata, original.request(), history.lastUuid());
         var next = CsiNativeActivationProof.advance(parsed, metadata, original.request(), writerId,
-                history.genesis(), history.activation(), previousRevision, previousSequence, history.prefix(), reader);
+                history.genesis(), history.activation(), previousRevision, previousSequence, history.prefix(),
+                checkpointReader(connection, original, previousRevision + 1, JournalRead.LIVE, reader));
         requireExistingContinuation(original, history.prefix(), next, operation);
         require(needed.equals(candidates.keySet()));
         if ("commitFileHistory".equals(operation)) {
@@ -561,11 +562,12 @@ public final class JdbcCsiActivationAdmission {
                         long rowRevision = rows.getLong("journal_revision");
                         var parsed = CsiNativeActivationProof.records(bytes);
                         if (revision == 0) {
+                            require(rows.getObject("activation_lease_until") == null && rows.getObject("activation_renewal_seq") == null);
                             genesisMetadata(metadata, original.request(), CsiNativeActivationProof.sha256(bytes));
                             CsiNativeActivationProof.uuid(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id"));
                             firstWriterId = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id");
                             genesis = CsiNativeActivationProof.genesis(parsed, original.request(),
-                                    ref -> resource(connection, original, ref, rowRevision, read));
+                                    checkpointReader(connection, original, rowRevision, read));
                             lastUuid = genesis.lastRecordUuid();
                         } else {
                             require(rows.getLong("first_sequence") == sequence + 1
@@ -582,11 +584,15 @@ public final class JdbcCsiActivationAdmission {
                                 }
                                 activation = CsiNativeActivationProof.activation(transaction, metadata, original.request(),
                                         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id"), genesis.definitionDigest(), activation,
-                                        ref -> resource(connection, original, ref, rowRevision, read));
+                                        checkpointReader(connection, original, rowRevision, read));
+                                activation = CsiNativeActivationProof.renewed(activation,
+                                        rows.getObject("activation_lease_until", Long.class),
+                                        rows.getObject("activation_renewal_seq", Long.class));
                             } else {
+                                require(rows.getObject("activation_lease_until") == null && rows.getObject("activation_renewal_seq") == null);
                                 prefix = CsiNativeActivationProof.advance(transaction, metadata,
                                         original.request(), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id"), genesis, activation, rowRevision - 1, sequence, prefix,
-                                        ref -> resource(connection, original, ref, rowRevision, read));
+                                        checkpointReader(connection, original, rowRevision, read));
                             }
                             lastUuid = transaction.lastRecordUuid();
                         }
@@ -843,6 +849,63 @@ public final class JdbcCsiActivationAdmission {
                 byte[] bytes = row.getBytes("inline_bytes");
                 require(!row.next());
                 return bytes;
+            }
+        } catch (SQLException error) {
+            throw JdbcRepositorySupport.failure(error);
+        }
+    }
+
+    static ManagedCheckpointHistory.Reader checkpointReader(Connection connection,
+            JdbcCsiFilesRetirementGuard.Original original, long revision, JournalRead read) {
+        return checkpointReader(connection, original, revision, read,
+                ref -> resource(connection, original, ref, revision, read));
+    }
+
+    private static ManagedCheckpointHistory.Reader checkpointReader(Connection connection,
+            JdbcCsiFilesRetirementGuard.Original original, long revision, JournalRead read,
+            java.util.function.Function<JsonNode, byte[]> current) {
+        return ManagedCheckpointHistory.reader(current, (ref, maximum) -> {
+            long origin = historyPageRevision(connection, original, ref, Math.min(maximum, revision - 1), read);
+            if (origin > 0) {
+                return new ManagedCheckpointHistory.PageBytes(resource(connection, original, ref, origin, read), origin);
+            }
+            require(maximum == revision);
+            return new ManagedCheckpointHistory.PageBytes(current.apply(ref), revision);
+        }, revision);
+    }
+
+    private static long historyPageRevision(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JsonNode ref, long maximum, JournalRead read) {
+        ManagedCheckpointHistory.pageRef(ref);
+        if (maximum < 1) {
+            return 0;
+        }
+        String scope = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                original.request().getScope().getTenantId(), original.request().getIsolationKey());
+        String resourceId = ref.path("resourceId").textValue();
+        try (PreparedStatement statement = read.statement(connection,
+                "SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
+                        + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id"
+                        + " AND t.session_id = x.session_id AND t.journal_revision = x.owner_revision"
+                        + " WHERE x.resource_key = ? AND x.session_scope_key = ? AND x.tenant_id = ?"
+                        + " AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
+                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_key = ?"
+                        + " AND x.owner_revision = x.journal_revision AND x.owner_revision <= ? ORDER BY x.owner_revision LIMIT 1")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, resourceId));
+            statement.setString(2, scope);
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 4, original.request().getScope().getWorkspaceId());
+            JdbcRepositorySupport.setIdentity(statement, 5, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 6, resourceId);
+            statement.setString(7, scope);
+            statement.setLong(8, maximum);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return 0;
+                }
+                long origin = rows.getLong(1);
+                require(origin > 0 && origin <= maximum && !rows.next());
+                return origin;
             }
         } catch (SQLException error) {
             throw JdbcRepositorySupport.failure(error);
