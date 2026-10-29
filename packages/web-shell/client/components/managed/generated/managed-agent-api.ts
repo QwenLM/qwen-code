@@ -1059,6 +1059,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/worktrees/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Options a main Session worktree */
+        post: operations["webShellSessionWorktreeOptions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/worktrees/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query a main Session worktree */
+        post: operations["webShellSessionWorktreeQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/worktrees/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Inspect a main Session worktree */
+        post: operations["webShellSessionWorktreeInspect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/worktrees/cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cleanup a main Session worktree */
+        post: operations["webShellSessionWorktreeCleanup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/transcript/items/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read recent published Session items and page toward older items
+         * @description Requires current Session read authorization on every page. The first page returns at most limit Items from the newest published snapshot, in chronological order. nextCursor pages toward older Items in that same signed, retained snapshot. snapshotThroughSequence identifies its coverage, which may lag the current Session head; an empty page with zero coverage does not certify an empty Session because no published snapshot may be available. This page does not contain live tail events or current approval/task state; use the existing transcript, event and state APIs for those. A newer snapshot does not change an existing cursor. Forward export cursors cannot be used here and backward cursors cannot be used for exports. No journal replay, writer acquisition or local cache is involved.
+         */
+        post: operations["webShellRecentTranscriptItems"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1190,6 +1278,10 @@ export interface components {
             skills?: components["schemas"]["SessionCreationSkill"][];
             /** @description Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime. */
             extensionPins?: components["schemas"]["ManagedExtensionPackagePin"][];
+            /** @description Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch. */
+            worktree?: {
+                baseRef?: string;
+            };
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -1292,6 +1384,7 @@ export interface components {
             /** @description Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection. */
             lifecycleOperation?: components["schemas"]["WebShellLifecycleOperation"];
             recovery?: components["schemas"]["SessionRecovery"];
+            worktree?: components["schemas"]["WebShellSessionWorktree"] | null;
         };
         WebShellSessionCapabilities: {
             /**
@@ -2098,18 +2191,22 @@ export interface components {
             skills: components["schemas"]["WebShellSkill"][];
         };
         WebShellWorkspaceFileQueryRequest: {
-            workspaceId: string;
-            cwdRelative: string;
+            workspaceId?: string;
+            cwdRelative?: string;
             directory: string;
             query?: string;
             expectedScopeRevision?: string;
-        };
+            /** Format: uuid */
+            sessionId?: string;
+        } & (unknown | unknown);
         WebShellWorkspaceFileReadRequest: {
-            workspaceId: string;
-            cwdRelative: string;
+            workspaceId?: string;
+            cwdRelative?: string;
             path: string;
             expectedScopeRevision: string;
-        };
+            /** Format: uuid */
+            sessionId?: string;
+        } & (unknown | unknown);
         WebShellWorkspaceFileEntry: {
             path: string;
             name: string;
@@ -2523,6 +2620,52 @@ export interface components {
         WebShellWorkspaceFileUploadQueryRequest: {
             /** Format: uuid */
             uploadId: string;
+        };
+        WebShellSessionWorktree: {
+            id: string;
+            sessionId: string;
+            workspaceId: string;
+            branch: string;
+            baseCommit: string;
+            cwdRelative: string;
+            operationId: string;
+            /** @enum {string} */
+            state: "preparing" | "ready" | "failed" | "blocked" | "removing" | "removed";
+            revision: number;
+            errorCode?: string | null;
+        };
+        WebShellSessionWorktreeOptions: {
+            supported: boolean;
+            reason?: string | null;
+            baseCommit?: string | null;
+            /** @description Source checkout branch independent of base ref; HEAD when detached, null when unavailable. */
+            currentBranch?: string | null;
+            branches: string[];
+        };
+        WebShellSessionWorktreePage: {
+            data: components["schemas"]["WebShellSessionWorktree"][];
+        };
+        WebShellSessionWorktreeInspection: {
+            worktree: components["schemas"]["WebShellSessionWorktree"];
+            canCleanup: boolean;
+            cleanupBlocker?: string | null;
+        };
+        WebShellSessionWorktreeOptionsRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            baseRef?: string;
+        };
+        WebShellSessionWorktreeQueryRequest: {
+            workspaceId: string;
+        };
+        WebShellSessionWorktreeInspectRequest: {
+            workspaceId: string;
+            worktreeId: string;
+        };
+        WebShellSessionWorktreeCleanupRequest: {
+            workspaceId: string;
+            worktreeId: string;
+            idempotencyKey: string;
         };
     };
     responses: {
@@ -4645,11 +4788,13 @@ export interface operations {
     webShellWorkspaceFilesUpload: {
         parameters: {
             query: {
-                workspaceId: string;
-                cwdRelative: string;
+                workspaceId?: string;
+                cwdRelative?: string;
                 path: string;
                 expectedScopeRevision: string;
                 uploadId: string;
+                /** @description Exactly one locator: Session ID, or Workspace ID plus cwdRelative. */
+                sessionId?: string;
             };
             header?: never;
             path?: never;
@@ -4724,6 +4869,152 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellSessionWorktreeOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeOptionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktreeOptions"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellSessionWorktreeQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktreePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellSessionWorktreeInspect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeInspectRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktreeInspection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellSessionWorktreeCleanup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeCleanupRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktree"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellRecentTranscriptItems: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExportRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded recent published Item page. Items are chronological within each page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellExportPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["CursorExpired"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }

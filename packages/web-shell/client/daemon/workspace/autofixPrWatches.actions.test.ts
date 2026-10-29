@@ -50,9 +50,7 @@ describe('autofix-pr watch workspace actions', () => {
       '/workspaces/w%2F1/autofix-pr/watches',
     ]);
     const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>)['Authorization']).toBe(
-      'Bearer tok',
-    );
+    expect(new Headers(init.headers).get('authorization')).toBe('Bearer tok');
   });
 
   it('keeps a malformed answer to its shape, and throws on a refusal', async () => {

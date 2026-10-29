@@ -5,7 +5,7 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 ## Managed 工作区与模型
 
-完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个项目列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新任务”继承当前会话或草稿的服务。新任务的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。
+完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个工作区列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新建会话”继承当前会话或草稿的服务。新会话的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。
 
 已有 Managed 会话的工作区、相对目录、Agent 预设和环境状态在会话上下文中查看。模型和工作区仍由 Java 授权，界面复用不改变后端工具范围或审批策略。导出的 `ManagedAgentWebShell` 独立入口保持兼容。
 
@@ -13,7 +13,7 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生模型菜单和工作区底栏。选择工作区、相对目录和模型后输入任务并发送，一次请求创建会话与首个 Turn；响应丢失保留冻结请求，已创建后的读回重试不会再次发送输入。旧 provider 的空创建能力保持兼容。更换工作区需新建会话；支持模型切换的会话可在空闲时选择服务端允许的模型，绑定工作区内切换目录仍使用已有修订校验流程。对话复用标准消息列表及输入框布局，保留 Managed 审批、取消、结果与未确认请求重试；不提供 daemon 附件、文件引用或斜杠命令。
 
-工作区查询返回 `capabilities.approvalModeSelection: true` 时，新任务按所选 Agent 查询审批策略，并复用输入框的策略菜单。Shell profile 支持 Ask Approval 与 Auto Edit，纯文件 profile 还可提供 Full Access；托管模式不提供 Classifier Approval 或 Plan。已保存的 AgentDefinition 只提供自身固定策略。选项加载失败或无效时暂停创建；更换模型会重新读取选项并保留草稿和工作区。明确选择的策略与会话创建请求一起固定保存，刷新后的重试沿用原策略；旧待确认请求继续省略策略。已有会话显示服务端保存的策略并禁用修改，需要新建任务才能更换。未宣告能力的旧服务端保留原行为。
+工作区查询返回 `capabilities.approvalModeSelection: true` 时，新会话按所选 Agent 查询审批策略，并复用输入框的策略菜单。Shell profile 支持 Ask Approval 与 Auto Edit，纯文件 profile 还可提供 Full Access；托管模式不提供 Classifier Approval 或 Plan。已保存的 AgentDefinition 只提供自身固定策略。选项加载失败或无效时暂停创建；更换模型会重新读取选项并保留草稿和工作区。明确选择的策略与会话创建请求一起固定保存，刷新后的重试沿用原策略；旧待确认请求继续省略策略。已有会话显示服务端保存的策略并禁用修改，需要新建会话才能更换。未宣告能力的旧服务端保留原行为。
 
 已有工作区托管会话的输入框优先显示服务端已确认的模型选择，其次显示最近成功主模型请求的实际模型；没有这些数据时只显示 Agent 身份。会话摘要返回 `capabilities.modelChange: true` 时，模型菜单从 `/session-models/query` 读取服务端允许列表，空闲时通过 `/session-models/change` 在同一会话内切换，后续消息使用新模型。活跃任务、审批、目录切换或未确认请求期间暂停切换。请求发送前保存会话、目标模型、修订和幂等键；响应不确定或刷新后继续确认原请求，读回后才更新选择，对话与草稿保留。旧服务端和不支持的会话保持只读模型控件。上下文浮层复用原生环形控件，显示最近成功请求的 prompt token 数、同一模型配置的窗口及剩余容量；切换后等待新模型观测，缺少有效计数时明确显示未知，不能用累计计费量推测。该浮层仅提供当前占用，不显示尚无托管接口支持的手动压缩或分类明细操作。本地模式保持原有模型切换与上下文功能。
 
@@ -71,11 +71,11 @@ Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。M
 嵌入式宿主通过 `rightPanel={{ items: ['files', 'review', 'sideTask'] }}` 启用。
 此入口需要有效、可信且无歧义的 daemon 工作区归属。
 
-新建任务页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
+新建会话页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
 Local Control，以及多主机位置。面板开关遵循 `header.items`，并在工作区确定后
 才显示；`rightPanel.items` 此时仅保留 `files`、`terminal` 和 `webPreview`，
 `review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
-自定义 `renderChatHeader` 的宿主在新建任务页仍不调用该渲染器。
+自定义 `renderChatHeader` 的宿主在新建会话页仍不调用该渲染器。
 输入框没有显示工作区选择器时，精简 header 保留只读工作区图标。
 面板跟随输入框选择的工作区；各工作区草稿独立保存，刷新和会话切换后可恢复，
 首条消息创建会话时迁移面板并删除草稿。草稿与会话各保留最近 20 份面板存档，
@@ -124,7 +124,7 @@ Artifact 发布的网页链接会在对应轮次留下产物卡片；开启网�
 内容的记录不能自动还原；任意开发网站也不会自动打包成离线网页。
 
 嵌入式接入方通过 `rightPanel={{ items: ['review', 'sideTask', 'webPreview'] }}`
-开启入口。新建任务页也可使用此入口；网页预览的草稿按输入框已选工作区保存，
+开启入口。新建会话页也可使用此入口；网页预览的草稿按输入框已选工作区保存，
 首条消息创建会话后随面板迁移。宿主 CSP 需要允许预览来源的 `frame-src`，同时用
 `frame-ancestors` 限制宿主页面只能被受信任的宿主嵌入，不能允许开发页面
 反过来嵌入宿主。预览容器会限制直接子页面跳转，但开发应用自己的后代
@@ -573,6 +573,69 @@ Web Shell 时生效。配置变化不会自动改变当前会话模式；当前�
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`  | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                 |
 | `mountUnavailableModelTooltip` | `WebShellUnavailableModelTooltipMount` | 可选。为禁用模型挂载自定义提示层，Solid/原生 DOM 宿主可写入传入的 `HTMLElement`。                                                              |
 
+### 宿主目录选择
+
+`WebShell` 和 `WebShellWithProviders` 均接受可选的
+`onPickWorkspaceDirectory`，其公开类型 `WebShellWorkspaceDirectoryPicker` 为
+`(opts?: { signal?: AbortSignal }) => Promise<string | undefined>`。
+宿主返回当前已连接 daemon 文件系统中已存在目录的绝对路径；用户取消时返回
+`undefined`，也可以抛出 `AbortError`。浏览器本机的目录句柄不能作为返回值。
+
+```tsx
+import {
+  WebShellWithProviders,
+  type WebShellWorkspaceDirectoryPicker,
+} from '@qwen-code/web-shell';
+
+const onPickWorkspaceDirectory: WebShellWorkspaceDirectoryPicker = (opts) =>
+  openHostDirectoryPicker({ daemonOrigin, signal: opts?.signal });
+
+<WebShellWithProviders
+  baseUrl={daemonOrigin}
+  onPickWorkspaceDirectory={onPickWorkspaceDirectory}
+/>;
+```
+
+示例中的 `openHostDirectoryPicker` 由宿主实现，并与 `daemonOrigin` 指向同一台
+计算机。配置回调后，现有 Add Workspace 对话框的 Browse 按钮优先调用它；
+headless 或跨源 daemon 无需声明 `native_directory_picker`。
+回调只服务于当前已连接目标，并要求 workspace 的 `status === 'connected'`；
+状态不满足时不显示 Browse，已配置宿主回调时也不会回退到原生选择器。
+不能用它为 Folder source 中另一台计算机选择路径。
+返回路径只回填输入框，不会自动注册；用户仍通过 Add 完成现有注册、刷新和选中流程，
+持久化能力检查和 trust 语义保持不变。选择进行中时 Add 按钮不可用，表单提交也会被
+阻止，避免注册选择前的旧路径。
+
+Git URL 来源的父目录 Browse 操作也使用此回调。宿主仍返回已存在的目录，
+对话框将父目录与 URL 中的仓库名组合为克隆目标；选择本身不会启动克隆或注册，
+仍需用户单独提交。它与本地目录选择共用取消、迟到结果保护、忙碌状态和焦点交接。
+
+宿主选择器进行中时，Add Workspace 临时释放模态限制，允许点击和聚焦 Web Shell
+portal 外的宿主 UI；完成或取消后恢复。宿主负责自己的选择器可访问性、焦点管理和
+层叠顺序。原生选择器保留原来的模态行为；这不增加公开的模态配置选项。
+
+模态切换仍会重新挂载内容，不保证 DOM 节点身份；对话框保存并恢复正文滚动偏移。
+浏览器观测确认重挂会重播入场动画；交接期间的动画抑制暂缓处理。
+已获得焦点的宿主 UI 保持优先，否则经兼容 shadow root 的检查后，将焦点停放在 Add
+面板。完成或取消后，以 `preventScroll` 将焦点返回新的 Browse 按钮；按钮不可用时
+返回面板。选择期间面板设置 `aria-busy`，Browse 显示“正在选择目录…”。
+并发打开其他 `DialogShell` 后，下层恢复时的 Radix 层级与 `aria-hidden` 排序仍未
+解决；传统滚动条引起的水平布局偏移尚未验证。
+
+Escape 仍沿用 Add Workspace 的关闭行为：宿主使用普通冒泡 Escape 处理器时，
+`DialogShell` 的 document 捕获处理会先关闭 Add 并取消选择器。宿主显式 Cancel
+返回 `undefined` 则保留 Add；只取消宿主选择器的独立 Escape 归属仍待评审。
+
+每次选择都会传入独立的 signal。对话框关闭、卸载、目标或连接变化、宿主/原生选择
+方式切换、请求被后续选择替换时会触发 abort，宿主应据此关闭自己的 UI 并取消相关请求。即使宿主忽略 abort，
+旧请求迟到的结果或错误也不会修改当前对话框。普通渲染中重建回调引用不会取消当前选择。
+返回 `undefined`、`AbortError` 或其他错误均不会自动调用原生选择器；真实错误使用
+现有错误提示。未配置回调时，保留原生选择器的能力、目标和同源检查及手动输入行为。
+客户端取消不保证关闭服务端原生 OS 对话框。
+
+API 位置、签名和宿主优先级是本次实现的选择，仍待维护者评审，详见
+[设计文档](../../docs/design/web-shell-host-directory-picker.zh-CN.md)。
+
 ### Workspace 会话创建超时
 
 Workspace 创建由 SDK 分别约束能力查询和创建请求。能力查询沿用 SDK 的通用 30 秒
@@ -613,6 +676,7 @@ daemon 参数的完整含义和配置方式见
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `onSessionIdChange`            | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报                                                                                        |
 | `onRefreshModels`              | `({ workspaceCwd: string, sessionId?: string }) => void \| Promise<void>`                                                             | 用户刷新模型选择器时先调用；宿主可拉取并保存平台目录。未提供或返回空值都会继续重载 Qwen 模型目录并回读当前列表；拒绝则保留旧列表并显示错误。不会自动切换模型或通知其他页面。 |
+| `onPickWorkspaceDirectory`     | `WebShellWorkspaceDirectoryPicker`                                                                                                    | 可选。接入宿主的 daemon 目录选择器，优先于原生选择器；见 [宿主目录选择](#宿主目录选择)。                                                                                     |
 | `onSessionCreated`             | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒                                                                                             |
 | `theme`                        | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                                                         |
 | `onThemeChange`                | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                                                  |
@@ -810,7 +874,7 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 
 ## 左侧导航与嵌入布局
 
-**Breaking change（不兼容变更）**：省略 `sidebar` 从隐藏侧栏改为展示首页；省略导航／底部菜单列表从默认全部改为仅新建任务／收起。旧宿主若要保持隐藏，传 `sidebar={false}`；若要保留原菜单，显式填写 `primaryNav.items` 和 `footer.items`。窄屏品牌默认显示，需隐藏时设置 `branding.hideWhenCompact: true`。
+**Breaking change（不兼容变更）**：省略 `sidebar` 从隐藏侧栏改为展示首页；省略导航／底部菜单列表从默认全部改为仅新建会话／收起。旧宿主若要保持隐藏，传 `sidebar={false}`；若要保留原菜单，显式填写 `primaryNav.items` 和 `footer.items`。窄屏品牌默认显示，需隐藏时设置 `branding.hideWhenCompact: true`。
 
 侧栏采用自动布局，不需要配置 `layout`。宿主不传 `sidebar`、传 `true` 或空配置时，
 默认仅首页：展示 300px 二级栏，不展示一级图标栏。显式配置其他可用导航项后，
@@ -821,7 +885,7 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 未配置列表不再默认开放所有功能；宿主原有显式列表及 renderer 继续生效。
 
 双栏模式下，桌面端左侧包含常驻图标栏和可收起的首页栏。
-首页保留新建任务、置顶和项目会话；
+首页保留新建会话、置顶和工作区会话；
 主要功能入口直接显示在图标栏；底部只保留「更多」与「展开／收起」，
 版本号、设置、主题及其他已启用底部操作收进「更多」，关闭菜单不中断更新检查或本地文件连接。
 仅首页时收起／展开按钮放在二级底部，收起保留原有 56px 窄条与悬浮会话面板。存在一级栏时按钮只放一级底部，所有二级栏均无此按钮；收起后二级完全隐藏，仅剩 56px 一级栏。点击首页或一级展开按钮恢复会话栏，点击功能图标打开对应的现有页面。

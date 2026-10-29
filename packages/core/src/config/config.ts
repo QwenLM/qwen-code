@@ -8802,11 +8802,13 @@ export class Config {
       enabled: this.bundledGeneratedUiActive,
       ...(reason ? { reason } : {}),
     };
-    // A disabled setting or a client without MCP Apps is an expected state.
+    // A disabled setting or a client without MCP Apps is an expected state,
+    // and so is any reason while the feature is only on by default.
     if (
       reason &&
       reason !== 'setting-disabled' &&
-      reason !== 'unsupported-client'
+      reason !== 'unsupported-client' &&
+      this.bundledGeneratedUi.explicit
     ) {
       const warning = `Bundled Generated UI is unavailable (${reason}). Restart the owning session after resolving it.`;
       this.warnings.push(warning);

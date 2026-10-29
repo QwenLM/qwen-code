@@ -350,22 +350,7 @@ public class ManagedWorkspaceRegistry {
                     "workspace_forbidden", "Workspace cannot be used.");
         }
         WorkspaceRecord record = records.getFirst();
-        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                String.class, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenantId, record.getStorageId()));
-        if (!remote.isEmpty()) {
-            boolean allowed = false;
-            if (ssh != null && ssh.isEnabled()) {
-                try {
-                    String nodeId = JSON.readTree(remote.getFirst()).path("nodeId").asText();
-                    allowed = ssh.getNodes().stream().anyMatch(node -> node.nodeId().equals(nodeId) && node.admits(tenantId, actorId));
-                } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
-                    throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_unavailable", "Workspace registration is invalid.");
-                }
-            }
-            if (!allowed) {
-                throw new ManagedAgentException(HttpStatus.FORBIDDEN, "runtime_node_forbidden", "New SSH Sessions are disabled or unauthorized.");
-            }
-        }
+        requireSshNodeAccess(tenantId, actorId, record.getStorageId());
         if (record.getState() != WorkspaceState.ACTIVE) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -379,6 +364,25 @@ public class ManagedWorkspaceRegistry {
                 descriptorRef(record.getConfigRef(), record.getPolicyRef()), 1);
         return new ResolvedBinding(binding, record.getConfigRef(),
                 record.getPolicyRef());
+    }
+
+    void requireSshNodeAccess(String tenantId, String actorId, String storageId) {
+        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                String.class, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenantId, storageId));
+        if (!remote.isEmpty()) {
+            boolean allowed = false;
+            if (ssh != null && ssh.isEnabled()) {
+                try {
+                    String nodeId = JSON.readTree(remote.getFirst()).path("nodeId").asText();
+                    allowed = ssh.getNodes().stream().anyMatch(node -> node.nodeId().equals(nodeId) && node.admits(tenantId, actorId));
+                } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                    throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_unavailable", "Workspace registration is invalid.");
+                }
+            }
+            if (!allowed) {
+                throw new ManagedAgentException(HttpStatus.FORBIDDEN, "runtime_node_forbidden", "SSH runtime node is disabled or unauthorized.");
+            }
+        }
     }
 
     ResolvedBinding resolveOwnedDirectory(String tenant, String actor, String workspace, String cwd) {

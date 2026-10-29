@@ -322,6 +322,7 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
       'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
       'test:e2e:managed-harness-restart-approval-terminal-write-failed',
+      'test:e2e:managed-harness-restart-approval-cleanup-failed',
     ];
     for (const script of scripts) {
       expect(manifest, `${script} must be an npm script`).toContain(
@@ -348,8 +349,8 @@ describe('managed-agent-server e2e runner', () => {
       scrap,
       'the crashed home must be scrapped before recovery',
     ).toBeLessThan(recovery);
-    expect(source).toContain(
-      "await waitUntil(\n          'Post-fault recovery Harness adopted the Session'",
+    expect(source).toMatch(
+      /await waitUntil\(\s*'Post-fault recovery Harness adopted the Session'/,
     );
     // The partial-prepare crash needs the held :start and a PREPARED row
     // with no dispatch, or it degrades into the after-decision barrier.
@@ -421,6 +422,22 @@ describe('managed-agent-server e2e runner', () => {
     // A terminal alone is not the answer: the surviving transcript must
     // still carry the model response.
     expect(source).toContain('Approval recovery answer differs');
+    // C3 refuses the release until the crash, then reopens it so the
+    // replacement's own release is witnessed on the same proxy, and the
+    // crash only lands once the control plane projected the terminal.
+    expect(source).toContain('releaseFailureCount: () => releaseFailureCount');
+    expect(source).toContain('replacementBrokerProxy.allowRelease()');
+    expect(source).toContain("'Runtime cleanup release refused'");
+    expect(source).toContain(
+      "'Original Turn projected before the cleanup crash'",
+    );
+    expect(source).toContain(
+      "'Post-fault cleanup retry reached the replacement'",
+    );
+    expect(source).toContain(
+      'Cleanup fault was not retried after the replacement',
+    );
+    expect(source).toContain("owner_kind='HOSTED_CLEANUP'");
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

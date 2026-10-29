@@ -1,9 +1,11 @@
 import type { CSSProperties, ReactNode } from 'react';
+import { GitForkIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import { SessionDetailsTooltip } from '../sidebar/SessionDetailsTooltip';
 import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import styles from '../sidebar/WebShellSidebar.module.css';
+import { ManagedWorktreeStatus } from './ManagedSessionWorktrees';
 import {
   isManagedSessionRunning,
   type ManagedAgentSessionSummary,
@@ -41,6 +43,11 @@ export function ManagedSessionNavigationRow({
           ? `managed.sessionState.${session.lifecycleStatus}`
           : `managed.phase.${session.phase}`,
       )}
+      details={
+        session.worktree && (
+          <ManagedWorktreeStatus worktree={session.worktree} />
+        )
+      }
     >
       <div
         className={`${styles.sessionRow} ${active ? styles.currentSession : ''} ${running ? styles.runningSession : ''}`}
@@ -77,13 +84,17 @@ export function ManagedSessionNavigationRow({
             } as CSSProperties
           }
         >
-          {running && (
+          {running ? (
             <span
               className={styles.sessionLoading}
               role="status"
               aria-label={t('sidebar.running')}
             />
-          )}
+          ) : session.worktree ? (
+            <span className={styles.sessionGitIcon}>
+              <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
+            </span>
+          ) : null}
           {actions && (
             <div
               className={styles.sessionActions}
