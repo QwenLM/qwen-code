@@ -597,7 +597,7 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   const providersBeforeClear = qualifiedProviderRequestCount();
   await page.keyboard.press('Escape');
   await page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first()
     .click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');

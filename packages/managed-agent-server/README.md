@@ -273,8 +273,8 @@ Design and client migration contract:
 The independent Hosted Java reference distribution packages the runnable
 server, operator-recovery entry point, embedded Broker component, a
 configuration template, systemd unit templates, a credential bootstrap,
-provenance manifest, checksums,
-and deployment/upgrade instructions. Pull requests and manual dry runs build
+a phased upgrade command for the systemd layout, provenance manifest,
+checksums, and deployment/upgrade instructions. Pull requests and manual dry runs build
 and boot the same Linux archive; only a protected-main production dispatch
 publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
@@ -295,6 +295,11 @@ reclaim anything. If the database check fails, capacity remains skipped.
 - Java 21
 - Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
+
+MySQL is the supported database family; full integration CI uses MySQL 8.4.
+MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
+Existing dialect handling remains in place; this change does not reject
+connections that previously worked or introduce a catalog migration.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
@@ -874,8 +879,7 @@ Then **Workspace → Choose existing directory** browses this computer directly,
 without a pre-registered parent or grant. Import keeps the project in place,
 automatically registers its projects parent outside Git worktrees, grants the
 current actor OWNER access, and sets the project as the initial working directory.
-The parent shares file access and its physical-owner lease across projects; this
-is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+The parent shares file access and catalog-local leases across projects; this is not a filesystem sandbox or a global parent-directory claim. New imports use `imported-<receipt key>` storage IDs and private registration metadata below `runtime-broker.state-directory/imported-projects/<storage ID>`. Independent local catalogs may import the same project while leaving any global storage marker untouched. Whole-storage migration, physical recovery and exclusive file-history rewind are unavailable for these shared imports; own-process Runtime recovery remains available. Existing owned roots are reused while sessions run.
 Private Runtime state and creation roots must stay outside imported parents.
 Remote listeners cannot enable this local feature, including with the insecure
 bind override. Signed mode retains signature validation and does not accept a
@@ -888,7 +892,7 @@ and idempotency key. These fields are exclusive with Workspace-relative source
 fields. `localDirectoryImport` advertises the capability independently; pending
 receipts pin native root identity and completed receipts resolve imported roots
 after restart or disabling further imports. Neither retry nor restart repairs a
-missing/foreign marker or restores revoked access. See the
+missing or mismatched registration metadata or restores revoked access. Legacy `created-` imports and application-owned roots keep their global marker contract; no existing receipt or marker is converted automatically. See the
 [local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
 
 For other deployments, the existing authorized-root flow remains available.
@@ -1173,7 +1177,8 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay` and `wake-recovery.scan-delay` — also read a bare number as milliseconds,
+`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
 
@@ -1757,7 +1762,7 @@ npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
 
-The remaining two cover the next barriers of the same matrix. The terminal
+Two more cover the next barriers of the same matrix. The terminal
 reply-loss arm commits `turn.settled`, loses its reply (and every bounded
 retry of it) until the crash, and restarts the Harness; the replacement
 projects the committed terminal, and no second store commit is required. The
@@ -1771,16 +1776,47 @@ npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
 npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
 ```
 
+A refused cleanup release followed by another crash (C3) refuses the release
+until the Turn is terminal and its Harness is killed. The owed cleanup is then
+paid by the replacement through the control plane's debt retry, not by the
+Turn path: the arm requires the replacement's own release, one `confirmed`
+event and no remaining `HOSTED_CLEANUP` projection:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-cleanup-failed
+```
+
+The control plane retries that debt itself. A periodic scan reads the dedicated
+managed database (never an embedded host's business database), lists outstanding
+`HOSTED_CLEANUP` owners whose Session has no active Turn, resolves the owed
+Turn from the cleanup descriptor, and issues the same prompt-scoped
+cleanup-only load an operator recheck uses. The scan is keyset-paginated and
+wraps around, advancing past unreadable descriptors so a stuck prefix cannot
+starve later debts. Retries back off in memory from 10 seconds to 5 minutes; an
+attempt that loses the daemon or its reference drops the connector's cached
+attachment so the next one loads the replacement generation, while a named
+refusal of live work only backs off. A Session with live work, an unsupported
+profile or unreadable evidence keeps its debt and waits for the operator
+recheck route. See
+[the cleanup debt design](../../docs/design/2026-10-28-hosted-cleanup-debt-retry.md).
+
+A lost takeover-load reply (A4's load half) drops the reply to the replacement's
+first drive load once, via a test-gated Harness hook (`QWEN_E2E_DROP_LOAD_REPLY`,
+never set in production). The control plane redrives the same load into the
+now-active driver; the arm asserts the reply was actually lost, then requires the
+original Turn to project exactly one terminal with the recovered answer — the
+redrive restates the active attachment instead of wedging the Turn:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-load-reply-lost
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
-focused or integration tested for now: a refused cleanup release followed by
-another crash (the packaged arm reproduced a control-plane gap where a
-delayed replacement receives no cleanup retry or adoption), the lost
-takeover-load reply (the packaged arm showed the redrive's active handoff
-leaves the original Turn RUNNING instead of projecting its terminal), mixed
-calls and rewritten inputs across a replacement, Hook/MCP/child uncertainty,
-the attempt and stream identities plus the live SSE view, the round and cost
-budgets, and the mixed-version reader/bundle closure (#14481).
+focused or integration tested for now: mixed calls and rewritten inputs
+across a replacement, Hook/MCP/child uncertainty, the attempt and stream
+identities plus the live SSE view, the round and cost budgets, and the
+mixed-version reader/bundle closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:

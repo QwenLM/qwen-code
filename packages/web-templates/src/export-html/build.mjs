@@ -79,10 +79,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
 // Main 8345f5ceec then measured 2,049,419. Passing Web Shell theme tokens to
 // MCP Apps as standard style variables adds 820: 2,049,419 against 2,050,239
 // on that main without and with the change, leaving 2,761 below this ceiling.
-//
-// The transcript tool-card payload renderer (#15280) is statically reachable
-// from the document entry and required raising this ceiling deliberately.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_060_000;
+// Recovery UI and availability consumers (#14980) add 1,787, measured
+// against merged main 65051590d9, so the merged build stays below this
+// ceiling.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_053_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

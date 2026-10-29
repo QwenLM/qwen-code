@@ -81,7 +81,7 @@ An occupied public port follows the ordinary daemon's bounded nearby-port
 retry; use the browser address printed by the launcher.
 
 This one command starts both the ordinary daemon and Managed Agent. The same
-WebShell lists ordinary and Managed workspaces and sessions together under Projects, with a Managed label on Managed workspaces and no execution-mode tabs. New task follows the selected workspace or conversation. Local sessions use
+WebShell lists ordinary and Managed workspaces and sessions together under Workspaces, with a Managed label on Managed workspaces and no execution-mode tabs. New session follows the selected workspace or conversation. Local sessions use
 the directory where you ran the command, while Managed sessions use their
 application-created Workspaces or explicitly imported local projects. Both use
 the same authenticated browser origin;
@@ -89,7 +89,7 @@ you do not need a second daemon command or browser page.
 
 In **Add workspace**, choose **Local (daemon)** or **Managed (Managed Agent)**
 before submitting. The choice defaults to the current conversation's service.
-Workspace rows and **New task** show that service, and new tasks inherit the
+Workspace rows and **New session** show that service, and new sessions inherit the
 selected workspace. The daemon's existing SSH workspace support remains
 available; Managed SSH registration is not integrated into this shared dialog.
 
@@ -132,16 +132,13 @@ directory or stop the conflicting service rather than editing persisted facts.
 Startup creates an application-owned default Workspace and its OWNER grant
 through the existing idempotent Workspace API. To use an existing local project,
 open **Workspace → Choose existing directory**, browse or enter its absolute
-path, then add the folder. The service registers its parent and grants OWNER
-access automatically, keeping existing files in place. New tasks start in the
-selected project. You can also create an empty Workspace.
+path, then add the folder. The service grants OWNER access and keeps existing files in place. New tasks start in the selected project. New imports are shared external directories: independent local installations can import the same project without transferring its parent or replacing an existing global storage marker. The parent remains the shared navigation and worktree-layout boundary within each installation. You can also create an empty Workspace.
 
 The launch directory remains available to Local sessions and is not imported
 automatically. `--workspace` remains unsupported in Managed local mode; select
-the project in the UI. The `.qwen-managed-storage.json` maintenance marker is
-kept outside Git worktrees; do not edit, delete, stash or commit it. Imported
-project files stay outside the private Managed data directory and require their
-own backup.
+the project in the UI. New import metadata is private to the installation under `runtime/imported-projects/<storage ID>/.qwen-managed-storage.json`; preserve it with the complete Managed data directory. Existing imports and application-owned storage retain their earlier marker contract; do not edit, delete, stash or commit those markers. Imported project files stay outside the private Managed data directory and require their own backup.
+
+Shared projects allow the same editing conflicts as independent terminals. Use independent worktrees to isolate edits. Whole-storage migration, physical recovery and exclusive file-history rewind are unavailable for new shared imports; recovery of this installation's own Runtime processes remains available. Earlier imports are not converted automatically. See the [shared-project design](../design/2026-10-28-managed-local-shared-projects.md).
 
 Local session history continues to use ordinary Qwen storage. It is separate
 from the Managed data directory and is not included in a Managed-only backup.
