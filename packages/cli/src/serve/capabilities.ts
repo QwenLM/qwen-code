@@ -166,6 +166,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // model, so a quiet watch costs no turn. Clients that send `gate` to an
   // older daemon would have it silently dropped on POST.
   scheduled_task_gate: { since: 'v1' },
+  // `GET /autofix-pr/watches` and its workspace-qualified form: the
+  // `/autofix-pr` watches of a workspace's clone, as `qwen autofix-pr status`
+  // lists them.
+  autofix_pr_watches: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
@@ -368,6 +372,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
+  session_btw_stream: { since: 'v1' },
   // Direct daemon-side shell execution for an existing session.
   // Advertised CONDITIONALLY: operators must explicitly enable it and
   // either configure bearer auth or use trusted-loopback mode. Clients must
@@ -652,6 +657,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  sessionBtwStreamAvailable?: boolean;
   currentSessionSchedulingAvailable?: boolean;
   workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
@@ -810,6 +816,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
+  ],
+  [
+    'session_btw_stream',
+    (toggles) => toggles.sessionBtwStreamAvailable === true,
   ],
   [
     'scheduled_task_session_reuse',

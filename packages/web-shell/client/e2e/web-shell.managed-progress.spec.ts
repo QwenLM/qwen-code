@@ -651,7 +651,7 @@ test('a permanently failing pending create exposes a discard path @smoke', async
     },
   );
 
-  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
   const composer = page
     .getByRole('region', { name: 'Managed conversation' })
     .locator('[data-web-shell-composer-editor] .cm-content');

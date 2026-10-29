@@ -110,7 +110,10 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   /**
    * Routes an incoming request to the appropriate controller and sends response
    */
-  async dispatch(request: CLIControlRequest): Promise<void> {
+  async dispatch(
+    request: CLIControlRequest,
+    propagateError = false,
+  ): Promise<void> {
     const { request_id, request: payload } = request;
 
     try {
@@ -125,6 +128,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       this.sendErrorResponse(request_id, errorMessage);
+      if (propagateError) throw error;
     }
   }
 
@@ -380,6 +384,8 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       case 'interrupt':
       case 'continue_last_turn':
       case 'set_model':
+      case 'get_workflow_mode':
+      case 'set_workflow_mode':
       case 'set_effort':
       case 'supported_commands':
       case 'get_context_usage':

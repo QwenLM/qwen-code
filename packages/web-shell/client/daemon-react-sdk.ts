@@ -331,6 +331,10 @@ export type {
   DaemonGoal,
   /** The `GET /goals` payload: the goals plus a count of unreachable sessions. */
   DaemonGoalList,
+  /** One `/autofix-pr` watch of a workspace's clone, as `status` lists it. */
+  DaemonAutofixPrWatch,
+  /** The `GET /autofix-pr/watches` payload. */
+  DaemonAutofixPrWatchList,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
   /** Summary of a gated task's recent gate runs. */

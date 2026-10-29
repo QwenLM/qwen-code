@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService.FileTarget;
-import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -56,7 +55,7 @@ public class WorkspaceFileUploadStore {
 
     public WorkspaceFileUploadStore(WorkspaceFileStore files, ManagedWorkspaceRegistry registry,
             WorkspaceStorageGuard guard, SshWorkspaceService ssh, ManagedAgentProperties properties,
-            JdbcTemplate jdbc, PlatformTransactionManager manager, ObjectMapper mapper,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             @Qualifier("managedAgentExecutor") Executor executor) {
         this.files = files;
         this.registry = registry;
@@ -77,7 +76,7 @@ public class WorkspaceFileUploadStore {
             int sizeBytes, String sha256, String code) {
     }
 
-    private record Frozen(String tenant, String actor, String workspace, String cwd, String revision,
+    private record Frozen(String tenant, String actor, String workspace, String cwd, String revision, String session,
             String uploadId, String path, int sizeBytes, String sha256, String physical,
             String node, String entry, Map<String, Object> request, FileTarget remote) {
     }
@@ -87,10 +86,14 @@ public class WorkspaceFileUploadStore {
 
     public UploadResult upload(String tenant, String actor, String workspace, String cwd, String path,
             String revision, String uploadId, InputStream input, long contentLength) {
+        return upload(tenant, actor, new WorkspaceFileStore.Locator(null, workspace, cwd), path, revision, uploadId, input, contentLength);
+    }
+
+    public UploadResult upload(String tenant, String actor, WorkspaceFileStore.Locator locator, String path,
+            String revision, String uploadId, InputStream input, long contentLength) {
         validate(path, revision, uploadId);
-        cwd = new WorkspaceSelection(workspace, cwd).cwdRelative();
-        if (!".".equals(cwd)) {
-            validate(cwd, revision, uploadId);
+        if (locator.sessionId() == null && !".".equals(locator.cwdRelative())) {
+            validate(locator.cwdRelative(), revision, uploadId);
         }
         if (!slots.tryAcquire()) {
             throw busy();
@@ -99,7 +102,7 @@ public class WorkspaceFileUploadStore {
         try {
             Operation saved = find(tenant, uploadId, false);
             if (saved == null) {
-                WorkspaceFileStore.Scope scope = files.scope(tenant, actor, workspace, cwd);
+                WorkspaceFileStore.Scope scope = files.scope(tenant, actor, locator);
                 if (!revision.equals(scope.revision())) {
                     throw changed();
                 }
@@ -107,9 +110,10 @@ public class WorkspaceFileUploadStore {
                 authorize(saved, actor);
             }
             byte[] bytes = read(input, contentLength);
-            String digest = digest(List.of(actor, workspace, cwd, path, revision, uploadId,
-                    bytes.length, DigestUtils.sha256Hex(bytes)));
-            Operation operation = admit(tenant, actor, workspace, cwd, path, revision, uploadId,
+            String digest = digest(locator.sessionId() == null
+                    ? List.of(actor, locator.workspaceId(), locator.cwdRelative(), path, revision, uploadId, bytes.length, DigestUtils.sha256Hex(bytes))
+                    : List.of(actor, List.of("session", locator.sessionId()), path, revision, uploadId, bytes.length, DigestUtils.sha256Hex(bytes)));
+            Operation operation = admit(tenant, actor, locator, path, revision, uploadId,
                     bytes.length, DigestUtils.sha256Hex(bytes), digest);
             running.add(key);
             UploadStatus result = operation.result();
@@ -170,7 +174,7 @@ public class WorkspaceFileUploadStore {
         }
     }
 
-    @Scheduled(initialDelay = 5000, fixedDelay = 5000)
+    @Scheduled(scheduler = "managedAgentScheduler", initialDelay = 5000, fixedDelay = 5000)
     public void reconcile() {
         var due = jdbc.queryForList("SELECT tenant_id, operation_id FROM ma_operation WHERE operation_kind = ?"
                 + " AND state = 'RUNNING' AND available_at <= " + ManagedSchemaTime.SQL_NOW
@@ -212,7 +216,7 @@ public class WorkspaceFileUploadStore {
         }
     }
 
-    private Operation admit(String tenant, String actor, String workspace, String cwd, String path,
+    private Operation admit(String tenant, String actor, WorkspaceFileStore.Locator locator, String path,
             String revision, String uploadId, int size, String sha256, String digest) {
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
@@ -224,7 +228,7 @@ public class WorkspaceFileUploadStore {
                 }
                 return previous;
             }
-            var scope = files.scope(tenant, actor, workspace, cwd);
+            var scope = files.scope(tenant, actor, locator);
             if (!revision.equals(scope.revision())) {
                 throw changed();
             }
@@ -244,24 +248,30 @@ public class WorkspaceFileUploadStore {
             }
             Map<String, Object> request = null;
             FileTarget remote = null;
+            String workspace = scope.binding().getWorkspaceId();
+            String cwd = scope.binding().getCwdRelative();
             if ("LOCAL".equals(scope.kind())) {
                 var root = guard.fileRoot(scope.binding());
-                request = Map.of("protocolVersion", 1, "operation", "probe", "nodeId", "local-files",
+                request = new LinkedHashMap<>(Map.of("protocolVersion", 1, "operation", "probe", "nodeId", "local-files",
                         "stateDirectory", properties.getRuntimeBroker().getStateDirectory(), "root", root.get("root"),
                         "allowedRoots", List.of(root.get("root")), "cwdRelative", cwd,
-                        "localRootIdentity", Map.of("device", root.get("device"), "inode", root.get("inode")));
+                        "localRootIdentity", Map.of("device", root.get("device"), "inode", root.get("inode"))));
+                if (scope.sessionFileScope() != null) {
+                    request.put("sessionFileScope", scope.sessionFileScope());
+                }
             } else {
                 remote = ssh.freezeFiles(scope.binding());
             }
-            Frozen target = new Frozen(tenant, actor, workspace, cwd, revision, uploadId, path, size, sha256, physical,
+            Frozen target = new Frozen(tenant, actor, workspace, cwd, revision, locator.sessionId(), uploadId, path, size, sha256, physical,
                     properties.getRuntimeBroker().getNodeExecutable(), properties.getRuntimeBroker().getWorkerEntry(), request, remote);
             String key = key(tenant, uploadId);
-            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id,"
                     + " target_kind, target_key, target_id, storage_key, physical_key, actor_key, request_digest, request_json, state, phase,"
-                    + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'STORAGE', ?, ?, ?, ?, ?, ?, ?, 'RUNNING', 'RUNNING', "
+                    + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, 'STORAGE', ?, ?, ?, ?, ?, ?, ?, 'RUNNING', 'RUNNING', "
                     + ManagedSchemaTime.SQL_NOW + " + 60000, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                     key, ManagedSchemaKeys.key(tenant), KIND, uploadId.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8),
-                    workspace.getBytes(StandardCharsets.UTF_8), ManagedSchemaKeys.key(scope.binding().getStorageId()),
+                    workspace.getBytes(StandardCharsets.UTF_8), locator.sessionId() == null ? null : locator.sessionId().getBytes(StandardCharsets.UTF_8),
+                    ManagedSchemaKeys.key(scope.binding().getStorageId()),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
                     ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
@@ -356,7 +366,10 @@ public class WorkspaceFileUploadStore {
 
     private void authorize(Operation operation, String actor) {
         if (!operation.target().actor().equals(actor)
-                || !registry.accessOf(operation.target().tenant(), actor, operation.target().workspace()).canCreate()) {
+                || !registry.accessOf(operation.target().tenant(), actor, operation.target().workspace()).canCreate()
+                || operation.target().session() != null
+                        && jdbc.queryForList("SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED'",
+                                Integer.class, operation.target().tenant(), operation.target().session()).isEmpty()) {
             throw notFound();
         }
     }

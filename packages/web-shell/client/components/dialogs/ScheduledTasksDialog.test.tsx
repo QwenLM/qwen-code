@@ -58,6 +58,7 @@ const { actions } = vi.hoisted(() => ({
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
     deleteScheduledTask: vi.fn(),
+    listAutofixPrWatches: vi.fn(),
     listSessionGroups: vi.fn(),
     createSessionGroup: vi.fn(),
     loadProviders: vi.fn(),
@@ -99,6 +100,14 @@ async function mount(
     };
     currentSessionSchedulingAvailable?: boolean;
     gateAvailable?: boolean;
+    autofixPrWatchesAvailable?: boolean;
+    workspaces?: Array<{
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      kind: 'ordinary';
+    }>;
     lockedWorkspace?: {
       id: string;
       cwd: string;
@@ -143,6 +152,8 @@ async function mount(
                 nextOpts.currentSessionSchedulingAvailable
               }
               gateAvailable={nextOpts.gateAvailable}
+              autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
+              workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
               onError={nextOpts.onError ?? vi.fn()}
             />
@@ -2492,5 +2503,168 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     );
     expect(values).toContain(''); // '' = the primary (its undefined action id)
     expect(wsSelect.value).toBe(''); // default targets the primary, no desync
+  });
+});
+
+describe('ScheduledTasksDialog autofix-pr watches', () => {
+  const SESSION = '10000000-0000-4000-8000-000000000001';
+  const watchTask = (over: Partial<MockTask> = {}) =>
+    baseTask({
+      name: null,
+      prompt: 'Run /autofix-pr tick o/r#12 --task feedc0ffee12 --no-reply',
+      cron: '*/2 * * * *',
+      gate: '"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot 12 --gate',
+      sessionId: SESSION,
+      sessionMode: 'persistent',
+      ...over,
+    });
+  const watch = (over: Record<string, unknown> = {}) => ({
+    pr: 12,
+    repo: 'O/R',
+    host: 'github.com',
+    url: 'https://github.com/O/R/pull/12',
+    headRefName: 'feat',
+    headSha: 'a'.repeat(40),
+    pushes: 3,
+    maxPushes: 10,
+    session: SESSION,
+    preparedAt: null,
+    lastCheck: new Date().toISOString(),
+    checkedRecently: true,
+    lastRound: null,
+    stopped: null,
+    watch: { every: 2, reply: false, instructions: '', task: 'feedc0ffee12' },
+    ended: null,
+    needsHuman: [
+      { sha: 'a'.repeat(40), at: '2026-10-26T10:00:00.000Z', text: 'Rename?' },
+    ],
+    worktreeExists: true,
+    fix: null,
+    ...over,
+  });
+
+  it("shows a watch's state on its task's card, and stops it in the watch's session", async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch()],
+    });
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    await mount([watchTask()], {
+      autofixPrWatchesAvailable: true,
+      onRunPrompt,
+    });
+    await flush();
+    expect(actions.listAutofixPrWatches).toHaveBeenCalledWith(undefined);
+    const summary = document.querySelector('[data-testid="autofix-pr-watch"]');
+    expect(summary?.textContent).toContain('O/R#12');
+    expect(summary?.textContent).toContain('Pushes 3/10');
+    expect(summary?.textContent).toContain('Needs your decision (1)');
+    expect(summary?.textContent).toContain('Rename?');
+    click(findButton('Stop watch'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith('/autofix-pr stop 12', SESSION);
+  });
+
+  it('names the one workspace of a single-project daemon when it stops a watch', async () => {
+    // From a standalone or Live conversation, the session is restored in
+    // the workspace, not in that context.
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch()],
+    });
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    await mount([watchTask()], {
+      autofixPrWatchesAvailable: true,
+      onRunPrompt,
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+    await flush();
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith();
+    click(findButton('Stop watch'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr stop 12',
+      SESSION,
+      '/w/main',
+    );
+  });
+
+  it("stops a watch of another workspace in its task's workspace", async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch()],
+    });
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    await mount([watchTask()], {
+      autofixPrWatchesAvailable: true,
+      onRunPrompt,
+      lockedWorkspace: {
+        id: 'second',
+        cwd: '/w/second',
+        primary: false,
+        trusted: true,
+        kind: 'ordinary',
+      },
+    });
+    await flush();
+    expect(actions.listAutofixPrWatches).toHaveBeenCalledWith('second');
+    click(findButton('Stop watch'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr stop 12',
+      SESSION,
+      '/w/second',
+    );
+  });
+
+  it('offers no stop for a task an earlier schedule replaced, or another session took over', async () => {
+    for (const [task, recorded] of [
+      [
+        watchTask({
+          prompt: 'Run /autofix-pr tick o/r#12 --task 000000000000',
+        }),
+        watch(),
+      ],
+      [watchTask(), watch({ session: 'someone-else' })],
+    ] as const) {
+      actions.listAutofixPrWatches.mockResolvedValue({
+        available: true,
+        watches: [recorded],
+      });
+      await mount([task], { autofixPrWatchesAvailable: true });
+      await flush();
+      expect(
+        document.querySelector('[data-testid="autofix-pr-watch"]')?.textContent,
+      ).toContain('it stops at its next fire');
+      expect(findButton('Stop watch')).toBeUndefined();
+      act(() => root?.unmount());
+      root = null;
+      container?.remove();
+      portalRoot?.remove();
+    }
+  });
+
+  it('asks for no watch without the daemon capability, or with no watch among the tasks', async () => {
+    actions.listAutofixPrWatches.mockClear();
+    await mount([watchTask()], { autofixPrWatchesAvailable: false });
+    await flush();
+    act(() => root?.unmount());
+    root = null;
+    container?.remove();
+    portalRoot?.remove();
+    await mount([baseTask({})], { autofixPrWatchesAvailable: true });
+    await flush();
+    expect(actions.listAutofixPrWatches).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="autofix-pr-watch"]'),
+    ).toBeNull();
   });
 });

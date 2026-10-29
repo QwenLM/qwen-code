@@ -16,6 +16,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -48,7 +49,7 @@ public class ManagedNativeJournalSnapshots {
     private final TransactionTemplate isolated;
     private final ToolPublicationRetentionStore retention;
 
-    public ManagedNativeJournalSnapshots(JdbcTemplate jdbc, ManagedSessionStore sessions, ObjectMapper json) {
+    public ManagedNativeJournalSnapshots(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedSessionStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.sessions = sessions;
         this.json = json;

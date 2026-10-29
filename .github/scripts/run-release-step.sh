@@ -378,6 +378,47 @@ BODY
     fi
     ;;
 
+  reconcile-failure)
+    # Reached from a success-gated sibling job because notify-failure itself is
+    # skipped once a later attempt passes, leaving the issue it filed open for
+    # good (#15705). Bot authorship is a hard requirement: a human may have
+    # filed the same title to track the flakiness, and closing their issue
+    # would discard that follow-up.
+    existing_issue="$(
+      gh issue list --repo "${GH_REPO}" \
+        --state open \
+        --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
+        --limit 30 \
+        --json number,url,labels,author,title \
+      | jq -c --arg tag "${RELEASE_TAG}" \
+        '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
+    )"
+    if [[ -z "${existing_issue}" ]]; then
+      echo "No workflow-owned release-failure issue is open for ${RELEASE_TAG}; nothing to reconcile."
+      exit 0
+    fi
+    issue_number="$(jq -r '.number' <<< "${existing_issue}")"
+    issue_url="$(jq -r '.url' <<< "${existing_issue}")"
+    body_file="$(mktemp)"
+    cat > "${body_file}" <<BODY
+The release completed successfully on a later attempt of this run, so the failure this issue reported is no longer current.
+
+Release tag: ${RELEASE_TAG}
+Run: ${DETAILS_URL} (attempt ${RUN_ATTEMPT:-unknown})
+
+Closing as not planned. Reopen if the ${RELEASE_TAG} artifacts later prove incomplete.
+BODY
+    gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" || {
+      echo "::warning::Failed to comment on ${issue_url}; closing regardless."
+    }
+    # Removed one at a time: `gh issue edit --remove-label` fails the whole call
+    # when any label is absent, and an absent label must not block the close.
+    for label in 'status/ready-for-agent' 'autofix/approved' 'autofix/in-progress'; do
+      gh issue edit "${issue_number}" --repo "${GH_REPO}" --remove-label "${label}" || true
+    done
+    gh issue close "${issue_number}" --repo "${GH_REPO}" --reason 'not planned'
+    ;;
+
   *)
     echo "unknown release step: ${step}" >&2
     exit 2

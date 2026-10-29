@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
@@ -32,7 +31,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
@@ -154,6 +152,15 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.CleanupRequest.class, List.of("WebShellSessionWorktreeCleanupRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.Page.class, List.of("WebShellSessionWorktreePage")),
+                    entry(com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService.Options.class, List.of("WebShellSessionWorktreeOptions")),
+                    entry(com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService.Inspection.class, List.of("WebShellSessionWorktreeInspection")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor.class, List.of("WebShellSessionWorktree")),
+                    entry(ApiModels.PublicSessionWorktree.class, List.of("SessionWorktree")),
                     entry(ApiModels.WebShellLifecycleOperation.class, List.of("WebShellLifecycleOperation")),
                     entry(ApiModels.WebShellExportRequest.class, List.of("WebShellExportRequest")),
                     entry(ApiModels.WebShellExportPage.class, List.of("WebShellExportPage")),
@@ -208,11 +215,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellContextCompressionRequest.class, List.of("WebShellContextCompressionRequest")),
                     entry(ApiModels.PublicContextCompressionOperation.class, List.of("PublicContextCompressionOperation")),
                     entry(ApiModels.WebShellContextCompressionOperation.class, List.of("WebShellContextCompressionOperation")),
-                    entry(ChangeCwdRequest.class, List.of("ChangeCwdRequest")),
                     entry(PublicCwdOperation.class,
                             List.of("PublicCwdOperation")),
-                    entry(WebShellChangeCwdRequest.class,
-                            List.of("WebShellChangeCwdRequest")),
                     entry(WebShellCwdOperation.class,
                             List.of("WebShellCwdOperation")),
                     entry(CommandAdmission.class, List.of("CommandAdmission")),
@@ -353,6 +357,7 @@ class ManagedAgentApiContractTest {
     private FixtureHarness harness;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -1096,6 +1101,12 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellExportSession", 404,
                 post(WEB_SHELL + "/sessions/export/query").header(TENANT, otherTenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        exchange(drift, "webShellRecentTranscriptItems", 200,
+                post(WEB_SHELL + "/transcript/items/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId));
+        exchange(drift, "webShellRecentTranscriptItems", 404,
+                post(WEB_SHELL + "/transcript/items/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
         String renameBody = """
                 {"requestId":"contract-rename","sessionId":"%s",
                  "idempotencyKey":"contract-web-rename","title":"renamed web"}
@@ -1560,10 +1571,8 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"" + webBoundId + "\",\"modelId\":\"model-a\",\"expectedRevision\":0,\"idempotencyKey\":\"model-key\"}");
         exchangeAutomations(drift, workspaceTenant, otherTenant, actor,
                 publicBoundId);
-        // W2 refuses the operation on this fixture's deployment: the
-        // workspace-files opt-in is disabled, so a bound Session answers
-        // workspace_unavailable; the operation-level behavior is exercised
-        // by the cwd integration tests.
+        // This fixture keeps Workspace files disabled, so compression
+        // admission reports workspace_unavailable for a bound Session.
         exchange(drift, "compressSessionContext", 400,
                 post("/v1/agents/sessions/{id}/compress", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor)
@@ -1578,131 +1587,15 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\",\"idempotencyKey\":\"compress-web-disabled\","
                         + "\"expectedCompactionRevision\":0}");
-        String cwdBody = """
-                {"cwd_relative":"services/api","expected_context_revision":1}
-                """;
-        exchange(drift, "changeSessionCwd", 400,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
+        mvc.perform(post("/v1/agents/sessions/{id}/cwd", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "cwd-contract-shape"),
-                "{}");
-        exchange(drift, "changeSessionCwd", 401,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant)
-                        .header(IDEMPOTENCY_KEY, "cwd-contract-noactor"),
-                cwdBody);
-        // 401 precedes the key-form check on the wire, on both surfaces.
-        exchange(drift, "changeSessionCwd", 401,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant)
-                        .header(IDEMPOTENCY_KEY, "not a key with space"),
-                cwdBody);
-        exchange(drift, "changeSessionCwd", 400,
-                post("/v1/agents/sessions/{id}/cwd", sessionId)
-                        .header(TENANT, tenant).principal(actor(tenant))
-                        .header(IDEMPOTENCY_KEY, "cwd-contract-legacy"),
-                cwdBody);
-        exchange(drift, "changeSessionCwd", 404,
-                post("/v1/agents/sessions/{id}/cwd", sessionId)
+                        .header(IDEMPOTENCY_KEY, "retired-cwd")
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isNotFound());
+        mvc.perform(post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "cwd-contract-foreign"),
-                cwdBody);
-        exchange(drift, "changeSessionCwd", 409,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "cwd-contract-bound"),
-                cwdBody);
-        exchange(drift, "changeSessionCwd", 400,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "cwd-contract-min-rev"),
-                """
-                {"cwd_relative":"services/api","expected_context_revision":0}
-                """);
-        String webCwdBody = """
-                {"sessionId":"%s","idempotencyKey":"cwd-web-contract",
-                 "cwdRelative":"services/api","expectedContextRevision":1}
-                """.formatted(webBoundId);
-        exchange(drift, "webShellChangeCwd", 400,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant).principal(actor),
-                "{}");
-        exchange(drift, "webShellChangeCwd", 401,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant), webCwdBody);
-        String webCwdBadKeyBody = """
-                {"sessionId":"%s","idempotencyKey":"not a key",
-                 "cwdRelative":"services/api","expectedContextRevision":1}
-                """.formatted(webBoundId);
-        exchange(drift, "webShellChangeCwd", 401,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant), webCwdBadKeyBody);
-        // The key-form refusals themselves, pinned with a trusted actor on
-        // both surfaces: public header and WebShell body field both answer
-        // invalid_idempotency_key below 129 chars; the WebShell body field
-        // alone answers invalid_request at 129+ (the disclosed divergence).
-        String publicBadKey = exchange(drift, "changeSessionCwd", 400,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "key with space"), cwdBody);
-        assertThat(json(publicBadKey).at("/error/code").asText())
-                .isEqualTo("invalid_idempotency_key");
-        String publicLongKeyBody = exchange(drift, "changeSessionCwd", 400,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "k".repeat(129)), cwdBody);
-        assertThat(json(publicLongKeyBody).at("/error/code").asText())
-                .isEqualTo("invalid_idempotency_key");
-        String webBadKeyBody2 = "{\"sessionId\":\"" + webBoundId
-                + "\",\"idempotencyKey\":\"not a key\","
-                + " \"cwdRelative\":\"services/api\","
-                + "\"expectedContextRevision\":1}";
-        String webBad = exchange(drift, "webShellChangeCwd", 400,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant).principal(actor),
-                webBadKeyBody2);
-        assertThat(json(webBad).at("/error/code").asText())
-                .isEqualTo("invalid_idempotency_key");
-        String webLongKeyBody = "{\"sessionId\":\"" + webBoundId
-                + "\",\"idempotencyKey\":\"" + "k".repeat(129) + "\","
-                + " \"cwdRelative\":\"services/api\","
-                + "\"expectedContextRevision\":1}";
-        String webLong = exchange(drift, "webShellChangeCwd", 400,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant).principal(actor),
-                webLongKeyBody);
-        assertThat(json(webLong).at("/error/code").asText())
-                .isEqualTo("invalid_request");
-        // A blank (whitespace-only) key diverges the same way: the public
-        // header answers invalid_idempotency_key, the WebShell body field
-        // refuses at bean validation with invalid_request.
-        String publicBlank = exchange(drift, "changeSessionCwd", 400,
-                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
-                        .header(TENANT, workspaceTenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, " "), cwdBody);
-        assertThat(json(publicBlank).at("/error/code").asText())
-                .isEqualTo("invalid_idempotency_key");
-        String webBlankKeyBody = "{\"sessionId\":\"" + webBoundId
-                + "\",\"idempotencyKey\":\" \","
-                + " \"cwdRelative\":\"services/api\","
-                + "\"expectedContextRevision\":1}";
-        String webBlank = exchange(drift, "webShellChangeCwd", 400,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant).principal(actor),
-                webBlankKeyBody);
-        assertThat(json(webBlank).at("/error/code").asText())
-                .isEqualTo("invalid_request");
-        exchange(drift, "webShellChangeCwd", 409,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant).principal(actor),
-                webCwdBody);
-        exchange(drift, "webShellChangeCwd", 400,
-                post(WEB_SHELL + "/sessions/cwd/change")
-                        .header(TENANT, workspaceTenant).principal(actor),
-                """
-                {"sessionId":"%s","idempotencyKey":"cwd-web-min-rev",
-                 "cwdRelative":"services/api","expectedContextRevision":0}
-                """.formatted(webBoundId));
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isNotFound());
         exchangeActions(drift, tenant);
         exchangeTasks(drift, tenant, otherTenant);
         String mcpCatalog = exchange(drift, "getSessionMcpCatalog", 200,
@@ -1788,6 +1681,27 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/user-messages/command").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"missing\",\"idempotencyKey\":\"queue-missing\",\"command\":{\"action\":\"resume\"}}");
         exchangeExtensions(drift, workspaceTenant, actor, publicBoundId);
+        exchange(drift, "webShellSessionWorktreeOptions", 200,
+                post(WEB_SHELL + "/workspaces/worktrees/options").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
+        exchange(drift, "webShellSessionWorktreeQuery", 200,
+                post(WEB_SHELL + "/workspaces/worktrees/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\"}");
+        exchange(drift, "webShellSessionWorktreeInspect", 404,
+                post(WEB_SHELL + "/workspaces/worktrees/inspect").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"worktreeId\":\"missing\"}");
+        exchange(drift, "webShellSessionWorktreeCleanup", 404,
+                post(WEB_SHELL + "/workspaces/worktrees/cleanup").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"worktreeId\":\"missing\",\"idempotencyKey\":\"cleanup\"}");
+        exchange(drift, "sessionWorktreeOptions", 200,
+                get("/v1/agents/workspaces/ws-default/worktrees/options").header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "sessionWorktreeQuery", 200,
+                get("/v1/agents/workspaces/ws-default/worktrees").header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "sessionWorktreeInspect", 404,
+                get("/v1/agents/workspaces/ws-default/worktrees/missing").header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "sessionWorktreeCleanup", 404,
+                post("/v1/agents/workspaces/ws-default/worktrees/missing/cleanup").header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "cleanup"), null);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(

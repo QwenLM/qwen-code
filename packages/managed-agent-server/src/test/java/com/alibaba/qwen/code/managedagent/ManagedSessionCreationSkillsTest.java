@@ -15,11 +15,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.nio.charset.StandardCharsets;
@@ -30,7 +31,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.when;
+import static org.mockito.Answers.RETURNS_DEFAULTS;
+import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -43,26 +45,47 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class ManagedSessionCreationSkillsTest {
     @Autowired private MockMvc mvc;
+    @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedAgentStore store;
     @Autowired private ManagedSessionSkills snapshots;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
     @TempDir private Path archiveDirectory;
-    @MockitoBean private HarnessConnector harness;
+    @TestBean(methodName = "createHarness") private HarnessConnector harness;
+    private static volatile boolean sessionSkillsSupported;
+    private static volatile boolean sessionExtensionsSupported;
+    private static volatile boolean mcpLifecycleSupported;
+    private static volatile boolean publicChildAgentsSupported;
     private String tenant;
     private Boolean previousShellEnabled;
     private final Map<String, Object> skill = Map.of("name", "review", "description", "Review changes",
             "body", "ORIGINAL_INSTRUCTIONS", "base_directory", "docs");
 
+    // Scheduled availability reads share this mock; configure capability answers
+    // at creation instead of mutating Mockito stubbing while those reads run.
+    static HarnessConnector createHarness() {
+        return mock(HarnessConnector.class, call -> switch (call.getMethod().getName()) {
+            case "supportsSessionSkills" -> sessionSkillsSupported;
+            case "supportsSessionExtensions" -> sessionExtensionsSupported;
+            case "supportsPublicChildAgents" -> publicChildAgentsSupported;
+            case "supportsLifecycle" -> call.getArguments().length == 1
+                    && ("hosted-workspace-shell/1".equals(call.getArgument(0))
+                    || mcpLifecycleSupported && "hosted-workspace-mcp/1".equals(call.getArgument(0)));
+            default -> RETURNS_DEFAULTS.answer(call);
+        });
+    }
+
     @BeforeEach
     void setup() {
         tenant = "skills-" + UUID.randomUUID();
-        when(harness.supportsSessionSkills()).thenReturn(true);
-        when(harness.supportsSessionExtensions()).thenReturn(true);
-        when(harness.supportsLifecycle("hosted-workspace-shell/1")).thenReturn(true);
+        sessionSkillsSupported = true;
+        sessionExtensionsSupported = true;
+        mcpLifecycleSupported = false;
+        publicChildAgentsSupported = false;
         properties.getExtensions().setEnabled(false);
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'ws', 1, 'storage', 'Test', 'config', 'policy', 'ACTIVE')", tenant);
@@ -126,7 +149,7 @@ class ManagedSessionCreationSkillsTest {
         String session = create(body, "empty", false).required("id").asText();
         assertThat(snapshots.initialSelection(tenant, session).get("extensions")).isEqualTo(List.of());
         assertThat(snapshots.snapshot(tenant, session)).isNull();
-        when(harness.supportsSessionExtensions()).thenReturn(false);
+        sessionExtensionsSupported = false;
         submit(body, "unsupported-package-harness", true).andExpect(status().isConflict());
         body.remove("workspace");
         submit(body, "unbound-package", true).andExpect(status().isBadRequest());
@@ -178,7 +201,7 @@ class ManagedSessionCreationSkillsTest {
                         .andExpect(jsonPath("$.error.code").value("unsupported_feature"));
             }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Long.class, tenant)).isZero();
-            when(harness.supportsLifecycle("hosted-workspace-mcp/1")).thenReturn(true);
+            mcpLifecycleSupported = true;
             String session = create(body, "negotiated-mcp", true).required("sessionId").asText();
             assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-mcp/1");
             assertThat(snapshots.initialSelection(tenant, session).get("extensions")).isEqualTo(List.of());
@@ -200,7 +223,7 @@ class ManagedSessionCreationSkillsTest {
         }
         boolean previousManaged = properties.getManagedExtensions().isEnabled();
         try {
-            when(harness.supportsPublicChildAgents()).thenReturn(true);
+            publicChildAgentsSupported = true;
             var definition = json.createObjectNode();
             definition.putObject("model");
             definition.put("instructions", "");
@@ -255,7 +278,7 @@ class ManagedSessionCreationSkillsTest {
         ((com.fasterxml.jackson.databind.node.ObjectNode) body.withArray("skills").get(0)).put("body", "CHANGED");
         submit(body, "key", true).andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
-        when(harness.supportsSessionSkills()).thenReturn(false);
+        sessionSkillsSupported = false;
         create(request("qwen-code", List.of(skill)), "key", true);
         assertThat(snapshots.effective(store.requireSession(tenant, session))).containsExactly(skill);
         jdbc.update("UPDATE ma_request_receipt SET result_json = REPLACE(result_json, 'ORIGINAL_INSTRUCTIONS', 'TAMPERED')"
@@ -316,9 +339,9 @@ class ManagedSessionCreationSkillsTest {
     @Test
     void refusesUnsupportedUnauthorizedAndInvalidRequestsBeforeCreatingAnything() throws Exception {
         var body = request("qwen-code", List.of(skill));
-        when(harness.supportsSessionSkills()).thenReturn(false);
+        sessionSkillsSupported = false;
         submit(body, "unsupported", true).andExpect(status().isConflict());
-        when(harness.supportsSessionSkills()).thenReturn(true);
+        sessionSkillsSupported = true;
         submit(request("qwen-code", List.of(skill, skill)), "duplicate", true).andExpect(status().isConflict());
         var unbound = request("qwen-code", List.of(skill));
         unbound.remove("workspace");

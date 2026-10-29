@@ -396,7 +396,7 @@ class WorkspaceCsiSessionMainTest {
         var before = allTables();
         var names = List.of("insertTurnCommand", "insertCancelCommand", "beginSessionMutation",
                 "completeSessionMutation", "abandonSessionMutation", "beginOperation", "beginWorkspaceClose",
-                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession",
                 "completeCwdChangeOperation", "failCwdChangeOperation", "claimOperation", "completeOperation",
                 "renewLifecycleOperation", "blockLifecycleOperation", "retryOperation", "advanceReplayFloor",
                 "materializeNextBatch", "claimTurn", "renewTurn", "releaseTurnLease", "scheduleTurnRetry",
@@ -645,7 +645,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(39);
+        assertThat(result).hasSize(40);
         return result;
     }
 

@@ -2,7 +2,7 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-状态：**设计提案，未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
+状态：**step 3a（供给前置层）已实现，产品能力仍未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
 
 ## 1. 本阶段存在的原因
 
@@ -60,11 +60,12 @@
   "storage": {
     "storageRef": "sha256-of-canonical-storage-identity",
     "mountRoot": "/workspace/storage",
-    "mountNonce": "control-plane-registration-nonce",
     "continuity": "confirms"
   }
 }
 ```
+
+**已实现形态（step 3a）。** 上面三个成员就是 step 3a 校验的全部集合，且是闭合集合：`storageRef`、`mountRoot`、`continuity`，三者必填，不接受其它成员。`mountNonce` 属于本设计的更宽集合，但现在无法校验 —— 持久注册记录没有 nonce 字段，worker 上报的 nonce 会是一条无法验证的声明。因此带 `mountNonce` 的回包会被**明确拒绝**（`external_storage_registration_mismatch`），而不是收下后忽略该成员；把 nonce 纳入记录属于 step 3b，因为注册 REST/写路径是阶段一已发布的面。`storageRef` 是注册身份元组 `{providerId, physicalKey, registrationRevision}` 的 canonical‑JSON SHA‑256（成员按名排序、revision 为 JSON 整数、小写十六进制），不含额外的包装成员。
 
 `state` 就是阶段一 observe 的成员，只取四个值——`RUNNING`、`STARTING`、`UNKNOWN`、`GONE`——本 profile 应答在 `protocolVersion: 1` 上，不允许出现第二套状态词汇；其他任何取值都按阶段一的做法阻断采用。`storage` 只承载存储侧证据，自身不携带状态：它只在 `RUNNING` 时出现，而缺少它的 `RUNNING` 等于没有证据，不能授权写入。本文别处对本 profile 使用的 `READY` 是 Broker 本地判定（定义见下），绝不是线上取值。
 
@@ -158,3 +159,50 @@ worker 是闭合 boot 路径里的可信代码：这些校验用来拒绝缺失�
 5. full-tier 公共 Hosted E2E；此时才在文档里写"该档案可生产**文件/命令**功能"。
 
 每一步都可以独立回退。阶段一的契约与其 fault‑gate 证据是基础——本设计只在其上补充能力：**不改变状态机的核心断言**，只做受控的能力扩展。
+
+## 12. 已实现的 step 3a：供给前置层
+
+step 3 的第一片以 Broker/适配器前置层的形式落地，而不是产品能力。它新增
+`external-workspace` provisioner kind，但用户侧还无法触达：
+
+- **kind 与传输。** `ExternalWorkspaceProvisioner` 继承已上线的 `external-scratch`
+  provisioner：放置、持久 handle、按 `provisionRequestId` 幂等、启动恢复、attest 与
+  release 为空操作，全部复用同一段代码而不是复制。`ExternalRuntimeKinds` 把该家族
+  命名一次；配置校验、provisioner 工厂、preflight broker 检查与重试/恢复分类都用它，
+  新 kind 不会静默落入"零校验"或"永久恢复阻塞"的分支。
+- **存储身份只来自持久注册。** `ExternalStorageRegistry` 是 `ma_storage`/
+  `ma_storage_owner` 的只读视图；provisioner 每次准入都按 `(tenant, alias)` 解析，
+  并以永久错误码拒绝（`external_storage_registration_not_found`、
+  `external_storage_registration_mismatch`、`external_storage_continuity_denied`）。
+  provider 身份、physical key、revision、alias 路径与 mount root 一律与注册记录比对，
+  绝不与请求或 provider 回包比对。查询使用注册记录的主键（与写入路径插入的 alias key 相同），
+  按 owner 行的主键关联该行，且只接受 `REGISTERED` 状态；`RETIRING` 或 `RETIRED`
+  均视为未注册。revision 不得超过 2^53-1，这是协议两端均能精确表示的最大整数。
+  `storageRef` 是注册身份元组（providerId、physicalKey、registrationRevision）的 canonical-JSON SHA-256；
+  revision 变化会让既有 handle 不可采纳，而不是悄悄重绑。无法完整读取查询结果时，返回可重试的
+  `runtime_external_unavailable`，使 Broker 保持该 placement 可采纳；已经读出的行若自身信息
+  不一致，则永久拒绝。
+- **boot 文档不变。** Broker 铸造已上线的 `managed-context/1` 文档，并追加已被 worker
+  准入的 `storage` 成员（`kind/physicalKey/aliasPath/mountRoot/registrationRevision`），
+  在 `session` 隔离与 Workspace capability digest 下由现有 worker 接受。因此本片
+  **不改 CLI/worker**，也不取代 `2026-10-25-external-container-publication.md`：
+  `storage` 扩展与 adapter 写出的 `registration.json` 描述符语义保持不变，worker 仍以
+  `0700` 创建缺失的 mount root。
+- **可选存储证据。** provider 可在 `RUNNING` 上返回
+  `storage: {storageRef, mountRoot, continuity}`：`confirms` 采纳，`unknown` 保留归属
+  但失去就绪证据，`denies` 永久拒绝，缺省证据保持阶段一语义（本片不授权任何写入）。
+
+本片**不做**：Hosted 工具档案与 EXTERNAL 执行准入（§5）、前台 shell publication 消费
+（§7）、`stopDrained`（§8）与关闭门禁。因此 `supportsDrainedStop()` 保持 `false`，
+放在该 profile 上的 Session 无法关闭；配置校验对两种 external kind 仍要求所有 managed
+Workspace 特性关闭。于是本 provisioner 是**可配置，但暂时放不下任何 Session，且每次放置
+都 fail-closed**：它通过配置显式开启，preflight 会给出一条前置警告说明这一点，只有组件
+测试与契约测试会驱动一次放置。
+
+**#15512 并未完成。** 文件工具执行（`read_file`/`write_file`/`edit`/`glob`）、前台
+shell、审批、capture 以及可验证的 close/drain 仍未实现；在这些落地并验证之前，该
+profile 不可用于 Hosted 工具。
+
+相对 §6 的已知偏离（留给后续片）：不新建 `managed-runtime-boot/2` 文档、不反转
+mount root 归属、不返回 `rootDevice`/`rootInode` receipt。这些属于 worker 契约变更，
+而 `storage` 契约已经是公开的 adapter 面；仓库内没有生产者并不等于外部没有消费者。
