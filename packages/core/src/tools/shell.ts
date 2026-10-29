@@ -107,7 +107,8 @@ import {
 } from '../utils/sedEditParser.js';
 import {
   detectLineEnding,
-  prepareTextFileContentAsync,
+  ensureCrlfLineEndings,
+  needsCrlfLineEndings,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
@@ -1893,9 +1894,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       );
     }
     await this.checkSedPriorRead(filePath);
-    const { content, _meta } = await this.config
-      .getFileSystemService()
-      .readTextFile({ path: filePath });
+    const fileSystemService = this.config.getFileSystemService();
+    const { content, _meta } = await fileSystemService.readTextFile({
+      path: filePath,
+    });
     let newContent: string;
     try {
       newContent = applySedSubstitution(content, sedInfo);
@@ -1907,19 +1909,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ..._meta,
       lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
     };
-    // Judge the edit by the bytes the write will actually produce: the write
-    // path restores CRLF for `lineEnding: 'crlf'`, so a substitution whose only
-    // effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF file) would
-    // otherwise report an applied edit whose bytes never change.
-    const prepared = await prepareTextFileContentAsync(
-      filePath,
-      newContent,
-      meta,
-    );
-    const asWritten = Buffer.isBuffer(prepared.data)
-      ? prepared.data.toString(prepared.encoding ?? 'utf-8')
-      : prepared.data;
-    if (asWritten === content) {
+    // Judge the edit by the content a read-back would return, not by the
+    // substitution string: the local writer re-applies CRLF for
+    // `lineEnding: 'crlf'` (and for Windows command scripts), so a substitution
+    // whose only effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF
+    // file) would otherwise report an applied edit whose bytes never change.
+    // Comparing strings also keeps a BOM or a non-UTF-8 encoding from making
+    // the comparison false on a file that did not change. A client-side write
+    // stores the content verbatim, so its prediction is not normalized — or a
+    // real edit such as `s/\r$//` would be suppressed.
+    const restored =
+      fileSystemService.restoresLineEndingsOnWrite !== false &&
+      (meta.lineEnding === 'crlf' || needsCrlfLineEndings(filePath));
+    if (
+      (restored ? ensureCrlfLineEndings(newContent) : newContent) === content
+    ) {
       newContent = content;
     }
 

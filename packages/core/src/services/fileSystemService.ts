@@ -152,6 +152,13 @@ export interface TextFileIo {
 
 export interface FileSystemService {
   readonly textFileIo?: TextFileIo;
+  /**
+   * Whether `writeTextFile` re-applies the file's own line endings (CRLF) to
+   * the content it is given. Unset is treated as `true`; a writer that stores
+   * the content verbatim must set it to `false` so callers do not predict a
+   * normalization that will not happen.
+   */
+  readonly restoresLineEndingsOnWrite?: boolean;
   withReadFile?<T>(
     request: FileReadRequest,
     operation: (source: FileReadSource) => Promise<T>,
@@ -250,7 +257,7 @@ export function resetUtf8BomCache(): void {
  * Returns true if the file at the given path requires CRLF line endings.
  * Only applies on Windows where cmd.exe actually parses these files.
  */
-function needsCrlfLineEndings(filePath: string): boolean {
+export function needsCrlfLineEndings(filePath: string): boolean {
   if (os.platform() !== 'win32') {
     return false;
   }
@@ -394,6 +401,8 @@ export async function encodeTextFileContentAsync(
  * Standard file system implementation
  */
 export class StandardFileSystemService implements FileSystemService {
+  readonly restoresLineEndingsOnWrite = true;
+
   async withReadFile<T>(
     request: FileReadRequest,
     operation: (source: FileReadSource) => Promise<T>,
