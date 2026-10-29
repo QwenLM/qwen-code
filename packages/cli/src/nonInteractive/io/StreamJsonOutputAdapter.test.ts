@@ -816,6 +816,63 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.error?.message).toBe('Test error');
     });
 
+    it('should report a session token-limit refusal instead of replaying the previous answer', () => {
+      const refusal = {
+        currentTokens: 120,
+        limit: 100,
+        message: 'Session token limit exceeded: 120 tokens > 100 limit.',
+      };
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: refusal,
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('result');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed.error?.message).toBe(refusal.message);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should report a blocked prompt as an error instead of replaying the previous answer', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('result');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed.error?.message).toBe(
+        'Blocked by a UserPromptSubmit hook: policy',
+      );
+      expect(parsed).not.toHaveProperty('result');
+    });
+
     it('should use provided summary over extracted text', () => {
       stdoutWriteSpy.mockClear();
       adapter.emitResult({

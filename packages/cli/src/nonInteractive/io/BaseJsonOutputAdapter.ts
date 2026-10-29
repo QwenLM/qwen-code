@@ -162,6 +162,15 @@ export abstract class BaseJsonOutputAdapter {
   // Last assistant message for result generation
   protected lastAssistantMessage: CLIAssistantMessage | null = null;
 
+  /**
+   * Set when the client refuses the turn before sending it
+   * (`SessionTokenLimitExceeded`, `UserPromptSubmitBlocked`). Such a stream
+   * carries no content, so without this the terminal `result` would fall back
+   * to `lastAssistantMessage` and replay the previous turn's answer as a
+   * success (#15704).
+   */
+  protected preSendRefusalMessage: string | null = null;
+
   // Track permission denials (execution denied tool calls)
   protected permissionDenials: CLIPermissionDenial[] = [];
 
@@ -607,6 +616,8 @@ export abstract class BaseJsonOutputAdapter {
    * This is a shared implementation used by both streaming and non-streaming adapters.
    */
   startAssistantMessage(): void {
+    // The refusal latch describes the stream of the turn being started.
+    this.preSendRefusalMessage = null;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -719,6 +730,14 @@ export abstract class BaseJsonOutputAdapter {
           statusCode: event.statusCode,
           fallbackIndex: event.fallbackIndex,
         });
+        break;
+      case LlmEventType.SessionTokenLimitExceeded:
+        // The client refused the send, so no content follows and the terminal
+        // `result` must report the refusal rather than the previous answer.
+        this.preSendRefusalMessage ??= event.value.message;
+        break;
+      case LlmEventType.UserPromptSubmitBlocked:
+        this.preSendRefusalMessage ??= `Blocked by a UserPromptSubmit hook: ${event.value.reason}`;
         break;
       default:
         break;
@@ -1257,9 +1276,24 @@ export abstract class BaseJsonOutputAdapter {
     options: ResultOptions,
     lastAssistantMessage: CLIAssistantMessage | null,
   ): CLIResultMessage {
-    const usage = options.usage ?? createExtendedUsage();
+    // A turn the client refused before sending has nothing of its own to
+    // report, and `lastAssistantMessage` still holds the previous turn's
+    // message. Convert the would-be success into the matching error result so
+    // the refused turn is not reported as an answer (#15704). An error the
+    // caller already classified keeps its own subtype and message.
+    const resultOptions: ResultOptions =
+      this.preSendRefusalMessage !== null && !options.isError
+        ? {
+            ...options,
+            isError: true,
+            subtype: 'error_during_execution',
+            errorMessage: options.errorMessage ?? this.preSendRefusalMessage,
+          }
+        : options;
+    this.preSendRefusalMessage = null;
+    const usage = resultOptions.usage ?? createExtendedUsage();
     const resultText =
-      options.summary ??
+      resultOptions.summary ??
       (lastAssistantMessage
         ? extractTextFromBlocks(lastAssistantMessage.message.content)
         : '');
@@ -1267,19 +1301,19 @@ export abstract class BaseJsonOutputAdapter {
     const baseUuid = randomUUID();
     const baseSessionId = this.getSessionId();
 
-    if (options.isError) {
-      const errorMessage = options.errorMessage ?? 'Unknown error';
+    if (resultOptions.isError) {
+      const errorMessage = resultOptions.errorMessage ?? 'Unknown error';
       return {
         type: 'result',
         subtype:
-          (options.subtype as CLIResultMessageError['subtype']) ??
+          (resultOptions.subtype as CLIResultMessageError['subtype']) ??
           'error_during_execution',
         uuid: baseUuid,
         session_id: baseSessionId,
         is_error: true,
-        duration_ms: options.durationMs,
-        duration_api_ms: options.apiDurationMs,
-        num_turns: options.numTurns,
+        duration_ms: resultOptions.durationMs,
+        duration_api_ms: resultOptions.apiDurationMs,
+        num_turns: resultOptions.numTurns,
         usage,
         permission_denials: [...this.permissionDenials],
         error: { message: errorMessage },
@@ -1296,9 +1330,9 @@ export abstract class BaseJsonOutputAdapter {
       // `JSON.stringify` (for `result`) and the top-level
       // `structured_result` field render as a JSON-safe `null` instead
       // of being silently omitted.
-      const hasStructured = 'structuredResult' in options;
+      const hasStructured = 'structuredResult' in resultOptions;
       const normalizedStructured = hasStructured
-        ? (options.structuredResult ?? null)
+        ? (resultOptions.structuredResult ?? null)
         : undefined;
       const finalResult = hasStructured
         ? JSON.stringify(normalizedStructured)
@@ -1309,20 +1343,21 @@ export abstract class BaseJsonOutputAdapter {
       } = {
         type: 'result',
         subtype:
-          (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
+          (resultOptions.subtype as CLIResultMessageSuccess['subtype']) ??
+          'success',
         uuid: baseUuid,
         session_id: baseSessionId,
         is_error: false,
-        duration_ms: options.durationMs,
-        duration_api_ms: options.apiDurationMs,
-        num_turns: options.numTurns,
+        duration_ms: resultOptions.durationMs,
+        duration_api_ms: resultOptions.apiDurationMs,
+        num_turns: resultOptions.numTurns,
         result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
-      if (options.stats) {
-        success.stats = options.stats;
+      if (resultOptions.stats) {
+        success.stats = resultOptions.stats;
       }
       if (hasStructured) {
         success.structured_result = normalizedStructured;
