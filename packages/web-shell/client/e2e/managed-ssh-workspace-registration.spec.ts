@@ -36,6 +36,10 @@ for (const width of [1280, 390]) {
         });
       if (path.endsWith('/workspace-extensions/query'))
         return route.fulfill({ json: { supported: false, extensions: [] } });
+      if (path.endsWith('/workspaces/worktrees/options'))
+        return route.fulfill({
+          json: { supported: false, reason: 'worktree_unsupported' },
+        });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({
           json: {

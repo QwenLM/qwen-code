@@ -1,8 +1,16 @@
 name: 'Qwen Review Runner Schedule'
 
 # Switch every online hk1/hk2 runner at 17:00 / 05:00 Asia/Shanghai.
-# GitHub cron uses UTC. Manual runs can select either pool explicitly.
+# 17:00 puts the whole fleet on review; 05:00 returns it to CI but keeps
+# REVIEW_DAY_HOSTS on review, so four reviews can start during the daytime
+# instead of queueing until the evening. GitHub cron uses UTC.
+# Manual runs can select a pool explicitly.
 # Running jobs finish; only the labels for the next job change.
+#
+# REVIEW_DAY_HOSTS is a space-separated list of hk1/hk2 runner names that
+# stay on `ecs-review` in the `day` pool. Unset falls back to the four hk2
+# runners below; the script fails loudly if a name matches no registered
+# runner, so a typo cannot silently shrink the daytime pool.
 #
 # RUNNER_ADMIN_PAT needs runner-label write access: repo scope for a
 # classic PAT, or repository Administration: write for a fine-grained PAT.
@@ -11,8 +19,8 @@ name: 'Qwen Review Runner Schedule'
 
 on:
   schedule:
-    - cron: '0 9 * * *' # 17:00 Asia/Shanghai: enable reviews
-    - cron: '0 21 * * *' # 05:00 Asia/Shanghai: return to CI
+    - cron: '0 9 * * *' # 17:00 Asia/Shanghai: whole fleet on review
+    - cron: '0 21 * * *' # 05:00 Asia/Shanghai: CI, REVIEW_DAY_HOSTS on review
   workflow_dispatch:
     inputs:
       pool:
@@ -22,6 +30,7 @@ on:
         default: 'ci'
         options:
           - 'review'
+          - 'day'
           - 'ci'
 
 permissions:
@@ -59,5 +68,8 @@ jobs:
       - name: 'Switch runner pool'
         env:
           RUNNER_ADMIN_TOKEN: '${{ secrets.RUNNER_ADMIN_PAT }}'
-          POOL: "${{ github.event_name == 'workflow_dispatch' && inputs.pool || (github.event.schedule == '0 9 * * *' && 'review' || 'ci') }}"
-        run: 'node .github/scripts/review-runner-schedule.mjs "$GITHUB_REPOSITORY" "$POOL"'
+          POOL: "${{ github.event_name == 'workflow_dispatch' && inputs.pool || (github.event.schedule == '0 9 * * *' && 'review' || 'day') }}"
+          REVIEW_DAY_HOSTS: "${{ vars.QWEN_REVIEW_DAY_HOSTS || 'ecs-qwen-hk2-1 ecs-qwen-hk2-2 ecs-qwen-hk2-3 ecs-qwen-hk2-4' }}"
+        run: |
+          read -r -a day_hosts <<< "$REVIEW_DAY_HOSTS"
+          node .github/scripts/review-runner-schedule.mjs "$GITHUB_REPOSITORY" "$POOL" "${day_hosts[@]}"

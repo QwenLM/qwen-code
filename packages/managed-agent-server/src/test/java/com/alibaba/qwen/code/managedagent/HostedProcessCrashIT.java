@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -328,7 +329,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() -> !running(process), 10, "process cleanup " + process.pid());
+                HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "process cleanup");
             }
         }
     }
@@ -512,7 +513,7 @@ class HostedProcessCrashIT {
                 residentWorker = workers.getFirst();
             }
             assertThat(workers.getFirst().pid()).isEqualTo(residentWorker.pid());
-            assertThat(running(residentWorker)).isTrue();
+            assertThat(HostedProcessLiveness.running(residentWorker)).isTrue();
         }
 
         private Map<String, Object> control(String route) throws Exception {
@@ -576,7 +577,7 @@ class HostedProcessCrashIT {
                 spring.destroyForcibly();
                 assertThat(spring.waitFor(10, TimeUnit.SECONDS)).isTrue();
                 assertThat(spring.exitValue()).isEqualTo(137);
-                assertThat(running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
+                assertThat(HostedProcessLiveness.running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
                 // Keep the Store down beyond the Harness's five-second writer lease.
                 Thread.sleep(8_000);
                 startSpring();
@@ -586,7 +587,7 @@ class HostedProcessCrashIT {
             }
             if (route.equals("/worker-kill")) {
                 assertThat(worker.destroyForcibly()).isTrue();
-                await(() -> !running(worker), 10, "worker SIGKILL");
+                HostedProcessLiveness.awaitStopped(worker, Duration.ofSeconds(10), "worker SIGKILL");
                 return Map.of("pid", worker.pid(), "signal", "SIGKILL");
             }
             assertThat(route).isEqualTo("/worker-stop");
@@ -790,7 +791,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() -> !running(process), 10, "process cleanup " + process.pid());
+                HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "process cleanup");
             }
             if (driver != null) {
                 assertThat(driver.waitFor(5, TimeUnit.SECONDS)).isTrue();
@@ -802,22 +803,6 @@ class HostedProcessCrashIT {
                 assertThat(brokerSidecar.waitFor(5, TimeUnit.SECONDS)).isTrue();
             }
         }
-    }
-
-    private static boolean running(ProcessHandle process) {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (Files.exists(stat)) {
-            try {
-                String value = Files.readString(stat);
-                return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-            } catch (java.io.IOException gone) {
-                return process.isAlive();
-            }
-        }
-        return true;
     }
 
     private static boolean stopped(ProcessHandle worker) {

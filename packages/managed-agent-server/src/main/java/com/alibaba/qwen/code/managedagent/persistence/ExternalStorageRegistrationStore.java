@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -28,7 +29,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     // boundary; this mapper only encodes/decodes payloads this store produced itself.
     private final ObjectMapper json = new ObjectMapper();
 
-    public ExternalStorageRegistrationStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
+    public ExternalStorageRegistrationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setTimeout(10);
