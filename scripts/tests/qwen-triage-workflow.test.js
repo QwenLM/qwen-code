@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6125,6 +6126,17 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(weak.trimEnd().endsWith(generic)).toBe(true);
       expect(weak).not.toContain('via Qwen Code /verify-pr');
+
+      // A downloaded artifact with no report.md is a weak notice too: the
+      // body says "No report.md was found", so it must not simultaneously
+      // carry a round attribution (review of 3108f8f24d, P3).
+      unlinkSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'),
+      );
+      const noReport = render(dir, { NAME: 'ft-noreport', ...attribution });
+      expect(noReport).toContain('No report.md was found');
+      expect(noReport.trimEnd().endsWith(generic)).toBe(true);
+      expect(noReport).not.toContain('via Qwen Code /verify-pr');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6133,8 +6145,8 @@ describe('qwen-triage verify publish fidelity', () => {
   // The three values are workflow-owned: the run step computes them from
   // the lane's own model config, the runner's CLI and the re-pinned skill
   // file — never from the agent-writable artifact tree, which PR code
-  // could plant. The hash is filter-proof for the same reason: the agent
-  // era leaves .git node-owned.
+  // could plant. The hash is filter-proof for the same reason: prepare
+  // leaves .git node-owned.
   it('threads workflow-owned attribution from the run step to the publisher', () => {
     const run = stepIn('verify', 'Run verification agent');
     expect(run).toContain(
@@ -6143,6 +6155,29 @@ describe('qwen-triage verify publish fidelity', () => {
     expect(run).toContain('echo "cli_version=$CLI_VERSION"');
     expect(run).toContain('echo "skill_hash=$SKILL_HASH"');
     expect(run).toContain("tr -d '\\r\\n' | cut -c1-200");
+
+    // The ordering IS the security argument (review of 3108f8f24d, P2):
+    // the values must be collected after the base re-pin and BEFORE the
+    // agent starts. The workspace parent directory stays node-owned, so
+    // during the agent era PR code can replace the whole .qwen directory
+    // (mv + mkdir) without touching the root-owned files inside it; a
+    // post-agent hash could then name instructions the round never loaded.
+    // toContain is order-blind — these indices pin the property itself.
+    const repin = run.indexOf('chmod -R a-w,a+rX .qwen');
+    const cliCollect = run.indexOf('CLI_VERSION="$(timeout');
+    const hashCollect = run.indexOf('SKILL_HASH="$(timeout');
+    const agentStart = run.indexOf('--prompt "/verify-pr');
+    expect(repin).toBeGreaterThan(-1);
+    expect(cliCollect).toBeGreaterThan(repin);
+    expect(hashCollect).toBeGreaterThan(repin);
+    expect(agentStart).toBeGreaterThan(cliCollect);
+    expect(agentStart).toBeGreaterThan(hashCollect);
+    // Exactly one hash derivation, and the post-agent block only emits the
+    // saved value — it never re-derives one.
+    expect(run.split('git hash-object').length - 1).toBe(1);
+    expect(run.indexOf('echo "skill_hash=$SKILL_HASH"')).toBeGreaterThan(
+      agentStart,
+    );
 
     const outputs =
       job('verify').match(/\n {4}outputs:[\s\S]*?\n {4}steps:/)?.[0] ?? '';

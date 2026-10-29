@@ -4232,6 +4232,22 @@ jobs:
           chown -R root:root .qwen
           chmod -R a-w,a+rX .qwen
 
+          # Attribution for the published report's footer, collected HERE —
+          # after the re-pin above and BEFORE the agent starts. The workspace
+          # parent directory stays node-owned, so during the agent era PR
+          # code can replace the whole .qwen directory (mv + mkdir) without
+          # touching the root-owned files inside it; a hash taken after the
+          # agent could then name instructions the round never loaded. The
+          # model is the lane's own config and the CLI is the root-owned
+          # global install. --no-filters matters even here: prepare left
+          # .git node-owned, and a planted clean filter would otherwise
+          # choose what gets hashed — or run as root. Best-effort: an empty
+          # value makes the publisher keep its generic signature instead of
+          # posting a half-attributed footer. The timeout keeps a planted
+          # shim from hanging the step.
+          CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
+          SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
+
           # 3. Fake artifact dirs planted during the build: a zeroed
           #    timestamp sorts AHEAD of the agent's real dir at collection
           #    time. (A steered agent can still forge its own artifacts —
@@ -4697,19 +4713,10 @@ jobs:
           fi
           echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
 
-          # Attribution for the published report's footer: the model this
-          # lane configured, the CLI installed on the runner, and the content
-          # hash of the base-pinned skill the agent actually loaded. All three
-          # are workflow-owned — never read from the agent-writable artifact
-          # tree, which PR code could plant. Best-effort: an empty value makes
-          # the publisher keep its generic signature instead of posting a
-          # half-attributed footer.
-          # timeout: these run after the agent era, so a planted shim must
-          # not be able to hang the step until the job ceiling.
-          CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
-          # --no-filters: the agent era left .git node-owned, and a planted
-          # clean filter would otherwise let PR code choose what gets hashed.
-          SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
+          # Emit the attribution collected before the agent started (see the
+          # re-pin above) — the saved values, never re-derived here: the
+          # agent era can replace the .qwen directory itself, so a post-agent
+          # hash could name instructions the round never loaded.
           {
             echo "model=$(printf '%s' "${OPENAI_MODEL:-}" | tr -d '\r\n' | cut -c1-200)"
             echo "cli_version=$CLI_VERSION"
@@ -6145,10 +6152,12 @@ jobs:
               fi
               printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
               # Attribution footer, the same shape /review posts: model, CLI
-              # version, and the content hash of the skill that ran. Only
-              # when all three workflow-owned values arrived — a half-known
-              # identity keeps the generic signature instead.
-              if [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
+              # version, and the content hash of the skill that ran. Only on
+              # a body that actually carries a report and only when all three
+              # workflow-owned values arrived — a missing report makes this
+              # a weak notice (WEAK_BODY above), and a half-known identity
+              # keeps the generic signature too.
+              if [ -n "$REPORT" ] && [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
                 printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\n' "$VERIFY_MODEL" "$VERIFY_CLI_VERSION" "$VERIFY_SKILL_HASH"
               else
                 printf '%s\n' '— _Qwen Code · sandboxed verification_'
