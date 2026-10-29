@@ -96,6 +96,7 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedWorkspaceRegistry registry;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Test
