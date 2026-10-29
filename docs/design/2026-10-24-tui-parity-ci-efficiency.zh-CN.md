@@ -20,7 +20,7 @@ TUI parity 工作流会为所有 package 变更运行，包括只改 Java 服务
 
 本次不并行三组产品验收。集成测试的全局初始化共用按时间戳命名的目录及清理逻辑，调用方还提供了同一个 `QWEN_HOME`。ECS 主机承载多个 runner，目前集成配置有意限制 worker，编辑器测试也包含亚秒级时间断言。并行前需要独立的初始化、缓存和 home 生命周期，并在真实 runner 负载下取得证据。
 
-Java 排除范围保持精确：其他 package（包括未来新增的 CLI 依赖）仍运行。混合 PR 若包含这三个排除目录之外的无关路径，可能保守地运行。Companion 的排除止于 `src/`：其 package 清单、打包配置和 `scripts/` 既是 Companion 构建的输入，也是 `bundlePaths.ts` 记录的 bundled-CLI 拷贝输入，因此仍要求运行两项检查。现有工作流级路径过滤仍允许纯文档修改不启动工作流；纯服务端修改会启动工作流并生成 skipped 的原名检查。新增轻量 job 会增加 hosted 调度和 API 依赖。跨 job 共享构建产物暂缓，因为平台及原生依赖兼容性需要更大范围的修改。
+排除范围刻意保持精确：三个排除目录之外的路径（包括未来新增的 CLI 依赖）仍运行。Companion 源码不在 CLI 构建依赖闭包中，但其余路径并非全部独立：Web Shell 构建会调用 `vscode-ide-companion/scripts/generate-notices.js`，共享的 frozen-lockfile 安装也会读取 Companion 清单。相反，`copy-bundled-cli.js` 消费已经构建好的 CLI；这次拷贝不使它成为 CLI 构建输入。将 Companion 的所有 `src/` 之外路径保留为触发项，是有意的保守范围选择，不代表每个这样的文件都会影响门禁。README、资源或扩展专用构建文件的进一步排除留待后续。现有工作流级路径过滤仍允许纯文档修改不启动工作流；纯服务端修改会启动工作流并生成 skipped 的原名检查。新增轻量 job 会增加 hosted 调度和 API 依赖。跨 job 共享构建产物暂缓，因为平台及原生依赖兼容性需要更大范围的修改。
 
 ## 验证与验收
 
