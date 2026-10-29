@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -89,6 +90,19 @@ class ManagedAgentEmbeddingTest {
             var source = context.getBean("managedAgentDataSource", DruidDataSource.class);
             context.close();
             assertThat(source.isClosed()).isTrue();
+        });
+    }
+
+    @Test
+    void cleanupDebtStoreQueriesTheDedicatedDatabaseNotTheHostOne() {
+        runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
+            assertThat(context).hasNotFailed();
+            var store = context.getBean(HostedCleanupDebtStore.class);
+            // The host business database has no ma_resource_ref. An unqualified
+            // JdbcTemplate would bind it and throw "Table not found" here; the
+            // dedicated database carries the schema, so the scan returns an
+            // empty page instead of failing every tick against the wrong DB.
+            assertThat(store.findOwed(20, -1, "").debts()).isEmpty();
         });
     }
 
