@@ -2388,7 +2388,19 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
   } catch (error) {
     throw new ApiError(`${label}: ${error.message}`, true);
   }
-  const body = await response.json().catch(() => undefined);
+  let body;
+  try {
+    body = await response.json();
+  } catch (error) {
+    // A body cut off or garbled after a success status is a failed read, not
+    // an empty answer; a poll may pass it. An error answer keeps its status.
+    if (response.ok) {
+      throw new ApiError(
+        `${label}: ${response.status} with an unreadable body (${error.message})`,
+        true,
+      );
+    }
+  }
   if (!response.ok) {
     const reason = body?.error?.message ?? body?.message ?? response.statusText;
     throw new ApiError(

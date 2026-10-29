@@ -17,6 +17,7 @@ import {
   readFile,
   readdir,
   readlink,
+  realpath,
   rename,
   rm,
   stat,
@@ -2282,7 +2283,10 @@ test('verify takes the auth mode from the configuration the server resolves', as
   const resolver = host.services.find(({ args }) => args.includes(RESOLVER));
   assert.equal(
     resolver.jar.path,
-    path.join(`${host.current}-releases`, '0.2.0', 'lib/server.jar'),
+    path.join(
+      await realpath(path.join(`${host.current}-releases`, '0.2.0')),
+      'lib/server.jar',
+    ),
   );
   host.resolveFailure = 'cannot resolve the server configuration: refused';
   assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 0);
@@ -2291,4 +2295,60 @@ test('verify takes the auth mode from the configuration the server resolves', as
     "SKIP cannot resolve the API's auth mode: cannot resolve the server configuration: refused",
   );
   assert.ok(!host.requests.some(({ url }) => url.includes('/v1/')));
+});
+
+test('verify fails a read whose body breaks off after a success status', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
+  host.responses['GET /v1/agents/sessions/s1'] = { id: 's1' };
+  host.responses['GET /v1/agents/sessions/s1/items'] = { data: [{}] };
+  host.responses['POST /v1/agents/sessions'] = { id: 's2' };
+  host.responses['GET /v1/agents/sessions/s2/events'] = {
+    data: [{ sequence: 1, type: 'turn.completed', terminal: true }],
+  };
+  // The headers arrive with 200, then the body is cut off.
+  const fetch = host.system.fetch;
+  let breaks = 0;
+  const breakOff = (part, times = Infinity) => {
+    breaks = 0;
+    host.system.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (!url.includes(part) || breaks >= times) {
+        return response;
+      }
+      breaks += 1;
+      return {
+        ...response,
+        json: async () => {
+          throw Object.assign(new Error('This operation was aborted'), {
+            name: 'AbortError',
+          });
+        },
+      };
+    };
+  };
+  breakOff('/items');
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.equal(
+    rowsOf(host.output).session,
+    'FAIL GET /v1/agents/sessions/s1/items?limit=20: 200 with an unreadable body (This operation was aborted)',
+  );
+  // A listing that breaks off is a failed read, not a tenant without Sessions.
+  breakOff('/v1/agents/sessions?limit=1');
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.match(
+    rowsOf(host.output).session,
+    /^FAIL GET \/v1\/agents\/sessions\?limit=1: 200 with an unreadable body/,
+  );
+  // A poll whose body breaks off once is polled again.
+  breakOff('/events', 1);
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 0);
+  assert.match(
+    rowsOf(host.output).turn,
+    /^PASS Session s2 ended with turn.completed/,
+  );
+  assert.equal(breaks, 1);
 });
