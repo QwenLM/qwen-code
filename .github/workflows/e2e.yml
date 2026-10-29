@@ -32,11 +32,13 @@ jobs:
   # pool host, so the six Linux shards spent more of the shared pool
   # rebuilding one commit than testing it. The outputs are platform-
   # independent JavaScript (native modules come from each leg's own
-  # `npm ci`), so a hosted VM builds once, off the pool, and every leg
-  # downloads the result. See .github/scripts/e2e-build-pack.sh.
+  # `npm ci`), so one job builds once and every leg downloads the result.
+  # The build shares the legs' pool-first routing: hosted ubuntu jobs sat
+  # queued for hours while the pool idled (2026-10-28), and one build per
+  # push adds no measurable pool load. See .github/scripts/e2e-build-pack.sh.
   build:
     name: 'Build for E2E'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     # Same fork gate as the legs, so a skipped build skips them all for the
     # same reason rather than failing them on a missing artifact.
@@ -63,6 +65,10 @@ jobs:
           npm config set fetch-retry-maxtimeout 120000
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       # A bare `corepack pnpm install` has no retry: run 34700339334's
       # build leg died at this step before any test ran, on a tree whose

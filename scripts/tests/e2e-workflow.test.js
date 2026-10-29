@@ -1266,7 +1266,7 @@ describe('e2e workflow', () => {
       const poolJobs = Object.entries(yml.jobs).filter(([, job]) =>
         String(job['runs-on'] ?? '').includes('ecs-qwen'),
       );
-      expect(poolJobs.map(([id]) => id)).toEqual(['e2e-test-linux']);
+      expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
       for (const [id, job] of poolJobs) {
         const gate = (job.steps ?? []).find(
           (step) => step.name === 'Disk floor gate (self-hosted)',
@@ -1279,8 +1279,8 @@ describe('e2e workflow', () => {
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
-    // job does it once on a hosted VM and the legs unpack its archive; these
-    // pins keep a leg from quietly growing its own build back.
+    // job does it once and the legs unpack its archive; these pins keep a leg
+    // from quietly growing its own build back.
     const build = yml.jobs.build;
     const legs = [
       'e2e-test-linux',
@@ -1289,9 +1289,13 @@ describe('e2e workflow', () => {
       'isolated-nightly',
     ];
 
-    it('builds once, on a hosted runner, off the shared pool', () => {
+    it("builds once, sharing the legs' pool-first runner routing", () => {
       expect(build.needs).toBeUndefined();
-      expect(build['runs-on']).toBe('ubuntu-latest');
+      // Hosted ubuntu jobs queued for hours while the pool idled
+      // (2026-10-28), so the build rides the exact routing expression every
+      // other pool job uses instead of pinning a hosted-only label.
+      expect(build['runs-on']).toBe(yml.jobs['e2e-test-linux']['runs-on']);
+      expect(String(build['runs-on'])).toContain('ecs-qwen');
       const names = build.steps.map((step) => step.name);
       expect(names).toContain('Build project');
       expect(names).toContain('Bundle CLI for E2E tests');
