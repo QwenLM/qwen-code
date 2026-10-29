@@ -9,6 +9,7 @@ import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
   isWrappedSystemReminderPart,
   stripSystemReminderBlocks,
 } from '../core/environmentContext.js';
@@ -18,6 +19,7 @@ import {
   escapeUserMessageTags,
 } from '../utils/xml.js';
 import {
+  ATTACHMENT_PROCESSING_FAILURE_NOTICE,
   isTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
   opensAttachedContent,
@@ -778,22 +780,29 @@ function userMessageTexts(history: Content[]): string[] {
         .map((part) => part.text)
         .join('\n'),
     ).trim();
-    // Tool traffic, reminders and hook context ride the turn too, but are
-    // neither typed nor attached.
+    // Tool traffic, reminders, hook context and the memory snapshot ride the
+    // turn too, but are neither typed nor attached.
     const attached = parts.filter(
       (part, index) =>
         !typed[index] &&
         !part.functionResponse &&
         !part.functionCall &&
         !isWrappedSystemReminderPart(part) &&
-        !(
-          typeof part.text === 'string' &&
-          isUserPromptSubmitContextPartText(part.text)
-        ),
+        !isInjectedContext(part),
     );
+    // A failed attachment is reported as such, not named as attached.
+    const failures = attached.filter(isAttachmentFailureNotice);
     const text = escapeUserMessageTags(
       escapeSystemReminderTags(
-        [typedText, attachedContentNote(attached)].filter(Boolean).join('\n'),
+        [
+          typedText,
+          ...failures.map(() => ATTACHMENT_PROCESSING_FAILURE_NOTICE),
+          attachedContentNote(
+            attached.filter((part) => !isAttachmentFailureNotice(part)),
+          ),
+        ]
+          .filter(Boolean)
+          .join('\n'),
       ),
     );
     if (text) texts.push(text);
@@ -802,17 +811,56 @@ function userMessageTexts(history: Content[]): string[] {
 }
 
 /**
+ * User turns with text but no typed-prompt mark, which compaction reads by
+ * position. Logged when an input is reduced, so a request path that stops
+ * marking its prompt shows up.
+ */
+export function countUnmarkedUserTurns(history: Content[]): number {
+  return history.filter(
+    (content) =>
+      content.role === 'user' &&
+      !content.parts?.some(isTypedPrompt) &&
+      (content.parts ?? []).some(
+        (part) =>
+          isUserTextPart(part) &&
+          !isWrappedSystemReminderPart(part) &&
+          !isInjectedContext(part),
+      ),
+  ).length;
+}
+
+/**
  * Which parts of a user turn hold what the user typed. The part marked where
  * the prompt was built (TYPED_PROMPT_METADATA) settles it: only marked parts
  * are typed, whatever the layout and whatever else rides the turn, including
  * attached content no header names. A turn with no mark (recorded before the
- * mark existed, or written by a subagent, hook or scheduled task) keeps the
- * positional rule of attachedContentStart.
+ * mark existed, or written by a subagent, the scheduler or a retry path that
+ * does not mark) keeps the positional rule of attachedContentStart, so its
+ * text is never dropped; hook context and the memory snapshot carry their own
+ * markers and are never typed.
  */
 function typedPartFlags(parts: Part[]): boolean[] {
   if (parts.some(isTypedPrompt)) return parts.map(isTypedPrompt);
   const attachedFrom = attachedContentStart(parts);
-  return parts.map((_, index) => index < attachedFrom);
+  return parts.map(
+    (part, index) => index < attachedFrom && !isInjectedContext(part),
+  );
+}
+
+/**
+ * Hook context and the auto-memory snapshot ride a user turn under their own
+ * markers: neither is what the user typed or something they attached.
+ */
+function isInjectedContext(part: Part): boolean {
+  return (
+    part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true ||
+    (typeof part.text === 'string' &&
+      isUserPromptSubmitContextPartText(part.text))
+  );
+}
+
+function isAttachmentFailureNotice(part: Part): boolean {
+  return part.text?.trim() === ATTACHMENT_PROCESSING_FAILURE_NOTICE;
 }
 
 /**

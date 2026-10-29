@@ -328,6 +328,7 @@ import {
   getExtractNoopSkipTurns,
   isBelowCompactionWarn,
   markTypedPrompt,
+  ATTACHMENT_PROCESSING_FAILURE_NOTICE,
 } from '@qwen-code/qwen-code-core';
 import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
@@ -1570,8 +1571,6 @@ const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
-const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
-  '[Attachment could not be processed]';
 const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // Latch the drain off only after this many consecutive timeouts: one slow
 // answer must not permanently disable mid-turn messages for a
@@ -11679,7 +11678,7 @@ export class Session implements SessionContext {
           message.kind === 'structured' &&
           hasInlineAttachmentContentBlock(message.content)
         ) {
-          rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
+          rawParts.push({ text: ATTACHMENT_PROCESSING_FAILURE_NOTICE });
         }
       }
       const built = prefixMidTurnUserMessageParts(

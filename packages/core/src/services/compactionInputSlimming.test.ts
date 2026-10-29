@@ -7,7 +7,9 @@
 import type { Content, Part } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 import {
+  ATTACHMENT_PROCESSING_FAILURE_NOTICE,
   markTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
   REFERENCED_FILES_HEADER,
@@ -15,6 +17,7 @@ import {
 } from '../utils/attached-content.js';
 import {
   condenseToUserMessages,
+  countUnmarkedUserTurns,
   CONDENSED_FIRST_MESSAGE_MAX_CHARS,
   CONDENSED_MESSAGE_MIN_CHARS,
   CONDENSED_USER_MESSAGE_MAX_CHARS,
@@ -876,6 +879,30 @@ describe('compactionInputSlimming', () => {
         expect(parts[1]).toBe(prompt);
       });
 
+      it('caps hook context and the memory snapshot on a turn with no mark', () => {
+        const prompt = { text: 'explain what this does' };
+        const parts = slim([
+          prompt,
+          {
+            text:
+              '<qwen:user-prompt-submit-context>\n' +
+              'h'.repeat(20_000) +
+              '\n</qwen:user-prompt-submit-context>',
+          },
+          {
+            text: 'm'.repeat(20_000),
+            partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+          },
+        ]);
+
+        expect(parts[0]).toBe(prompt);
+        for (const part of parts.slice(1)) {
+          expect(part.text!.length).toBeLessThanOrEqual(
+            4_000 + SLIM_TEXT_TRUNCATION_MARKER.length,
+          );
+        }
+      });
+
       describe('a turn whose prompt part is marked', () => {
         const prompt = markTypedPrompt({ text: 'explain what this does' });
         const fileBlock = [
@@ -1658,6 +1685,73 @@ describe('compactionInputSlimming', () => {
       expect(quote).not.toContain('Attached');
       expect(quote).not.toContain('Today is Monday');
       expect(quote).not.toContain('hook says hi');
+    });
+
+    it('neither quotes nor names hook context or the memory snapshot on a turn with no mark', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: 'explain what this does' },
+            {
+              text:
+                '<qwen:user-prompt-submit-context>\nhook says hi\n' +
+                '</qwen:user-prompt-submit-context>',
+            },
+            {
+              text: 'memory catalog',
+              partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+            },
+          ],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const [quote] = quotesIn(blockText(condensed[0]!));
+      expect(quote).toBe('explain what this does');
+    });
+
+    it('counts the user turns read by position', () => {
+      expect(
+        countUnmarkedUserTurns([
+          { role: 'user', parts: [markTypedPrompt({ text: 'marked' })] },
+          { role: 'model', parts: [{ text: 'ok' }] },
+          { role: 'user', parts: [{ text: 'recorded before the mark' }] },
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nToday is Monday.\n</system-reminder>',
+              },
+            ],
+          },
+          ...toolRound(1, 10),
+        ]),
+      ).toBe(1);
+    });
+
+    it('keeps the notice that an attachment could not be processed', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            markTypedPrompt({ text: 'please inspect this image' }),
+            { text: ATTACHMENT_PROCESSING_FAILURE_NOTICE },
+          ],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const [quote] = quotesIn(blockText(condensed[0]!));
+      expect(quote).toBe(
+        `please inspect this image\n${ATTACHMENT_PROCESSING_FAILURE_NOTICE}`,
+      );
     });
 
     it('quotes every marked part of a turn, as messages typed while tools ran', () => {

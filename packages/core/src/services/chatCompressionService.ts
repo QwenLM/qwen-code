@@ -31,6 +31,7 @@ import {
 } from '../utils/contextLengthError.js';
 import {
   condenseToUserMessages,
+  countUnmarkedUserTurns,
   estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
@@ -998,6 +999,9 @@ export class ChatCompressionService {
     // user's own messages: those are the one part of the history the summary
     // cannot recover from anywhere else (#9455).
     const reduceColdInput = (targetTokens: number): Content[] => {
+      debugLogger.debug(
+        `Reducing the compression input: ${countUnmarkedUserTurns(sideQueryHistory)} user turns carry no prompt mark and are read by position.`,
+      );
       const truncated = opts.requestPayloadTooLarge
         ? getColdInput().slimmedHistory
         : slimCompactionInput(sideQueryHistory, undefined, {

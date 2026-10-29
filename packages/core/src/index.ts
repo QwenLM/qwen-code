@@ -514,6 +514,7 @@ export {
 } from './utils/terminalSafe.js';
 export { escapeXml } from './utils/xml.js';
 export {
+  ATTACHMENT_PROCESSING_FAILURE_NOTICE,
   isTypedPrompt,
   markTypedPrompt,
   TYPED_PROMPT_METADATA,

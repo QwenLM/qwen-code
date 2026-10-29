@@ -29,6 +29,14 @@ export function opensAttachedContent(text: string): boolean {
 }
 
 /**
+ * Sent after a message whose attachment could not be resolved. Compaction
+ * keeps it beside the message's quote, since it is the one thing the summary
+ * needs to know about that attachment.
+ */
+export const ATTACHMENT_PROCESSING_FAILURE_NOTICE =
+  '[Attachment could not be processed]';
+
+/**
  * `partMetadata` key on the part that holds what the user typed, stamped where
  * the prompt is built. Compaction keeps that part and treats every other part
  * of the turn as attached, whatever the layout: the CLI puts the prompt first
