@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
   linkSync,
@@ -23,6 +23,11 @@ import { join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { buildReport, type Finding } from './findings.js';
+import { serializeLedger } from './lib/ledger.js';
+import {
+  pendingEventsDir,
+  readPendingReviewEvents,
+} from './lib/review-events.js';
 import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
@@ -1091,5 +1096,143 @@ describe('the CLI option contract', () => {
     const saved = saveReviewArtifact(parsed);
     expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
     expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
+  });
+});
+
+describe('saveReviewArtifact — the clean-round verify handoff', () => {
+  let home: string;
+  const headSha = 'a'.repeat(40);
+
+  beforeEach(() => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'review-artifact-home-')));
+    vi.stubEnv('QWEN_HOME', join(home, '.qwen'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', '');
+    vi.stubEnv('QWEN_CODE_SESSION_ID', 'sess-9');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function cleanFixture(
+    opts: {
+      anchor?: boolean;
+      critical?: boolean;
+      event?: string;
+      plan?: boolean;
+      host?: string | null;
+    } = {},
+  ) {
+    const paths = fixture();
+    const event = opts.event ?? 'APPROVE';
+    writeJson(paths.composed, {
+      ...verdict,
+      event,
+      baseEvent: event,
+      cappedBy: [],
+      downgraded: false,
+      downgradedFrom: null,
+      verdictLine: `Verdict: ${event}`,
+      body: `No blockers.\n\n${serializeLedger({
+        v: 1,
+        round: 2,
+        findings: [],
+        ...(opts.anchor === false ? {} : { sha: headSha }),
+      })}`,
+    });
+    writeJson(
+      paths.findings,
+      buildReport([
+        opts.critical ? finding : { ...finding, severity: 'Suggestion' },
+      ]),
+    );
+    if (opts.plan !== false) {
+      writeJson(join(root, '.qwen/tmp/qwen-review-pr-123-fetch.json'), {
+        prNumber: '123',
+        ownerRepo: 'QwenLM/qwen-code',
+        host: opts.host === undefined ? 'github.com' : opts.host,
+        fetchedSha: headSha,
+      });
+    }
+    return paths;
+  }
+
+  it('writes one platform-neutral event for a clean PR round', () => {
+    const paths = cleanFixture();
+    saveReviewArtifact({ ...paths, target: 'pr-123', effort: 'high' });
+    const { events, unreadable } = readPendingReviewEvents(root);
+    expect(unreadable).toEqual([]);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event).toMatchObject({
+      schemaVersion: 1,
+      sessionId: 'sess-9',
+      round: 2,
+      target: {
+        platform: 'github',
+        host: 'github.com',
+        ownerRepo: 'QwenLM/qwen-code',
+        number: 123,
+        headSha,
+      },
+      verdict: { event: 'APPROVE', critical: 0, suggestion: 1 },
+      artifactPath: '.qwen/reviews/review.json',
+    });
+    // Host-trusted: the repository under review cannot plant one.
+    expect(events[0]?.path.startsWith(root)).toBe(false);
+    expect(events[0]?.path.startsWith(join(home, '.qwen'))).toBe(true);
+  });
+
+  it('records an Aone target as Aone — the producer does not pick a platform', () => {
+    const paths = cleanFixture({ host: 'code.alibaba-inc.com' });
+    saveReviewArtifact({ ...paths, target: 'pr-123', effort: 'high' });
+    const { events } = readPendingReviewEvents(root);
+    expect(events[0]?.event.target).toMatchObject({
+      platform: 'aone',
+      host: 'code.alibaba-inc.com',
+    });
+  });
+
+  it('writes nothing when the round withheld its anchor (a fail-closed cap)', () => {
+    const paths = cleanFixture({ anchor: false, event: 'COMMENT' });
+    saveReviewArtifact({ ...paths, target: 'pr-123', effort: 'high' });
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+    expect(existsSync(pendingEventsDir(root))).toBe(false);
+  });
+
+  it('writes nothing when a Critical was counted', () => {
+    const paths = cleanFixture({ critical: true });
+    saveReviewArtifact({ ...paths, target: 'pr-123', effort: 'high' });
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+  });
+
+  it('writes nothing for a Request changes round with zero counted Criticals', () => {
+    const paths = cleanFixture({ event: 'REQUEST_CHANGES' });
+    saveReviewArtifact({ ...paths, target: 'pr-123', effort: 'high' });
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+  });
+
+  it('writes nothing without a PR plan report, and still saves the artifact', () => {
+    const paths = cleanFixture({ plan: false });
+    const saved = saveReviewArtifact({
+      ...paths,
+      target: 'pr-123',
+      effort: 'high',
+    });
+    expect(existsSync(saved.path)).toBe(true);
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+  });
+
+  it('never costs the caller its saved review when the event cannot be written', () => {
+    const paths = cleanFixture();
+    // A file where the global qwen dir must be: the event write cannot land.
+    writeFileSync(join(home, '.qwen'), 'not a directory');
+    const saved = saveReviewArtifact({
+      ...paths,
+      target: 'pr-123',
+      effort: 'high',
+    });
+    expect(existsSync(saved.path)).toBe(true);
+    expect(JSON.parse(readFileSync(saved.path, 'utf8')).schemaVersion).toBe(1);
   });
 });

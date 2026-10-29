@@ -186,6 +186,10 @@ import {
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
 import {
+  startReviewVerifyAutomation,
+  type ReviewVerifyAutomation,
+} from './review-verify-automation.js';
+import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceQualifiedDiagnosticStatusRoutes,
   registerWorkspaceQualifiedStatusRoutes,
@@ -3999,9 +4003,41 @@ export function createServeApp(
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      scheduledActivity.set(runtime, () => keepalive.activeWork);
+      // The clean-review verification handoff rides the same per-workspace
+      // lifecycle: same trusted-workspace gate and the runtime's OWN
+      // sub-session launcher, so the concurrency caps and the depth-1 gate
+      // apply. A runtime built without a launcher gets no automation rather
+      // than a borrowed one from another runtime.
+      //
+      // Optional by construction: the keepalive above is already running, and
+      // its stop is registered below. A handoff that cannot start (an
+      // unreadable state directory) must not take the keepalive's registration
+      // down with it, so the failure is disclosed and the workspace keeps its
+      // scheduled tasks.
+      let reviewVerify: ReviewVerifyAutomation | undefined;
+      try {
+        reviewVerify = runtime.subSessionLauncher
+          ? startReviewVerifyAutomation({
+              boundWorkspace: runtime.workspaceCwd,
+              launch: runtime.subSessionLauncher.launch,
+            })
+          : undefined;
+      } catch (err) {
+        process.stderr.write(
+          `qwen serve: review-verify automation not started for ${
+            runtime.workspaceCwd
+          }: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+      scheduledActivity.set(
+        runtime,
+        () => keepalive.activeWork || (reviewVerify?.activeWork ?? false),
+      );
       rehydrateWorkspace(runtime);
-      keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
+      keepaliveStops.set(runtime.workspaceCwd, () => {
+        keepalive.stop();
+        reviewVerify?.stop();
+      });
     };
     for (const runtime of workspaceRegistry.list()) {
       startKeepaliveForWorkspace(runtime);
@@ -4011,6 +4047,9 @@ export function createServeApp(
     // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
     // run-qwen-serve.ts can invoke it without threading it back through the
     // createServeApp return type. Stopping all is idempotent per keepalive.
+    // These keepalive-named hooks govern every background automation started
+    // above (the scheduled-task keepalive and the review-verify handoff); the
+    // names are kept so the lifecycle call sites stay one pair.
     (
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {

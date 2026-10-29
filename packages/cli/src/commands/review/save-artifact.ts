@@ -35,9 +35,16 @@ import {
   validateFindings,
 } from './findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
-import { REVIEWS_DIR } from './lib/paths.js';
+import { REVIEWS_DIR, tmpFile } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
-import { volumeOf } from './lib/ledger.js';
+import { parseLedger, volumeOf } from './lib/ledger.js';
+import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
+import { isPositivePrNumber } from './lib/roster.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import {
+  cleanRoundHeadSha,
+  emitReviewCleanEvent,
+} from './lib/review-events.js';
 import {
   LAND_WITH_RESIDUAL_RISK,
   RECOMMENDATION_CODES,
@@ -626,6 +633,101 @@ function validateFindingsReport(value: unknown): FindingsReport {
   return supplied;
 }
 
+/**
+ * The PR identity the fetch report recorded, or null when this round has no
+ * such report (a local or file target) or it does not name a PR. Validated to
+ * the same standard `compose-review`'s `planPrIdentity` applies, because the
+ * host rides into a prompt the daemon will execute.
+ */
+function planTargetIdentity(
+  planPath: string,
+): { ownerRepo: string; number: number; host: string | null } | null {
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      ownerRepo?: unknown;
+      prNumber?: unknown;
+      host?: unknown;
+    };
+    if (typeof plan.ownerRepo !== 'string' || !isOwnerRepo(plan.ownerRepo)) {
+      return null;
+    }
+    if (!isPositivePrNumber(plan.prNumber)) return null;
+    const host =
+      typeof plan.host === 'string' && HOSTNAME_RE.test(plan.host)
+        ? plan.host
+        : null;
+    return { ownerRepo: plan.ownerRepo, number: Number(plan.prNumber), host };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hand a clean round to the daemon's deep-verification automation.
+ *
+ * Best-effort by contract: this runs after the artifact is already durable, and
+ * a handoff that cannot be written must not cost the caller its saved review —
+ * the same posture `record_artifact` has in Step 8. Returns a line for stderr,
+ * or undefined when there is nothing to disclose (the ordinary case: this round
+ * was not a clean PR round).
+ *
+ * The plan report is read from the main project's `.qwen/tmp`, not from beside
+ * the composed input: in worktree mode the composed input lives in the
+ * worktree's own tmp while `fetch-pr` wrote the plan from the main checkout.
+ */
+function emitVerifyEvent(input: {
+  root: string;
+  target: string;
+  verdict: PersistedVerdict;
+  counts: FindingsReport['counts'];
+  artifactPath: string;
+}): string | undefined {
+  const ledger = parseLedger(input.verdict.body);
+  const headSha = cleanRoundHeadSha({
+    event: input.verdict.event,
+    critical: input.counts.bySeverity['Critical'] ?? 0,
+    anchorSha: ledger?.sha,
+  });
+  if (!headSha) return undefined;
+  const planPath = join(input.root, tmpFile(input.target, 'fetch.json'));
+  const identity = planTargetIdentity(planPath);
+  if (!identity) {
+    return `save-artifact: clean round, but no PR plan report at ${planPath}; no verify event written.`;
+  }
+  const platform = detectPlatformKind({ host: identity.host ?? undefined });
+  // Off GitHub there is no default host: a null here would emit an Aone event
+  // labelled github.com, the contradiction `review meta` refuses to print.
+  const host = identity.host ?? (platform === 'github' ? 'github.com' : null);
+  if (!host) {
+    return `save-artifact: clean round on ${platform} with no recorded host; no verify event written.`;
+  }
+  try {
+    const emitted = emitReviewCleanEvent({
+      workspaceRoot: input.root,
+      target: {
+        platform,
+        host,
+        ownerRepo: identity.ownerRepo,
+        number: identity.number,
+        headSha,
+      },
+      round: ledger?.round ?? 1,
+      verdict: {
+        event: input.verdict.event,
+        critical: input.counts.bySeverity['Critical'] ?? 0,
+        suggestion: input.counts.bySeverity['Suggestion'] ?? 0,
+      },
+      artifactPath: input.artifactPath,
+      sessionId: process.env['QWEN_CODE_SESSION_ID']?.trim() || undefined,
+    });
+    return `save-artifact: verify event written (${emitted.path}).`;
+  } catch (error) {
+    return `save-artifact: could not write the verify event (${
+      error instanceof Error ? error.message.split('\n')[0] : String(error)
+    }); the saved review is unaffected.`;
+  }
+}
+
 export function saveReviewArtifact(
   args: SaveArtifactArgs,
 ): SavedReviewArtifact {
@@ -706,9 +808,18 @@ export function saveReviewArtifact(
     `${JSON.stringify(document, null, 2)}\n`,
     { encoding: 'utf8', noFollow: true },
   );
+  const artifactWorkspacePath = relative(root, outputPath).split(sep).join('/');
+  const note = emitVerifyEvent({
+    root,
+    target: args.target,
+    verdict,
+    counts: findings.counts,
+    artifactPath: artifactWorkspacePath,
+  });
+  if (note) writeStderrLine(note);
   return {
     path: outputPath,
-    workspacePath: relative(root, outputPath).split(sep).join('/'),
+    workspacePath: artifactWorkspacePath,
   };
 }
 

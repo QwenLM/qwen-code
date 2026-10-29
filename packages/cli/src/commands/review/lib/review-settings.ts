@@ -11,6 +11,12 @@ import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 const SAFE_DEFAULTS: OperatorReviewSettings = {
   attribution: true,
   comment: false,
+  // The one field whose degrade differs from its schema default (on). A
+  // degrade must not enable a public write the operator cannot currently
+  // read back: the verification sub-session posts a report comment, so an
+  // unreadable settings file turns the handoff OFF, exactly as it turns
+  // auto-posting off. A readable file with no `autoVerify` still defaults on.
+  autoVerify: false,
   effort: undefined,
   reverseAuditRounds: undefined,
   approachRounds: undefined,
@@ -20,6 +26,14 @@ const SAFE_DEFAULTS: OperatorReviewSettings = {
 export interface OperatorReviewSettings {
   attribution: boolean;
   comment: boolean;
+  /**
+   * Whether the daemon may hand a clean review round to a `/verify-pr`
+   * sub-session. Default on; read from the operator scopes only, so a
+   * repository cannot switch automatic verification on or off for the
+   * sessions that review it. Degrades to OFF when the settings cannot be
+   * loaded at all — see SAFE_DEFAULTS.
+   */
+  autoVerify: boolean;
   /**
    * The raw `review.effort` value when set — still `'auto'`, and settings
    * loading performs no per-value enum validation, so possibly not a level
@@ -98,7 +112,8 @@ export function operatorReviewSettings(): OperatorReviewSettings {
       `NOTE: review settings could not be loaded (${
         error instanceof Error ? error.message.split('\n')[0] : String(error)
       }); this review uses the defaults — attribution on, no auto-posting, no ` +
-        `effort or round-cap override. Fix the settings file to restore them.`,
+        `automatic verification handoff, no effort or round-cap override. ` +
+        `Fix the settings file to restore them.`,
     );
     return { ...SAFE_DEFAULTS };
   }
@@ -113,6 +128,8 @@ export function operatorReviewSettings(): OperatorReviewSettings {
     attribution:
       typeof review?.attribution === 'boolean' ? review.attribution : true,
     comment: review?.comment === true,
+    autoVerify:
+      typeof review?.autoVerify === 'boolean' ? review.autoVerify : true,
     effort: typeof review?.effort === 'string' ? review.effort : undefined,
     severityFloor:
       typeof review?.severityFloor === 'string'
