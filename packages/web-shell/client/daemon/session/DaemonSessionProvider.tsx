@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDaemonClient, findDaemonAvailability } from '../availability.js';
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../availability-context.js';
 import {
   restoreLocalDeletionBlocks,
   removeDeletedMessageBlocks,
@@ -14,6 +19,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -22,7 +28,7 @@ import {
 } from 'react';
 import {
   DAEMON_APPROVAL_MODES,
-  DaemonClient,
+  type DaemonClient,
   DaemonCapabilityMissingError,
   DaemonHttpError,
   DaemonSessionClient,
@@ -81,6 +87,10 @@ import {
 import {
   McpAppToolsContext,
   McpAppGeneratedUiContext,
+  McpAppGeneratedUiOwnerContext,
+  type McpAppGeneratedUiInvalidation,
+  type McpAppGeneratedUiOwner,
+  type McpAppGeneratedUiOwnerSource,
 } from '../../mcpAppHostContext.js';
 import { createTrajectoryLiveStore } from '../../trajectory/trajectory-live-store.js';
 import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context.js';
@@ -775,6 +785,46 @@ const DaemonWorkspaceEventSignalsContext = createContext<
 const DaemonSessionOwnerGuardContext = createContext<
   DaemonSessionOwnerGuard | undefined
 >(undefined);
+
+type GeneratedUiLifecycle = Pick<
+  McpAppGeneratedUiOwner,
+  'subscribeInvalidation' | 'invalidate'
+> & {
+  registerScope(scope: GeneratedUiScope): () => void;
+  captureSessionDeletion(
+    owner: GeneratedUiScope,
+    workspaceCwd: string | undefined,
+  ): (sessionIds: readonly string[]) => void;
+};
+
+interface GeneratedUiScope {
+  id: string;
+  baseUrl?: string;
+  token?: string;
+  workspaceCwd?: string;
+}
+
+function findGeneratedUiScope(
+  candidates: Array<GeneratedUiScope | undefined>,
+  baseUrl: string | undefined,
+  token: string | undefined,
+  workspaceCwd: string | undefined,
+) {
+  return candidates.find(
+    (scope) =>
+      scope &&
+      scope.baseUrl === baseUrl &&
+      scope.token === token &&
+      scope.workspaceCwd === workspaceCwd,
+  );
+}
+
+let nextGeneratedUiScopeId = 0;
+
+const GeneratedUiScopeContext = createContext<
+  { scope: GeneratedUiScope; lifecycle: GeneratedUiLifecycle } | undefined
+>(undefined);
+
 /**
  * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
  * failures** (vs session-not-found 404/410). Auth failures should NOT enter
@@ -898,6 +948,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     children,
   } = props;
   const workspace = useOptionalDaemonWorkspace();
+  const availability = useDaemonAvailability();
+  const availabilityController = useDaemonAvailabilityController();
+  const availabilityRef = useRef(availabilityController);
+  availabilityRef.current = availabilityController;
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
   const sessionContextResolution = useMemo(() => {
@@ -1340,6 +1394,150 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const inheritedGeneratedUi = useContext(GeneratedUiScopeContext);
+  const ownGeneratedUiLifecycle = useMemo<GeneratedUiLifecycle>(() => {
+    const listeners = new Set<(event: McpAppGeneratedUiInvalidation) => void>();
+    const scopes = new Set<GeneratedUiScope>();
+    const invalidate = (event: McpAppGeneratedUiInvalidation) => {
+      for (const listener of listeners) listener(event);
+    };
+    return {
+      subscribeInvalidation(listener) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      invalidate,
+      registerScope(scope) {
+        scopes.add(scope);
+        return () => {
+          scopes.delete(scope);
+        };
+      },
+      captureSessionDeletion(owner, workspaceCwd) {
+        const scopeIds = [...scopes]
+          .filter(
+            (scope) =>
+              workspaceCwd !== undefined &&
+              scope.workspaceCwd === workspaceCwd &&
+              scope.baseUrl === owner.baseUrl &&
+              scope.token === owner.token,
+          )
+          .map((scope) => scope.id);
+        return (sessionIds) => {
+          for (const scopeId of scopeIds) {
+            for (const sessionId of sessionIds) {
+              invalidate({ scopeId, sessionId, reason: 'deleted' });
+            }
+          }
+        };
+      },
+    };
+  }, []);
+  const generatedUiLifecycle =
+    inheritedGeneratedUi?.lifecycle ?? ownGeneratedUiLifecycle;
+  const generatedUiProvider = useMemo(
+    () => ({ resolvedBaseUrl, resolvedToken, resolvedWorkspaceCwd }),
+    [resolvedBaseUrl, resolvedToken, resolvedWorkspaceCwd],
+  );
+  const generatedUiProviderRef = useRef(generatedUiProvider);
+  generatedUiProviderRef.current = generatedUiProvider;
+  const confirmedGeneratedUiWorkspace = useRef<
+    | {
+        provider: typeof generatedUiProvider;
+        requestedCwd?: string;
+        cwd: string;
+      }
+    | undefined
+  >(undefined);
+  const getConfirmedGeneratedUiWorkspace = useCallback(() => {
+    const confirmed = confirmedGeneratedUiWorkspace.current;
+    const provider = generatedUiProviderRef.current;
+    return confirmed &&
+      confirmed.provider.resolvedBaseUrl === provider.resolvedBaseUrl &&
+      confirmed.provider.resolvedToken === provider.resolvedToken &&
+      [
+        confirmed.provider.resolvedWorkspaceCwd,
+        confirmed.requestedCwd,
+        confirmed.cwd,
+      ].includes(provider.resolvedWorkspaceCwd)
+      ? confirmed
+      : undefined;
+  }, []);
+  const confirmedWorkspace = getConfirmedGeneratedUiWorkspace();
+  const generatedUiWorkspaceCwd =
+    confirmedWorkspace?.cwd ?? resolvedWorkspaceCwd ?? connection.workspaceCwd;
+  const ownGeneratedUiScope = useMemo<GeneratedUiScope>(
+    () => ({
+      id: String(++nextGeneratedUiScopeId),
+      baseUrl: resolvedBaseUrl,
+      token: resolvedToken,
+      workspaceCwd: generatedUiWorkspaceCwd,
+    }),
+    [generatedUiWorkspaceCwd, resolvedBaseUrl, resolvedToken],
+  );
+  const inheritedScope = inheritedGeneratedUi?.scope;
+  const inheritedGeneratedUiScopeRef = useRef(inheritedScope);
+  inheritedGeneratedUiScopeRef.current = inheritedScope;
+  const generatedUiScope = findGeneratedUiScope(
+    [inheritedScope, ownGeneratedUiScope],
+    resolvedBaseUrl,
+    resolvedToken,
+    generatedUiWorkspaceCwd,
+  )!;
+  const generatedUiScopeRef = useRef(generatedUiScope);
+  generatedUiScopeRef.current = generatedUiScope;
+  const resolveGeneratedUiScope = useCallback(
+    (cwd: string | undefined) => {
+      const confirmed = getConfirmedGeneratedUiWorkspace();
+      const provider = generatedUiProviderRef.current;
+      return findGeneratedUiScope(
+        [inheritedGeneratedUiScopeRef.current, generatedUiScopeRef.current],
+        resolvedBaseUrl,
+        resolvedToken,
+        confirmed &&
+          (confirmed.requestedCwd === cwd ||
+            provider.resolvedWorkspaceCwd === cwd)
+          ? confirmed.cwd
+          : cwd,
+      );
+    },
+    [getConfirmedGeneratedUiWorkspace, resolvedBaseUrl, resolvedToken],
+  );
+  const generatedUiSessionScopes = useRef(
+    new WeakMap<DaemonSessionClient, string>(),
+  );
+  const generatedUiRevocations = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
+  useLayoutEffect(() => {
+    if (generatedUiScope !== ownGeneratedUiScope) return;
+    const unregister = generatedUiLifecycle.registerScope(generatedUiScope);
+    return () => {
+      unregister();
+      generatedUiLifecycle.invalidate({
+        scopeId: generatedUiScope.id,
+        reason: 'scope-changed',
+      });
+    };
+  }, [generatedUiLifecycle, generatedUiScope, ownGeneratedUiScope]);
+  const invalidateGeneratedUi = useCallback(
+    (
+      owner: DaemonSessionClient,
+      reason: McpAppGeneratedUiInvalidation['reason'],
+      sessionId: string | null = owner.sessionId,
+    ) => {
+      const scopeId = generatedUiSessionScopes.current.get(owner);
+      if (!scopeId) return;
+      generatedUiLifecycle.invalidate({
+        scopeId,
+        ...(sessionId !== null ? { sessionId } : {}),
+        reason,
+      });
+    },
+    [generatedUiLifecycle],
+  );
   const initialClientIdDependencyRef = useRef(clientId);
   const knownCapabilities =
     workspace?.capabilities ??
@@ -1619,6 +1817,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       sessionRef.current === skipNextCleanupDetachSessionRef.current;
     const effectPendingSessionLoad = pendingSessionLoadRef.current;
     let runnerSession = sessionRef.current;
+    let generatedUiSubscriptionOwner: DaemonSessionClient | undefined;
+    let unsubscribeGeneratedUiRevocation: (() => void) | undefined;
 
     // ── Batched transcript dispatch ────────────────────────────────
     // The live SSE loop dispatches transcript events through this batcher
@@ -1746,7 +1946,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const client =
         workspaceClientRef.current ??
-        new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
+        createDaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
       let session: DaemonSessionClient | undefined;
       let capabilities:
         | Awaited<ReturnType<DaemonClient['capabilities']>>
@@ -1819,9 +2019,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let stopPersistenceUnconfirmed = false;
 
       while (!disposed && !abort.signal.aborted) {
+        try {
+          if (availabilityRef.current) {
+            await availabilityRef.current.waitUntilAvailable(abort.signal);
+          }
+        } catch {
+          return;
+        }
+        if (disposed || abort.signal.aborted) return;
+        const availabilityGeneration = availabilityRef.current?.getGeneration();
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
+        let generatedUiRestoreTarget:
+          | { scopeId: string; sessionId: string }
+          | undefined;
         let eventStream:
           | {
               sessionId: string;
@@ -2264,6 +2476,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : {}),
             };
             let nextSession: DaemonSessionClient;
+            if (targetSessionId && effectSessionContext?.kind === 'workspace') {
+              const scope = resolveGeneratedUiScope(effectWorkspaceCwd);
+              if (scope) {
+                generatedUiRestoreTarget = {
+                  scopeId: scope.id,
+                  sessionId: targetSessionId,
+                };
+              }
+            }
             if (restoreSessionId) {
               if (effectSessionContext?.kind === 'standalone') {
                 nextSession = shouldResumeRequestedSession
@@ -2550,6 +2771,48 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
+          if (activeWorkspaceScoped) {
+            confirmedGeneratedUiWorkspace.current = {
+              provider: generatedUiProviderRef.current,
+              requestedCwd: activeWorkspaceCwdRef.current,
+              cwd: activeSession.workspaceCwd,
+            };
+          }
+          // Buffered SSE events can arrive before the connected render binds
+          // this session. Never assign a different workspace's current scope.
+          if (
+            activeWorkspaceScoped &&
+            !generatedUiSessionScopes.current.has(activeSession)
+          ) {
+            const scope = resolveGeneratedUiScope(activeSession.workspaceCwd);
+            if (scope) {
+              generatedUiSessionScopes.current.set(activeSession, scope.id);
+            }
+          }
+          if (generatedUiSubscriptionOwner !== activeSession) {
+            unsubscribeGeneratedUiRevocation?.();
+            generatedUiSubscriptionOwner = activeSession;
+            unsubscribeGeneratedUiRevocation =
+              activeSession.subscribeGeneratedUiRevocation?.((revision) => {
+                const scope = resolveGeneratedUiScope(
+                  activeSession.workspaceCwd,
+                );
+                if (
+                  disposed ||
+                  abort.signal.aborted ||
+                  !activeWorkspaceScoped ||
+                  sessionRef.current !== activeSession ||
+                  !scope ||
+                  generatedUiSessionScopes.current.get(activeSession) !==
+                    scope.id ||
+                  (generatedUiRevocations.current.get(activeSession) ?? 0) >=
+                    revision
+                )
+                  return;
+                generatedUiRevocations.current.set(activeSession, revision);
+                invalidateGeneratedUi(activeSession, 'policy', null);
+              });
+          }
           if (runnerSession !== activeSession) {
             setConnectionSynchronous((current) => ({
               ...current,
@@ -3517,6 +3780,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           let sawEvent = false;
           let resyncRequested = false;
           const requestEpochResetReload = () => {
+            invalidateGeneratedUi(activeSession, 'epoch', null);
             // An epoch reset means the daemon/EventBus timeline was rebuilt.
             // The current SSE cursor and any restored/local prompt activity may
             // describe the old epoch, so do a full /load and let
@@ -3605,6 +3869,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             try {
               turnNavigationStore.handleSessionEvent(event.type);
               if (event.type === 'session_messages_deleted') {
+                invalidateGeneratedUi(activeSession, 'deleted');
                 if (event.originatorClientId !== activeSession.clientId) {
                   setConnection((current) => ({
                     ...current,
@@ -3637,6 +3902,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     });
                 }
                 continue;
+              }
+              if (event.type === 'session_rewound') {
+                invalidateGeneratedUi(activeSession, 'rewound');
               }
 
               const followupSuggestion =
@@ -3792,6 +4060,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   );
                 };
                 if (generatedUiPolicyChanged) {
+                  invalidateGeneratedUi(activeSession, 'policy', null);
                   activeSession.session.generatedUi = undefined;
                   publishContext();
                 }
@@ -4136,6 +4405,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 stopPersistenceUnconfirmed =
                   closedData.persistenceUnconfirmed === true;
                 const closedSessionId = activeSession.sessionId;
+                invalidateGeneratedUi(
+                  activeSession,
+                  workspaceRuntimeStopped ? 'runtime-stopped' : 'deleted',
+                  workspaceRuntimeStopped ? null : closedSessionId,
+                );
                 const active = activePromptsRef.current.get(closedSessionId);
                 active?.controller.abort();
                 activePromptsRef.current.delete(closedSessionId);
@@ -4246,6 +4520,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
+            void availabilityRef.current?.check();
             nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
@@ -4297,6 +4572,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             continue;
           }
           if (disposed || abort.signal.aborted) return;
+          availabilityRef.current?.reportFailure(
+            error,
+            undefined,
+            availabilityGeneration,
+          );
           // The loop threw, so the in-try post-loop flush was skipped. Apply
           // buffered transcript events now: leaving them with a scheduled timer
           // would let it fire after a reconnect reset and dispatch stale events.
@@ -4496,6 +4776,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (isAuthFailure || isTerminal) {
+            if (session) {
+              invalidateGeneratedUi(
+                session,
+                isAuthFailure ? 'auth-failed' : 'deleted',
+                isAuthFailure ? null : session.sessionId,
+              );
+            } else if (generatedUiRestoreTarget) {
+              generatedUiLifecycle.invalidate({
+                scopeId: generatedUiRestoreTarget.scopeId,
+                ...(isAuthFailure
+                  ? {}
+                  : { sessionId: generatedUiRestoreTarget.sessionId }),
+                reason: isAuthFailure ? 'auth-failed' : 'deleted',
+              });
+            }
             // Auth failures (401/403) and terminal session errors (404/410)
             // must clear the session — the server-side state is gone or
             // inaccessible, so delta resume is impossible.
@@ -4669,6 +4964,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const session = runnerSession;
       if (session) trajectoryLiveStore.invalidate(session, 'stream_closed');
       disposed = true;
+      unsubscribeGeneratedUiRevocation?.();
       abort.abort();
       const ownsCurrentSession =
         session !== undefined && sessionRef.current === session;
@@ -4732,9 +5028,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           token: resolvedToken,
           sessionId: session.sessionId,
           clientId: session.clientId,
-        }).catch((err) =>
-          console.warn('[DaemonSessionProvider] detach failed:', err),
-        );
+        }).catch((err) => {
+          const state = findDaemonAvailability(
+            resolvedBaseUrl!,
+            resolvedToken,
+          )?.getSnapshot();
+          if (state === undefined || state === 'available') {
+            console.warn('[DaemonSessionProvider] detach failed:', err);
+          }
+        });
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
@@ -4743,11 +5045,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
+    generatedUiLifecycle,
+    invalidateGeneratedUi,
     prefetchGitBranch,
     prefetchSkills,
     turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
+    resolveGeneratedUiScope,
     sessionEffectContext,
     sessionContextResolutionError,
     modelServiceId,
@@ -4775,6 +5080,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   useEffect(() => {
     if (
+      availability !== 'available' ||
       !heartbeatSupportedRef.current ||
       connection.status !== 'connected' ||
       heartbeatIntervalMs <= 0 ||
@@ -4859,6 +5165,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
           const missingSession = isMissingSessionHttpStatus(errorStatus);
           if (authFailure || missingSession) {
+            invalidateGeneratedUi(
+              session,
+              authFailure ? 'auth-failed' : 'deleted',
+              authFailure ? null : session.sessionId,
+            );
             trajectoryLiveStore.invalidate(
               session,
               authFailure ? 'auth_failure' : 'session_missing',
@@ -4931,7 +5242,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     connection.status,
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
+    invalidateGeneratedUi,
     trajectoryLiveStore,
+    availability,
   ]);
 
   const settleAdmittedPrompt = useCallback(
@@ -5015,7 +5328,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         ) => {
           const client =
             workspaceClientRef.current ??
-            new DaemonClient({
+            createDaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });
@@ -5056,7 +5369,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         createDetachedStandaloneSession: (overrides) => {
           const client =
             workspaceClientRef.current ??
-            new DaemonClient({
+            createDaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });
@@ -5095,6 +5408,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current?.controller?.abort();
           liveJournalRepairRef.current = undefined;
         },
+        onGeneratedUiInvalidated: invalidateGeneratedUi,
         onPromptAdmitted: (owner, admission) => {
           bindPrompt(
             locallyBoundPromptIdsRef.current,
@@ -5150,6 +5464,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }),
     [
       addNotice,
+      invalidateGeneratedUi,
       clientId,
       resolvedBaseUrl,
       resolvedToken,
@@ -5526,6 +5841,92 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const appSession = sessionRef.current;
   const generatedUi = appSession?.session?.generatedUi;
+  const generatedUiClientId = appSession?.clientId;
+  const generatedUiEventEpoch = appSession?.eventEpoch;
+  const generatedUiOwnerSource = useMemo<
+    McpAppGeneratedUiOwnerSource | undefined
+  >(() => {
+    if (
+      !appSession ||
+      !generatedUiClientId ||
+      connection.status !== 'connected' ||
+      connection.sessionId !== appSession.sessionId ||
+      connection.workspaceCwd !== appSession.workspaceCwd ||
+      generatedUiScope.workspaceCwd !== appSession.workspaceCwd
+    )
+      return undefined;
+    const previousScope = generatedUiSessionScopes.current.get(appSession);
+    if (previousScope && previousScope !== generatedUiScope.id)
+      return undefined;
+    generatedUiSessionScopes.current.set(appSession, generatedUiScope.id);
+    return {
+      scopeId: generatedUiScope.id,
+      sessionId: appSession.sessionId,
+      clientId: generatedUiClientId,
+      workspaceCwd: appSession.workspaceCwd,
+      eventEpoch: generatedUiEventEpoch,
+      captureOwner() {
+        const owner = ownerGuardValue.capture({ includeRecovery: true });
+        return {
+          isCurrent: () =>
+            // owner.isCurrent() already rejects a recovery that started after
+            // this capture. Comparing with the generation seen at render as
+            // well rejected every attach during a turn: sending a prompt
+            // advances the generation without changing the capability receipt.
+            owner.isCurrent() &&
+            !manualSessionClearRef.current &&
+            generatedUiScopeRef.current === generatedUiScope &&
+            sessionRef.current === appSession &&
+            appSession.clientId === generatedUiClientId &&
+            appSession.eventEpoch === generatedUiEventEpoch &&
+            connectionRef.current.status === 'connected' &&
+            connectionRef.current.sessionId === appSession.sessionId &&
+            appSession.session.generatedUi === generatedUi &&
+            generatedUi?.version === 1 &&
+            generatedUi.enabled === true,
+        };
+      },
+    };
+  }, [
+    appSession,
+    connection.sessionId,
+    connection.status,
+    connection.workspaceCwd,
+    generatedUi,
+    generatedUiClientId,
+    generatedUiEventEpoch,
+    generatedUiScope,
+    ownerGuardValue,
+  ]);
+  const generatedUiOwner = useMemo<McpAppGeneratedUiOwner>(
+    () => ({
+      scopeId: generatedUiScope.id,
+      workspaceCwd: generatedUiScope.workspaceCwd,
+      source: generatedUiOwnerSource,
+      subscribeInvalidation: generatedUiLifecycle.subscribeInvalidation,
+      invalidate: generatedUiLifecycle.invalidate,
+      captureSessionDeletion: (workspaceCwd) =>
+        generatedUiLifecycle.captureSessionDeletion(
+          generatedUiScope,
+          workspaceCwd,
+        ),
+    }),
+    [generatedUiLifecycle, generatedUiOwnerSource, generatedUiScope],
+  );
+  useLayoutEffect(() => {
+    if (
+      appSession &&
+      generatedUiOwnerSource &&
+      generatedUi?.version === 1 &&
+      generatedUi.enabled === false
+    ) {
+      invalidateGeneratedUi(appSession, 'policy', null);
+    }
+  }, [appSession, generatedUi, generatedUiOwnerSource, invalidateGeneratedUi]);
+  const generatedUiScopeContext = useMemo(
+    () => ({ scope: generatedUiScope, lifecycle: generatedUiLifecycle }),
+    [generatedUiLifecycle, generatedUiScope],
+  );
   const mcpAppGeneratedUi = useMemo(() => {
     if (
       !appSession ||
@@ -5567,41 +5968,49 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [appSession, connection.sessionId]);
 
   return (
-    <TrajectoryLiveContext.Provider value={trajectoryLiveStore}>
-      <McpAppGeneratedUiContext.Provider value={mcpAppGeneratedUi}>
-        <McpAppToolsContext.Provider value={mcpAppTools}>
-          <DaemonStoreContext.Provider value={store}>
-            <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
-              <DaemonConnectionContext.Provider value={connection}>
-                <DaemonPromptStatusContext.Provider value={promptStatus}>
-                  <DaemonSessionNoticesContext.Provider value={noticesValue}>
-                    <DaemonWorkspaceEventSignalsContext.Provider
-                      value={workspaceEventSignals}
-                    >
-                      <DaemonActionsContext.Provider value={actions}>
-                        <DaemonSessionOwnerGuardContext.Provider
-                          value={ownerGuardValue}
+    <GeneratedUiScopeContext.Provider value={generatedUiScopeContext}>
+      <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+        <TrajectoryLiveContext.Provider value={trajectoryLiveStore}>
+          <McpAppGeneratedUiContext.Provider value={mcpAppGeneratedUi}>
+            <McpAppToolsContext.Provider value={mcpAppTools}>
+              <DaemonStoreContext.Provider value={store}>
+                <DaemonTurnNavigationContext.Provider
+                  value={turnNavigationStore}
+                >
+                  <DaemonConnectionContext.Provider value={connection}>
+                    <DaemonPromptStatusContext.Provider value={promptStatus}>
+                      <DaemonSessionNoticesContext.Provider
+                        value={noticesValue}
+                      >
+                        <DaemonWorkspaceEventSignalsContext.Provider
+                          value={workspaceEventSignals}
                         >
-                          <DaemonTranscriptHistoryContext.Provider
-                            value={transcriptHistoryValue}
-                          >
-                            <DaemonPromptSettlementContext.Provider
-                              value={subscribeToPromptSettlement}
+                          <DaemonActionsContext.Provider value={actions}>
+                            <DaemonSessionOwnerGuardContext.Provider
+                              value={ownerGuardValue}
                             >
-                              {children}
-                            </DaemonPromptSettlementContext.Provider>
-                          </DaemonTranscriptHistoryContext.Provider>
-                        </DaemonSessionOwnerGuardContext.Provider>
-                      </DaemonActionsContext.Provider>
-                    </DaemonWorkspaceEventSignalsContext.Provider>
-                  </DaemonSessionNoticesContext.Provider>
-                </DaemonPromptStatusContext.Provider>
-              </DaemonConnectionContext.Provider>
-            </DaemonTurnNavigationContext.Provider>
-          </DaemonStoreContext.Provider>
-        </McpAppToolsContext.Provider>
-      </McpAppGeneratedUiContext.Provider>
-    </TrajectoryLiveContext.Provider>
+                              <DaemonTranscriptHistoryContext.Provider
+                                value={transcriptHistoryValue}
+                              >
+                                <DaemonPromptSettlementContext.Provider
+                                  value={subscribeToPromptSettlement}
+                                >
+                                  {children}
+                                </DaemonPromptSettlementContext.Provider>
+                              </DaemonTranscriptHistoryContext.Provider>
+                            </DaemonSessionOwnerGuardContext.Provider>
+                          </DaemonActionsContext.Provider>
+                        </DaemonWorkspaceEventSignalsContext.Provider>
+                      </DaemonSessionNoticesContext.Provider>
+                    </DaemonPromptStatusContext.Provider>
+                  </DaemonConnectionContext.Provider>
+                </DaemonTurnNavigationContext.Provider>
+              </DaemonStoreContext.Provider>
+            </McpAppToolsContext.Provider>
+          </McpAppGeneratedUiContext.Provider>
+        </TrajectoryLiveContext.Provider>
+      </McpAppGeneratedUiOwnerContext.Provider>
+    </GeneratedUiScopeContext.Provider>
   );
 }
 

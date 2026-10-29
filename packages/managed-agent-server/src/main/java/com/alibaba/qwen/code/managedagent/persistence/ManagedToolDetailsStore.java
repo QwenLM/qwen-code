@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellToolDetails;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -22,8 +23,8 @@ public class ManagedToolDetailsStore {
     private final ManagedExtensionRecordStore resources;
     private final ObjectMapper json;
 
-    public ManagedToolDetailsStore(JdbcTemplate jdbc,
-            ManagedExtensionRecordStore resources, ObjectMapper json) {
+    public ManagedToolDetailsStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            ManagedExtensionRecordStore resources, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.resources = resources;
         this.json = json;

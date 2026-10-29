@@ -108,7 +108,9 @@ describe('untrustedGitfile (real git)', () => {
     expect(() => requireWorktree(paths, 7, root)).toThrow(
       /no git command runs in/,
     );
-    expect(unsavedWork(paths, [])).toMatch(/not to this clone's own entry/);
+    expect(unsavedWork(paths, [], undefined, root)).toMatch(
+      /not to this clone's own entry/,
+    );
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -195,7 +197,7 @@ describe('untrustedGitfile (real git)', () => {
     expect(untrustedSubmodules(worktree, root)).toMatch(
       /is not the gitfile of a submodule the clone keeps/,
     );
-    expect(unsavedWork(autofixPrPaths(root, 7), [])).toMatch(
+    expect(unsavedWork(autofixPrPaths(root, 7), [], undefined, root)).toMatch(
       /is not the gitfile of a submodule the clone keeps/,
     );
   });
@@ -300,7 +302,7 @@ describe('untrustedGitfile (real git)', () => {
     expect(() => requireWorktree(autofixPrPaths(root, 7), 7, root)).toThrow(
       /is not a git worktree/,
     );
-    expect(unsavedWork(autofixPrPaths(root, 7), [])).toMatch(
+    expect(unsavedWork(autofixPrPaths(root, 7), [], undefined, root)).toMatch(
       /is not a git worktree/,
     );
     expect(existsSync(marker)).toBe(false);
@@ -323,4 +325,54 @@ describe('untrustedGitfile (real git)', () => {
     writeFileSync(join(worktree, '.git'), `gitdir: ${lexical}\n`);
     expect(untrustedGitfile(worktree, root)).not.toBeNull();
   });
+
+  // The rewritten gitfile and the fsmonitor hook are POSIX spellings.
+  it.skipIf(process.platform === 'win32')(
+    'anchors trust to the genuine clone, not the linked watch root',
+    () => {
+      const repl = realpathSync(
+        mkdtempSync(join(tmpdir(), 'autofix-wt-repl-')),
+      );
+      git(repl, 'init', '-q', '-b', 'main');
+      git(
+        repl,
+        '-c',
+        'user.email=a@b',
+        '-c',
+        'user.name=a',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'r',
+      );
+      const hook = join(repl, 'fsmonitor.sh');
+      writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+      git(repl, 'config', 'core.fsmonitor', hook);
+      // A linked worktree of the genuine clone, hosting a watch worktree of
+      // the replacement; rewrite the linked root's gitfile so it vouches for
+      // the replacement's worktree entries.
+      const linked = join(root, 'linked');
+      git(root, 'worktree', 'add', '-q', '--detach', linked);
+      const nestedPaths = autofixPrPaths(linked, 7);
+      mkdirSync(dirname(nestedPaths.worktreePath), { recursive: true });
+      git(repl, 'worktree', 'add', '-q', '--detach', nestedPaths.worktreePath);
+      writeFileSync(join(linked, '.git'), `gitdir: ${join(repl, '.git')}\n`);
+      rmSync(marker, { force: true });
+      try {
+        // root = the linked watch root (what watchRoot() returns under the
+        // daemon); trustRoot = the genuine clone. The check must still reject
+        // and never run the replacement's fsmonitor.
+        expect(() =>
+          requireWorktree(nestedPaths, 7, linked, false, root),
+        ).toThrow(/no git command runs in/);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(nestedPaths.worktreePath, { recursive: true, force: true });
+        rmSync(linked, { recursive: true, force: true });
+        rmSync(repl, { recursive: true, force: true });
+        git(root, 'worktree', 'prune');
+      }
+    },
+  );
 });

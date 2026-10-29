@@ -2764,6 +2764,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionConfigOption(
     sessionId: string,
     req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
   ): Promise<SetSessionConfigOptionResponse>;
 
   /**

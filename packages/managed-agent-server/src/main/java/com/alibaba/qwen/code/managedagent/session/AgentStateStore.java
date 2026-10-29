@@ -255,6 +255,33 @@ public interface AgentStateStore {
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles,
+            com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Plan worktree) {
+        if (worktree != null) {
+            throw new UnsupportedOperationException("Session worktrees are unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles);
+    }
+
+    default com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor findSessionWorktree(
+            String tenantId, String sessionId) {
+        return null;
+    }
+
+    default Map<String, com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor> findSessionWorktrees(
+            String tenantId, List<String> sessionIds) {
+        return Map.of();
+    }
+
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest);
@@ -812,6 +839,11 @@ public interface AgentStateStore {
             Long beforeSequence, int limit);
 
     StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
+
+    StoreModels.SnapshotPage findRecentSnapshotPage(String tenantId, String sessionId, String cursor, int limit);
+
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward);
 
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);

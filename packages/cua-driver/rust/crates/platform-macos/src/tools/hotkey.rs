@@ -325,7 +325,8 @@ impl Tool for HotkeyTool {
                     .as_deref()
                     .is_some_and(crate::browser::BrowserJs::supports)
                     && !crate::browser::electron_js::ElectronJs::is_electron(pid);
-                if native {
+                // Modal panels handle their own shortcuts while the app menu is disabled.
+                if native && !crate::ax::dialogs::dialog_window_ids(pid).contains(&wid) {
                     let result = tokio::task::spawn_blocking(move || {
                         super::menu_equivalent::find(pid, &combo)
                             .map(|item| super::menu_equivalent::run(pid, wid, item, save))

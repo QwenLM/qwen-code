@@ -211,6 +211,7 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  recallText?: string;
   promptId?: string;
   /** Source-record link for conversation rewind, never for file restore. */
   rewindId?: string;

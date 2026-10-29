@@ -6174,6 +6174,12 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
+                ...(replayPage.branchPointsByAssistantUuid
+                  ? {
+                      branchPointsByAssistantUuid:
+                        replayPage.branchPointsByAssistantUuid,
+                    }
+                  : {}),
                 // The restore gate already drained active turns and blocks
                 // new ones (and a drain timeout rejects before replay), so
                 // a trailing unmatched call here is genuinely abandoned —
@@ -6418,6 +6424,12 @@ class QwenAgent implements Agent {
                     replayState: projection.replay!.replay,
                     goalBootstrap: replayGoalBootstrap(projection),
                     suppressRestoreAskUserQuestion,
+                    ...(projection.replay!.branchPointsByAssistantUuid
+                      ? {
+                          branchPointsByAssistantUuid:
+                            projection.replay!.branchPointsByAssistantUuid,
+                        }
+                      : {}),
                     ...(restoreOptions.replay.kind === 'recent'
                       ? {
                           limits: {
@@ -7029,6 +7041,38 @@ class QwenAgent implements Agent {
             },
             { persistDefault: false },
           );
+          break;
+        }
+        case 'workflow_mode': {
+          if (value !== 'on' && value !== 'off') {
+            throw RequestError.invalidParams(
+              undefined,
+              'Workflow mode must be on or off',
+            );
+          }
+          if (
+            params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] !== undefined
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Workflow mode always persists to the session',
+            );
+          }
+          if (!session.getConfig().isWorkflowModeSupported()) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Session Workflow mode is unsupported',
+            );
+          }
+          await session.assertCanStartTurn();
+          if (this.sessions.get(sessionId) !== session) {
+            throw RequestError.invalidParams(undefined, 'Session changed');
+          }
+          await session.getConfig().setWorkflowMode(value === 'on');
+          await session.assertCanStartTurn();
+          if (this.sessions.get(sessionId) !== session) {
+            throw RequestError.invalidParams(undefined, 'Session changed');
+          }
           break;
         }
         case 'reasoning_effort': {
@@ -8584,7 +8628,7 @@ class QwenAgent implements Agent {
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
-        initialized: true,
+        initialized: false,
         skills: [],
         errors: [this.errorCell('skills', error)],
       };
@@ -15028,7 +15072,14 @@ class QwenAgent implements Agent {
           // persisted to the workspace settings file and must not clobber the
           // global file (which would silently affect every other workspace and
           // session).
-          updateOutputLanguageFile(normalizedValue);
+          // The rule file is a best-effort mirror of the setting that
+          // `setValue` already persisted above, so a filesystem failure here
+          // must not fail the route and discard a change that did land.
+          try {
+            updateOutputLanguageFile(normalizedValue);
+          } catch (err) {
+            debugLogger.warn('Failed to write output-language.md:', err);
+          }
         }
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
@@ -16431,6 +16482,11 @@ class QwenAgent implements Agent {
     ) {
       config.setGoalProposalHostSupported(true);
     }
+    // Only the daemon bridge, whose Web Shell renders MCP Apps, declares this;
+    // TUI, headless, editor and channel clients never receive Generated UI.
+    if (this.clientCapabilities?._meta?.['qwen.mcpAppHost'] === true) {
+      config.setMcpAppHostSupported(true);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }
@@ -17342,6 +17398,11 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
+      session.bindWorkflowModeUpdates?.(
+        () =>
+          this.buildConfigOptions(config, session.getDefaultReasoningConfig()),
+        () => this.sessions.get(sessionId) === session,
+      );
       this.registerHostedSession(sessionId, config, settings);
       // Track the file-derived mode, not a mode restored from the transcript.
       // An unchanged settings reload must not overwrite session-local state.
@@ -17564,6 +17625,30 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    const baseOptions = [modeConfigOption, modelConfigOption];
+    if (config.isWorkflowModeSupported?.()) {
+      const { requested, available, effective, reason } =
+        config.getWorkflowMode();
+      baseOptions.push({
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        description: 'Prefer Workflow orchestration for this session',
+        type: 'select',
+        currentValue: requested ? 'on' : 'off',
+        options: [
+          { value: 'off', name: 'Off' },
+          { value: 'on', name: 'On' },
+        ],
+        _meta: {
+          'qwen.workflowMode': {
+            available,
+            effective,
+            ...(reason ? { reason } : {}),
+          },
+        },
+      });
+    }
+
     const modelReasoning = this.getModelReasoningConfiguration(
       config,
       currentModelId,
@@ -17592,11 +17677,11 @@ class QwenAgent implements Agent {
         modelReasoning,
       )
     ) {
-      return [modeConfigOption, modelConfigOption];
+      return baseOptions;
     }
 
     if (!generation) {
-      return [modeConfigOption, modelConfigOption];
+      return baseOptions;
     }
     const currentModelEffort = config.getReasoningEffort?.();
     const reasoningOverride = config.getReasoningEffortOverride?.();
@@ -17640,7 +17725,7 @@ class QwenAgent implements Agent {
       gptOverride?.enabled &&
       gptOverride.useDefaultEffort
     ) {
-      return [modeConfigOption, modelConfigOption];
+      return baseOptions;
     }
     const gptEnableOverride =
       generation.reasoning === false
@@ -17723,7 +17808,7 @@ class QwenAgent implements Agent {
       ],
     };
 
-    return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
+    return [...baseOptions, reasoningEffortConfigOption];
   }
 
   private getModelReasoningConfiguration(

@@ -76,7 +76,10 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
+import type {
+  ServeWorkspaceSkillsStatus,
+  ServeWorkspaceSkillStatus,
+} from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
@@ -91,6 +94,7 @@ import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import * as trustPolicyRuntime from '../config/daemon-trust-policy.js';
 import * as trustPolicyMonitorRuntime from '../config/daemon-trust-policy-monitor.js';
 import * as workspaceServiceRuntime from './workspace-service/index.js';
+import type { QueryWorkspaceStatusFn } from './workspace-service/types.js';
 import {
   ChannelWorkerStartupError,
   type ChannelWorkerSnapshot,
@@ -1415,6 +1419,260 @@ describe('workspace skill settings persistence', () => {
       ],
     });
   });
+
+  it.each(['single', 'batch'] as const)(
+    'retries catalog identity for a %s enable inside the cold-read throttle window',
+    async (mode) => {
+      writeSkillSettings(['rust:chat'], ['chat']);
+      const idle = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: false,
+        skills: [],
+      };
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce(idle)
+        .mockResolvedValue({
+          ...idle,
+          initialized: true,
+          skills: [skillStatus('rust:chat', 'project')],
+        });
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi.fn().mockResolvedValue(idle),
+        }),
+      );
+      const deps = await captureSkillPersistence([]);
+      vi.spyOn(Date, 'now').mockReturnValue(10_000);
+      const service = deps.workspaceRegistry!.primary.workspaceService;
+      const context = { route: 'TEST', workspaceCwd: workspace };
+      expect(
+        (await service.getWorkspaceSkillsStatus(context)).initialized,
+      ).toBe(false);
+      expect(
+        (await service.getWorkspaceSkillsStatus(context)).initialized,
+      ).toBe(false);
+      expect(query).toHaveBeenCalledOnce();
+
+      if (mode === 'single') {
+        await expect(
+          deps.persistDisabledSkills!(workspace, 'rust:chat', true),
+        ).resolves.toMatchObject({ changed: true, disabled: [] });
+      } else {
+        await expect(
+          deps.persistDisabledSkillsBatch!(workspace, ['rust:chat'], true),
+        ).resolves.toMatchObject({
+          outcomes: [{ skillName: 'rust:chat', changed: true }],
+        });
+      }
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ enabled: ['rust:chat'] });
+    },
+  );
+
+  it.each(['single', 'batch'] as const)(
+    'does not read the catalog for a %s disable',
+    async (mode) => {
+      writeSkillSettings([]);
+      const query = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      });
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({ ...deps, queryWorkspaceStatus: query }),
+      );
+      const { persistDisabledSkills, persistDisabledSkillsBatch } =
+        await captureSkillPersistence([]);
+
+      await (mode === 'single'
+        ? persistDisabledSkills!(workspace, 'rust:chat', false)
+        : persistDisabledSkillsBatch!(workspace, ['rust:chat'], false));
+
+      expect(query).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not hold the settings write lock across a cold catalog read', async () => {
+    writeSkillSettings([]);
+    const never = new Promise<never>(() => undefined);
+    const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+    vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    ).mockImplementation((deps) =>
+      original({
+        ...deps,
+        queryWorkspaceStatus: vi.fn(() => never),
+        workspaceSkillsStatusProvider: undefined,
+      }),
+    );
+    const { persistDisabledSkills, persistDisabledTools } =
+      await captureSkillPersistence([]);
+
+    void persistDisabledSkills!(workspace, 'rust:chat', true).catch(
+      () => undefined,
+    );
+    const outcome = await Promise.race([
+      persistDisabledTools!(workspace, 'Bash', false).then(() => 'written'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('blocked'), 1_000),
+      ),
+    ]);
+
+    expect(outcome).toBe('written');
+  });
+
+  it.each(['single', 'batch'] as const)(
+    'keeps a later disable behind a %s enable awaiting the catalog',
+    async (mode) => {
+      writeSkillSettings([]);
+      let resolveCatalog: (status: ServeWorkspaceSkillsStatus) => void = () =>
+        undefined;
+      const catalog = new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+        resolveCatalog = resolve;
+      });
+      const queryMock = vi.fn(() => catalog);
+      const query = queryMock as unknown as QueryWorkspaceStatusFn;
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: undefined,
+        }),
+      );
+      const { persistDisabledSkills, persistDisabledSkillsBatch } =
+        await captureSkillPersistence([]);
+
+      const enable =
+        mode === 'single'
+          ? persistDisabledSkills!(workspace, 'rust:chat', true)
+          : persistDisabledSkillsBatch!(workspace, ['rust:chat'], true);
+      await vi.waitFor(() => expect(queryMock).toHaveBeenCalled());
+      const disable =
+        mode === 'single'
+          ? persistDisabledSkills!(workspace, 'rust:chat', false)
+          : persistDisabledSkillsBatch!(workspace, ['rust:chat'], false);
+      resolveCatalog({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      });
+
+      await expect(enable).resolves.toMatchObject(
+        mode === 'single'
+          ? { changed: true }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      await expect(disable).resolves.toMatchObject(
+        mode === 'single'
+          ? { changed: true }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ disabled: ['rust:chat'] });
+    },
+  );
+
+  it.each(['single', 'batch'] as const)(
+    'resolves a %s enable from the retained catalog when fresh sources fail',
+    async (mode) => {
+      writeSkillSettings(['rust:chat'], ['chat']);
+      const idle = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: false,
+        skills: [],
+      };
+      const warm = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      };
+      const query = vi.fn().mockResolvedValueOnce(warm).mockResolvedValue(idle);
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi
+            .fn()
+            .mockRejectedValue(new Error('enumeration failed')),
+          isChannelLive: () => false,
+        }),
+      );
+      const {
+        persistDisabledSkills,
+        persistDisabledSkillsBatch,
+        workspaceRegistry,
+      } = await captureSkillPersistence([]);
+      const service = workspaceRegistry!.primary.workspaceService;
+      await service.getWorkspaceSkillsStatus({
+        route: 'TEST',
+        workspaceCwd: workspace,
+      });
+
+      const result =
+        mode === 'single'
+          ? await persistDisabledSkills!(workspace, 'rust:chat', true)
+          : await persistDisabledSkillsBatch!(workspace, ['rust:chat'], true);
+
+      expect(result).toMatchObject(
+        mode === 'single'
+          ? { changed: true, disabled: [] }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      expect(result).not.toHaveProperty('block');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ enabled: ['rust:chat'] });
+    },
+  );
 
   it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
     writeSkillSettings([], ['pdf', 'legacy']);
@@ -8659,6 +8917,146 @@ describe('runQwenServe runtime startup failures', () => {
     vi.restoreAllMocks();
     if (tmpDir) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('binds workflow mode writes to the trusted owner of each runtime generation', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-mode-owners-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    const added = path.join(tmpDir, 'added');
+    for (const cwd of [primary, secondary, added]) fs.mkdirSync(cwd);
+    vi.spyOn(
+      trustPolicyRuntime,
+      'readDaemonTrustPolicySnapshot',
+    ).mockResolvedValue({
+      revision: 'trusted-workflow-mode-owners',
+      folderTrustEnabled: false,
+      ideTrust: undefined,
+      trustedFolders: {},
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => ({
+        ...makeRuntimeBridge(),
+        getSessionSummary: vi
+          .fn()
+          .mockImplementation((sessionId: string) => ({ sessionId })),
+      }));
+    let registry: WorkspaceRegistry | undefined;
+    const createApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      registry = args[2]?.workspaceRegistry;
+      return createApp(...args);
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'workflow-mode-token',
+        serveWebShell: false,
+      },
+      { preheatBridge: false, daemonLogBaseDir: path.join(tmpDir, 'debug') },
+    );
+    try {
+      const response = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer workflow-mode-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: added, persist: false }),
+      });
+      expect(response.status).toBe(201);
+      expect(createBridge).toHaveBeenCalledTimes(3);
+      const options = createBridge.mock.calls.map(([options]) => options);
+      for (const [index, option] of options.entries()) {
+        expect(option.isWorkflowModeWriteAllowed).toBeTypeOf('function');
+        expect(option.isWorkflowModeWriteAllowed!('missing-session')).toBe(
+          false,
+        );
+        option.sessionLifecycle!({
+          type: 'registered',
+          sessionId: `owned-session-${index}`,
+          workspaceCwd: option.boundWorkspace!,
+          reason: 'spawn',
+        });
+      }
+      for (const [index, option] of options.entries()) {
+        expect(
+          option.isWorkflowModeWriteAllowed!(`owned-session-${index}`),
+        ).toBe(true);
+        expect(
+          option.isWorkflowModeWriteAllowed!(
+            `owned-session-${(index + 1) % options.length}`,
+          ),
+        ).toBe(false);
+      }
+      const dynamic = options[2]!;
+      const entry = registry!.getManagedEntryByWorkspaceCwd(
+        dynamic.boundWorkspace!,
+      )!;
+      expect(registry!.beginReplacement(entry, 'revoked')).toBe(true);
+      expect(dynamic.isWorkflowModeWriteAllowed!('owned-session-2')).toBe(
+        false,
+      );
+      expect(options[0]!.isWorkflowModeWriteAllowed!('owned-session-0')).toBe(
+        true,
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('denies workflow mode writes for an untrusted primary owner', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-mode-untrusted-')),
+    );
+    vi.spyOn(
+      trustPolicyRuntime,
+      'readDaemonTrustPolicySnapshot',
+    ).mockResolvedValue({
+      revision: 'untrusted-workflow-mode-owner',
+      folderTrustEnabled: true,
+      ideTrust: undefined,
+      trustedFolders: {},
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => ({
+        ...makeRuntimeBridge(),
+        getSessionSummary: vi
+          .fn()
+          .mockReturnValue({ sessionId: 'untrusted-session' }),
+      }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      { preheatBridge: false, daemonLogBaseDir: path.join(tmpDir, 'debug') },
+    );
+    try {
+      const options = createBridge.mock.calls[0]![0];
+      expect(options.isWorkflowModeWriteAllowed).toBeTypeOf('function');
+      options.sessionLifecycle!({
+        type: 'registered',
+        sessionId: 'untrusted-session',
+        workspaceCwd: tmpDir,
+        reason: 'spawn',
+      });
+      expect(options.isWorkflowModeWriteAllowed!('untrusted-session')).toBe(
+        false,
+      );
+    } finally {
+      await handle.close();
     }
   });
 

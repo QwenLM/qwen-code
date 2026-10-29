@@ -23,6 +23,22 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    WEBSHELL_WORKTREE_OPTIONS(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/options",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    WEBSHELL_WORKTREE_QUERY(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/query",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    WEBSHELL_WORKTREE_INSPECT(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/inspect",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    WEBSHELL_WORKTREE_CLEANUP(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/cleanup",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_OPTIONS(Method.GET, "/v1/agents/workspaces/{workspaceId}/worktrees/options",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_QUERY(Method.GET, "/v1/agents/workspaces/{workspaceId}/worktrees",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_INSPECT(Method.GET, "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_CLEANUP(Method.POST, "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}/cleanup",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
     PUBLIC_USER_MESSAGES_QUERY(Method.GET, "/v1/agents/sessions/{sessionId}/user-messages",
             Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
     PUBLIC_USER_MESSAGES_COMMAND(Method.POST, "/v1/agents/sessions/{sessionId}/user-messages",
@@ -294,6 +310,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/transcript/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.TRANSCRIPT_QUERY)),
+    WEBSHELL_TRANSCRIPT_ITEMS(Method.POST,
+            "/api/agent/web-shell/v1/transcript/items/query",
+            Surface.WEBSHELL, RuleClass.READER,
+            EnumSet.of(Capability.ITEM_LIST)),
     WEBSHELL_EVENT_STREAM(Method.POST, "/api/agent/web-shell/v1/events/stream",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.TAIL_EVENTS)),
@@ -507,6 +527,14 @@ public enum SurfaceRegistry {
                     + "/transactions",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_TRANSACTION_LIST)),
+    INTERNAL_TRANSACTION_RECENT(Method.GET,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/transactions:recent",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_TRANSACTION_LIST)),
+    INTERNAL_TRANSACTION_LOOKUP(Method.GET,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/transactions:lookup",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_TRANSACTION_LIST)),
     INTERNAL_RESOURCE_GET(Method.GET,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/resources/{resourceId}",
@@ -671,6 +699,7 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
@@ -783,6 +812,7 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        SESSION_WORKTREE,
         /** Trusted actor with a read grant on the persisted Workspace; operation reads also retain actor ownership. */
         SESSION_EXTENSION_READER,
         SESSION_EXTENSION_OPERATOR,

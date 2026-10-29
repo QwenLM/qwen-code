@@ -329,6 +329,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
@@ -2988,7 +3007,7 @@ describe('loadCliConfig', () => {
   });
 
   it.each([undefined, false, true])(
-    'passes only the resolved Generated UI opt-in as a runtime candidate: %s',
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
     async (enabled) => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -2996,7 +3015,7 @@ describe('loadCliConfig', () => {
       expect(mockConfigConstructorParams).toHaveBeenCalledWith(
         expect.objectContaining({
           bundledGeneratedUi: expect.objectContaining({
-            enabled: enabled === true,
+            enabled: enabled !== false,
           }),
         }),
       );
@@ -3012,6 +3031,7 @@ describe('loadCliConfig', () => {
         bundledGeneratedUi: {
           enabled: true,
           unavailableReason: 'unsupported-runtime',
+          explicit: true,
         },
       }),
     );

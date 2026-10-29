@@ -1369,6 +1369,20 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      isWorkflowModeWriteAllowed: (sessionId): boolean => {
+        const registry = primaryTrustRegistry;
+        if (!registry) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.primaryEntry;
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.bridge === defaultBridgeForAdmission &&
+          entry.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          !entry.current.guard.closed
+        );
+      },
       artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,

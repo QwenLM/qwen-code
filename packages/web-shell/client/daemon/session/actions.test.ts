@@ -32,6 +32,70 @@ import type {
   SettledPrompt,
 } from './types';
 
+describe('Generated UI action invalidation', () => {
+  it('revokes the cleared session before waiting for detach', async () => {
+    const session = createMockSession('original');
+    const detach = createDeferred<void>();
+    session.detach.mockReturnValue(detach.promise);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+    const clearing = h.actions.clearSession();
+    expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(session, 'cleared');
+    detach.resolve();
+    await clearing;
+  });
+
+  it.each(['release', 'rewind'] as const)(
+    'invalidates the original owner after successful %s, even after navigation',
+    async (operation) => {
+      const session = createMockSession('original');
+      const finished = createDeferred<unknown>();
+      session.client.closeSession.mockReturnValue(finished.promise);
+      session.rewind.mockReturnValue(finished.promise);
+      const onGeneratedUiInvalidated = vi.fn();
+      const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+      const pending =
+        operation === 'release'
+          ? h.actions.releaseSession('background')
+          : h.actions.rewindSession('prompt');
+      expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+      h.sessionRef.current = createMockSession(
+        'replacement',
+      ) as unknown as DaemonSessionClient;
+      finished.resolve({});
+      await pending;
+      if (operation === 'release')
+        expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(
+          session,
+          'deleted',
+          'background',
+        );
+      else
+        expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(
+          session,
+          'rewound',
+        );
+    },
+  );
+
+  it.each(['release', 'rewind'] as const)(
+    'does not report an unsuccessful %s as a deletion',
+    async (operation) => {
+      const session = createMockSession('original');
+      session.client.closeSession.mockRejectedValue(new Error('refused'));
+      session.rewind.mockRejectedValue(new Error('refused'));
+      const onGeneratedUiInvalidated = vi.fn();
+      const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+      await expect(
+        operation === 'release'
+          ? h.actions.releaseSession('background')
+          : h.actions.rewindSession('prompt'),
+      ).rejects.toThrow('refused');
+      expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('context usage counter reconciliation', () => {
   function snapshot() {
     return {
@@ -6993,6 +7057,7 @@ function createActionsHarness(
     onPromptAdmitted?: ReturnType<typeof vi.fn>;
     onContinuationAdmitted?: ReturnType<typeof vi.fn>;
     onPromptRemoved?: ReturnType<typeof vi.fn>;
+    onGeneratedUiInvalidated?: ReturnType<typeof vi.fn>;
     passiveAssistantDoneTimerRef?: {
       current: ReturnType<typeof setTimeout> | undefined;
     };
@@ -7088,6 +7153,7 @@ function createActionsHarness(
     onPromptAdmitted: opts.onPromptAdmitted,
     onContinuationAdmitted: opts.onContinuationAdmitted,
     onPromptRemoved: opts.onPromptRemoved,
+    onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
       opts.onConnectionChange?.(connection);

@@ -4521,6 +4521,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it.each([
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ])(
+    'declares an MCP App host only when the client advertises one (%s)',
+    async (advertised, expected) => {
+      const innerConfig = await setupSessionMocks('mcp-app-host-session');
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await agent.initialize({
+          clientCapabilities:
+            advertised === undefined
+              ? {}
+              : { _meta: { 'qwen.mcpAppHost': advertised } },
+        });
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        if (expected) {
+          expect(innerConfig.setMcpAppHostSupported).toHaveBeenCalledWith(true);
+          expect(
+            innerConfig.setMcpAppHostSupported.mock.invocationCallOrder[0],
+          ).toBeLessThan(innerConfig.initialize.mock.invocationCallOrder[0]);
+        } else {
+          expect(innerConfig.setMcpAppHostSupported).not.toHaveBeenCalled();
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('profiles newSession stages under the daemon trace context', async () => {
     const parentContext = { trace: 'parent' };
     mockExtractDaemonTraceContext.mockReturnValue(parentContext);
@@ -5768,6 +5810,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     let providers: ReturnType<Config['getModelProvidersConfig']>;
     let protocols: ReturnType<Config['getProviderProtocolConfig']> = {};
     return {
+      isWorkflowModeSupported: vi.fn(() => false),
+      getWorkflowMode: vi.fn<Config['getWorkflowMode']>(() => ({
+        requested: false,
+        available: false,
+        effective: false,
+      })),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
@@ -5776,6 +5824,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
+      setMcpAppHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
       getSessionSourceService: vi.fn(),
@@ -11521,6 +11570,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reports an uninitialized snapshot when catalog enumeration throws', async () => {
+    // A partial build failure must not look like a valid empty catalog: the
+    // daemon latches `initialized: true` and then prefers it over its own
+    // enumeration, and sibling routes publish the same envelope.
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        getCachedSkills: vi.fn().mockImplementation(() => {
+          throw new Error('broken skill catalog');
+        }),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+    ).resolves.toMatchObject({
+      initialized: false,
+      skills: [],
+      errors: [
+        { kind: 'skills', status: 'error', error: 'broken skill catalog' },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes the skill cache when extension sources moved under a read', async () => {
     // Extensions have no watcher, so this is the only path by which an
     // extension installed outside the daemon reaches the snapshot. Extension
@@ -12849,6 +12945,51 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([false, true])(
+    'advertises Workflow mode independently of reasoning support (%s)',
+    async (available) => {
+      const sessionId = 'workflow-mode-options';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'ordinary-model');
+      innerConfig.getContentGeneratorConfig.mockReturnValue(undefined);
+      innerConfig.isWorkflowModeSupported = vi.fn(() => true);
+      innerConfig.getWorkflowMode = vi.fn(() => ({
+        requested: true,
+        available,
+        effective: available,
+        ...(!available ? { reason: 'workflow_unavailable' } : {}),
+      }));
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const result = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          result.configOptions?.find((option) => option.id === 'workflow_mode'),
+        ).toMatchObject({
+          currentValue: 'on',
+          _meta: { 'qwen.workflowMode': { available, effective: available } },
+        });
+        expect(
+          result.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          ),
+        ).toBeUndefined();
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'workflow_mode',
+            value: 'true',
+          }),
+        ).rejects.toThrow('on or off');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each([
     ['gpt-5.4', 'none', ['none', 'low', 'medium', 'high', 'xhigh']],
@@ -21393,6 +21534,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'Japanese',
     );
     expect(updateOutputLanguageFile).toHaveBeenCalledWith('Japanese');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setCoreValue still resolves when the output language rule file write fails', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // output-language.md is a best-effort mirror of an already-persisted
+    // setting, so a filesystem failure here (EACCES/EROFS on an unwritable
+    // ~/.qwen) must not fail the whole route. `mockImplementationOnce` keeps
+    // the throwing implementation from leaking into later tests, since
+    // `beforeEach` only clears call records and not implementations.
+    vi.mocked(updateOutputLanguageFile).mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied');
+    });
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      scope: 'user',
+      key: 'general.outputLanguage',
+      value: 'Japanese',
+    });
+
+    // Reaching this line is the point: the route resolved instead of rejecting
+    // with an opaque internal error.
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'general.outputLanguage',
+      'Japanese',
+    );
+    // The setting stayed persisted at user scope - no rollback.
+    expect(settings.user.settings['general']).toEqual({
+      outputLanguage: 'Japanese',
+    });
+    expect(updateOutputLanguageFile).toHaveBeenCalledWith('Japanese');
+    // ...and the swallowed failure was logged rather than lost.
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to write output-language.md:',
+      expect.any(Error),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -30060,6 +30251,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
+      setMcpAppHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
       getSessionSourceService: vi.fn(),
