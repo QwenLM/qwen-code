@@ -3312,6 +3312,9 @@ describe('rebuilt edit diff annotation', () => {
     expect(container.textContent).not.toContain(
       'Diff rebuilt from the tool call arguments',
     );
+    expect(container.textContent).not.toContain(
+      'Rendered without hunk headers',
+    );
   });
 
   it('does not annotate a file creation rebuilt from an empty old_string', () => {

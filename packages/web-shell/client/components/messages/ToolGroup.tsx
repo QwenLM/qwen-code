@@ -190,7 +190,7 @@ export type DiffSource =
  * then the call's own `patch` argument (a real unified diff), and finally a
  * rebuild from the edit's old/new text. The two `buildUnifiedDiff`
  * sources — content block and argument rebuild — render headerless and
- * 0-based, so those are the ones `isAnnotatedDiffSource` marks; recorded
+ * 0-based, so those are the ones `annotationNoteKey` marks; recorded
  * diffs and `patch` arguments keep their real hunk headers.
  */
 export function resolveDiff(tool: ACPToolCall): {
