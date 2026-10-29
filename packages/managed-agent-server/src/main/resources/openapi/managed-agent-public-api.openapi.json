@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.95.0",
+    "version": "1.96.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes."
   },
   "servers": [
@@ -7458,6 +7458,55 @@
           }
         },
         "summary": "Cleanup a main Session worktree"
+      }
+    },
+    "/api/agent/web-shell/v1/transcript/items/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRecentTranscriptItems",
+        "x-qwen-implementation-status": "implemented",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bounded recent published Item page. Items are chronological within each page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellExportPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/CursorExpired"
+          }
+        },
+        "description": "Requires current Session read authorization on every page. The first page returns at most limit Items from the newest published snapshot, in chronological order. nextCursor pages toward older Items in that same signed, retained snapshot. snapshotThroughSequence identifies its coverage, which may lag the current Session head; an empty page with zero coverage does not certify an empty Session because no published snapshot may be available. This page does not contain live tail events or current approval/task state; use the existing transcript, event and state APIs for those. A newer snapshot does not change an existing cursor. Forward export cursors cannot be used here and backward cursors cannot be used for exports. No journal replay, writer acquisition or local cache is involved.",
+        "summary": "Read recent published Session items and page toward older items"
       }
     }
   },

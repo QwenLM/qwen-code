@@ -138,6 +138,31 @@ class ManagedSessionStoreIntegrationTest {
     }
 
     @Test
+    void recentAndCommandQueryRoutesReadWithoutOpeningAnotherWriter() throws Exception {
+        String session = "recent-query-" + UUID.randomUUID();
+        String base = historySession(session);
+        mvc.perform(get(base + "/transactions:recent").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE).param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.transactions.length()").value(1))
+                .andExpect(jsonPath("$.transactions[0].commandId").value("command-genesis"))
+                .andExpect(jsonPath("$.throughRevision").value(1)).andExpect(jsonPath("$.hasMore").value(false));
+        mvc.perform(get(base + "/transactions:lookup").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE).param("operation", "session.create").param("commandId", "command-genesis"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.transaction.journalRevision").value(1));
+        mvc.perform(get(base + "/transactions:recent").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE).param("throughRevision", "2"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get(base + "/transactions:lookup").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B)
+                .param("workspaceId", WORKSPACE).param("operation", "session.create").param("commandId", "command-genesis"))
+                .andExpect(status().is4xxClientError());
+    }
+
+    @Test
     void checkpointHistoryReusesCommittedDependenciesWithoutRecensus() throws Exception {
         String session = "checkpoint-history-" + UUID.randomUUID();
         String base = historySession(session);
