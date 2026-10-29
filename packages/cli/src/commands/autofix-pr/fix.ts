@@ -23,7 +23,7 @@ import {
   NO_FOLLOW,
   readGateCursor,
   readRegularFile,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   TASK_OPTION,
   taskArg,
@@ -252,7 +252,7 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
   marker: string;
 } {
   assertAttemptId(args.attempt);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state);
@@ -317,7 +317,7 @@ export type FixEndResult =
 
 export function runFixEnd(args: FixEndArgs): FixEndResult {
   assertAttemptId(args.attempt);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state, args.task);

@@ -18,7 +18,7 @@ import {
   assertWatching,
   autofixPrPaths,
   MAX_INSTRUCTIONS_CHARS,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   WATCH_INTERVALS,
   withWatchLock,
@@ -132,7 +132,7 @@ export interface ScheduleArgs {
 export function runSchedule(
   args: ScheduleArgs,
 ): ScheduledTask & AutofixPrWatchOptions {
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   if (
     args.again &&
     (args.every !== undefined || args.noReply || args.instructions)

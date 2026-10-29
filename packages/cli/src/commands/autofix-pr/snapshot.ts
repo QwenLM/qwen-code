@@ -49,7 +49,7 @@ import {
   NO_FOLLOW,
   readGateCursor,
   readState,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   sameRepository,
@@ -1827,7 +1827,7 @@ function runGate(args: SnapshotArgs): void {
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   const existing = readGateCursor(paths.gatePath);
   const state = readState(paths.statePath);
   let target: { host: string; owner: string; repo: string };
@@ -2041,12 +2041,9 @@ export function runSnapshot(args: SnapshotArgs): void {
     runGate(args);
     return;
   }
-  const state = requireState(
-    autofixPrPaths(repoRoot(), args.pr).statePath,
-    args.pr,
-  );
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
+  const state = requireState(paths.statePath, args.pr);
   assertWatching(state, args.task);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
   // The snapshot file is the one the agent working now reads.
   assertNoFixInFlight(paths, args.pr);
   setGhHost(state.host);
@@ -2124,7 +2121,8 @@ export function roundReplyCheck(
   return {
     known: (id) => seen.has(id),
     strict,
-    cachePath: autofixPrPaths(repoRoot(), state.prNumber).repliesPath,
+    cachePath: autofixPrPaths(resolveWatchRoot(state.prNumber), state.prNumber)
+      .repliesPath,
   };
 }
 
