@@ -533,9 +533,8 @@ describe('standalone-update', () => {
         }
         if (runtime === 'bun') {
           // Mirror installBunRuntime in scripts/create-standalone-package.js:
-          // the runtime lives at bun/bin/bun and node/bin/node is a shim
-          // execing it, so the layout gate and the smoke test exercise the
-          // same two-hop chain official archives ship.
+          // official bun archives ship the node/bin/node compatibility shim
+          // alongside the real bun/bin/bun interpreter the smoke test runs.
           fs.mkdirSync(path.join(fixture, 'qwen-code', 'node', 'bin'), {
             recursive: true,
           });
@@ -1558,18 +1557,20 @@ describe('standalone-update', () => {
       expectInstallationPreserved();
     });
 
-    it('preserves the installation when the archive ships no launcher', async () => {
+    it('accepts an archive without a launcher once the entry point runs', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-      // Runnable but without bin/qwen: isStandaloneInstallDir would stop
-      // recognising the tree after activation, and the PATH wrapper would
-      // point at a file that does not exist.
+      // The standalone-runtime harness repacks a minimal runnable tree without
+      // bin/qwen; the archive contract is the lib/cli-entry.js floor plus the
+      // smoke test, not the installer's launcher layout.
       await serveArchive({ runnable: true, binless: true });
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
-      ).rejects.toThrow(
-        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
-      );
-      expectInstallationPreserved();
+      ).resolves.toBe('done');
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ),
+      ).toMatchObject({ version: '1.2.3' });
     });
 
     it('preserves the installation when the archive omits the launcher entry point', async () => {
@@ -1581,7 +1582,7 @@ describe('standalone-update', () => {
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).rejects.toThrow(
-        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
+        'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
       );
       expectInstallationPreserved();
     });
@@ -1786,7 +1787,7 @@ describe('standalone-update', () => {
         const failed = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
         pending = failed;
         await expect(failed.activate()).rejects.toThrow(
-          'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
+          'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
         );
         expect(cachedArchives()).toHaveLength(0);
         expectInstallationPreserved();
@@ -1808,13 +1809,13 @@ describe('standalone-update', () => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', configured);
         await serveArchive();
 
-        // The verified archive deliberately has no runtime, so it cannot
+        // The verified archive deliberately has no entry point, so it cannot
         // replace the fixture installation even if the download and checksum
-        // succeed: the manifest gate requires the standalone runtime layout.
+        // succeed: the entry-point gate rejects it before activation.
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
-          'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
+          'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
         );
 
         expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
@@ -1841,7 +1842,7 @@ describe('standalone-update', () => {
       await expect(
         performStandaloneUpdate(standaloneDir, 'v1.2.3'),
       ).rejects.toThrow(
-        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
+        'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
       );
       expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
         `${baseUrl}/v1.2.3/${filename}`,

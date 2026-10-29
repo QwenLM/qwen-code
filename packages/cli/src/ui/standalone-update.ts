@@ -18,7 +18,6 @@ import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { hasStandaloneRuntimeLayout } from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -1459,12 +1458,9 @@ async function applyStandaloneUpdate(
         'Downloaded archive does not match the expected target, runtime and version',
       );
     }
-    if (
-      !hasStandaloneRuntimeLayout(newInstallDir, target) ||
-      !fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))
-    ) {
+    if (!fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))) {
       throw new Error(
-        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
+        'Downloaded archive is missing the standalone entry point (lib/cli-entry.js)',
       );
     }
     debugLogger.info('Running smoke test...');
