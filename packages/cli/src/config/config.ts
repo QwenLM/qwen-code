@@ -2953,6 +2953,7 @@ export async function loadCliConfig(
             : undefined,
           modelGrades: settings.agents.modelGrades,
           allowedGrades: settings.agents.allowedGrades,
+          defaultBackground: settings.agents.defaultBackground,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

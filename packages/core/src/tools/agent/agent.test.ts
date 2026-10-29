@@ -396,6 +396,7 @@ describe('AgentTool', () => {
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
       getMaxSubagentDepth: vi.fn().mockReturnValue(5),
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
+      getAgentsSettings: vi.fn().mockReturnValue({}),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
       getFileFilteringOptions: vi.fn().mockReturnValue({
@@ -1260,11 +1261,13 @@ describe('AgentTool', () => {
 
     it('declares the background default and foreground opt-out', () => {
       const runInBackground = schemaProps().run_in_background!;
-      expect(runInBackground.default).toBe(true);
+      expect(runInBackground.default).toBeUndefined();
       // Teammate clauses are about `name`, undeclared with teams off here.
       expectText(
         runInBackground.description,
         [
+          'agents.defaultBackground (true by default)',
+          'explicit value > definition background > agents.defaultBackground',
           'Set to false',
           'interactive fork',
           'Nested agents run in the foreground unless run_in_background is explicitly true',
@@ -4108,6 +4111,9 @@ describe('AgentTool', () => {
 
     it('runs a non-interactive fork through the background registry', async () => {
       vi.mocked(config.isInteractive).mockReturnValue(false);
+      vi.mocked(config.getAgentsSettings).mockReturnValue({
+        defaultBackground: false,
+      });
       vi.mocked(mockAgent.getFinalText).mockReturnValue('headless fork result');
       withMessaging();
       llmClient({
@@ -5538,20 +5544,43 @@ describe('AgentTool', () => {
     });
 
     it.each([
-      [
-        'should run in background when run_in_background is true even without background config',
-        search({ run_in_background: true }),
-      ],
-      [
-        'runs a top-level subagent in the background when the flag is omitted',
-        search(),
-      ],
-    ])('%s', async (_title, params) => {
-      loadForeground();
-      const result = await invoke(params).execute();
-      expect(textOf(result)).toContain('Background agent launched');
-      expect(mockRegistry.register).toHaveBeenCalled();
-    });
+      [undefined, undefined, undefined, true],
+      [true, undefined, undefined, true],
+      [false, undefined, undefined, false],
+      [false, undefined, true, true],
+      [true, undefined, false, false],
+      [false, true, undefined, true],
+      [true, false, undefined, false],
+      [false, true, false, false],
+      [true, false, true, true],
+    ])(
+      'resolves background mode with setting=%s, definition=%s, argument=%s to %s',
+      async (
+        defaultBackground,
+        background,
+        runInBackground,
+        expectedBackground,
+      ) => {
+        vi.mocked(config.getAgentsSettings).mockReturnValue({
+          defaultBackground,
+        });
+        loadAs({ name: 'file-search', background });
+        const { updates, onUpdate } = trackUpdates();
+        const result = await invoke(
+          search({ run_in_background: runInBackground }),
+        ).execute(undefined, onUpdate);
+        const executionMode = expectedBackground ? 'background' : 'foreground';
+
+        expect(textOf(result)).toContain(
+          expectedBackground ? 'Background agent launched' : 'Monitor done',
+        );
+        expectDisplay(result, { executionMode });
+        expect(updates[0]).toMatchObject({ executionMode });
+        expect(mockRegistry.register.mock.calls[0]?.[0]).toMatchObject({
+          isBackgrounded: expectedBackground,
+        });
+      },
+    );
 
     it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {
       // Without a team a `name` falls through to a one-shot agent, and
@@ -5592,6 +5621,9 @@ describe('AgentTool', () => {
       // Background is top-level-only in v1 (a nested launcher cannot honor
       // the completion contract); never silently run it in the foreground.
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(config.getAgentsSettings).mockReturnValue({
+        defaultBackground: false,
+      });
       const invocation = invoke(
         monitor({
           description: 'Start monitor from a nested sub-agent',

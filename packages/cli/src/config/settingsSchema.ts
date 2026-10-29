@@ -3951,6 +3951,16 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         items: { type: 'string' },
       },
+      defaultBackground: {
+        type: 'boolean',
+        label: 'Default Background',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Run top-level regular subagents in the background by default. Set to false to return their results inline in the foreground. The explicit run_in_background argument and agent-definition background field take precedence over this setting.',
+        showInDialog: false,
+      },
       maxParallelAgents: {
         type: 'number',
         label: 'Max Parallel Agents',
