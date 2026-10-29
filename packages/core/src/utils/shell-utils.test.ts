@@ -352,6 +352,21 @@ describe('checkCommandPermissions', () => {
       expect(result.disallowedCommands).toEqual(['rm -rf /tmp/x']);
     });
 
+    it('should keep an invisible redirect target addressable for the deny rules', async () => {
+      // A CR at a segment edge is not layout to bash — `echo x >\r` writes a
+      // file literally named CR in the cwd, which a `Write(//project/**)` deny
+      // rule has to see. Trimming it away leaves the bare `echo x >`, which no
+      // write rule matches, so the command would be allowed.
+      config.getPermissionsDeny = () => ['ShellTool(echo x >\r)'];
+      const result = await checkCommandPermissions(
+        'echo x >\r& echo y',
+        config,
+      );
+      expect(result.allAllowed).toBe(false);
+      expect(result.isHardDenial).toBe(true);
+      expect(result.disallowedCommands).toEqual(['echo x >\r']);
+    });
+
     it('should return a detailed failure object for a command not on a strict allowlist', async () => {
       config.getCoreTools = () => ['ShellTool(ls)'];
       const result = await checkCommandPermissions('git status && ls', config);

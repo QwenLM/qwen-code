@@ -2312,7 +2312,17 @@ export async function checkCommandPermissions(
     };
   }
 
-  const normalize = (cmd: string): string => cmd.trim().replace(/\s+/g, ' ');
+  // `splitCommands` keeps a CR, VT, FF or NBSP at a segment edge on purpose:
+  // bash may read that character as a redirect target, so the segment text has
+  // to stay faithful for the callers that evaluate it as written. This gate,
+  // however, asks the PermissionManager about each segment, and it must not
+  // hand it a command that differs from the user's only by an invisible
+  // character: `.trim()` deletes that whole target (`echo x >\r` becomes a bare
+  // `echo x >`, which no write rule can match) while folding `\s` into a space
+  // turns the target into a word. Trim only the separators bash itself treats
+  // as layout, and collapse those.
+  const normalize = (cmd: string): string =>
+    trimBashEdgeSeparators(cmd).replace(/[ \t\n]+/g, ' ');
   const commandsToValidate = splitCommands(command).map(normalize);
   const invocation: AnyToolInvocation & { params: { command: string } } = {
     params: { command: '' },

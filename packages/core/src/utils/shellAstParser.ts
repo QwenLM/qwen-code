@@ -1387,9 +1387,16 @@ function extractRulesFromStatement(node: SyntaxNode): string[] {
  * // → ['docker compose up *']
  */
 export async function extractCommandRules(command: string): Promise<string[]> {
-  if (typeof command !== 'string' || !command.trim()) return [];
+  // The bash-faithful splitter keeps a CR, VT, FF or NBSP at a segment edge,
+  // because bash may read it as a redirect target. Parsing it here would make
+  // that invisible character part of the command word, so the rule offered for
+  // "always allow" would carry it (`Bash(git *)` for `git status\u00a0`, or a
+  // rule no editor can display). Normalize the edge at this boundary instead of
+  // in the splitter, whose text other consumers read as written.
+  const trimmed = typeof command === 'string' ? command.trim() : '';
+  if (!trimmed) return [];
 
-  const tree = await parseShellCommand(command);
+  const tree = await parseShellCommand(trimmed);
   const root = tree.rootNode;
   const rules: string[] = [];
 
