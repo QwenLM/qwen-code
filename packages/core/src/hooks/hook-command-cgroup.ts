@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 
 /**
  * The recorded-refusal cause discriminator. The recorded refusal is the
@@ -42,9 +43,16 @@ export class HookCommandIsolationUnavailableError extends Error {
 }
 
 const LAUNCHER = String.raw`
-const { writeFileSync, writeSync } = require('node:fs');
+const { mkdirSync, readFileSync, writeFileSync, writeSync } = require('node:fs');
 const { spawn } = require('node:child_process');
 const [group, executable, args] = process.argv.slice(1);
+// Cancellation SIGTERMs the unit before escalating to cgroup.kill. An
+// opted-in launcher must survive that sweep: if the worker dies before the
+// escalation, this process is the only reaper left. exitLikeChild removes
+// this handler before re-raising a SIGTERM that ended the command.
+if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
+  process.on('SIGTERM', () => {});
+}
 try {
   writeFileSync(group + '/cgroup.procs', String(process.pid));
 } catch {
@@ -56,6 +64,32 @@ try {
 try {
   writeSync(3, 'joined\n');
 } catch {}
+// A Hook command belongs to the worker that launched it. If that worker
+// dies without running its handlers, this launcher is reparented and the
+// unit would otherwise stay populated forever. Hook commands opt in; a
+// background Shell does not, because H3 keeps it across worker restarts.
+if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
+  const parentPid = process.ppid;
+  if (parentPid === 1) {
+    // The worker died before this launcher started; there is no parent
+    // transition left to observe.
+    try {
+      writeFileSync(group + '/cgroup.kill', '1');
+    } catch {
+      // The unit is gone or the kernel refused the write.
+    }
+    process.exit(0);
+  }
+  setInterval(() => {
+    if (process.ppid === parentPid) return;
+    try {
+      writeFileSync(group + '/cgroup.kill', '1');
+    } catch {
+      // The unit is gone or the kernel refused the write.
+    }
+    process.exit(0);
+  }, 100).unref();
+}
 // No deployment command or environment is evaluated before membership.
 const child = spawn(executable, JSON.parse(args), {
   env: JSON.parse(process.env.QWEN_HOOK_COMMAND_ENV),
@@ -72,13 +106,65 @@ child.on('error', () => process.exit(1));
 // signal 6 SIGABRT, never SIGIOT, and Linux has no SIGEMT.
 const KEPT = ['SIGABRT', 'SIGBUS', 'SIGFPE', 'SIGILL', 'SIGQUIT', 'SIGSEGV',
   'SIGSYS', 'SIGTRAP', 'SIGXCPU', 'SIGXFSZ', 'SIGUSR1', 'SIGPIPE'];
-child.on('exit', (code, signal) => {
-  if (signal !== null && !KEPT.includes(signal)) {
-    process.kill(process.pid, signal);
+let exitCode = 0;
+let exitSignal = null;
+function exitLikeChild() {
+  if (exitSignal !== null && !KEPT.includes(exitSignal)) {
+    // The SIGTERM handler above must not swallow the command's own signal.
+    if (exitSignal === 'SIGTERM') process.removeAllListeners('SIGTERM');
+    process.kill(process.pid, exitSignal);
     setTimeout(() => process.exit(1), 1000);
     return;
   }
-  process.exit(code ?? 1);
+  process.exit(exitCode ?? 1);
+}
+child.on('exit', (code, signal) => {
+  exitCode = code;
+  exitSignal = signal;
+  if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
+    // A foreground exit is not the end of the Hook tree. Move this launcher
+    // out of the unit so its population is only the remaining members, then
+    // keep the reaper alive until the unit is empty. A worker that dies in
+    // that drain window still reaches cgroup.kill through the interval.
+    let moved = false;
+    try {
+      // A temporary sibling unit keeps this launcher out of the original
+      // unit without moving into the root, which may forbid internal
+      // processes while it has children.
+      const reaperUnit = group + '-reaper-' + process.pid;
+      mkdirSync(reaperUnit, { mode: 0o700 });
+      writeFileSync(reaperUnit + '/cgroup.procs', String(process.pid));
+      moved = true;
+    } catch {
+      // The delegated root may refuse the unit; fall back to the old exit.
+    }
+    if (moved) {
+      const drained = () => {
+        try {
+          return /^populated 0$/m.test(
+            readFileSync(group + '/cgroup.events', 'utf8'),
+          );
+        } catch {
+          // A removed unit has no members left.
+          return true;
+        }
+      };
+      // The foreground may have been the last member: do not tax every
+      // successful command with the poll interval's first tick.
+      if (drained()) {
+        exitLikeChild();
+        return;
+      }
+      const wait = setInterval(() => {
+        if (!drained()) return;
+        clearInterval(wait);
+        exitLikeChild();
+      }, 100);
+      // The wait itself keeps this launcher alive; do not unref it.
+      return;
+    }
+  }
+  exitLikeChild();
 });
 `;
 
@@ -178,9 +264,14 @@ export class HookCommandCgroup {
     return Reflect.construct(HookCommandCgroup, [directory]);
   }
 
-  launch(executable: string, args: string[], env: NodeJS.ProcessEnv) {
+  launch(
+    executable: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: { reapOnParentExit?: boolean },
+  ) {
     return {
-      executable: process.execPath,
+      executable: getJsInterpreterCommand(import.meta.url).command,
       args: [
         '--input-type=commonjs',
         '--eval',
@@ -193,6 +284,9 @@ export class HookCommandCgroup {
         PATH: '/usr/bin:/bin',
         LANG: 'C.UTF-8',
         QWEN_HOOK_COMMAND_ENV: JSON.stringify(env),
+        ...(options?.reapOnParentExit
+          ? { QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT: '1' }
+          : {}),
       },
     };
   }
@@ -205,6 +299,28 @@ export class HookCommandCgroup {
     } catch {
       return false;
     }
+  }
+
+  covers(pid: number): boolean {
+    // A launcher that outlived its foreground waits in the reaper sibling
+    // unit, so the original listing alone would misread it as unjoined.
+    for (const file of [
+      join(this.directory, 'cgroup.procs'),
+      join(`${this.directory}-reaper-${pid}`, 'cgroup.procs'),
+    ]) {
+      try {
+        if (
+          readFileSync(file, 'utf8')
+            .split('\n')
+            .some((line) => Number(line) === pid)
+        ) {
+          return true;
+        }
+      } catch {
+        // A missing unit holds no members.
+      }
+    }
+    return false;
   }
 
   async waitForEmpty(
@@ -244,5 +360,20 @@ export class HookCommandCgroup {
 
   remove(): void {
     if (this.empty()) rmdirSync(this.directory);
+  }
+
+  removeReaper(pid: number): void {
+    const reaper = `${this.directory}-reaper-${pid}`;
+    try {
+      if (
+        /^populated 0$/m.test(
+          readFileSync(join(reaper, 'cgroup.events'), 'utf8'),
+        )
+      ) {
+        rmdirSync(reaper);
+      }
+    } catch {
+      // Missing or still populated: the worker-start sweep owns it.
+    }
   }
 }

@@ -9,7 +9,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { reloadPluginsCommand } from './reload-plugins-command.js';
 import type { CommandContext } from './types.js';
 import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
-import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 
 vi.mock('../../config/extension-runtime-reload.js', () => ({
   reloadPluginsRuntime: vi.fn(async () => ({
@@ -103,5 +103,47 @@ describe('reloadPluginsCommand', () => {
       messageType: 'error',
       content: 'Reload failed: boom',
     });
+  });
+
+  it('does not finish a newer shared reload when an earlier command completes', async () => {
+    const state = new ExtensionRefreshState();
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    const summary = {
+      extensionCount: 0,
+      commandCount: 0,
+      skillCount: 0,
+      agentCount: 0,
+      workflowCount: 0,
+      hookCount: 0,
+      mcpServerCount: 0,
+      lspServerCount: 0,
+    };
+    vi.mocked(reloadPluginsRuntime)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = () => resolve(summary);
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishSecond = () => resolve(summary);
+          }),
+      );
+    const context = {
+      services: { config: {} as Config, extensionRefreshState: state },
+      ui: { reloadCommands: vi.fn() },
+    } as unknown as CommandContext;
+    const first = reloadPluginsCommand.action!(context, '');
+    const second = reloadPluginsCommand.action!(context, '');
+    finishFirst();
+    await first;
+    expect(state.isReloadInProgress()).toBe(true);
+    finishSecond();
+    await second;
+    expect(state.isReloadInProgress()).toBe(false);
+    expect(state.markExtensionsChanged('later change')).toBe(true);
   });
 });

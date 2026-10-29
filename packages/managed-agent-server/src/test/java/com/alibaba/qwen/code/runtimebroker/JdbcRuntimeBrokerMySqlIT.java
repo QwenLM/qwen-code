@@ -1,13 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import javax.sql.DataSource;
 
 import java.net.URI;
 import java.sql.Connection;
@@ -23,10 +20,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import javax.sql.DataSource;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcRuntimeBrokerMySqlIT {
+    @Test
+    void residentMountPathsDoNotBlockIndependentStorageAfterRetirement() throws Exception {
+        inIsolatedSchema("resident_placement_", ResidentWorkspacePlacementTest::verify);
+    }
+
     @Test
     void physicalAliasesReleaseOnlyTheirMatchingHolder() throws Exception {
         inIsolatedSchema("broker_physical_", JdbcPhysicalStorageReleaseTest::verify);
@@ -59,6 +66,8 @@ class JdbcRuntimeBrokerMySqlIT {
                     PreparedStatement timeZone = connection.prepareStatement(
                             "SET time_zone = '" + offset + "'")) {
                 timeZone.execute();
+                JdbcRepositorySupportTest.assertDatabaseClock(
+                        JdbcRepositorySupport.databaseNowPrecise(connection));
                 JdbcRepositorySupportTest.assertStorageSafeClock(
                         JdbcRepositorySupport.databaseNow(connection));
             }

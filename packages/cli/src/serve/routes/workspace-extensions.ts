@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { registerManagedPackagePreparation } from './managed-package-preparation.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -26,6 +27,7 @@ import {
   qualifySkillName,
   validateSkillName,
 } from '@qwen-code/qwen-code-core';
+import { isNpmPackage } from '@qwen-code/qwen-code-core/extension/npm.js';
 import express, {
   type Application,
   type Request,
@@ -43,7 +45,10 @@ import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
-import { MAX_SKILL_NAME_LENGTH } from '../server/request-helpers.js';
+import {
+  MAX_SKILL_NAME_LENGTH,
+  parseRefreshSessionIds,
+} from '../server/request-helpers.js';
 import {
   isPortableAbsolutePath,
   requireTrustedWorkspaceRuntime,
@@ -858,6 +863,7 @@ export function registerWorkspaceExtensionRoutes(
   }
 
   const registerFor = (base: string, resolve: ResolveController): void => {
+    registerManagedPackagePreparation(app, base, resolve, mutate);
     // GET {base} — read-only installed extension status.
     app.get(base, async (req, res) => {
       const assertGenerationOpen = deps.captureGenerationAssertion?.();
@@ -1307,7 +1313,8 @@ export function registerWorkspaceExtensionRoutes(
             return;
           }
         }
-        const npmSource = sourceValue.startsWith('@');
+        const npmSource =
+          sourceValue.startsWith('@') || isNpmPackage(sourceValue);
         const remoteSource =
           npmSource ||
           sourceValue.startsWith('https://') ||
@@ -1512,6 +1519,8 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
+        const input = parseRefreshSessionIds(req.body, res, bridge);
+        if (!input) return;
         if (
           !ctrl.validateExtensionMutationClient(req, res, {
             requireClientId: false,
@@ -1522,7 +1531,9 @@ export function registerWorkspaceExtensionRoutes(
         const releaseOperationSlot = ctrl.acquireOperationSlot(res);
         if (!releaseOperationSlot) return;
         try {
-          const result = await ctrl.refreshExtensionsForAllSessions();
+          const result = await ctrl.refreshExtensionsForAllSessions(
+            input.sessionIds,
+          );
           res.status(200).json(result);
         } finally {
           releaseOperationSlot();
@@ -1865,6 +1876,7 @@ export function registerWorkspaceExtensionRoutes(
         | (() => readonly WorkspaceRuntime[]);
       skipRefresh?: boolean;
       skillsOnly?: boolean;
+      sessionIds?: readonly string[];
       deadlineMs?: number;
       assertGenerationOpen?: () => void;
     } = {},
@@ -2728,6 +2740,16 @@ export function registerWorkspaceExtensionRoutes(
       (req, res) => {
         const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        let input: { sessionIds?: string[] } | undefined;
+        try {
+          input = parseRefreshSessionIds(req.body, res, runtime.bridge);
+        } catch (error) {
+          sendBridgeError(res, error, {
+            route: 'POST /workspaces/:workspace/extensions/refresh',
+          });
+          return;
+        }
+        if (!input) return;
         const manager = primaryController.createExtensionManager(
           runtime.workspaceCwd,
           true,
@@ -2742,6 +2764,9 @@ export function registerWorkspaceExtensionRoutes(
           async () => ({ status: 'refreshed' }),
           {
             refreshRuntimes: [runtime],
+            ...(input.sessionIds !== undefined
+              ? { sessionIds: input.sessionIds }
+              : {}),
             assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
           },
         );

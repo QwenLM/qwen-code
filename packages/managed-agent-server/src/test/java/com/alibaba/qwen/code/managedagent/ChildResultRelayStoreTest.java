@@ -1,15 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore.PendingChild;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore.RelayRow;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -38,6 +39,7 @@ class ChildResultRelayStoreTest {
     private AgentStateStore state;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @org.junit.jupiter.api.BeforeEach
@@ -109,9 +111,9 @@ class ChildResultRelayStoreTest {
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
                 parent, creationKey, "other-digest", "audit", input, null,
                 lineage))
-                .isInstanceOf(ApiException.class)
+                .isInstanceOf(ManagedAgentException.class)
                 .satisfies(error -> assertThat(
-                        ((ApiException) error).getCode())
+                        ((ManagedAgentException) error).getCode())
                         .isEqualTo("idempotency_conflict"));
         assertThat(creationKey).matches("^[0-9a-f]{64}$");
         assertThat(jdbc.queryForObject(
@@ -145,9 +147,9 @@ class ChildResultRelayStoreTest {
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
                 parent, "key-1", "digest", "audit", List.of(), null,
                 new StoreModels.SessionLineage(parent, parent, "run-1", 1)))
-                .isInstanceOf(ApiException.class)
+                .isInstanceOf(ManagedAgentException.class)
                 .satisfies(error -> assertThat(
-                        ((ApiException) error).getCode())
+                        ((ManagedAgentException) error).getCode())
                         .isEqualTo("child_parent_unavailable"));
     }
 
@@ -271,8 +273,8 @@ class ChildResultRelayStoreTest {
                         + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, ?, ?, ?, ?, 1)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
-                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
                 TENANT, sessionId, recordId,
                 "resource-" + recordId,
                 "shell".equals(kind) ? "background_shell" : kind, taskState,
@@ -435,6 +437,55 @@ class ChildResultRelayStoreTest {
                 .isEmpty();
     }
 
+    // #14165 FG10d: a close debt never rewrites the walk's classification.
+    // A run whose outcome no witness survived (a recovery-blocked workflow,
+    // a give-up) retires `unknown` on its walk and its delivery row even
+    // where the host cannot close the child, exactly as when the close is
+    // admitted at once; a proven result retires `done`/`delivered`. Either
+    // way the owed close parks, discoverable, on its own row.
+    @Test
+    void retainsACloseDebtUnderTheWalksOwnClassification() {
+        long now = 450_000L;
+        String session = UUID.randomUUID().toString();
+        for (String classification : List.of("unknown", "done")) {
+            String run = "run-debt-" + classification;
+            insertRecordRow("scope-g", session, run, "workflow", "planned",
+                    "running");
+            RelayRow row = relayStore.claim(TENANT, session, run,
+                    "key-" + classification, "owner", now + 30_000, now);
+            relayStore.retainCloseDebt(row, "owner", classification,
+                    "child-g", now + 1_000, "close debt retained",
+                    now + 30_000, now);
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation"
+                    + " WHERE tenant_id = ? AND operation_id = ? AND"
+                    + " operation_kind = 'CHILD_SESSION_START'", String.class,
+                    TENANT, run)).isEqualTo(classification);
+            assertThat(jdbc.queryForObject("SELECT CONCAT(transport_state,"
+                    + " '/', reception_state, '/', consumption_state) FROM"
+                    + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
+                    + " 'CHILD_RESULT' AND delivery_id = ?", String.class,
+                    TENANT, run)).isEqualTo(("done".equals(classification)
+                            ? "delivered" : classification)
+                            + "/pending/pending");
+            RelayRow debt = relayStore.find(TENANT, session, run);
+            assertThat(debt.operationKind()).isEqualTo("CHILD_SESSION_CLOSE");
+            assertThat(debt.state()).isEqualTo("close_debt");
+            assertThat(debt.childSessionId()).isEqualTo("child-g");
+        }
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactlyInAnyOrder("run-debt-unknown", "run-debt-done");
+        RelayRow other = relayStore.claim(TENANT, session, "run-debt-orphan",
+                "key-orphan", "owner", now + 30_000, now);
+        assertThatThrownBy(() -> relayStore.retainCloseDebt(other, "owner",
+                "orphaned", "child-g", now + 1_000, null, now + 30_000, now))
+                .isInstanceOf(IllegalArgumentException.class);
+        RelayRow owed = relayStore.find(TENANT, session, "run-debt-done");
+        assertThatThrownBy(() -> relayStore.retainCloseDebt(owed, "owner",
+                "done", "child-g", now + 1_000, null, now + 30_000, now))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     // A give-up whose settle committed and whose close_debt write then
     // failed leaves delivery `cancelled` against a ledger still walking
     // the earliest arms (`binding`): narrower arm-2 state lists made
@@ -540,7 +591,7 @@ class ChildResultRelayStoreTest {
     }
 
     private void resource(String sessionId, String resourceId, String kind, String body) {
-        String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,

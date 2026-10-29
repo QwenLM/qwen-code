@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -60,7 +61,7 @@ class Issue13180HardenedVerificationTest {
 
     @LocalServerPort private int publicPort;
     @Autowired private WriterCredentialPolicy credentials;
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") private JdbcTemplate jdbc;
     private final HttpClient http = HttpClient.newHttpClient();
 
     @DynamicPropertySource
@@ -219,7 +220,7 @@ class Issue13180HardenedVerificationTest {
                 "INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, session_id,"
                         + " action_id, record_id, action_version, domain, revision, state, options_json, gmt_create)"
                         + " VALUES ('ACTION', ?, ?, ?, ?, ?, ?, 1, 'approval', 1, 'requested', ?, ?)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(tenant, session),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, session),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session, actionId), tenant, session, actionId, actionId,
                 "{\"v\":1,\"requestId\":\"" + actionId + "\","
                         + "\"turnId\":\"turn-verify\","

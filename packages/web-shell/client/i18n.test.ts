@@ -12,6 +12,37 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('explains missing rewind identities in both locales', () => {
+    expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
+      'no prompt identity',
+    );
+    expect(getTranslator('zh-CN')('rewind.identityUnavailable')).toContain(
+      '身份',
+    );
+  });
+
+  it('pluralizes deletion counts and explains unsupported sessions in both locales', () => {
+    const en = getTranslator('en');
+    expect(en('messageDelete.selected', { count: 1 })).toBe('1 group selected');
+    expect(en('messageDelete.selected', { count: 2 })).toBe(
+      '2 groups selected',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 1 })).toBe(
+      'Delete 1 message group?',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 2 })).toBe(
+      'Delete 2 message groups?',
+    );
+    expect(en('messageDelete.unsupported')).toBe(
+      'Deleting saved messages is not supported for this session.',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.unsupported')).toBe(
+      '此会话不支持删除已保存的消息。',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.selected', { count: 2 })).toBe(
+      '已选 2 组',
+    );
+  });
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -33,12 +64,8 @@ describe('web-shell i18n catalog', () => {
     expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
       '搜索已加载记录…',
     );
-    expect(en('trajectory.filter.count', { count: 1 })).toBe(
-      '1 matching record',
-    );
-    expect(en('trajectory.filter.count', { count: 2 })).toBe(
-      '2 matching records',
-    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe('1 match');
+    expect(en('trajectory.filter.count', { count: 2 })).toBe('2 matches');
     expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
       '(1 record)',
     );

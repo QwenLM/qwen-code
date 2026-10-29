@@ -6,10 +6,11 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,6 +33,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -51,9 +53,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,11 +74,12 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 /**
- * FG10 (#14165) b/c/e/f: the relay-driven settlement of a `child_run`
+ * FG10 (#14165) b–f: the relay-driven settlement of a `child_run`
  * `workflow` launch under fault — a real Spring managed-agent server on
  * MySQL, the embedded Runtime Broker, the packaged Hosted Harness and a
  * scripted model. A coordinator-owned team lead calls `workflow` with a
@@ -103,6 +108,14 @@ import static org.awaitility.Awaitility.await;
  * with its reply lost, and after settlement: a cancelled record leaves
  * nothing running under it, a lost reply replays the admitted cancel, and
  * a settled run refuses it.
+ *
+ * FG10d SIGKILLs the Harness under an attached run — with its `agent()`
+ * request in flight, and with its work done but the child Turn's
+ * settlement swallowed before it reached the store — and starts a cold
+ * one: the run is never re-executed and never settled as if observed;
+ * the Turn parks marked, the cold load refuses, and the record settles
+ * `recovery_blocked` over `outcome_unknown` with an `unknown` ledger and
+ * one honest notification (#14387).
  */
 class HostedWorkflowRelayFaultGatesIT {
     private static final String TOKEN = "fg10-fixture";
@@ -240,6 +253,14 @@ class HostedWorkflowRelayFaultGatesIT {
                 "cancel-reply-lost", "cancel-after-settlement"));
     }
 
+    @Test
+    @Timeout(600)
+    void fg10dKilledWorkflowsSettleBlockedAndNeverRunAgainOnMySql()
+            throws Exception {
+        runLetter("fg10d", List.of("kill-mid-workflow-subagents-in-flight",
+                "kill-after-last-subagent-before-settlement"));
+    }
+
     // ---------------------------------------------------------- letters
 
     private void runLetter(String letter, List<String> caseNames)
@@ -273,6 +294,10 @@ class HostedWorkflowRelayFaultGatesIT {
                 case "cancel-subagent-in-flight" -> cancelInFlight(false);
                 case "cancel-reply-lost" -> cancelInFlight(true);
                 case "cancel-after-settlement" -> cancelAfterSettlement();
+                case "kill-mid-workflow-subagents-in-flight" ->
+                        killMidWorkflow(false);
+                case "kill-after-last-subagent-before-settlement" ->
+                        killMidWorkflow(true);
                 default -> throw new IllegalArgumentException(
                         "unknown case " + letter + "/" + name);
             }
@@ -408,9 +433,12 @@ class HostedWorkflowRelayFaultGatesIT {
      * completed — the result revision (`result-revision-refused`) or the
      * acceptance that lands the notification (`notification-refused`). The
      * subagent is held until the lead's own Turn settled, so the refusal
-     * latches an idle lead (a Turn still open there would keep its
+     * meets an idle lead (a Turn still open there would keep its
      * workspace with the dead owner across the restart) and lands after
      * the child's run, never across it (that is FG10d's ground).
+     * The refused commit stays unsettled rather than latching (#14570):
+     * each settle that finds the revision absent retries it, so the fire
+     * count is a multiple of the bounded retry, not exactly one batch.
      */
     private void refusedAfterChild(String name, String event,
             String condition) throws Exception {
@@ -433,7 +461,7 @@ class HostedWorkflowRelayFaultGatesIT {
         assertThat(turnStatus(child, onlyTurn(child)))
                 .as("the child's run completed before the refusal")
                 .isEqualTo("COMPLETED");
-        // Latched, not advanced: nothing delivered, nothing woken.
+        // Unsettled, not advanced: nothing delivered, nothing woken.
         JsonNode record = childRun(lead);
         if ("result-revision-refused".equals(name)) {
             assertThat(childRunRevision(lead)).isEqualTo(3L);
@@ -453,7 +481,174 @@ class HostedWorkflowRelayFaultGatesIT {
         restartHarness(lead);
         awaitConsumed(lead);
         assertOneWorkflowInstance(lead);
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
+    }
+
+    // ------------------------------------------------ cases: FG10d-1, -2
+
+    /**
+     * The packaged Harness is SIGKILLed under an attached workflow run —
+     * with its `agent()` request in flight at the model, or (`afterWork`)
+     * with the run's work done and the child Turn's settlement swallowed
+     * at the store before it ever left the wire — and a cold one starts.
+     * The run's in-process work died with the generation and no witness
+     * of it survives, so the recovery must neither re-run the script nor
+     * settle the Turn as if its outcome had been observed (#14387): the
+     * Turn parks marked and unsettled, the restarted Harness refuses the
+     * child's load, and the relay settles the record `recovery_blocked`
+     * over `outcome_unknown`, classifies its ledger `unknown` and tells
+     * the lead once, honestly.
+     */
+    private void killMidWorkflow(boolean afterWork) throws Exception {
+        CountDownLatch hold = new CountDownLatch(1);
+        subagentHold.set(hold);
+        String lead;
+        String child;
+        String turn;
+        try {
+            lead = launch(afterWork ? "killsettle" : "killflight");
+            assertThat(subagentHeld.await(90, TimeUnit.SECONDS))
+                    .as("the subagent request reached the model").isTrue();
+            awaitLeadSettled(lead);
+            child = onlyChildSession(lead);
+            turn = onlyTurn(child);
+            waiting().atMost(Duration.ofSeconds(60))
+                    .pollInterval(Duration.ofMillis(250)).untilAsserted(() ->
+                            assertThat(childRun(lead).path("run")
+                                    .path("execution").asText())
+                                    .as("the run is attached")
+                                    .isEqualTo("running_attached"));
+            if (afterWork) {
+                storeProxy.arm(HostedSessionRelayForwardingProxy.Rule.swallow(
+                        matchSettleTurn(child), "settle-swallow"));
+                hold.countDown();
+                waiting().atMost(Duration.ofSeconds(60))
+                        .pollInterval(Duration.ofMillis(100))
+                        .untilAsserted(() -> {
+                            assertNoModelFailure();
+                            assertThat(countOps(storeProxy,
+                                    "swallowing settle-swallow"))
+                                    .isEqualTo(1);
+                        });
+                assertThat(childMessagesMentioning(child, SUB_ANSWER))
+                        .as("the run's work landed; only its settlement"
+                                + " is missing").isEqualTo(1);
+            } else {
+                subagentAbortExpected = true;
+            }
+            killHarness();
+            if (afterWork) {
+                storeProxy.release("settle-swallow");
+            } else {
+                assertThat(subagentAborted.await(30, TimeUnit.SECONDS))
+                        .as("the kill took the in-flight subagent request")
+                        .isTrue();
+            }
+        } finally {
+            hold.countDown();
+            subagentHold.set(null);
+        }
+        assertThat(turnStatus(child, turn)).as("nothing settled the Turn")
+                .isEqualTo("RUNNING");
+        startHarness();
+        awaitRecoveryBlocked(lead, child, turn);
+        // Give a re-drive, a stray settlement or a second notification the
+        // chance to land before proving none did.
+        waiting().pollDelay(Duration.ofSeconds(5))
+                .atMost(Duration.ofSeconds(10)).until(() -> true);
+        assertNoModelFailure();
+        // Never re-executed: the script's one `agent()` dispatch, and the
+        // child journal holds no more answers than the killed run left.
+        assertThat(subagentCalls.get()).as("agent() dispatches").isEqualTo(1);
+        assertThat(childMessagesMentioning(child, SUB_ANSWER))
+                .isEqualTo(afterWork ? 1 : 0);
+        assertThat(jdbc.queryForMap("SELECT status, error_code FROM ma_turn"
+                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                tenant, child, turn))
+                .as("parked, marked, never settled")
+                .containsEntry("status", "RUNNING")
+                .containsEntry("error_code",
+                        AgentStateStore.WORKFLOW_RECOVERY_BLOCKED);
+        assertThat(Files.readAllLines(harnessLog)).as("the cold load refused")
+                .anyMatch(line -> line.contains("sessionId=" + child)
+                        && line.contains("code=hosted_turn_recovery_required"));
+        if (afterWork) {
+            String swallowed = storeProxy.operations().stream()
+                    .filter(line -> line.startsWith(
+                            "PROXY swallowing settle-swallow "))
+                    .map(line -> line.substring(line.indexOf(" cmd=") + 5))
+                    .findFirst().orElseThrow();
+            assertThat(storeProxy.operations()).as("the settlement never"
+                    + " reached the store").noneMatch(line -> line.startsWith(
+                            "PROXY passthru ") && line.contains(" cmd="
+                                    + swallowed + " "));
+        }
+        // The cold load closes the child journal's Turn as interrupted
+        // before refusing; nothing ever records it completed.
+        assertThat(jdbc.queryForList("SELECT CAST(inline_bytes AS CHAR) FROM"
+                + " ma_resource WHERE tenant_id = ? AND session_id = ? AND"
+                + " kind = 'managed-turn-result'", String.class, tenant, child))
+                .as("the child journal's Turn results")
+                .noneMatch(body -> body.contains("\"state\":\"completed\""));
+        JsonNode record = childRun(lead);
+        assertThat(record.path("childSessionId").asText()).isEqualTo(child);
+        assertThat(record.path("run").path("state").asText())
+                .isEqualTo("recovery_blocked");
+        assertThat(record.path("run").path("execution").asText())
+                .isEqualTo("outcome_unknown");
+        assertThat(record.path("run").path("reason").asText())
+                .isEqualTo("runtime_lost");
+        assertThat(record.path("stopReason").isNull()).isTrue();
+        assertThat(record.path("resultRef").isNull()).isTrue();
+        assertThat(record.path("run").path("definition")
+                .path("definitionDigest").asText())
+                .as("the pin is never re-resolved").isEqualTo(sha256(SCRIPT));
+        assertThat(childResultRows()).as("nothing was delivered")
+                .containsExactly("unknown/pending/pending");
+        assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE"
+                + " tenant_id = ? AND session_id = ? AND operation_kind ="
+                + " 'CHILD_SESSION_START'", String.class, tenant, lead))
+                .containsExactly("unknown");
+        List<String> told = notifications(lead);
+        assertThat(told).as("one blocked line").hasSize(1);
+        assertThat(told.get(0)).contains("<status>blocked</status>")
+                .contains("<result>\\nWorkflow child run recovery blocked"
+                        + " (outcome unknown).")
+                .doesNotContain("running");
+        assertThat(wakeRounds.get()).as("one wake reads it").isEqualTo(1);
+        assertThat(operations(lead, "CHILD_SESSION_START")).isEqualTo(1);
+    }
+
+    /** The coordinator parked the killed Turn and the relay settled its
+     * record from the mark. */
+    private void awaitRecoveryBlocked(String lead, String child,
+            String turn) {
+        waiting().atMost(Duration.ofSeconds(150))
+                .pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    assertThat(jdbc.queryForObject("SELECT error_code FROM"
+                            + " ma_turn WHERE tenant_id = ? AND session_id = ?"
+                            + " AND turn_id = ?", String.class, tenant, child,
+                            turn)).isEqualTo(
+                                    AgentStateStore.WORKFLOW_RECOVERY_BLOCKED);
+                    assertThat(childRun(lead).path("run").path("state")
+                            .asText()).isEqualTo("recovery_blocked");
+                    assertThat(childResultRows()).isNotEmpty();
+                    assertThat(wakeRounds.get()).isEqualTo(1);
+                });
+    }
+
+    /** A POST of the child Turn's settlement commit. */
+    private static HostedSessionRelayForwardingProxy.Matcher matchSettleTurn(
+            String child) {
+        return (method, path, body) -> "POST".equals(method)
+                && path.contains("/sessions/" + child + "/transactions:commit")
+                && body.contains("\"operation\":\"settleTurn\"");
+    }
+
+    private static String sha256(String text) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(StandardCharsets.UTF_8)));
     }
 
     // ------------------------------------------------ cases: FG10e-1, -2
@@ -824,12 +1019,14 @@ class HostedWorkflowRelayFaultGatesIT {
     }
 
     /** Every attempt of the store client's bounded retry met the
-     * refusal; past it the lead latches its writes and sends no more. */
+     * refusal; past it the lead keeps the append unsettled and sends no
+     * more until the refusal drops (#14570). A settle that fires before
+     * the drop retries the same commit, so only the lower bound is exact. */
     private void awaitRefusals(String name) {
         waiting().atMost(Duration.ofSeconds(90))
                 .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
                     assertNoModelFailure();
-                    assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+                    assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
                 });
     }
 
@@ -860,10 +1057,7 @@ class HostedWorkflowRelayFaultGatesIT {
      * generation holds `session`, the takeover's witness. */
     private void restartHarness(String session) throws Exception {
         long generation = writerGeneration(session);
-        harness.descendants().forEach(ProcessHandle::destroyForcibly);
-        harness.destroyForcibly();
-        assertThat(harness.waitFor(20, TimeUnit.SECONDS))
-                .as("the killed Harness exited").isTrue();
+        killHarness();
         startHarness();
         waiting().atMost(Duration.ofSeconds(100))
                 .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
@@ -871,6 +1065,14 @@ class HostedWorkflowRelayFaultGatesIT {
                                 .as("a new writer generation holds %s",
                                         session)
                                 .isGreaterThan(generation));
+    }
+
+    /** SIGKILLs the packaged Harness and its descendants (POSIX). */
+    private void killHarness() throws InterruptedException {
+        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(20, TimeUnit.SECONDS))
+                .as("the killed Harness exited").isTrue();
     }
 
     /** The public task id of the lead's workflow run. */
@@ -961,19 +1163,6 @@ class HostedWorkflowRelayFaultGatesIT {
             }
         });
         return json.readTree(json.writeValueAsString(node));
-    }
-
-    private static String camel(String key) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < key.length(); i++) {
-            char c = key.charAt(i);
-            if (c == '_' && i + 1 < key.length()) {
-                out.append(Character.toUpperCase(key.charAt(++i)));
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
     }
 
     private void awaitTerminal(String session, String turn) {
@@ -1637,7 +1826,7 @@ class HostedWorkflowRelayFaultGatesIT {
     }
 
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it",
-                () -> Thread.currentThread().isInterrupted());
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 }

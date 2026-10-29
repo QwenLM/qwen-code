@@ -1,14 +1,14 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.event.EventTransport;
+import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer;
+import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
+import com.alibaba.qwen.code.managedagent.event.LiteTopicEventTransport;
+import com.alibaba.qwen.code.managedagent.event.LiteTopicPublicEventTransport;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer;
-import com.alibaba.qwen.code.managedagent.service.LiteTopicEventTransport;
-import com.alibaba.qwen.code.managedagent.service.LiteTopicPublicEventTransport;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator;
-import com.alibaba.qwen.code.managedagent.store.EventTransport;
-import com.alibaba.qwen.code.managedagent.store.JournalEventTransport;
-import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -100,9 +100,9 @@ class EventTransportConfigurationTest {
                 // Bound from the property values, as in a deployment.
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .withBean(ClientServiceProvider.class, () -> provider)
-                .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
-                .withBean(Clock.class, Clock::systemUTC)
-                .withBean(ObjectMapper.class, ObjectMapper::new)
+                .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> mock(JdbcTemplate.class))
+                .withBean("managedAgentClock", Clock.class, Clock::systemUTC)
+                .withBean("managedAgentObjectMapper", ObjectMapper.class, ObjectMapper::new)
                 .withBean(HarnessConnector.class, () -> harness)
                 .withBean(MessageMaterializer.class,
                         () -> mock(MessageMaterializer.class))

@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.AliyunToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationCollector;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.OSS;
@@ -39,8 +39,8 @@ class ToolPublicationStorageConfigurationTest {
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(AliyunToolPublicationStorageAutoConfiguration.class))
             .withUserConfiguration(PropertiesConfiguration.class, ToolPublicationConfiguration.class)
-            .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
-            .withBean(PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class))
+            .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> mock(JdbcTemplate.class))
+            .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class))
             .withBean(ManagedSessionStore.class, () -> mock(ManagedSessionStore.class))
             .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
             .withBean(ToolExecutionRepository.class, () -> mock(ToolExecutionRepository.class))

@@ -20,7 +20,14 @@ import {
   isReasoningEffortPlaceholder,
 } from '../../reasoning-effort.js';
 import { isOpenRouterHostname } from './openrouter.js';
-import { resolveReasoningForModel } from '../../reasoning-overrides.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../../reasoning-overrides.js';
+import {
+  applyDeepSeekReasoningEffort,
+  getBuiltinDeepSeekReasoning,
+} from '../../deepseek-reasoning.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -240,6 +247,45 @@ export class DefaultOpenAICompatibleProvider
       ...(extraBody ? extraBody : {}),
     };
     this.flattenGptReasoningEffort(result);
+    return this.flattenDeepSeekReasoningEffort(result);
+  }
+
+  protected flattenDeepSeekReasoningEffort<T extends object>(body: T): T {
+    const model = (body as { model?: string }).model;
+    const resolved = this.getReasoningCapabilities(model);
+    if (
+      !getBuiltinDeepSeekReasoning({ ...this.contentGeneratorConfig, model }) ||
+      !resolved ||
+      resolved.toggleOnly ||
+      (resolved.profile !== undefined && resolved.profile !== 'deepseek-openai')
+    )
+      return body;
+    const reasoning = getEffectiveReasoning(
+      { ...this.contentGeneratorConfig, model },
+      resolved,
+    );
+    const result = applyDeepSeekReasoningEffort(
+      body,
+      this.contentGeneratorConfig.baseUrl,
+      (reasoning || undefined)?.effort,
+    );
+    const loose = result as Record<string, unknown>;
+    if (
+      resolved.canDisable !== false &&
+      (loose['reasoning_effort'] === 'none' ||
+        (resolved.disableField === 'thinking'
+          ? (loose['thinking'] as { type?: string } | undefined)?.type ===
+            'disabled'
+          : loose['enable_thinking'] === false))
+    ) {
+      if (resolved.disableField === 'thinking') {
+        loose['thinking'] = { type: 'disabled' };
+        delete loose['reasoning_effort'];
+      } else if (resolved.disableField === 'enable_thinking') {
+        loose['enable_thinking'] = false;
+        delete loose['reasoning_effort'];
+      }
+    }
     return result;
   }
 
