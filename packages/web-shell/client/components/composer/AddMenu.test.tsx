@@ -931,6 +931,33 @@ describe('mobile AddMenu', () => {
     });
     await settle();
   }
+  it.each(['en', 'zh-CN'] as const)(
+    'explains unavailable simple actions in %s and discovers them on the next open',
+    async (language) => {
+      let actions: ReturnType<AddMenuProps['getWorkspaceActions']> = undefined;
+      renderWith(
+        mobileProps({
+          simpleMode: true,
+          addFileAvailable: false,
+          getWorkspaceActions: () => actions,
+        }),
+        language,
+      );
+      await openMenu();
+      expect(menuItem('composer-add-menu-empty')?.textContent).toBe(
+        getTranslator(language)('composerAdd.emptyState'),
+      );
+      const close = portalRoot!.querySelector<HTMLButtonElement>(
+        `[aria-label="${getTranslator(language)('common.close')}"]`,
+      )!;
+      await act(async () => close.click());
+      await settle();
+      actions = { listDirectory: vi.fn().mockResolvedValue([]) };
+      await openMenu();
+      expect(menuItem('composer-add-menu-empty')).toBeNull();
+      expect(menuItem('composer-add-menu-reference-file')).not.toBeNull();
+    },
+  );
   it('uses the scoped bottom drawer and supports reference search and back', async () => {
     const props = mobileProps({
       getWorkspaceActions: () => ({

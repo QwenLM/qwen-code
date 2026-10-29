@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
@@ -32,7 +33,7 @@ public class WakeRecoveryStore {
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
 
-    public WakeRecoveryStore(JdbcTemplate jdbc) {
+    public WakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         transactions = new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
     }

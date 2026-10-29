@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
@@ -128,7 +129,7 @@ public class ChildResultRelayStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
-    public ChildResultRelayStore(JdbcTemplate jdbc) {
+    public ChildResultRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }

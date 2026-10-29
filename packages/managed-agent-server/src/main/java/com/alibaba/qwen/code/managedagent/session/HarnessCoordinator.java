@@ -27,6 +27,7 @@ import jakarta.annotation.PreDestroy;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -130,8 +131,8 @@ public class HarnessCoordinator {
 
     public HarnessCoordinator(AgentStateStore store,
             HarnessConnector harness, HarnessEventProjector projector,
-            RuntimeWarmer runtimeWarmer, ExecutorService executor,
-            Clock clock, ManagedAgentProperties properties) {
+            RuntimeWarmer runtimeWarmer, @Qualifier("managedAgentExecutor") ExecutorService executor,
+            @Qualifier("managedAgentClock") Clock clock, ManagedAgentProperties properties) {
         this.store = store;
         this.harness = harness;
         this.projector = projector;
@@ -242,7 +243,7 @@ public class HarnessCoordinator {
                 tenantId, sessionId, error);
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recoverExpiredTurns() {
         if (!harness.isAvailable()) {
