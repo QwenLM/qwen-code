@@ -9,6 +9,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeModelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
@@ -132,6 +134,10 @@ public class WebShellAgentController {
     @PostMapping("/sessions/export/query")
     public ApiModels.WebShellExportPage export(TenantContext tenant,
             @Valid @RequestBody ApiModels.WebShellExportRequest request) {
+        if ("messages".equals(request.view())) {
+            return service.messageExportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                    request.cursor(), request.limit() == null ? 100 : request.limit(), false);
+        }
         return service.exportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
                 request.cursor(), request.limit() == null ? 100 : request.limit());
     }
@@ -173,10 +179,25 @@ public class WebShellAgentController {
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
+        if ("messages".equals(request.view())) {
+            return service.messageTranscript(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                    request.cursor(), request.limit() == null ? 100 : request.limit());
+        }
         return service.transcript(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(),
                 request.cursor(),
                 request.limit() == null ? 100 : request.limit());
+    }
+
+    @PostMapping("/transcript/items/query")
+    public WebShellExportPage recentTranscriptItems(TenantContext tenant,
+            @Valid @RequestBody WebShellExportRequest request) {
+        if ("messages".equals(request.view())) {
+            return service.messageExportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                    request.cursor(), request.limit() == null ? 100 : request.limit(), true);
+        }
+        return service.recentTranscriptItems(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.cursor(), request.limit() == null ? 100 : request.limit());
     }
 
     @PostMapping(value = "/events/stream",
