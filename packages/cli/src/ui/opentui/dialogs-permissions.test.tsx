@@ -197,7 +197,8 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
       },
     ]);
     const painted = container.textContent ?? '';
-    expect(painted).toContain('Bash(docker * (unparsable)');
+    // The marker leads the row so tail truncation cannot clip it away.
+    expect(painted).toContain('(unparsable) Bash(docker *');
     expect(painted.match(/\(unparsable\)/g)).toHaveLength(1);
   });
 

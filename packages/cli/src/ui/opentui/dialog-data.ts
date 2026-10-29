@@ -781,11 +781,13 @@ export function deletePermissionRule(
       | Record<string, string[]>
       | undefined;
     const scopeRules = rules?.[type];
-    if (scopeRules?.includes(raw)) {
+    // `parseRule` trims, so a stored entry with surrounding whitespace has to
+    // match the trimmed rule or the removal never reaches the settings file.
+    if (scopeRules?.some((rule) => rule.trim() === raw)) {
       settings.setValue(
         settingScope,
         `permissions.${type}`,
-        scopeRules.filter((rule) => rule !== raw),
+        scopeRules.filter((rule) => rule.trim() !== raw),
       );
       break;
     }

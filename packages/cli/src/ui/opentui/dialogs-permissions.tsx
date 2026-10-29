@@ -43,6 +43,7 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { permissionRuleLabel } from '../utils/permission-rule-label.js';
 
 import {
   clipToWidth,
@@ -276,7 +277,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   const ruleListItems = [
     { label: t('Add a new rule…'), key: '__add__', value: '__add__' },
     ...filteredRules.map((r) => ({
-      label: r.invalid ? `${r.raw} ${t('(unparsable)')}` : r.raw,
+      label: permissionRuleLabel(r),
       value: r.raw,
       key: `${r.type}-${r.scope}-${r.raw}`,
     })),

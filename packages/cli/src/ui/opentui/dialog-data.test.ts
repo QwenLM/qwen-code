@@ -1216,6 +1216,21 @@ describe('permissions data and mutations', () => {
       value: [],
     });
   });
+
+  it('persists the deletion of a rule stored with surrounding whitespace', () => {
+    // `parseRule` trims, so the row's value is `Bash(git *)` while the stored
+    // entry keeps its spaces; an exact comparison would drop it from memory
+    // only and the rule would return on the next start.
+    const { settings, written } = createFakeSettings({
+      user: { permissions: { allow: [' Bash(git *) '] } } as Settings,
+    });
+    deletePermissionRule(config, settings, 'Bash(git *)', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
 });
 
 describe('mcp and extension feeds', () => {
