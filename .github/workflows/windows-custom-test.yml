@@ -70,8 +70,8 @@ jobs:
           if (!(Test-Path windows-portable/node.exe)) { throw "node.exe missing" }
           if (!(Test-Path windows-portable/dist/cli.js)) { throw "Bundled CLI missing" }
           if (!(Test-Path windows-portable/dist/system.md)) { throw "Custom system prompt missing" }
-          & windows-portable/Qwen.exe --version
-          if ($LASTEXITCODE -ne 0) { throw "Portable CLI startup failed" }
+          & windows-portable/node.exe windows-portable/dist/cli.js --version
+          if ($LASTEXITCODE -ne 0) { throw "Bundled CLI startup failed" }
       - name: Upload portable Windows application
         uses: actions/upload-artifact@v4
         with:
