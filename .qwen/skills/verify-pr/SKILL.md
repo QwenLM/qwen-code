@@ -369,7 +369,22 @@ with `gh api -X PUT repos/.../contents/<path> --input -` carrying a
 JSON payload — `-f content="$(base64 …)"` blows past ARG_MAX around 100 KB.
 Keep the report.md contract in the comment body: verdict line first,
 collapsed `<details>` Chinese summary immediately after, images referenced
-by the same kebab-case names the files carry. The local path has no
+by the same kebab-case names the files carry. End the comment with the
+attribution footer, the same shape `/review` posts:
+
+```text
+_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_
+```
+
+Resolve the three values from the round's own runtime, never from memory:
+the model is `$QWEN_CODE_MODEL_IDENTITY` when non-empty, else
+`$QWEN_CODE_MODEL`; the CLI version is `qwen --version`; the skill hash is
+the first 12 characters of
+`git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md` — the content
+hash of the instructions this round actually loaded, which needs no git
+history. When the model cannot be resolved, omit the footer rather than
+post an empty identity — and never claim the CI lane's `sandboxed
+verification` signature for a workstation round. The local path has no
 publisher enforcing the fail/mismatch rule, so run
 `node scripts/verify-pr-check.mjs <artifact dir>` and clear its errors before
 publishing, then state the verdict word from `verdict.txt` verbatim. A published
@@ -1471,7 +1486,10 @@ or contract version too.
 Create `tmp/pr<n>-verify-<YYYYMMDD-HHMMSS>/` (the `-verify-` infix is what the
 workflow globs). It must contain:
 
-- `report.md` — the deliverable (structure below).
+- `report.md` — the deliverable (structure below). No attribution footer in
+  it: both publish paths append the footer at comment time — the workflow
+  from its own run metadata, a local round per the publish rule — so a
+  footer written into the report would appear twice.
 - `verdict.txt` — exactly one word: `merge-ready` | `findings` | `blocked` |
   `inconclusive`. Anything else is discarded by the workflow.
 - `assertions.json` — `{"pass": <int>, "fail": <int>, "total": <int>}`,
