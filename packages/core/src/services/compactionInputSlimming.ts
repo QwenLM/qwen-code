@@ -8,9 +8,14 @@ import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { stripSystemReminderBlocks } from '../core/environmentContext.js';
+import {
+  isWrappedSystemReminderPart,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
+import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import { escapeUserMessageTags } from '../utils/xml.js';
 import {
+  isTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
   opensAttachedContent,
   REFERENCED_SESSION_HEADER_PREFIX,
@@ -303,8 +308,9 @@ export interface SlimOptions {
    * its window still shows the summarizer what the user asked for. Tool
    * results ride user turns as `functionResponse` parts and are still
    * truncated, as is content attached on the user's behalf (@-mentioned
-   * files, MCP resources, referenced sessions): everything from the first
-   * part that opens such content to the end of the turn.
+   * files, MCP resources, referenced sessions): every part but the marked
+   * prompt, or, in a turn with no mark, everything from the first part that
+   * opens such content to the end of the turn.
    */
   preserveUserText?: boolean;
 }
@@ -341,15 +347,15 @@ export function slimCompactionInput(
 
   const slimmed = history.map((content) => {
     if (!content.parts || content.parts.length === 0) return content;
-    const typedParts =
+    const typed =
       options?.preserveUserText === true && content.role === 'user'
-        ? attachedContentStart(content.parts)
-        : 0;
+        ? typedPartFlags(content.parts)
+        : undefined;
 
     let touched = false;
     const newParts: Part[] = content.parts.map((part, index) => {
       const replacement =
-        index < typedParts && isUserTextPart(part)
+        typed?.[index] && isUserTextPart(part)
           ? capTypedText(part, stats)
           : transformPart(part, stats, supportedModalities, options);
       if (replacement !== part) {
@@ -747,18 +753,28 @@ function userMessageTexts(history: Content[]): string[] {
   for (const content of history) {
     if (content.role !== 'user') continue;
     const parts = content.parts ?? [];
-    const attachedFrom = attachedContentStart(parts);
-    const typed = stripSystemReminderBlocks(
+    const typed = typedPartFlags(parts);
+    const typedText = stripSystemReminderBlocks(
       parts
-        .slice(0, attachedFrom)
-        .filter(isUserTextPart)
+        .filter((part, index) => typed[index] && isUserTextPart(part))
         .map((part) => part.text)
         .join('\n'),
     ).trim();
+    // Tool traffic, reminders and hook context ride the turn too, but are
+    // neither typed nor attached.
+    const attached = parts.filter(
+      (part, index) =>
+        !typed[index] &&
+        !part.functionResponse &&
+        !part.functionCall &&
+        !isWrappedSystemReminderPart(part) &&
+        !(
+          typeof part.text === 'string' &&
+          isUserPromptSubmitContextPartText(part.text)
+        ),
+    );
     const text = escapeUserMessageTags(
-      [typed, attachedContentNote(parts.slice(attachedFrom))]
-        .filter(Boolean)
-        .join('\n'),
+      [typedText, attachedContentNote(attached)].filter(Boolean).join('\n'),
     );
     if (text) texts.push(text);
   }
@@ -766,12 +782,26 @@ function userMessageTexts(history: Content[]): string[] {
 }
 
 /**
- * Index of the first part that opens content attached on the user's behalf,
- * or `parts.length`. What the user typed is a turn's first part, so it is
- * never taken for attached content even when it starts like a header, and
- * everything after the opening header is attached: closing markers are not
- * trusted, since `--- End of content ---` carries no nonce and a file can
- * contain it.
+ * Which parts of a user turn hold what the user typed. The part marked where
+ * the prompt was built (TYPED_PROMPT_METADATA) settles it: only marked parts
+ * are typed, whatever the layout and whatever else rides the turn, including
+ * attached content no header names. A turn with no mark (recorded before the
+ * mark existed, or written by a subagent, hook or scheduled task) keeps the
+ * positional rule of attachedContentStart.
+ */
+function typedPartFlags(parts: Part[]): boolean[] {
+  if (parts.some(isTypedPrompt)) return parts.map(isTypedPrompt);
+  const attachedFrom = attachedContentStart(parts);
+  return parts.map((_, index) => index < attachedFrom);
+}
+
+/**
+ * For a turn with no marked prompt: index of the first part that opens
+ * content attached on the user's behalf, or `parts.length`. What the user
+ * typed is taken to be the turn's first part, so it is never taken for
+ * attached content even when it starts like a header, and everything after
+ * the opening header is attached: closing markers are not trusted, since
+ * `--- End of content ---` carries no nonce and a file can contain it.
  */
 function attachedContentStart(parts: Part[]): number {
   const index = parts.findIndex(

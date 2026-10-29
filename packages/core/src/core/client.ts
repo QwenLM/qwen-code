@@ -207,6 +207,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { markTypedPrompt } from '../utils/attached-content.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
@@ -3775,6 +3776,18 @@ export class LlmClient {
       SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    // A prompt the user typed arrives here as a plain string when nothing in
+    // it needed expanding; mark it so compaction tells it apart from what
+    // rides the turn after it (hook context, reminders). Expanded prompts are
+    // marked where they are built.
+    if (
+      typeof request === 'string' &&
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery &&
+      isTopLevelSession()
+    ) {
+      request = [markTypedPrompt({ text: request })];
+    }
     const humanInput =
       messageType === SendMessageType.UserQuery &&
       !options?.isConcurrentSideQuery &&

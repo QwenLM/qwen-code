@@ -22230,6 +22230,70 @@ describe('Session', () => {
       }
     });
 
+    describe('marks the typed prompt for compaction (#9455)', () => {
+      it('marks the trailing prompt and not the referenced file content', async () => {
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts:
+              '\n--- Content from referenced files ---\nContent from @editor.ts:\nexport const answer = 42;\n--- End of content ---',
+            files: [],
+          } as Awaited<ReturnType<typeof core.readManyFiles>>);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const targetDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-typed-')),
+        );
+
+        try {
+          await fs.writeFile(
+            path.join(targetDir, 'editor.ts'),
+            'editor',
+            'utf8',
+          );
+          mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'Reverse the string "hello"' },
+              {
+                type: 'resource_link',
+                name: 'editor.ts',
+                uri: 'file://editor.ts',
+              },
+            ],
+          });
+
+          const typed = firstSentMessage().filter(core.isTypedPrompt);
+          expect(textParts(typed)).toHaveLength(1);
+          expect(textParts(typed)[0]).toContain('Reverse the string "hello"');
+          expect(JSON.stringify(typed)).not.toContain(
+            'Content from referenced files',
+          );
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(targetDir, { recursive: true, force: true });
+        }
+      });
+
+      it('marks a prompt that references nothing', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'plain question' }],
+        });
+
+        const typed = firstSentMessage().filter(core.isTypedPrompt);
+        expect(textParts(typed)).toEqual([
+          expect.stringContaining('plain question'),
+        ]);
+      });
+    });
+
     describe('conversation_finished telemetry (#4602 review)', () => {
       it('emits conversation_finished once when a turn completes normally', async () => {
         const finishedSpy = vi
@@ -26856,9 +26920,9 @@ describe('Session', () => {
           },
         );
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
-        const midTurnPart = {
+        const midTurnPart = core.markTypedPrompt({
           text: '\n[User message received during tool execution]:   please also check tests  ',
-        };
+        });
         const nextMessage = secondCall?.[1].message as Part[];
         const functionResponseIndex = nextMessage.findIndex(
           (part) => part.functionResponse !== undefined,
@@ -27060,9 +27124,9 @@ describe('Session', () => {
           text: '[Voice bridge could not transcribe attached audio: no voice model is configured. The audio content is unavailable; do not assume or invent what it says.]',
         };
         const midTurnParts: Part[] = [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: please inspect this image@attachment:///mixed-notes.txt@attachment:///mixed.pdf',
-          },
+          }),
           {
             inlineData: {
               mimeType: 'image/png',
@@ -27139,9 +27203,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: @attachment:///inline-only.txt',
-            },
+            }),
             {
               text: 'File: attachment:///inline-only.txt\ninline only contents',
             },
@@ -27176,9 +27240,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: inspect notes@attachment:///notes.txt',
-            },
+            }),
           ],
           'inspect notes',
           undefined,
@@ -27195,7 +27259,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            { text: '\n[User message received during tool execution]: ' },
+            core.markTypedPrompt({
+              text: '\n[User message received during tool execution]: ',
+            }),
             { text: 'Attachment absolutePath: /tmp/image-2.png' },
           ],
           '',
@@ -27648,9 +27714,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: voice note',
-            },
+            }),
             {
               inlineData: {
                 mimeType: 'audio/wav',
@@ -27846,15 +27912,15 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'read file' }],
           });
 
-          const fallbackPart = {
+          const fallbackPart = core.markTypedPrompt({
             text: '\n[User message received during tool execution]: please inspect this image',
-          };
+          });
           const attachmentFailurePart = {
             text: '[Attachment could not be processed]',
           };
-          const followUpPart = {
+          const followUpPart = core.markTypedPrompt({
             text: '\n[User message received during tool execution]: safe follow-up',
-          };
+          });
           const secondCall = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1];
           expect(secondCall?.[1].message).toEqual(
@@ -27946,9 +28012,9 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'read file' }],
           });
 
-          const fallbackPart = {
+          const fallbackPart = core.markTypedPrompt({
             text: '\n[User message received during tool execution]: please listen to this audio',
-          };
+          });
           const attachmentFailurePart = {
             text: '[Attachment could not be processed]',
           };
@@ -28026,19 +28092,19 @@ describe('Session', () => {
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining([
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: mid-turn 0',
-            },
-            {
+            }),
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: mid-turn 9',
-            },
+            }),
           ]),
         );
         expect(secondCall?.[1].message).not.toEqual(
           expect.arrayContaining([
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: mid-turn 10',
-            },
+            }),
           ]),
         );
         expect(
@@ -28131,15 +28197,15 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'read file' }],
         });
 
-        const retainedMidTurnPart = {
+        const retainedMidTurnPart = core.markTypedPrompt({
           text: '\n[User message received during tool execution]: already queued',
-        };
-        const abortedMidTurnPart = {
+        });
+        const abortedMidTurnPart = core.markTypedPrompt({
           text: '\n[User message received during tool execution]: inspect this image',
-        };
-        const skippedMidTurnPart = {
+        });
+        const skippedMidTurnPart = core.markTypedPrompt({
           text: '\n[User message received during tool execution]: should not be processed',
-        };
+        });
         const preservedMessage = vi.mocked(mockChat.addHistory).mock
           .calls[0]?.[0] as Content | undefined;
 
@@ -28299,12 +28365,12 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'read file' }],
           });
 
-          const mixedMidTurnPart = {
+          const mixedMidTurnPart = core.markTypedPrompt({
             text: '\n[User message received during tool execution]: mixed safe follow-up',
-          };
-          const midTurnPart = {
+          });
+          const midTurnPart = core.markTypedPrompt({
             text: '\n[User message received during tool execution]: safe follow-up',
-          };
+          });
           const secondCall = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1];
           expect(secondCall?.[1].message).toEqual(
@@ -28422,15 +28488,15 @@ describe('Session', () => {
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining([
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: @file:///notes.txt',
-            },
+            }),
             {
               text: 'File: file:///notes.txt\nnote contents',
             },
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: @file:///image.png',
-            },
+            }),
             {
               inlineData: {
                 mimeType: 'image/png',
@@ -28441,12 +28507,12 @@ describe('Session', () => {
         );
         expect(secondCall?.[1].message).not.toEqual(
           expect.arrayContaining([
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: invalid resource',
-            },
-            {
+            }),
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: huge resource',
-            },
+            }),
           ]),
         );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
@@ -28721,9 +28787,9 @@ describe('Session', () => {
         // Prompt 2: the drain flushes the recovered message into this batch.
         await session.prompt(prompt);
 
-        const midTurnPart = {
+        const midTurnPart = core.markTypedPrompt({
           text: '\n[User message received during tool execution]: please also check tests',
-        };
+        });
         // Injected into prompt 2's follow-up (4th sendMessageStream call), not
         // prompt 1's (which timed out with nothing to inject).
         const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
@@ -29009,7 +29075,9 @@ describe('Session', () => {
               userInputOnly: true,
             },
           ]);
-          const midTurnPart = { text: `${interruptPrefix}use plan B instead` };
+          const midTurnPart = core.markTypedPrompt({
+            text: `${interruptPrefix}use plan B instead`,
+          });
           const sends = vi.mocked(mockChat.sendMessageStream).mock.calls;
           expect(sends).toHaveLength(2);
           expect(sends[1]?.[1].message).toEqual([midTurnPart]);
@@ -29061,7 +29129,9 @@ describe('Session', () => {
           const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
           expect(calls).toHaveLength(2);
           expect(calls[1]?.[1].message).toEqual([
-            { text: `${interruptPrefix}use plan B instead` },
+            core.markTypedPrompt({
+              text: `${interruptPrefix}use plan B instead`,
+            }),
           ]);
         });
 
@@ -29130,7 +29200,9 @@ describe('Session', () => {
               expect(sends[0][1].aborted).toBe(true);
               expect(sends).toHaveLength(2);
               expect(sends[1][0]).toEqual([
-                { text: `${interruptPrefix}use plan B instead` },
+                core.markTypedPrompt({
+                  text: `${interruptPrefix}use plan B instead`,
+                }),
               ]);
               expect(sends[1][3]).toMatchObject({
                 type: core.SendMessageType.Steer,
@@ -29233,7 +29305,9 @@ describe('Session', () => {
             await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
             expect(sends).toHaveLength(2);
             expect(sends[1][0]).toEqual([
-              { text: `${interruptPrefix}use plan B instead` },
+              core.markTypedPrompt({
+                text: `${interruptPrefix}use plan B instead`,
+              }),
             ]);
             expect(sends[1][3]).toMatchObject({
               type: core.SendMessageType.Steer,
@@ -29266,7 +29340,9 @@ describe('Session', () => {
             await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
             expect(sends).toHaveLength(2);
             expect(sends[1][0]).toEqual([
-              { text: `${interruptPrefix}use plan B instead` },
+              core.markTypedPrompt({
+                text: `${interruptPrefix}use plan B instead`,
+              }),
             ]);
           });
 
@@ -29375,7 +29451,11 @@ describe('Session', () => {
           await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
-          ).toEqual([{ text: `${interruptPrefix}use plan B instead` }]);
+          ).toEqual([
+            core.markTypedPrompt({
+              text: `${interruptPrefix}use plan B instead`,
+            }),
+          ]);
         });
 
         it('cuts a Goal continuation short and answers the input in it', async () => {
@@ -29428,7 +29508,9 @@ describe('Session', () => {
           const sends = vi.mocked(mockChat.sendMessageStream).mock.calls;
           expect(sends).toHaveLength(2);
           expect(sends[1]?.[1].message).toEqual([
-            { text: `${interruptPrefix}use plan B instead` },
+            core.markTypedPrompt({
+              text: `${interruptPrefix}use plan B instead`,
+            }),
           ]);
         });
 
@@ -29479,9 +29561,11 @@ describe('Session', () => {
           expect(
             nextMessage.some((part) => part.functionResponse !== undefined),
           ).toBe(true);
-          expect(nextMessage).toContainEqual({
-            text: '\n[User message received during tool execution]: also check tests',
-          });
+          expect(nextMessage).toContainEqual(
+            core.markTypedPrompt({
+              text: '\n[User message received during tool execution]: also check tests',
+            }),
+          );
         });
 
         it('answers input whose drain returns after the response ended', async () => {
@@ -29510,9 +29594,9 @@ describe('Session', () => {
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
           ).toEqual([
-            {
+            core.markTypedPrompt({
               text: '\n[User message received while you were responding]: late steer',
-            },
+            }),
           ]);
         });
 
@@ -29551,7 +29635,7 @@ describe('Session', () => {
           const sends = vi.mocked(mockChat.sendMessageStream).mock.calls;
           expect(sends[1]?.[1].message).toEqual([{ text: 'Keep working' }]);
           expect(sends[2]?.[1].message).toEqual([
-            { text: `${interruptPrefix}stop here` },
+            core.markTypedPrompt({ text: `${interruptPrefix}stop here` }),
           ]);
         });
 
@@ -30017,7 +30101,9 @@ describe('Session', () => {
           expect(state.signal?.aborted).toBe(true);
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
-          ).toEqual([{ text: `${interruptPrefix}late steer` }]);
+          ).toEqual([
+            core.markTypedPrompt({ text: `${interruptPrefix}late steer` }),
+          ]);
         });
 
         it('leaves a late answer that lands after its turn to the tool boundary', async () => {
@@ -30081,9 +30167,11 @@ describe('Session', () => {
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1]
               .message as Part[],
-          ).toContainEqual({
-            text: '\n[User message received during tool execution]: late steer',
-          });
+          ).toContainEqual(
+            core.markTypedPrompt({
+              text: '\n[User message received during tool execution]: late steer',
+            }),
+          );
         });
 
         it('leaves a late answer that lands after its response to the tool boundary', async () => {
@@ -30163,9 +30251,11 @@ describe('Session', () => {
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1]
               .message as Part[],
-          ).toContainEqual({
-            text: '\n[User message received during tool execution]: late steer',
-          });
+          ).toContainEqual(
+            core.markTypedPrompt({
+              text: '\n[User message received during tool execution]: late steer',
+            }),
+          );
         });
 
         it('does not cut a response whose tool call starts while the drain is out', async () => {
@@ -30243,7 +30333,9 @@ describe('Session', () => {
           await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
-          ).toEqual([{ text: `${responsePrefix}also check tests` }]);
+          ).toEqual([
+            core.markTypedPrompt({ text: `${responsePrefix}also check tests` }),
+          ]);
         });
 
         it('surfaces an error from a response its drain did not cut', async () => {
@@ -30393,9 +30485,11 @@ describe('Session', () => {
               (part) => part.functionResponse !== undefined,
             ),
           ).toBe(true);
-          expect(toolResultMessage).toContainEqual({
-            text: '\n[User message received during tool execution]: also check tests',
-          });
+          expect(toolResultMessage).toContainEqual(
+            core.markTypedPrompt({
+              text: '\n[User message received during tool execution]: also check tests',
+            }),
+          );
         });
 
         it('keeps taken input when the turn is stopped while the tool boundary resolves it', async () => {
@@ -30485,7 +30579,7 @@ describe('Session', () => {
             1,
           );
           const kept = [
-            { text: `${responsePrefix}look at this` },
+            core.markTypedPrompt({ text: `${responsePrefix}look at this` }),
             { text: '[Attachment could not be processed]' },
           ];
           expect(mockChat.addHistory).toHaveBeenCalledWith({
@@ -30536,7 +30630,9 @@ describe('Session', () => {
           await expect(done).resolves.toMatchObject({
             stopReason: 'cancelled',
           });
-          const kept = { text: `${responsePrefix}use plan B instead` };
+          const kept = core.markTypedPrompt({
+            text: `${responsePrefix}use plan B instead`,
+          });
           expect(mockChat.addHistory).toHaveBeenCalledWith({
             role: 'user',
             parts: [kept],
@@ -30597,7 +30693,7 @@ describe('Session', () => {
           expect(mockChat.addHistory).toHaveBeenCalledWith({
             role: 'user',
             parts: [
-              { text: `${responsePrefix}look at this` },
+              core.markTypedPrompt({ text: `${responsePrefix}look at this` }),
               { text: '[Attachment could not be processed]' },
             ],
           });
@@ -30658,7 +30754,9 @@ describe('Session', () => {
             expect.objectContaining({
               role: 'user',
               parts: [
-                { text: `${interruptPrefix}look at this` },
+                core.markTypedPrompt({
+                  text: `${interruptPrefix}look at this`,
+                }),
                 { text: '[Attachment could not be processed]' },
               ],
             }),
@@ -30722,7 +30820,9 @@ describe('Session', () => {
             const kept = {
               role: 'user',
               parts: [
-                { text: `${responsePrefix}compare with this` },
+                core.markTypedPrompt({
+                  text: `${responsePrefix}compare with this`,
+                }),
                 ...(hang === 'a media bridge'
                   ? [{ text: '[Attachment could not be processed]' }]
                   : []),
@@ -35116,7 +35216,7 @@ describe('Session', () => {
           });
 
           expect(firstSentMessage()).toEqual([
-            { text: '@attachment:///notes.txt' },
+            core.markTypedPrompt({ text: '@attachment:///notes.txt' }),
             { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
             { text: 'File: attachment:///notes.txt\nhello' },
             { text: 'Expanded skill prompt' },
@@ -39811,7 +39911,9 @@ describe('Session', () => {
         });
 
         expect(readManyFilesSpy).not.toHaveBeenCalled();
-        expect(firstSentMessage()).toEqual([{ text: 'Check this file' }]);
+        expect(firstSentMessage()).toEqual([
+          core.markTypedPrompt({ text: 'Check this file' }),
+        ]);
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -39840,7 +39942,9 @@ describe('Session', () => {
         });
 
         const message = firstSentMessage();
-        expect(message[0]).toEqual({ text: 'Use @ext:browser now' });
+        expect(message[0]).toEqual(
+          core.markTypedPrompt({ text: 'Use @ext:browser now' }),
+        );
         const sentText = textParts(message).join('\n');
         expect(sentText).toContain(
           '--- Extension: Browser (untrusted third-party content) ---',
@@ -39875,7 +39979,9 @@ describe('Session', () => {
       });
 
       const message = firstSentMessage();
-      expect(message[0]).toEqual({ text: 'Use @mcp:demo now' });
+      expect(message[0]).toEqual(
+        core.markTypedPrompt({ text: 'Use @mcp:demo now' }),
+      );
       const sentText = textParts(message).join('\n');
       expect(sentText).toContain('--- MCP Server: demo ---');
       expect(sentText).toContain('- Resources: 1');
@@ -40614,12 +40720,12 @@ describe('Session', () => {
               name: core.ToolNames.SHELL,
             }),
           }),
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: recovered before cancellation',
-          },
-          {
+          }),
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: recovered image before cancellation',
-          },
+          }),
           { text: '[Attachment could not be processed]' },
         ],
       });
@@ -40627,9 +40733,9 @@ describe('Session', () => {
         mockChatRecordingService.recordMidTurnUserMessage,
       ).toHaveBeenCalledWith(
         [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: recovered before cancellation',
-          },
+          }),
         ],
         'recovered before cancellation',
       );
@@ -40637,9 +40743,9 @@ describe('Session', () => {
         mockChatRecordingService.recordMidTurnUserMessage,
       ).toHaveBeenCalledWith(
         [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: recovered image before cancellation',
-          },
+          }),
           { text: '[Attachment could not be processed]' },
         ],
         'recovered image before cancellation',
@@ -46442,18 +46548,18 @@ describe('Session', () => {
                 name: core.ToolNames.ASK_USER_QUESTION,
               }),
             }),
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: follow-up while waiting',
-            },
+            }),
           ],
         });
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: follow-up while waiting',
-            },
+            }),
           ],
           'follow-up while waiting',
         );
@@ -56378,9 +56484,9 @@ describe('Session', () => {
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: direction drained before the token-limit check',
-          },
+          }),
         ],
       });
 
@@ -56421,9 +56527,9 @@ describe('Session', () => {
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: context drained at the final claim boundary',
-          },
+          }),
         ],
       });
       expect(
@@ -58207,9 +58313,9 @@ describe('Session', () => {
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: context drained beside the queued prompt',
-          },
+          }),
         ],
       });
     });
@@ -58414,9 +58520,9 @@ describe('Session', () => {
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: mid-turn direction before queued prompt',
-          },
+          }),
         ],
       });
       mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
@@ -58617,9 +58723,9 @@ describe('Session', () => {
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: [
-          {
+          core.markTypedPrompt({
             text: '\n[User message received during tool execution]: mid-turn before queued prompt cancellation',
-          },
+          }),
         ],
       });
       callback('background done', '<after-midturn-fifo-cancel />', {

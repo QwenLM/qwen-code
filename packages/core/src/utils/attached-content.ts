@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Part } from '@google/genai';
+
 /**
  * Headers that open content qwen-code adds to a user turn on the user's
  * behalf: @-mentioned files, MCP resources and referenced sessions. The code
@@ -24,4 +26,32 @@ const ATTACHED_CONTENT_HEADERS = [
 export function opensAttachedContent(text: string): boolean {
   const start = text.trimStart();
   return ATTACHED_CONTENT_HEADERS.some((header) => start.startsWith(header));
+}
+
+/**
+ * `partMetadata` key on the part that holds what the user typed, stamped where
+ * the prompt is built. Compaction keeps that part and treats every other part
+ * of the turn as attached, whatever the layout: the CLI puts the prompt first
+ * and the ACP session puts it last. Client-side only: the native generator
+ * strips `partMetadata` and the other converters never serialize it, while
+ * the session file keeps it, so a resumed session still has it.
+ */
+export const TYPED_PROMPT_METADATA = 'qwen-code:typed-prompt';
+
+/** `part` marked as text the user typed. */
+export function markTypedPrompt(part: Part): Part {
+  return {
+    ...part,
+    partMetadata: { ...part.partMetadata, [TYPED_PROMPT_METADATA]: true },
+  };
+}
+
+/** Whether `part` is a text part marked as what the user typed. */
+export function isTypedPrompt(part: Part): boolean {
+  return (
+    part.partMetadata?.[TYPED_PROMPT_METADATA] === true &&
+    typeof part.text === 'string' &&
+    !part.thought &&
+    !part.functionResponse
+  );
 }

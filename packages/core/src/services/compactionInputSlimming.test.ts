@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  markTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
   REFERENCED_FILES_HEADER,
   REFERENCED_SESSION_HEADER_PREFIX,
@@ -861,6 +862,77 @@ describe('compactionInputSlimming', () => {
         expect(part).toBe(typedLikeHeader);
       });
 
+      describe('a turn whose prompt part is marked', () => {
+        const prompt = markTypedPrompt({ text: 'explain what this does' });
+        const fileBlock = [
+          { text: `\n${REFERENCED_FILES_HEADER}` },
+          { text: '\nContent from src/app.ts:\n' },
+          { text: 'x'.repeat(20_000) },
+          { text: '\n--- End of content ---' },
+        ];
+        const expectAttachedCapped = (parts: Part[], typedIndex: number) => {
+          parts.forEach((part, index) => {
+            if (index === typedIndex) return;
+            expect(part.text!.length).toBeLessThanOrEqual(
+              4_000 + SLIM_TEXT_TRUNCATION_MARKER.length,
+            );
+          });
+        };
+
+        it('keeps the prompt and caps the files when the prompt comes last (ACP)', () => {
+          const parts = slim([...fileBlock, prompt]);
+
+          expect(parts[4]).toBe(prompt);
+          expectAttachedCapped(parts, 4);
+        });
+
+        it('keeps a last prompt when an unrecognized part leads the turn', () => {
+          // An extension or MCP-server mention block carries no header.
+          const parts = slim([
+            { text: 'Extension "docs" context: ' + 'e'.repeat(20_000) },
+            ...fileBlock,
+            prompt,
+          ]);
+
+          expect(parts[5]).toBe(prompt);
+          expectAttachedCapped(parts, 5);
+        });
+
+        it('caps attached text that opens with no recognized header', () => {
+          const parts = slim([
+            prompt,
+            {
+              text:
+                '--- Start of content for directory: src ---\n' +
+                'd'.repeat(20_000),
+            },
+            { text: 'headerless @{file} body ' + 'f'.repeat(20_000) },
+            {
+              text:
+                '<qwen:user-prompt-submit-context>\n' +
+                'h'.repeat(20_000) +
+                '\n</qwen:user-prompt-submit-context>',
+            },
+          ]);
+
+          expect(parts[0]).toBe(prompt);
+          expectAttachedCapped(parts, 0);
+        });
+
+        it('keeps a marked prompt that starts like a header', () => {
+          const typedLikeHeader = markTypedPrompt({
+            text:
+              `${REFERENCED_FILES_HEADER} shows up in my logs; why? ` +
+              'q'.repeat(10_000),
+          });
+
+          const parts = slim([typedLikeHeader, ...fileBlock]);
+
+          expect(parts[0]).toBe(typedLikeHeader);
+          expectAttachedCapped(parts, 0);
+        });
+      });
+
       it('caps text the user typed, keeping its start and its end', () => {
         const pasted = 'BEGIN ' + 'p'.repeat(200_000) + ' END?';
 
@@ -1354,6 +1426,68 @@ describe('compactionInputSlimming', () => {
       const [quote] = quotesIn(blockText(condensed[0]!));
       expect(quote).toContain('and 13 more');
       expect(quote).not.toContain('L'.repeat(121));
+    });
+
+    it.each([
+      ['comes last (ACP)', [] as Part[]],
+      [
+        'comes last behind an unrecognized part',
+        [{ text: 'Extension "docs" context: ' + 'e'.repeat(5_000) }],
+      ],
+    ])(
+      'quotes a marked prompt that %s and names the files, not their content',
+      (_label, leading) => {
+        const history: Content[] = [
+          {
+            role: 'user',
+            parts: [
+              ...leading,
+              { text: `\n${REFERENCED_FILES_HEADER}` },
+              { text: '\nContent from src/app.ts:\n' },
+              { text: 'x'.repeat(20_000) },
+              { text: '\n--- End of content ---' },
+              markTypedPrompt({ text: 'explain what this does' }),
+            ],
+          },
+          ...toolRound(1, 20_000),
+          { role: 'model', parts: [{ text: 'done' }] },
+        ];
+
+        const condensed = condenseToUserMessages(history, 12_000)!;
+
+        const [quote] = quotesIn(blockText(condensed[0]!));
+        expect(quote).toContain('explain what this does');
+        expect(quote).toContain('src/app.ts');
+        expect(quote).not.toContain('x'.repeat(100));
+        expect(quote).not.toContain('e'.repeat(100));
+      },
+    );
+
+    it('neither quotes nor names reminders and hook context beside a marked prompt', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: '<system-reminder>\nToday is Monday.\n</system-reminder>' },
+            markTypedPrompt({ text: 'explain what this does' }),
+            {
+              text:
+                '<qwen:user-prompt-submit-context>\nhook says hi\n' +
+                '</qwen:user-prompt-submit-context>',
+            },
+          ],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const [quote] = quotesIn(blockText(condensed[0]!));
+      expect(quote).toContain('explain what this does');
+      expect(quote).not.toContain('Attached');
+      expect(quote).not.toContain('Today is Monday');
+      expect(quote).not.toContain('hook says hi');
     });
 
     it('says the quotes are verbatim only when none was shortened', () => {

@@ -326,6 +326,7 @@ import {
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   getExtractNoopSkipTurns,
   isBelowCompactionWarn,
+  markTypedPrompt,
 } from '@qwen-code/qwen-code-core';
 import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
@@ -11625,7 +11626,7 @@ export class Session implements SessionContext {
       let rawParts: Part[];
       try {
         if (message.kind === 'text') {
-          rawParts = [{ text: message.message }];
+          rawParts = [markTypedPrompt({ text: message.message })];
         } else {
           rawParts = await withTimeoutSignal(
             resolveSignal,
@@ -11667,7 +11668,7 @@ export class Session implements SessionContext {
             `Failed to resolve mid-turn message: ${errorMessage}`,
           );
         }
-        rawParts = [{ text: displayText }];
+        rawParts = [markTypedPrompt({ text: displayText })];
         if (
           message.kind === 'structured' &&
           hasInlineAttachmentContentBlock(message.content)
@@ -19326,7 +19327,7 @@ export class Session implements SessionContext {
       }
       switch (part.type) {
         case 'text':
-          if (sshWorkspace) return { text: part.text };
+          if (sshWorkspace) return markTypedPrompt({ text: part.text });
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
@@ -19353,7 +19354,7 @@ export class Session implements SessionContext {
               textPathSpecsToRead.set(canonicalPath, pathSpec);
             }
           }
-          return { text: part.text };
+          return markTypedPrompt({ text: part.text });
         case 'image':
           if (preserveUnsupportedImageForBridge) {
             return {
@@ -19583,7 +19584,7 @@ export class Session implements SessionContext {
     // trims as before.
     const promptText =
       pathSpecsToRead.length > 0 ? initialQueryText : initialQueryText.trim();
-    const promptPart: Part = { text: promptText };
+    const promptPart: Part = markTypedPrompt({ text: promptText });
     // promptLast → instruction trails the reference content (prominence fix).
     // Default → original order (instruction first), byte-identical to the
     // pre-change behaviour the mid-turn drain path depends on.

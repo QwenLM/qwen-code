@@ -21,6 +21,7 @@ import {
   summarizeMcpResource,
   SessionService,
   SessionReferenceService,
+  markTypedPrompt,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -233,7 +234,10 @@ export async function resolveAtCommandQuery({
   );
 
   if (atPathCommandParts.length === 0) {
-    return { processedQuery: [{ text: query }], shouldProceed: true };
+    return {
+      processedQuery: [markTypedPrompt({ text: query })],
+      shouldProceed: true,
+    };
   }
 
   // Get centralized file discovery service
@@ -915,14 +919,20 @@ export async function resolveAtCommandQuery({
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
-      return { processedQuery: [{ text: query }], shouldProceed: true };
+      return {
+        processedQuery: [markTypedPrompt({ text: query })],
+        shouldProceed: true,
+      };
     } else if (!initialQueryText && query) {
       // If all @-commands were invalid and no surrounding text, pass original query
-      return { processedQuery: [{ text: query }], shouldProceed: true };
+      return {
+        processedQuery: [markTypedPrompt({ text: query })],
+        shouldProceed: true,
+      };
     }
     // Otherwise, proceed with the (potentially modified) query text that doesn't involve file reading
     return {
-      processedQuery: [{ text: initialQueryText || query }],
+      processedQuery: [markTypedPrompt({ text: initialQueryText || query })],
       shouldProceed: true,
     };
   }
@@ -1292,7 +1302,7 @@ export async function resolveAtCommandQuery({
     },
   ]);
   const processedQueryParts: PartListUnion = [
-    { text: initialQueryText },
+    markTypedPrompt({ text: initialQueryText }),
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,

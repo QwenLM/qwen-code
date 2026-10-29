@@ -371,7 +371,7 @@ describe('Session.pendingWorktreeNotice', () => {
     expect(capturedMessages[1]).toEqual(
       expect.arrayContaining([
         { text: expect.stringContaining(notice) as string },
-        { text: 'ordinary prompt' },
+        core.markTypedPrompt({ text: 'ordinary prompt' }),
       ]),
     );
     expect(session.pendingRecoveredAgentsNotice).toBeNull();

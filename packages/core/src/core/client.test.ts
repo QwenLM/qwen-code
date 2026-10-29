@@ -26,7 +26,9 @@ import type {
   GenerateContentResponse,
   Part,
   PartListUnion,
+  PartUnion,
 } from '@google/genai';
+import { isTypedPrompt } from '../utils/attached-content.js';
 import {
   LlmClient,
   SendMessageType,
@@ -13189,6 +13191,49 @@ Other open files:
           interactionSpan,
           'expanded model prompt',
         );
+      });
+
+      describe('marking the typed prompt for compaction (#9455)', () => {
+        const sentRequest = () =>
+          mockTurnRunFn.mock.calls[0]![1] as PartUnion[];
+        const typedParts = (request: PartUnion[]) =>
+          request.filter(
+            (part): part is Part =>
+              typeof part !== 'string' && isTypedPrompt(part),
+          );
+
+        it('marks a plain-string user prompt but not the hook context after it', async () => {
+          promptSubmitBus(extraHookContext());
+
+          await run('plain prompt', 'prompt-typed-mark', {
+            type: SendMessageType.UserQuery,
+          });
+
+          const request = sentRequest();
+          const typed = typedParts(request);
+          expect(typed).toHaveLength(1);
+          expect(typed[0]!.text).toContain('plain prompt');
+          expect(JSON.stringify(typed)).not.toContain('extra hook context');
+          expect(JSON.stringify(request)).toContain('extra hook context');
+        });
+
+        it('does not mark a cron prompt', async () => {
+          await run('scheduled prompt', 'prompt-typed-cron', {
+            type: SendMessageType.Cron,
+          });
+
+          expect(typedParts(sentRequest())).toEqual([]);
+        });
+
+        it('does not mark a prompt sent inside a subagent', async () => {
+          await runWithAgentContext('agent-1', () =>
+            run('delegated task', 'prompt-typed-subagent', {
+              type: SendMessageType.UserQuery,
+            }),
+          );
+
+          expect(typedParts(sentRequest())).toEqual([]);
+        });
       });
 
       it('passes a non-empty submitted prompt for UserQuery hooks', async () => {

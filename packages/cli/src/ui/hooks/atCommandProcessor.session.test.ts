@@ -30,6 +30,7 @@ import {
   FileDiscoveryService,
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
+  markTypedPrompt,
 } from '@qwen-code/qwen-code-core';
 import * as os from 'node:os';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -190,7 +191,7 @@ describe('handleAtCommand @session:', () => {
       const firstPart = Array.isArray(result.processedQuery)
         ? result.processedQuery[0]
         : undefined;
-      expect(firstPart).toEqual({ text: '@session:a&b' });
+      expect(firstPart).toEqual(markTypedPrompt({ text: '@session:a&b' }));
       expect(mockFindSessionsByTitle).toHaveBeenCalledWith('a&b');
     } finally {
       platformSpy.mockRestore();
