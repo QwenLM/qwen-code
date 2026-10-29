@@ -138,6 +138,7 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import { markPromptParts } from '../../services/prompt-processors/prompt-parts.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -1136,13 +1137,20 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           return true;
         case 'submit_prompt':
           if (onSubmitPrompt)
-            return onSubmitPrompt(outcome.content, undefined, {
-              promptId: outcome.promptId,
-              modelOverride: outcome.modelOverride,
-              refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
-              onComplete: outcome.onComplete,
-              invocationEchoed: true,
-            });
+            // A string is marked by the client when it is sent.
+            return onSubmitPrompt(
+              typeof outcome.content === 'string'
+                ? outcome.content
+                : markPromptParts(outcome.content),
+              undefined,
+              {
+                promptId: outcome.promptId,
+                modelOverride: outcome.modelOverride,
+                refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
+                onComplete: outcome.onComplete,
+                invocationEchoed: true,
+              },
+            );
           notify('The live prompt turn is not wired in this shell.');
           return false;
         case 'schedule_tool':

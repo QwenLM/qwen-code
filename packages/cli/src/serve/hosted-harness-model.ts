@@ -59,6 +59,7 @@ import type {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { createHostedPromptHookRunner } from './hosted-hook-model.js';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/attached-content.js';
 import {
   HookEventName,
   createHookOutput,
@@ -894,7 +895,9 @@ async function runPreparedHostedHarnessTextTurn(
           input.signal,
         )) ?? [...input.resumeFromToolResults])
       : [
-          ...(effectivePrompt ? [{ text: effectivePrompt }] : []),
+          ...(effectivePrompt
+            ? [markTypedPrompt({ text: effectivePrompt })]
+            : []),
           ...(input.attachmentParts ?? []),
         ];
     const selectedSkills =
@@ -954,9 +957,9 @@ async function runPreparedHostedHarnessTextTurn(
         const context = submit?.getAdditionalContext();
         if (typeof updated === 'string' || context) {
           parts = [
-            {
+            markTypedPrompt({
               text: `${typeof updated === 'string' ? updated : message.text}${context ? `\n${context}` : ''}`,
-            },
+            }),
             ...(message.attachments ?? parts.filter((part) => !part.text)),
           ];
         }

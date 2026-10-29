@@ -94,6 +94,7 @@ import {
 } from '../types.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import type { OpenTuiInputSubmission } from './input-submission.js';
+import { markPromptParts } from '../../services/prompt-processors/prompt-parts.js';
 
 const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
 
@@ -580,7 +581,7 @@ async function resolveSteeredPromptParts(
     const message = submission.text;
     const messageEvents: OpenTuiStreamEvent[] = [];
     if (signal.aborted) return restore();
-    let resolved: PartListUnion = submission.content;
+    let resolved: PartListUnion = markPromptParts(submission.content);
     if (isAtCommand(message)) {
       const deadline = new AbortController();
       const readSignal = AbortSignal.any([signal, deadline.signal]);

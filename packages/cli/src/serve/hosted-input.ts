@@ -5,6 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/attached-content.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
@@ -160,7 +161,8 @@ export function parseHostedInput(value: unknown): {
   return {
     text,
     attachments,
-    parts: [...(text ? [{ text }] : []), ...attachments],
+    // The text is the request, for compaction; the attachments are not.
+    parts: [...(text ? [markTypedPrompt({ text })] : []), ...attachments],
   };
 }
 

@@ -3777,12 +3777,15 @@ export class LlmClient {
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     // A prompt the user typed arrives here as a plain string when nothing in
-    // it needed expanding; mark it so compaction tells it apart from what
-    // rides the turn after it (hook context, reminders). Expanded prompts are
-    // marked where they are built.
+    // it needed expanding, and so does its retry; mark it so compaction tells
+    // it apart from what rides the turn after it (hook context, reminders).
+    // Expanded prompts are marked where they are built. A scheduled prompt is
+    // left to compaction's positional reading: a `/loop` tick sends text the
+    // harness wrote under the same type.
     if (
       typeof request === 'string' &&
-      messageType === SendMessageType.UserQuery &&
+      (messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Retry) &&
       !options?.isConcurrentSideQuery &&
       isTopLevelSession()
     ) {

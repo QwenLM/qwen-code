@@ -218,13 +218,14 @@ describe('handleAtCommand', () => {
   });
 
   describe('marks the typed prompt for compaction (#9455)', () => {
-    const typedFlags = async (query: string) => {
+    const typedFlags = async (query: string, markPrompt?: boolean) => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
         onDebugMessage: mockOnDebugMessage,
         messageId: 900,
         signal: abortController.signal,
+        markPrompt,
       });
       return (result.processedQuery as Array<{ text?: string }>).map(
         isTypedPrompt,
@@ -258,6 +259,18 @@ describe('handleAtCommand', () => {
         false,
         false,
       ]);
+    });
+
+    it('marks nothing for input that is not a request', async () => {
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'notice.txt'),
+        'attached body',
+      );
+
+      expect(await typedFlags('background task finished', false)).toEqual([
+        false,
+      ]);
+      expect(await typedFlags(`see @${filePath}`, false)).not.toContain(true);
     });
   });
 

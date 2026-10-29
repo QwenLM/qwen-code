@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it } from 'vitest';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/attached-content.js';
 import { readFileSync } from 'node:fs';
 import { PIPELINE_IMAGE_MIME_TYPES } from '@qwen-code/qwen-code-core/utils/request-tokenizer/supportedImageFormats.js';
 import {
@@ -66,7 +67,7 @@ describe('Hosted immutable attachment input', () => {
       image,
     ]);
     expect(parsed.text).toBe('Review');
-    expect(parsed.parts[0]).toEqual({ text: 'Review' });
+    expect(parsed.parts[0]).toEqual(markTypedPrompt({ text: 'Review' }));
     expect(parsed.parts[1]?.text).toContain('"notes 1.md" (text/markdown)');
     expect(parsed.parts[1]?.text).toContain('你好\nsecond line');
     expect(parsed.parts[2]).toEqual({

@@ -13217,6 +13217,21 @@ Other open files:
           expect(JSON.stringify(request)).toContain('extra hook context');
         });
 
+        it('marks a retried prompt sent as a plain string', async () => {
+          installChat({
+            getHistoryLength: vi.fn().mockReturnValue(0),
+            stripOrphanedUserEntriesFromHistory: vi.fn(),
+          });
+
+          await run('retried prompt', 'prompt-typed-retry', {
+            type: SendMessageType.Retry,
+          });
+
+          const typed = typedParts(sentRequest());
+          expect(typed).toHaveLength(1);
+          expect(typed[0]!.text).toContain('retried prompt');
+        });
+
         it('does not mark a cron prompt', async () => {
           await run('scheduled prompt', 'prompt-typed-cron', {
             type: SendMessageType.Cron,

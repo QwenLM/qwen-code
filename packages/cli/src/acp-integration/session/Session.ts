@@ -88,6 +88,7 @@ import type {
   FunctionCall,
   GenerateContentResponseUsageMetadata,
   Part,
+  PartListUnion,
 } from '@google/genai';
 import {
   createToolLifecycle,
@@ -436,7 +437,7 @@ import {
 } from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
-import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { markPromptParts } from '../../services/prompt-processors/prompt-parts.js';
 import {
   MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
   MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
@@ -1807,6 +1808,11 @@ function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
     `Mid-turn drain response had ${items.length} ${fieldName}; processing first ${MAX_MID_TURN_DRAIN_ITEMS}`,
   );
   return items.slice(0, MAX_MID_TURN_DRAIN_ITEMS);
+}
+
+/** The prompt as recorded, marked so a resumed session still quotes it. */
+function recordedPrompt(promptText: string): PartListUnion {
+  return promptText ? [markTypedPrompt({ text: promptText })] : promptText;
 }
 
 function getMidTurnItemDisplayTextForLog(displayText: unknown): string {
@@ -7133,7 +7139,7 @@ export class Session implements SessionContext {
                 .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
               recorder?.recordUserMessage(
-                promptText,
+                recordedPrompt(promptText),
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
                   inputAnnotations ||
@@ -7231,7 +7237,7 @@ export class Session implements SessionContext {
               ) {
                 const recorder = this.config.getChatRecordingService();
                 recorder?.recordUserMessage(
-                  promptText,
+                  recordedPrompt(promptText),
                   goalTurn?.permit,
                   promptDisplayText !== undefined || inputAnnotations
                     ? {
@@ -19098,7 +19104,7 @@ export class Session implements SessionContext {
 
     switch (result.type) {
       case 'submit_prompt': {
-        const expandedPrompt = normalizePartList(result.content);
+        const expandedPrompt = markPromptParts(result.content);
         const attachmentBlocks =
           result.resolvedCommand?.kind === CommandKind.BUILT_IN
             ? []
@@ -19584,7 +19590,13 @@ export class Session implements SessionContext {
     // trims as before.
     const promptText =
       pathSpecsToRead.length > 0 ? initialQueryText : initialQueryText.trim();
-    const promptPart: Part = markTypedPrompt({ text: promptText });
+    // Without a text block (a command's attachments alone) the prompt holds
+    // only the `@uri` pointers this function wrote, not a request.
+    const promptPart: Part = message.some(
+      (block) => block.type === 'text' && block.text.trim() !== '',
+    )
+      ? markTypedPrompt({ text: promptText })
+      : { text: promptText };
     // promptLast → instruction trails the reference content (prominence fix).
     // Default → original order (instruction first), byte-identical to the
     // pre-change behaviour the mid-turn drain path depends on.

@@ -54,6 +54,11 @@ export interface ResolveAtCommandParams {
   onDebugMessage: (message: string) => void;
   messageId: number;
   signal: AbortSignal;
+  /**
+   * Mark the prompt as the request, for compaction. False for input that is
+   * not one, such as a background notification. Defaults to true.
+   */
+  markPrompt?: boolean;
 }
 
 interface HandleAtCommandParams extends ResolveAtCommandParams {
@@ -227,7 +232,10 @@ export async function resolveAtCommandQuery({
   onDebugMessage,
   messageId: userMessageTimestamp,
   signal,
+  markPrompt = true,
 }: ResolveAtCommandParams): Promise<ResolveAtCommandResult> {
+  const promptPart = (text: string): Part =>
+    markPrompt ? markTypedPrompt({ text }) : { text };
   const commandParts = parseAllAtCommands(query);
   const atPathCommandParts = commandParts.filter(
     (part) => part.type === 'atPath',
@@ -235,7 +243,7 @@ export async function resolveAtCommandQuery({
 
   if (atPathCommandParts.length === 0) {
     return {
-      processedQuery: [markTypedPrompt({ text: query })],
+      processedQuery: [promptPart(query)],
       shouldProceed: true,
     };
   }
@@ -920,19 +928,19 @@ export async function resolveAtCommandQuery({
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
       return {
-        processedQuery: [markTypedPrompt({ text: query })],
+        processedQuery: [promptPart(query)],
         shouldProceed: true,
       };
     } else if (!initialQueryText && query) {
       // If all @-commands were invalid and no surrounding text, pass original query
       return {
-        processedQuery: [markTypedPrompt({ text: query })],
+        processedQuery: [promptPart(query)],
         shouldProceed: true,
       };
     }
     // Otherwise, proceed with the (potentially modified) query text that doesn't involve file reading
     return {
-      processedQuery: [markTypedPrompt({ text: initialQueryText || query })],
+      processedQuery: [promptPart(initialQueryText || query)],
       shouldProceed: true,
     };
   }
@@ -1302,7 +1310,7 @@ export async function resolveAtCommandQuery({
     },
   ]);
   const processedQueryParts: PartListUnion = [
-    markTypedPrompt({ text: initialQueryText }),
+    promptPart(initialQueryText),
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,

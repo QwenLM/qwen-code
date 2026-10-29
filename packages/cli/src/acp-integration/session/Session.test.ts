@@ -1936,7 +1936,7 @@ describe('Session', () => {
 
       expect(intentParts(firstSentMessage())).toHaveLength(1);
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'expanded request without a keyword',
+        [core.markTypedPrompt({ text: 'expanded request without a keyword' })],
         undefined,
         undefined,
         expect.any(String),
@@ -8759,7 +8759,7 @@ describe('Session', () => {
       const promptId = getApiHistoryPromptId(pushedEntry);
       expect(promptId).toMatch(/^test-session-id########\d+$/);
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'hello',
+        [core.markTypedPrompt({ text: 'hello' })],
         undefined,
         undefined,
         promptId,
@@ -14373,7 +14373,7 @@ describe('Session', () => {
             expect(
               mockChatRecordingService.recordUserMessage,
             ).toHaveBeenLastCalledWith(
-              'same prompt',
+              [core.markTypedPrompt({ text: 'same prompt' })],
               undefined,
               withDisplayText
                 ? { displayText: 'visible prompt', hookContext: '' }
@@ -14417,7 +14417,7 @@ describe('Session', () => {
           _meta: { promptId: 'client-supplied-id' },
         });
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          'untrusted identity',
+          [core.markTypedPrompt({ text: 'untrusted identity' })],
           undefined,
           undefined,
           expect.stringContaining('test-session-id########'),
@@ -15589,7 +15589,7 @@ describe('Session', () => {
       );
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        '原始语音文本',
+        [core.markTypedPrompt({ text: '原始语音文本' })],
         undefined,
         undefined,
         expect.stringContaining('test-session-id########'),
@@ -15635,7 +15635,7 @@ describe('Session', () => {
       inputAnnotations[0].reference.value = 'changed after submission';
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        text,
+        [core.markTypedPrompt({ text })],
         undefined,
         {
           displayText: text,
@@ -15660,7 +15660,7 @@ describe('Session', () => {
           _meta: { inputAnnotations },
         });
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          'hello',
+          [core.markTypedPrompt({ text: 'hello' })],
           undefined,
           undefined,
           expect.stringContaining('test-session-id########'),
@@ -15686,7 +15686,7 @@ describe('Session', () => {
         _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: [null, 'x', valid] },
       });
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'hello',
+        [core.markTypedPrompt({ text: 'hello' })],
         undefined,
         {
           displayText: 'hello',
@@ -15715,7 +15715,7 @@ describe('Session', () => {
         _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations },
       });
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'hello',
+        [core.markTypedPrompt({ text: 'hello' })],
         undefined,
         undefined,
         expect.stringContaining('test-session-id########'),
@@ -15769,7 +15769,7 @@ describe('Session', () => {
         links[0]._meta!.preview.version = 2;
 
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          text,
+          text ? [core.markTypedPrompt({ text })] : text,
           undefined,
           {
             displayText: text,
@@ -15831,7 +15831,7 @@ describe('Session', () => {
           });
         }
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          userText,
+          userText ? [core.markTypedPrompt({ text: userText })] : userText,
           undefined,
           expect.objectContaining({
             displayText: userText,
@@ -15880,7 +15880,7 @@ describe('Session', () => {
       });
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'describe this',
+        [core.markTypedPrompt({ text: 'describe this' })],
         undefined,
         {
           displayText: 'describe this',
@@ -15912,7 +15912,7 @@ describe('Session', () => {
       });
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'describe these',
+        [core.markTypedPrompt({ text: 'describe these' })],
         undefined,
         expect.objectContaining({ attachmentReferences }),
         expect.stringContaining('test-session-id########'),
@@ -15940,7 +15940,7 @@ describe('Session', () => {
       });
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'inspect this',
+        [core.markTypedPrompt({ text: 'inspect this' })],
         undefined,
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
@@ -20868,7 +20868,7 @@ describe('Session', () => {
       ).resolves.toEqual({ stopReason: 'end_turn' });
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        '3',
+        [core.markTypedPrompt({ text: '3' })],
         undefined,
         undefined,
         'test-session-id########3',
@@ -20898,7 +20898,11 @@ describe('Session', () => {
       });
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'internal channel instructions\n\nhello',
+        [
+          core.markTypedPrompt({
+            text: 'internal channel instructions\n\nhello',
+          }),
+        ],
         undefined,
         { displayText: 'hello', hookContext: '' },
         expect.stringContaining('test-session-id########'),
@@ -22291,6 +22295,37 @@ describe('Session', () => {
         expect(textParts(typed)).toEqual([
           expect.stringContaining('plain question'),
         ]);
+      });
+
+      it("marks a command's expansion, not the pointer to its attachment (R3-1)", async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded skill prompt' }],
+          resolvedCommand: { name: 'inspect', kind: CommandKind.FILE },
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: '/inspect' },
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///notes.txt',
+                mimeType: 'text/plain',
+                text: 'note body',
+              },
+            },
+          ],
+        });
+
+        const typed = firstSentMessage().filter(core.isTypedPrompt);
+        expect(textParts(typed)).toEqual(['Expanded skill prompt']);
       });
     });
 
@@ -27203,9 +27238,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            core.markTypedPrompt({
+            {
               text: '\n[User message received during tool execution]: @attachment:///inline-only.txt',
-            }),
+            },
             {
               text: 'File: attachment:///inline-only.txt\ninline only contents',
             },
@@ -27259,9 +27294,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            core.markTypedPrompt({
+            {
               text: '\n[User message received during tool execution]: ',
-            }),
+            },
             { text: 'Attachment absolutePath: /tmp/image-2.png' },
           ],
           '',
@@ -28488,15 +28523,15 @@ describe('Session', () => {
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining([
-            core.markTypedPrompt({
+            {
               text: '\n[User message received during tool execution]: @file:///notes.txt',
-            }),
+            },
             {
               text: 'File: file:///notes.txt\nnote contents',
             },
-            core.markTypedPrompt({
+            {
               text: '\n[User message received during tool execution]: @file:///image.png',
-            }),
+            },
             {
               inlineData: {
                 mimeType: 'image/png',
@@ -34496,7 +34531,7 @@ describe('Session', () => {
         });
 
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          'follow-up',
+          [core.markTypedPrompt({ text: 'follow-up' })],
           undefined,
           undefined,
           expect.stringContaining('test-session-id########'),
@@ -34996,7 +35031,7 @@ describe('Session', () => {
 
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          '/btw question',
+          [core.markTypedPrompt({ text: '/btw question' })],
           undefined,
           undefined,
           expect.stringContaining('test-session-id########'),
@@ -35117,7 +35152,7 @@ describe('Session', () => {
         // pins the deferred branch's no-payload arm so a regression to
         // unconditional payload recording fails here.
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          '/advisor check my work',
+          [core.markTypedPrompt({ text: '/advisor check my work' })],
           undefined,
           undefined,
           expect.stringContaining('test-session-id########'),
@@ -35162,7 +35197,7 @@ describe('Session', () => {
         );
 
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          '/advisor check my work',
+          [core.markTypedPrompt({ text: '/advisor check my work' })],
           undefined,
           {
             displayText: '/advisor check my work',
@@ -35216,10 +35251,10 @@ describe('Session', () => {
           });
 
           expect(firstSentMessage()).toEqual([
-            core.markTypedPrompt({ text: '@attachment:///notes.txt' }),
+            { text: '@attachment:///notes.txt' },
             { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
             { text: 'File: attachment:///notes.txt\nhello' },
-            { text: 'Expanded skill prompt' },
+            core.markTypedPrompt({ text: 'Expanded skill prompt' }),
           ]);
         },
       );
@@ -35245,7 +35280,7 @@ describe('Session', () => {
         });
 
         expect(firstSentMessage()).toEqual([
-          { text: 'Expanded built-in prompt' },
+          core.markTypedPrompt({ text: 'Expanded built-in prompt' }),
         ]);
       });
 
@@ -35273,7 +35308,7 @@ describe('Session', () => {
         expect(mockChat.addHistory).toHaveBeenCalledWith(
           expect.objectContaining({
             role: 'user',
-            parts: [{ text: 'Expanded prompt' }],
+            parts: [core.markTypedPrompt({ text: 'Expanded prompt' })],
           }),
         );
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
@@ -38707,7 +38742,7 @@ describe('Session', () => {
           { promptId: 'test-session-id########1' },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          'hello',
+          [core.markTypedPrompt({ text: 'hello' })],
           permit,
           undefined,
           expect.stringContaining('test-session-id########'),
