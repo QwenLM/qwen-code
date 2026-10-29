@@ -536,7 +536,11 @@ class WorkspaceCsiNativeActivationGateTest {
         jdbc.execute(
                 "ALTER TABLE ma_session_journal_tx ADD CONSTRAINT owned_reject_install CHECK"
                         + " (journal_revision < 2)");
-        assertThatThrownBy(() -> commit(1)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        // The CHECK violation this injects is mapped per engine: H2 reports a
+        // DataIntegrityViolationException, MySQL error 3819 an
+        // UncategorizedSQLException. Both are DataAccessExceptions, and the
+        // rollback assertions below are the pin, not the wrapper type.
+        assertThatThrownBy(() -> commit(1)).isInstanceOf(org.springframework.dao.DataAccessException.class);
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(binding.getVersion());
