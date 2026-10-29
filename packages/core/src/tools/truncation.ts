@@ -14,6 +14,7 @@ import * as crypto from 'node:crypto';
 import type { Part, PartListUnion } from '@google/genai';
 import { ReadFileTool } from './read-file.js';
 import type { Config } from '../config/config.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -26,6 +27,7 @@ import {
   ToolResultSizeEvent,
   ToolResultPersistedEvent,
 } from '../telemetry/types.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
@@ -71,6 +73,80 @@ export const COMBINED_PASS_TOLERANCE_FACTOR = 2;
  * the fallback kicks in, so the diagnostics comparison must tolerate that band.
  */
 export const TRUNCATION_FALLBACK_ENVELOPE_SLACK = 500;
+
+/**
+ * Output tokens held back for the model's own reply when sizing a tool
+ * result against the remaining window. Without a reserve, a result sized to
+ * exactly the remaining window would leave nothing for the answer, which is
+ * the failure this guards against.
+ */
+export const CONTEXT_AWARE_OUTPUT_RESERVE_TOKENS = 8192;
+
+/**
+ * Smallest char budget a context-tightened result may be squeezed to. Below
+ * this the preview stops being useful, so we floor here instead of returning
+ * almost nothing.
+ */
+export const CONTEXT_AWARE_MIN_CHARS = 1000;
+
+/**
+ * Tightens a tool-output truncation threshold to the space actually left in
+ * the model's context window.
+ *
+ * The configured threshold is a fixed char budget that ignores how full the
+ * conversation already is. When the window is nearly full, a result that
+ * fits the fixed budget can still fill the window and leave the model too
+ * little room to answer, which surfaces as a hard stream error instead of a
+ * graceful degrade. This returns the smaller of the configured threshold and
+ * the estimated remaining window (minus a reserve for the reply), floored at
+ * CONTEXT_AWARE_MIN_CHARS. The full output is still persisted by the caller,
+ * so tightening loses nothing recoverable.
+ *
+ * Returns the configured threshold unchanged when the window is unknown,
+ * still has room, or truncation is disabled (a non-finite threshold is the
+ * explicit "off" opt-out), so normal turns are never affected.
+ */
+export function contextAwareTruncateThreshold(
+  config: Config,
+  configuredThresholdChars: number,
+  reservedOutputTokens: number = CONTEXT_AWARE_OUTPUT_RESERVE_TOKENS,
+): number {
+  // A non-finite configured threshold is the explicit "truncation disabled"
+  // opt-out (`getTruncateToolOutputThreshold` maps a `<= 0` setting to
+  // `Number.POSITIVE_INFINITY`). Honor it first so the context guard cannot
+  // silently re-enable a cap the user turned off.
+  if (!Number.isFinite(configuredThresholdChars)) {
+    return configuredThresholdChars;
+  }
+  // Resolve the window through the same fallback chain used elsewhere in the
+  // codebase (`config.ts`): the per-session content-generator config first,
+  // then the model's default generation config. We stop at the generation
+  // config on purpose — returning the configured threshold for a window that
+  // cannot be resolved keeps normal turns untouched, rather than reaching for
+  // the model's built-in input limit and changing behavior for models that
+  // never set a context window.
+  const windowSize =
+    config.getContentGeneratorConfig?.()?.contextWindowSize ??
+    config.getModelsConfig?.()?.getGenerationConfig?.().contextWindowSize;
+  if (!windowSize || windowSize <= 0) {
+    return configuredThresholdChars;
+  }
+  // "Used" is the current turn's last API-reported prompt-token count, read
+  // from the process-global telemetry. This is a soft safety-net behind the
+  // hard compaction gate, so a conservative (lower-bound) anchor is
+  // acceptable; each daemon runs as a single session process, so the global
+  // reflects this turn's window rather than a mix of concurrent sessions.
+  const usedTokens = uiTelemetryService.getLastPromptTokenCount();
+  const remainingTokens = windowSize - usedTokens - reservedOutputTokens;
+  if (remainingTokens <= 0) {
+    return CONTEXT_AWARE_MIN_CHARS;
+  }
+  const remainingChars = remainingTokens * CHARS_PER_TOKEN;
+  if (remainingChars >= configuredThresholdChars) {
+    return configuredThresholdChars;
+  }
+  return Math.max(CONTEXT_AWARE_MIN_CHARS, remainingChars);
+}
 
 /**
  * Truncates large tool output and saves the full content to a temp file.
