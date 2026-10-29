@@ -584,12 +584,13 @@ export function parseRule(raw: string): PermissionRule {
  */
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
   const printable = stripAnsiAndControl(raw);
-  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
-  console.warn(
+  const message =
     `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
-      `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +
-      `protects nothing. Balance the parentheses to make it take effect.`,
-  );
+    `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +
+    `protects nothing. Balance the parentheses to make it take effect.`;
+  debugLogger.warn(message);
+  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+  console.warn(message);
 }
 
 /**

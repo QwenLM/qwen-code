@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
 import { theme } from '../semantic-colors.js';
+import { stripUnsafeCharacters } from '../utils/textUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -903,9 +904,9 @@ export function PermissionsDialog({
           </Text>
           <Box height={1} />
           <Box marginLeft={2} flexDirection="column">
-            <Text bold>{deleteTarget.rule.raw}</Text>
+            <Text bold>{stripUnsafeCharacters(deleteTarget.rule.raw)}</Text>
             <Text color={theme.text.secondary}>
-              {describeRule(deleteTarget.rule.raw)}
+              {describeRule(stripUnsafeCharacters(deleteTarget.rule.raw))}
             </Text>
             <Text color={theme.text.secondary}>
               {scopeLabel(deleteTarget.scope)}
