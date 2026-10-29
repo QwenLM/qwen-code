@@ -251,6 +251,8 @@ describe('sedEditParser', () => {
     expect(
       parseSedEditCommand("sed -E -i 's/\\u{41}/X/g' file.txt"),
     ).toBeNull();
+    // `\0` is a NUL to an ES regex with the `u` flag, but a literal `0` to sed.
+    expect(parseSedEditCommand("sed -i 's/\\0/X/g' file.txt")).toBeNull();
   });
 
   it('declines u-only invalid escapes so the real sed runs', () => {
