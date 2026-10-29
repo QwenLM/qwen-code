@@ -2,6 +2,8 @@
 
 [English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
 
+> Superseded in part by [release queue optimization](2026-10-28-release-queue-optimization.md): final npm OIDC publishing stays on GitHub-hosted runners; the opt-in isolated ECS lane builds and hands off artifacts. Native audio builds can reuse verified artifacts. The isolation prerequisite still applies.
+
 ## Problem and Scope
 
 On 2026-10-15 both v0.25.2 release workflows completed validation but then

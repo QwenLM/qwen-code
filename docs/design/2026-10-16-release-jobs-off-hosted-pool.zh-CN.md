@@ -2,6 +2,8 @@
 
 [English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
 
+> 后续方案见[发布排队优化](2026-10-28-release-queue-optimization.zh-CN.md)：最终 npm OIDC 发布保留在 GitHub-hosted runner，启用后的隔离 ECS runner 负责构建和产物交接；音频预构建可复用经过验证的历史产物。启用前仍须完成主机隔离。
+
 ## 问题与范围
 
 2026-10-15，两个 v0.25.2 release 工作流完成验证后在 GitHub 托管 runner
