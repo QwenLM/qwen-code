@@ -1308,9 +1308,9 @@ export interface WebShellSidebarOptions {
   showLive?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
-  /** Customize the primary navigation area (new task button, custom entries). */
+  /** Customize the primary navigation area (new session button, custom entries). */
   primaryNav?: WebShellSidebarPrimaryNavOptions;
-  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  /** Whether to hide the "Workspaces" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
@@ -2839,11 +2839,12 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 
 function serializeModelSwitchSummary(
   summary: ModelSwitchSummary,
+  displayName: string,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   return t('model.usingModel', {
     isRuntime: summary.isRuntime ? 1 : 0,
-    modelId: summary.modelId,
+    modelId: displayName,
   });
 }
 
@@ -20135,11 +20136,16 @@ export function App({
         .then((result) => {
           if (!owner.isCurrent()) return;
           const summary = getModelSwitchSummary(result);
-          setPendingModel(summary?.modelId ?? modelId);
+          setPendingModel(modelId);
           if (summary) {
+            const displayName = getModelDisplayName(
+              connectionRef.current.models?.find(
+                (model) => model.id === modelId,
+              )?.label || summary.modelId,
+            );
             store.dispatch({
               type: 'debug',
-              text: serializeModelSwitchSummary(summary, t),
+              text: serializeModelSwitchSummary(summary, displayName, t),
               source: 'model_switch_summary',
               data: summary,
             });
