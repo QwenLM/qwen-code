@@ -81,7 +81,8 @@ class ManagedMessagePagingTest {
         assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(9999), id(10000));
         assertThat(page.hasMore()).isTrue();
         assertThat(jdbc.messageReads).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_snapshot", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE kind IN (?, ?)",
+                Long.class, "managed-snapshot-page", "managed-snapshot-manifest")).isZero();
         var older = read(page.nextCursor(), 2, true);
         assertThat(older.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(9997), id(9998));
         assertThat(jdbc.messageReads).isEqualTo(4);
