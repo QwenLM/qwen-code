@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -17,7 +18,7 @@ import javax.sql.DataSource;
 })
 class WorkspaceRecoveryTest {
     @Autowired private DataSource source;
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") private JdbcTemplate jdbc;
     @Autowired private ManagedAgentStore store;
     @Autowired private WorkspaceExecutionStore authority;
 
