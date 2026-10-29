@@ -35,6 +35,7 @@ const autoMemory = vi.hoisted(() => ({
   error: undefined as unknown,
   readAutoMemoryFile: vi.fn(),
   openAutoMemoryFolder: vi.fn(),
+  reload: vi.fn(),
 }));
 
 const settingsState = vi.hoisted(() => ({
@@ -70,6 +71,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       error: autoMemory.error,
       readAutoMemoryFile: autoMemory.readAutoMemoryFile,
       openAutoMemoryFolder: autoMemory.openAutoMemoryFolder,
+      reload: autoMemory.reload,
     }),
     useSettings: () => ({
       settings: settingsState.settings,
@@ -151,6 +153,7 @@ beforeEach(() => {
   autoMemory.error = undefined;
   autoMemory.readAutoMemoryFile.mockReset();
   autoMemory.openAutoMemoryFolder.mockReset();
+  autoMemory.reload.mockReset().mockResolvedValue(undefined);
   settingsState.settings = [];
   settingsState.setValue.mockReset().mockResolvedValue(undefined);
   settingsState.reload.mockReset().mockResolvedValue(undefined);
@@ -457,5 +460,38 @@ describe('MemoryMessage auto tab', () => {
 
     const editor = container.querySelector('textarea');
     expect(editor?.value).toBe('existing\ntyped\n');
+  });
+
+  // R2-14: the dialog's `/memory refresh` signal must reach the Auto panel.
+  // Keyed on a CHANGE, not the value: a signal set before the tab is opened
+  // must not double-fetch on entry, and only a later bump re-fetches.
+  it('reloads the auto panel only when refreshSignal changes while open', async () => {
+    autoMemory.status = AUTO_STATUS;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage refreshSignal={1} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    // A refresh issued before the tab opened must not fire on entry.
+    act(() => button('Auto memory').click());
+    await flush();
+    expect(autoMemory.reload).not.toHaveBeenCalled();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage refreshSignal={2} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    expect(autoMemory.reload).toHaveBeenCalledTimes(1);
   });
 });

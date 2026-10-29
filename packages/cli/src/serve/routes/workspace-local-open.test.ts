@@ -354,6 +354,50 @@ describe('POST /workspaces/:workspace/open (auto-memory target)', () => {
     expect(openPathLocally).not.toHaveBeenCalled();
   });
 
+  it('returns 404 not_found when a regular file occupies the memory root ancestor', async () => {
+    // A checked-in `.qwen` FILE (dotfile-sync accident): the project root
+    // <ws>/.qwen/memory cannot exist at all — stat fails ENOTDIR, which is
+    // the "does not exist yet" state, not a daemon fault.
+    await fs.writeFile(path.join(cwd, '.qwen'), 'not a directory\n');
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('auto_memory_dir_not_found');
+    expect(res.body.scope).toBe('project');
+    expect(openPathLocally).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 not_found when the user memory root is a symlink loop', async () => {
+    // A symlink loop at the user root: stat fails ELOOP — the directory
+    // cannot exist, so the answer is the not-found state, not a 500. The
+    // parent must exist for the symlink to be created at all.
+    await fs.mkdir(globalBase, { recursive: true });
+    const userDir = path.join(globalBase, 'memories');
+    await fs.symlink('memories', userDir);
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory', autoMemoryScope: 'user' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('auto_memory_dir_not_found');
+    expect(res.body.scope).toBe('user');
+    expect(openPathLocally).not.toHaveBeenCalled();
+  });
+
   it('returns 500 with the path when the auto-memory root is not a directory', async () => {
     await fs.mkdir(path.join(cwd, '.qwen'), { recursive: true });
     await fs.writeFile(path.join(cwd, '.qwen', 'memory'), 'not a dir\n');

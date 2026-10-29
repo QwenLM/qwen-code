@@ -17,8 +17,10 @@ import {
   getUserAutoMemoryRoot,
   runWithMemoryProjectScope,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { sanitizeIndexField } from '@qwen-code/qwen-code-core/memory/indexer.js';
 import { resolveTrustedMemoryRoot } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
 import { detectBOM } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
+import { parse as parseYaml } from '@qwen-code/qwen-code-core/utils/yaml-parser.js';
 import {
   isUnverifiableIdentityError,
   openNoFollow,
@@ -219,26 +221,55 @@ type FrontmatterFields = Partial<
  * carry a `---` YAML frontmatter block; anything malformed (or a file
  * without one) simply falls back to filename-derived metadata — a parse
  * hiccup never drops an entry from the listing.
+ *
+ * The fenced block is parsed with core's YAML parser (the same one the
+ * recall/forget scans use), so block scalars, quoted values and plain
+ * scalars behave the way core recalls them — not a hand-rolled line
+ * regex that garbles `description: |` into a literal pipe.
  */
 function parseAutoMemoryFrontmatter(head: string): FrontmatterFields {
   const normalized = head.replace(/\r\n/g, '\n');
   const match = normalized.match(/^---\n([\s\S]*?)\n---(\n|$)/);
   if (!match) return {};
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseYaml(match[1]);
+  } catch {
+    return {};
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {};
+  }
   const out: FrontmatterFields = {};
-  for (const line of match[1].split('\n')) {
-    const kv = line.match(/^(name|title|description|type|category):\s*(.+)$/);
-    if (!kv) continue;
-    const raw = kv[2].trim();
-    // Multi-line and structured values are not rendered.
-    if (raw.startsWith('[') || raw.startsWith('{') || raw.startsWith('>')) {
-      continue;
-    }
-    const value = raw.replace(/^(['"])(.*)\1$/, '$2').trim();
-    if (value && out[kv[1] as keyof FrontmatterFields] === undefined) {
-      out[kv[1] as keyof FrontmatterFields] = value;
-    }
+  for (const key of FRONTMATTER_KEYS) {
+    const value = frontmatterScalarString(parsed[key]);
+    if (value !== undefined) out[key] = value;
   }
   return out;
+}
+
+const FRONTMATTER_KEYS = [
+  'name',
+  'title',
+  'description',
+  'type',
+  'category',
+] as const;
+
+/**
+ * Coerce a parsed YAML scalar to the string the panel renders. Core's
+ * parser yields numbers/booleans for bare scalars (`name: 10183`); keep
+ * their text instead of dropping the field (core's `stringValue`
+ * behaviour in the memory scans).
+ */
+function frontmatterScalarString(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value.trim() || undefined;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return undefined;
 }
 
 async function probeFrontmatter(filePath: string): Promise<FrontmatterFields> {
@@ -440,16 +471,24 @@ export async function collectWorkspaceAutoMemoryStatus(
         seen.add(file.relativePath);
       }
       const meta = await probeFrontmatter(file.absolutePath);
+      // Collaborator-authored frontmatter is hostile input: core's index
+      // sanitizer strips control/zero-width/bidi chars, collapses
+      // whitespace and caps the length, so a repo-tracked file cannot
+      // reorder rendered text or overflow the row (same contract core
+      // applies before embedding the fields in the committed index).
+      const title =
+        meta['name'] ?? meta['title'] ?? titleFromFilename(file.absolutePath);
       const entry: ServeAutoMemoryFile = {
         kind: 'auto_memory_file',
         scope,
         path: file.absolutePath,
-        title:
-          meta['name'] ?? meta['title'] ?? titleFromFilename(file.absolutePath),
+        title: sanitizeIndexField(title),
         bytes: file.bytes,
         modifiedAt: new Date(file.mtimeMs).toISOString(),
       };
-      if (meta['description']) entry.description = meta['description'];
+      if (meta['description']) {
+        entry.description = sanitizeIndexField(meta['description']);
+      }
       if (meta['type']) entry.type = meta['type'];
       if (meta['category']) entry.category = meta['category'];
       entries.push(entry);

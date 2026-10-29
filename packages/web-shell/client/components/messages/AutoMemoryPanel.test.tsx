@@ -32,6 +32,8 @@ const state = vi.hoisted(() => ({
   reload: vi.fn(),
   features: [] as string[],
   localDaemon: false,
+  autoMemoryOptions: undefined as unknown,
+  settingsOptions: undefined as unknown,
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
@@ -41,20 +43,26 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     >();
   return {
     ...actual,
-    useAutoMemory: () => ({
-      status: state.status,
-      entries: state.status?.entries ?? [],
-      loading: state.loading,
-      error: state.error,
-      readAutoMemoryFile: state.readAutoMemoryFile,
-      openAutoMemoryFolder: state.openAutoMemoryFolder,
-    }),
-    useSettings: () => ({
-      settings: state.settings,
-      error: state.settingsError,
-      setValue: state.setValue,
-      reload: state.reload,
-    }),
+    useAutoMemory: (options?: unknown) => {
+      state.autoMemoryOptions = options;
+      return {
+        status: state.status,
+        entries: state.status?.entries ?? [],
+        loading: state.loading,
+        error: state.error,
+        readAutoMemoryFile: state.readAutoMemoryFile,
+        openAutoMemoryFolder: state.openAutoMemoryFolder,
+      };
+    },
+    useSettings: (options?: unknown) => {
+      state.settingsOptions = options;
+      return {
+        settings: state.settings,
+        error: state.settingsError,
+        setValue: state.setValue,
+        reload: state.reload,
+      };
+    },
     useConnection: () => ({
       capabilities: { features: state.features },
     }),
@@ -227,6 +235,8 @@ beforeEach(() => {
   state.settingsError = undefined;
   state.features = [];
   state.localDaemon = false;
+  state.autoMemoryOptions = undefined;
+  state.settingsOptions = undefined;
   state.readAutoMemoryFile.mockReset();
   state.openAutoMemoryFolder.mockReset().mockResolvedValue(undefined);
   state.setValue.mockReset().mockResolvedValue({
@@ -256,6 +266,38 @@ describe('AutoMemoryPanel', () => {
     // One 512-byte entry per scope.
     expect(container.textContent).toContain('1 · 512 B');
     expect(container.textContent).toContain('512 B');
+  });
+
+  // The hooks are wired with autoLoad: without it the listing is never
+  // requested (useDaemonResource defaults autoLoad=false) and the panel
+  // renders only the two toggles. The mock captures the argument.
+  it('loads the listing and the settings automatically', async () => {
+    await mount();
+
+    expect(state.autoMemoryOptions).toEqual({ autoLoad: true });
+    expect(state.settingsOptions).toEqual({ autoLoad: true });
+  });
+
+  it('renders each row size distinct from the scope header total', async () => {
+    // Two project entries with distinct sizes: the project header shows the
+    // SUM (2.0 KB), a different string from either row size (512 B, 1.5 KB),
+    // so a deleted per-row size would not be masked by the header total.
+    state.status = listing([
+      PROJECT_ENTRY,
+      {
+        ...PROJECT_ENTRY,
+        path: `${PROJECT_DIR}/extra.md`,
+        title: 'Extra notes',
+        bytes: 1536,
+      },
+      USER_ENTRY,
+    ]);
+
+    await mount();
+
+    expect(container.textContent).toContain('2 · 2.0 KB');
+    expect(container.textContent).toContain('512 B');
+    expect(container.textContent).toContain('1.5 KB');
   });
 
   it('shows the not-initialized hint when no directory exists yet', async () => {
@@ -288,6 +330,39 @@ describe('AutoMemoryPanel', () => {
 
     expect(state.readAutoMemoryFile).toHaveBeenCalledWith(PROJECT_ENTRY.path);
     expect(container.textContent).toContain('the note body');
+  });
+
+  it('does not paint a late first read under a newer selection', async () => {
+    // A second selection while the first read is still in flight: the
+    // loadSeq guard must drop the late first response, not paint its body
+    // under the second entry's path header.
+    let resolveFirst: (value: { content: string }) => void = () => {};
+    state.readAutoMemoryFile.mockImplementation((p: string) =>
+      p === PROJECT_ENTRY.path
+        ? new Promise<{ content: string }>((resolve) => {
+            resolveFirst = resolve;
+          })
+        : Promise.resolve({
+            scope: 'user',
+            path: USER_ENTRY.path,
+            bytes: USER_ENTRY.bytes,
+            content: 'prefs body\n',
+          }),
+    );
+
+    await mount();
+    act(() => entryButton('Build notes').click());
+    // Select the user entry while the first read is still in flight.
+    act(() => entryButton('Preferences').click());
+    await flush();
+
+    // The late first read must not overwrite the newer selection.
+    resolveFirst({ content: 'stale A body\n' });
+    await flush();
+
+    expect(container.textContent).toContain(USER_ENTRY.path);
+    expect(container.textContent).toContain('prefs body');
+    expect(container.textContent).not.toContain('stale A body');
   });
 
   it('flags truncated content', async () => {

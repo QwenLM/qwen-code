@@ -31,9 +31,14 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 
-// Lets one test make core's no-follow open reject the way it does on a
-// volume that cannot prove file identity (inode 0, Windows-only).
-const noFollow = vi.hoisted(() => ({ reject: undefined as Error | undefined }));
+// Lets tests make core's no-follow open reject the way it does on a volume
+// that cannot prove file identity (inode 0, Windows-only), or substitute a
+// handle whose stat() answers differ between the open and the post-read stat
+// (to drive the torn-read post-check arm).
+const noFollow = vi.hoisted(() => ({
+  reject: undefined as Error | undefined,
+  handle: undefined as unknown,
+}));
 vi.mock('@qwen-code/qwen-code-core/noFollowOpen', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -41,10 +46,13 @@ vi.mock('@qwen-code/qwen-code-core/noFollowOpen', async (importOriginal) => {
     >();
   return {
     ...actual,
-    openNoFollow: (...args: Parameters<typeof actual.openNoFollow>) =>
-      noFollow.reject
-        ? Promise.reject(noFollow.reject)
-        : actual.openNoFollow(...args),
+    openNoFollow: (...args: Parameters<typeof actual.openNoFollow>) => {
+      if (noFollow.reject) return Promise.reject(noFollow.reject);
+      if (noFollow.handle !== undefined) {
+        return Promise.resolve(noFollow.handle);
+      }
+      return actual.openNoFollow(...args);
+    },
   };
 });
 
@@ -117,6 +125,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   noFollow.reject = undefined;
+  noFollow.handle = undefined;
   delete process.env['QWEN_CODE_MEMORY_LOCAL'];
   delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   clearAutoMemoryRootCache();
@@ -179,6 +188,69 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
     for (const entry of status.entries) {
       expect(entry.modifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     }
+  });
+
+  it('reads name and category frontmatter keys on an isolated entry', async () => {
+    await writeFile(
+      projectDir,
+      'named.md',
+      '---\nname: Named entry\ncategory: decision\n---\n\nbody\n',
+    );
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    expect(status.fileCount).toBe(1);
+    expect(status.entries[0].title).toBe('Named entry');
+    expect(status.entries[0].category).toBe('decision');
+  });
+
+  it('parses a block-scalar description via core YAML, not a literal pipe', async () => {
+    await writeFile(
+      projectDir,
+      'block.md',
+      '---\nname: Block note\ndescription: |\n  How the project builds\ntype: project\n---\n\nbody\n',
+    );
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    // The old line-regex garbled `description: |` into the literal `|`;
+    // core's YAML parser yields the block text (sanitizer collapses the
+    // trailing newline clip-chomp keeps).
+    expect(status.entries[0].description).toBe('How the project builds');
+  });
+
+  it('strips bidi and zero-width chars and caps hostile frontmatter fields', async () => {
+    // U+202E (bidi override) and U+200B (zero-width space) are the two
+    // characters a repo-tracked memory file could use to reorder or hide
+    // the rendered title/description. Built with fromCharCode so no
+    // invisible codepoint lands in this source file.
+    const bidi = String.fromCharCode(0x202e);
+    const zwsp = String.fromCharCode(0x200b);
+    const content = [
+      '---',
+      `name: ${bidi}Evil${zwsp}title`,
+      `description: ${bidi}${'x'.repeat(200)}${zwsp}`,
+      'type: project',
+      '---',
+      '',
+      'body',
+    ].join('\n');
+    await writeFile(projectDir, 'hostile.md', content);
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    const entry = status.entries[0];
+    expect(entry.title).toBe('Eviltitle');
+    expect(entry.description).toBeDefined();
+    expect(entry.description).not.toContain(bidi);
+    expect(entry.description).not.toContain(zwsp);
+    expect((entry.description ?? '').length).toBeLessThanOrEqual(120);
   });
 
   it('skips dotfiles, non-markdown files, and symlinked entries', async () => {
@@ -378,6 +450,42 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
       }),
     ]);
   });
+
+  it('records a readdir-failed root and keeps the surviving entries', async () => {
+    // The errors[] PRODUCER side: a root that exists but cannot be listed
+    // must surface as a readdir_failed cell, not drop the whole listing or
+    // 500 the route (the finding's "one unreadable dir -> 500 for the
+    // whole listing" regression).
+    await writeFile(projectDir, 'note.md', 'note\n');
+    await fs.mkdir(userDir, { recursive: true });
+    const originalReaddir = fs.readdir.bind(fs);
+    vi.spyOn(fs, 'readdir').mockImplementation((target, opts) =>
+      String(target) === userDir
+        ? Promise.reject(
+            Object.assign(new Error('EACCES: permission denied, scandir'), {
+              code: 'EACCES',
+            }),
+          )
+        : originalReaddir(target, opts),
+    );
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    expect(status.initialized).toBe(true);
+    expect(status.entries.map((entry) => path.basename(entry.path))).toEqual([
+      'note.md',
+    ]);
+    expect(status.errors).toEqual([
+      expect.objectContaining({
+        kind: 'auto_memory_file',
+        status: 'error',
+        hint: userDir,
+        errorKind: 'readdir_failed',
+      }),
+    ]);
+  });
 });
 
 describe('readWorkspaceAutoMemoryFile', () => {
@@ -502,6 +610,54 @@ describe('readWorkspaceAutoMemoryFile', () => {
 
     expect(result.content).toBeUndefined();
     expect(result.bytes).toBe(7);
+  });
+
+  it('refuses a torn read when the file changes between open and the post-read stat', async () => {
+    // Drives the POST-READ arm of the torn check (after.size/mtimeMs vs the
+    // open-time stat), which the lstat-mocked test above short-circuits via
+    // tornPre: a write landing between the two handle.stat() calls must be
+    // withheld, not served as a stale prefix with no truncated flag.
+    const file = path.join(projectDir, 'note.md');
+    await writeFile(projectDir, 'note.md', 'stable\n');
+    const realHandle = await fs.open(file, 'r');
+    try {
+      const s = await realHandle.stat();
+      const openedStat = {
+        isFile: () => s.isFile(),
+        dev: s.dev,
+        ino: s.ino,
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+      };
+      const afterStat = {
+        ...openedStat,
+        size: s.size + 5,
+        mtimeMs: s.mtimeMs + 1000,
+      };
+      let statCalls = 0;
+      noFollow.handle = {
+        stat: async () => {
+          statCalls += 1;
+          return statCalls === 1 ? openedStat : afterStat;
+        },
+        read: (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number | null,
+        ) => realHandle.read(buffer, offset, length, position),
+        close: () => realHandle.close(),
+      };
+      const result = await readWorkspaceAutoMemoryFile(workspace, file, {
+        trusted: true,
+      });
+      expect(statCalls).toBe(2);
+      expect(result.content).toBeUndefined();
+      expect(result.contentUnavailable).toBe('torn');
+    } finally {
+      await realHandle.close();
+      noFollow.handle = undefined;
+    }
   });
 
   it('discriminates a torn read from an undecodable file', async () => {
@@ -729,6 +885,40 @@ describe('mountWorkspaceAutoMemoryRoutes', () => {
     expect(projectRes.status).toBe(200);
     expect(projectRes.body.content).toBe('project memory\n');
     expect(projectRes.body.scope).toBe('project');
+  });
+
+  it('re-resolves the user root created after an earlier read cached the literal', async () => {
+    // The memory base sits under a symlink so the literal user root differs
+    // from its canonical form. A read while memories/ does not exist yet
+    // warms the canonicalization cache with the literal root; creating the
+    // entry through the real base afterwards must still be served — a bare
+    // cached literal would answer 400 outside, because the file resolves to
+    // the real base, not the symlinked literal.
+    const realBase = path.join(tmp, 'real-base');
+    await fs.mkdir(realBase, { recursive: true });
+    const baseLink = path.join(tmp, 'base-link');
+    await fs.symlink(realBase, baseLink);
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = baseLink;
+    clearAutoMemoryRootCache();
+    const literalRoot = path.join(baseLink, 'memories');
+    const app = mountApp({ boundWorkspace: workspace, trusted: true });
+
+    // (1) warm the cache with the literal user root while it is absent.
+    const res1 = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(literalRoot, 'note.md') });
+    expect(res1.status).toBe(404);
+    expect(res1.body.code).toBe('not_found');
+
+    // (2) create the entry through the REAL base and re-request the same
+    // literal path; the route must re-canonicalize the root at request time.
+    await writeFile(realBase, 'memories/note.md', 'created later\n');
+    const res2 = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(literalRoot, 'note.md') });
+    expect(res2.status).toBe(200);
+    expect(res2.body.scope).toBe('user');
+    expect(res2.body.content).toBe('created later\n');
   });
 
   it('resolves the roots under the runtime storage scope when a runtime is mounted', async () => {

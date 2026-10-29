@@ -148,7 +148,12 @@ export function registerWorkspaceLocalOpenRoutes(
           try {
             dirStat = await fs.stat(targetPath);
           } catch (err) {
-            if (isEnoent(err)) {
+            const code = (err as { code?: unknown }).code;
+            // ENOTDIR (a regular file occupies an ancestor component, e.g.
+            // a checked-in `.qwen` file) and ELOOP (a symlink loop) mean the
+            // root cannot exist at all — the same "does not exist yet"
+            // state as ENOENT, not a daemon fault.
+            if (isEnoent(err) || code === 'ENOTDIR' || code === 'ELOOP') {
               res.status(404).json({
                 error: 'Auto-memory directory does not exist yet',
                 code: 'auto_memory_dir_not_found',
@@ -161,7 +166,6 @@ export function registerWorkspaceLocalOpenRoutes(
             // instead of shadowing the local-open failure codes below.
             // `errno` carries Node's string error CODE (e.g. 'EACCES'),
             // not libuv's numeric errno; 'UNKNOWN' when the error has none.
-            const code = (err as { code?: unknown }).code;
             res.status(500).json({
               error: 'Auto-memory directory is not accessible',
               code: 'auto_memory_dir_stat_failed',

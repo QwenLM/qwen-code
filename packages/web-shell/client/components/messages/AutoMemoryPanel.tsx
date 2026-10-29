@@ -68,9 +68,14 @@ function formatModifiedAt(iso: string | undefined): string {
 
 interface AutoMemoryPanelProps {
   onMessage?: (message: string, type?: 'status' | 'error') => void;
+  /** The dialog's `/memory refresh` counter; a real change re-fetches. */
+  refreshSignal?: number;
 }
 
-export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
+export function AutoMemoryPanel({
+  onMessage,
+  refreshSignal = 0,
+}: AutoMemoryPanelProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const {
@@ -80,6 +85,9 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
     error,
     readAutoMemoryFile,
     openAutoMemoryFolder,
+    // Distinct from the settings `reload` below; this one refreshes the
+    // auto-memory listing only.
+    reload: reloadAutoMemory,
   } = useAutoMemory({ autoLoad: true });
   const {
     settings,
@@ -108,6 +116,17 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
   // Revision of the listing entry the shown content was read for; a
   // listing reload that changes it invalidates the content.
   const loadedRevisionRef = useRef<string | null>(null);
+
+  // The dialog's `/memory refresh` bumps `refreshSignal`; the panel already
+  // auto-loads on mount, so fire only on a real CHANGE (a ref of the last-seen
+  // value), never on the initial paint or a signal set before mount.
+  const lastRefreshSignalRef = useRef(refreshSignal);
+  useEffect(() => {
+    if (refreshSignal <= 0) return;
+    if (refreshSignal === lastRefreshSignalRef.current) return;
+    lastRefreshSignalRef.current = refreshSignal;
+    reloadAutoMemory();
+  }, [refreshSignal, reloadAutoMemory]);
 
   const projectEntries = entries.filter((entry) => entry.scope === 'project');
   const userEntries = entries.filter((entry) => entry.scope === 'user');

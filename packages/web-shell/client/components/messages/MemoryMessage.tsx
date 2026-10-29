@@ -303,7 +303,10 @@ export function MemoryMessage({
 
       <section className={styles.detail}>
         {activeTab === 'auto' ? (
-          <AutoMemoryPanel onMessage={onMessage} />
+          <AutoMemoryPanel
+            onMessage={onMessage}
+            refreshSignal={refreshSignal}
+          />
         ) : (
           <>
             <header className={styles.detailHeader}>
