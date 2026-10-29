@@ -8,7 +8,6 @@ import { pathToFileURL } from 'node:url';
 
 export async function runHostedFileTurn({
   root,
-  output,
   session,
   promptId,
   prompt,

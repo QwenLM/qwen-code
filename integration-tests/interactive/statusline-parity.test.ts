@@ -123,8 +123,8 @@ describe.skipIf(process.platform === 'win32')(
                 .map((line) => JSON.parse(line) as CommandRecord)
             : [];
         const snapshot = () =>
-          [settings, join(cwd, '.qwen/settings.json')].map(
-            (file) => (existsSync(file) ? readFileSync(file, 'utf8') : null),
+          [settings, join(cwd, '.qwen/settings.json')].map((file) =>
+            existsSync(file) ? readFileSync(file, 'utf8') : null,
           );
         const current = () => {
           if (!session) throw new Error('No active statusline test session');
