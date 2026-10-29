@@ -64,7 +64,7 @@ test('the composer no-workspace target creates an exact standalone session @smok
   );
 });
 
-test('the sidebar New task keeps the primary workspace route on a capable daemon @smoke', async ({
+test('the sidebar New session keeps the primary workspace route on a capable daemon @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -111,7 +111,7 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
   const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New task',
+    name: 'New session',
     exact: true,
   });
   await expect(newTaskButtons).toHaveCount(2);
@@ -374,7 +374,7 @@ async function installScenario(
 
 async function clickNewTask(page: Page): Promise<void> {
   const newTask = page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first();
   await expect(newTask).toBeEnabled();
   await newTask.click();

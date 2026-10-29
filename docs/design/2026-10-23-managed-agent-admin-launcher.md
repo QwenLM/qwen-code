@@ -34,20 +34,21 @@ That form does not work for an operator who installed the reference distribution
 
 `scripts/package-managed-agent-reference.mjs` exports `ADMIN_COMMANDS`: each entry holds a command name, the entry point's class and a one-line summary.
 
-| Command                | Entry point                                    |
-| ---------------------- | ---------------------------------------------- |
-| `storage-registration` | `persistence.WorkspaceStorageRegistrationMain` |
-| `workspace-recovery`   | `persistence.WorkspaceRecoveryMain`            |
-| `workspace-migration`  | `workspace.runtime.WorkspaceMigrationMain`     |
-| `maintenance-recovery` | `persistence.WorkspaceMaintenanceRecoveryMain` |
-| `operator-recovery`    | `workspace.runtime.WorkspaceRecoveryCommand`   |
-| `csi-registration`     | `persistence.WorkspaceCsiRegistrationMain`     |
-| `csi-protection`       | `workspace.runtime.WorkspaceCsiProtectionMain` |
-| `csi-session`          | `persistence.WorkspaceCsiSessionMain`          |
-| `csi-runtime`          | `persistence.WorkspaceCsiRuntimeMain`          |
-| `csi-retirement`       | `persistence.WorkspaceCsiRetirementMain`       |
-| `csi-worker-ack`       | `persistence.WorkspaceCsiWorkerAckMain`        |
-| `resident-retirement`  | `persistence.ResidentWorkspaceRetirementMain`  |
+| Command                  | Entry point                                    |
+| ------------------------ | ---------------------------------------------- |
+| `storage-registration`   | `persistence.WorkspaceStorageRegistrationMain` |
+| `workspace-recovery`     | `persistence.WorkspaceRecoveryMain`            |
+| `workspace-migration`    | `workspace.runtime.WorkspaceMigrationMain`     |
+| `maintenance-recovery`   | `persistence.WorkspaceMaintenanceRecoveryMain` |
+| `operator-recovery`      | `workspace.runtime.WorkspaceRecoveryCommand`   |
+| `csi-registration`       | `persistence.WorkspaceCsiRegistrationMain`     |
+| `csi-protection`         | `workspace.runtime.WorkspaceCsiProtectionMain` |
+| `csi-session`            | `persistence.WorkspaceCsiSessionMain`          |
+| `csi-runtime`            | `persistence.WorkspaceCsiRuntimeMain`          |
+| `csi-retirement`         | `persistence.WorkspaceCsiRetirementMain`       |
+| `csi-worker-ack`         | `persistence.WorkspaceCsiWorkerAckMain`        |
+| `resident-retirement`    | `persistence.ResidentWorkspaceRetirementMain`  |
+| `resolved-configuration` | `preflight.ResolvedConfiguration`              |
 
 All classes are under `com.alibaba.qwen.code.managedagent`.
 

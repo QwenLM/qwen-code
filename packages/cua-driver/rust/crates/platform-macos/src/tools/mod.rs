@@ -1002,6 +1002,7 @@ pub fn register_all(
         let cursor_registry = state.cursor_registry.clone();
         let observation_revisions = state.observation_revisions.clone();
         registry.retain_runtime_cleanup(move || {
+            cua_driver_core::pip_hook::remove_runtime(&prefix);
             for cursor in cursor_registry
                 .all_states()
                 .into_iter()
@@ -1023,6 +1024,7 @@ pub fn register_all(
         let observation_revisions = state.observation_revisions.clone();
         let registration =
             cua_driver_core::session::register_scoped_session_end_hook(move |session_id| {
+                cua_driver_core::pip_hook::remove_session(session_id);
                 session_config.clear(session_id);
                 observation_revisions.clear_session(session_id);
                 cua_driver_core::observation_revision::revision_tokens().clear_session(session_id);

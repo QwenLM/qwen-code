@@ -39,6 +39,7 @@ const VERSION_PATTERN = new RegExp(
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/src/main/java';
 const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.persistence';
+const PREFLIGHT = 'com.alibaba.qwen.code.managedagent.preflight';
 const WORKSPACE_RUNTIME =
   'com.alibaba.qwen.code.managedagent.workspace.runtime';
 
@@ -105,6 +106,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'resident-retirement',
     `${PERSISTENCE}.ResidentWorkspaceRetirementMain`,
     'Inspect, begin or delete the pod of a resident Workspace retirement.',
+  ],
+  [
+    'resolved-configuration',
+    `${PREFLIGHT}.ResolvedConfiguration`,
+    'Print the Runtime state directory and auth mode the configuration resolves to.',
   ],
 ]);
 
@@ -467,6 +473,8 @@ export async function createReferenceDistribution({
   for (const file of [
     'qwen-managed-agent-bootstrap',
     'qwen-managed-agent-bootstrap.mjs',
+    'qwen-managed-agent-upgrade',
+    'qwen-managed-agent-upgrade.mjs',
   ]) {
     await copy(
       root,
@@ -600,7 +608,11 @@ export async function createReferenceDistribution({
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/bin/qwen-managed-agent-admin`,
+    // The two launchers exec these modules.
     `${rootName}/bin/qwen-managed-agent-bootstrap`,
+    `${rootName}/bin/qwen-managed-agent-bootstrap.mjs`,
+    `${rootName}/bin/qwen-managed-agent-upgrade`,
+    `${rootName}/bin/qwen-managed-agent-upgrade.mjs`,
     `${rootName}/config/application.example.yml`,
     ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {

@@ -12,8 +12,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonCapabilities,
   DaemonSessionSummary,
+  DaemonStandaloneSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
+import type { DaemonProductSessionContext } from '../daemon/session/types';
 import { I18nProvider } from '../i18n';
 import {
   McpAppGeneratedUiOwnerContext,
@@ -39,6 +41,7 @@ let connectionState: {
   sessionId?: string;
   capabilities?: DaemonCapabilities;
   workspaceCwd?: string;
+  sessionContext?: DaemonProductSessionContext;
 };
 let workspaceCapabilities: DaemonCapabilities | undefined;
 let generatedUiOwner: McpAppGeneratedUiOwner | undefined;
@@ -52,6 +55,12 @@ let statusState: {
 };
 // Live sessions the mock daemon returns per non-primary workspace cwd.
 let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
+// Standalone pages queued (FIFO) for the mocked listStandaloneSessionsPage.
+let standalonePages: {
+  sessions: DaemonStandaloneSessionSummary[];
+  nextCursor?: string;
+}[];
+const standaloneListPage = vi.fn();
 // Options captured from the (mocked) useScopedSessions call, so tests can
 // assert the live-state vs catalog-poll fallback.
 let scopedSessionsOptions: { pollIntervalMs?: number };
@@ -72,6 +81,11 @@ let workspaceClient: {
   workspaceByCwd: ReturnType<typeof vi.fn>;
   archiveSessionsData: ReturnType<typeof vi.fn>;
   deleteSessionsData: ReturnType<typeof vi.fn>;
+  listStandaloneSessionsPage: ReturnType<typeof vi.fn>;
+  renameStandaloneSession: ReturnType<typeof vi.fn>;
+  exportStandaloneSession: ReturnType<typeof vi.fn>;
+  archiveStandaloneSessions: ReturnType<typeof vi.fn>;
+  deleteStandaloneSessions: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
 let workspaceActions: {
@@ -160,6 +174,18 @@ function session(
   };
 }
 
+function standaloneSession(
+  id: string,
+  extra: Partial<DaemonStandaloneSessionSummary> = {},
+): DaemonStandaloneSessionSummary {
+  return {
+    ...session(id, { workspaceCwd: '/standalone' }),
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    ...extra,
+  };
+}
+
 function statusSession(
   id: string,
   extra: Partial<DaemonStatusReportSession> = {},
@@ -203,6 +229,11 @@ beforeEach(() => {
   sessionsState = { sessions: [], loading: false };
   statusState = { report: { full: { sessions: [] } } };
   otherWorkspaceSessions = {};
+  standalonePages = [];
+  standaloneListPage.mockReset();
+  standaloneListPage.mockImplementation(
+    async () => standalonePages.shift() ?? { sessions: [] },
+  );
   scopedSessionsOptions = {};
   workspaceLiveStateOptions = { enabled: false };
   statusReportOptions = {};
@@ -256,6 +287,25 @@ beforeEach(() => {
       removed: ids,
       notFound: [],
       errors: [],
+    })),
+    listStandaloneSessionsPage: standaloneListPage,
+    renameStandaloneSession: vi.fn(async () => {}),
+    exportStandaloneSession: vi.fn(async () => ({
+      content: '<html></html>',
+      filename: 'session.html',
+      mimeType: 'text/html',
+    })),
+    archiveStandaloneSessions: vi.fn(async (ids: string[]) => ({
+      archived: ids,
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    })),
+    deleteStandaloneSessions: vi.fn(async (ids: string[]) => ({
+      removed: ids,
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
     })),
   };
   sessionsReload.mockClear();
@@ -499,6 +549,28 @@ describe('deriveSessionCards', () => {
     expect(
       cards.find((card) => card.workspaceCwd === '/other')?.isCurrent,
     ).toBe(true);
+  });
+
+  it('matches a standalone current session by context kind, not cwd', () => {
+    const cards = deriveSessionCards(
+      [
+        {
+          ...session('st1', { workspaceCwd: '/conversations' }),
+          sourceType: 'standalone',
+        },
+        session('st1', { workspaceCwd: '/w' }),
+      ],
+      'st1',
+      [],
+      '/w',
+      'standalone',
+    );
+    expect(
+      cards.find((card) => card.workspaceCwd === '/conversations')?.isCurrent,
+    ).toBe(true);
+    expect(cards.find((card) => card.workspaceCwd === '/w')?.isCurrent).toBe(
+      false,
+    );
   });
 
   it('uses status-report approval details as a compatibility fallback', () => {
@@ -757,7 +829,11 @@ describe('SessionOverviewPanel', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's-run',
+      '/w',
+      undefined,
+    );
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
@@ -786,13 +862,21 @@ describe('SessionOverviewPanel', () => {
       );
       expect(onOpenSession).not.toHaveBeenCalled();
       act(() => title.click());
-      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+        's1',
+        '/w',
+        undefined,
+      );
       onOpenSession.mockClear();
     } finally {
       selection.removeAllRanges();
     }
     act(() => click(cell));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's1',
+      '/w',
+      undefined,
+    );
   });
 
   it('keeps an inline rename draft when clicking a plain row cell', () => {
@@ -1091,7 +1175,11 @@ describe('SessionOverviewPanel', () => {
       act(() => cell.dispatchEvent(mouseDown));
       expect(mouseDown.defaultPrevented).toBe(false);
       act(() => click(cell));
-      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('question', '/w');
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+        'question',
+        '/w',
+        undefined,
+      );
       sessionsState.sessions = sessionsState.sessions.map((entry) =>
         entry.sessionId === 'target' ? target : entry,
       );
@@ -1162,7 +1250,11 @@ describe('SessionOverviewPanel', () => {
     const title = titleTrigger(rows()[0]!);
     expect(title.tagName).toBe('BUTTON');
     act(() => click(title));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's-run',
+      '/w',
+      undefined,
+    );
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
@@ -1435,7 +1527,11 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
     act(() => click(titleTrigger(beta)));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('b1', '/wsB');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'b1',
+      '/wsB',
+      undefined,
+    );
   });
 
   it('keeps equal session ids in different workspaces independent', async () => {
@@ -2984,7 +3080,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).toContain('Failed to create a new session');
     expect(container!.textContent).not.toContain('Failed to delete session');
   });
 
@@ -2999,7 +3095,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).toContain('Failed to create a new session');
     expect(container!.textContent).not.toContain('Failed to archive session');
   });
 
@@ -3562,5 +3658,585 @@ describe('SessionOverviewPanel polling', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SessionOverviewPanel standalone sessions', () => {
+  function useStandaloneCapabilities(): void {
+    connectionState.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaceCwd: '/w',
+    };
+  }
+
+  // Production shape (wire-observed): the daemon advertises its internal
+  // Conversations runtime as a trusted non-primary live workspace, and every
+  // standalone card carries that cwd — so the capability gates pass and the
+  // routing, not the gating, decides which client serves the action.
+  function useConversationsRuntimeCapabilities(): void {
+    connectionState.capabilities = {
+      features: [
+        'standalone_sessions_v1',
+        'workspace_qualified_rest_core',
+        'workspace_session_metadata',
+        'workspace_session_export',
+        'session_archive',
+      ],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'conv',
+          cwd: '/conv',
+          displayName: 'Conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+  }
+
+  it('does not request standalone sessions without the capability', async () => {
+    render();
+    await flushAsync();
+    expect(standaloneListPage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the standalone catalog hidden on a host-locked shell', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render({ workspaceCwd: '/w' });
+    await flushAsync();
+    expect(standaloneListPage).not.toHaveBeenCalled();
+    // No standalone row is merged (only the empty-state row remains).
+    expect(rowTitles()).not.toContain('Solo');
+  });
+
+  it('merges standalone sessions into the overview when advertised', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+    });
+    expect(rowTitles()).toEqual(['Solo', 'One']);
+  });
+
+  it('collects every standalone page before rendering', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'First',
+            updatedAt: '2026-07-06T12:00:00.000Z',
+          }),
+        ],
+        nextCursor: 'c1',
+      },
+      {
+        sessions: [
+          standaloneSession('st2', {
+            displayName: 'Second',
+            updatedAt: '2026-07-06T11:30:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledTimes(2);
+    expect(standaloneListPage).toHaveBeenLastCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+      cursor: 'c1',
+    });
+    expect(rowTitles()).toEqual(['First', 'Second']);
+  });
+
+  it('deduplicates a standalone session a workspace already lists', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('s1', {
+            workspaceCwd: '/w',
+            displayName: 'One',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(rowTitles()).toEqual(['One']);
+  });
+
+  it('warns and keeps the overview when the standalone list fails', async () => {
+    useStandaloneCapabilities();
+    standaloneListPage.mockRejectedValue(new Error('offline'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      render();
+      await flushAsync();
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] overview standalone sessions list failed:',
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('opens a standalone row with the standalone context', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(row.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      '/standalone',
+      { kind: 'standalone' },
+    );
+  });
+
+  it('opens a standalone row from its title with the standalone context', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(titleTrigger(row)));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      '/standalone',
+      { kind: 'standalone' },
+    );
+  });
+
+  it('opens a workspace row without a standalone context', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    await flushAsync();
+    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledWith('s1', '/w', undefined);
+  });
+
+  it('classifies standalone rows by catalog, not by an empty cwd', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [
+      session('e1', { displayName: 'Empty', workspaceCwd: '' }),
+    ];
+    render();
+    await flushAsync();
+    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('e1', '', undefined);
+  });
+
+  it('keeps the split and tab buttons disabled for a standalone selection', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render({ onOpenSplit: vi.fn() });
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowCheckbox(row)));
+    expect(footerButton('Open in split')?.disabled).toBe(true);
+    expect(footerButton('Open in new tab')?.disabled).toBe(true);
+  });
+
+  it('skips poll ticks while a standalone walk is still in flight', async () => {
+    useStandaloneCapabilities();
+    let resolveFirstPage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    const firstPage = new Promise<{
+      sessions: DaemonStandaloneSessionSummary[];
+    }>((resolve) => {
+      resolveFirstPage = resolve;
+    });
+    standaloneListPage.mockImplementation(async () => firstPage);
+    vi.useFakeTimers();
+    try {
+      render();
+      // The initial walk is still in flight when the 3s cadence fires:
+      // the ticks must be skipped, not started as duplicate walks.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(standaloneListPage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(standaloneListPage).toHaveBeenCalledTimes(1);
+      resolveFirstPage({
+        sessions: [standaloneSession('st1', { displayName: 'Solo' })],
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(rowTitles()).toEqual(['Solo']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a standalone walk superseded by a host lock', async () => {
+    useStandaloneCapabilities();
+    let resolvePage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    standaloneListPage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledTimes(1);
+    // The lock lands while the walk's page is still pending: the walk's
+    // effect is gone, so its page must not repopulate the hidden catalog.
+    rerender({ workspaceCwd: '/w' });
+    await flushAsync();
+    resolvePage({
+      sessions: [standaloneSession('st1', { displayName: 'LeakedSolo' })],
+    });
+    await flushAsync();
+    expect(rowTitles()).not.toContain('LeakedSolo');
+  });
+
+  it('routes standalone rename and export to the standalone client routes', async () => {
+    useConversationsRuntimeCapabilities();
+    // Page 1 feeds the initial walk; page 2 feeds the post-rename refresh.
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo Two',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Rename')));
+    const input = container!.querySelector(
+      'input[aria-label="Rename: Solo"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, 'Solo Two'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.renameStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      'Solo Two',
+    );
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.updateSessionMetadata).not.toHaveBeenCalled();
+    }
+    const row2 = rows().find((tr) => tr.textContent?.includes('Solo Two'))!;
+    act(() => click(rowActionButton(row2, 'Export conversation record')));
+    await flushAsync();
+    expect(workspaceClient.exportStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      { format: 'html' },
+    );
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.exportSession).not.toHaveBeenCalled();
+    }
+    expect(anchorClick).toHaveBeenCalled();
+  });
+
+  it('routes standalone archive through the standalone client route', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Archive')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(workspaceClient.archiveStandaloneSessions).toHaveBeenCalledWith([
+      'st1',
+    ]);
+    expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.archiveSessionsData).not.toHaveBeenCalled();
+    }
+  });
+
+  it('routes standalone delete through the standalone client route', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Delete')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(workspaceClient.deleteStandaloneSessions).toHaveBeenCalledWith([
+      'st1',
+    ]);
+    expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.deleteSessionsData).not.toHaveBeenCalled();
+    }
+  });
+
+  it('labels a standalone row "No workspace" instead of the internal root', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    const workspaceCell = row.querySelector(
+      '[data-web-shell-session-workspace]',
+    )!;
+    expect(workspaceCell.textContent).toBe('No workspace');
+    expect(workspaceCell.getAttribute('title')).toBe('No workspace');
+    await act(async () => click(rowActionButton(row, 'Details for Solo')));
+    const details = document.querySelector(
+      '[role="dialog"][aria-label="Solo"]',
+    ) as HTMLElement;
+    expect(details).not.toBeNull();
+    expect(details.textContent).toContain('No workspace');
+    expect(details.innerHTML).not.toContain('/conv');
+  });
+
+  it('labels the Conversations runtime facet "No workspace" in the workspace filter', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const trigger = container!.querySelector(
+      'button[aria-label^="Filter by workspace:"]',
+    ) as HTMLElement;
+    act(() => click(trigger));
+    const filterPanel = document.querySelector(
+      '[role="dialog"][aria-label="Filter by workspace"]',
+    ) as HTMLElement;
+    expect(filterPanel.textContent).toContain('No workspace');
+    expect(filterPanel.textContent).not.toContain('Conversations');
+  });
+
+  it('renames the open standalone session through the standalone route', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.workspaceCwd = undefined;
+    connectionState.sessionContext = { kind: 'standalone' };
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    expect(row.textContent).toContain('Current');
+    act(() => click(rowActionButton(row, 'Rename')));
+    const input = container!.querySelector(
+      'input[aria-label="Rename: Solo"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, 'Solo Two'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.renameStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      'Solo Two',
+    );
+    expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Archive', 'archiveStandaloneSessions'],
+    ['Delete', 'deleteStandaloneSessions'],
+  ] as const)(
+    'splits standalone %s batches at the route limit of 100 ids',
+    async (label, method) => {
+      useConversationsRuntimeCapabilities();
+      const many = Array.from({ length: 101 }, (_, index) =>
+        standaloneSession(`st-${index}`, {
+          workspaceCwd: '/conv',
+          displayName: `Solo ${index}`,
+        }),
+      );
+      standalonePages = [{ sessions: many }, { sessions: [] }];
+      render();
+      await flushAsync();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton(label)!));
+      const confirm = document.querySelector(
+        '[data-slot="alert-dialog-action"]',
+      ) as HTMLElement;
+      act(() => click(confirm));
+      await flushAsync();
+      expect(workspaceClient[method]).toHaveBeenCalledTimes(2);
+      expect(workspaceClient[method]).toHaveBeenNthCalledWith(
+        1,
+        many.slice(0, 100).map((item) => item.sessionId),
+      );
+      expect(workspaceClient[method]).toHaveBeenNthCalledWith(
+        2,
+        many.slice(100).map((item) => item.sessionId),
+      );
+    },
+  );
+
+  it('marks the open standalone session as current and clears it on delete', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.workspaceCwd = undefined;
+    connectionState.sessionContext = { kind: 'standalone' };
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render({ onCurrentSessionRemoved });
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    expect(row.textContent).toContain('Current');
+    act(() => click(rowActionButton(row, 'Delete')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(workspaceClient.deleteStandaloneSessions).toHaveBeenCalledWith([
+      'st1',
+    ]);
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
   });
 });

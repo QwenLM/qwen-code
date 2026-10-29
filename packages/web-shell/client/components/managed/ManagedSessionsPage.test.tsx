@@ -2297,7 +2297,7 @@ describe('ManagedSessionsPage', () => {
       await act(async () =>
         slot
           .querySelector<HTMLButtonElement>(
-            '[aria-label="New task: Project B"]',
+            '[aria-label="New session: Project B"]',
           )!
           .click(),
       );
