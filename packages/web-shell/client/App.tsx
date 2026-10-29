@@ -617,6 +617,29 @@ function isWebTerminalTarget(event: Event): boolean {
   );
 }
 
+// Open content of the shell's modal primitives (ui/dialog, ui/alert-dialog,
+// ui/drawer). Matching the primitives rather than ARIA roles skips non-modal
+// popovers that carry role="dialog" (session/workspace details tooltips) and
+// the inline tool-approval card's role="alertdialog". Every ui/drawer in the
+// shell is modal: DrawerContent always mounts its overlay, both for the
+// floating artifact panel (narrow viewport or split view, fullscreen or not)
+// and for the composer's mobile add menu.
+const OPEN_MODAL_SURFACE_SELECTOR =
+  '[data-slot="dialog-content"][data-state="open"], ' +
+  '[data-slot="alert-dialog-content"][data-state="open"], ' +
+  '[data-slot="drawer-content"][data-state="open"]';
+
+// Modal confirms owned by a component (the Session Overview archive/delete
+// AlertDialog) are not in the shell's own dialog state. They portal into
+// the shell portal root, which a shadowDom `portals` embedding places inside
+// a shadow root that document.querySelector cannot see, so query it too.
+function hasOpenModalSurface(portalRoot: HTMLElement | null): boolean {
+  return (
+    document.querySelector(OPEN_MODAL_SURFACE_SELECTOR) !== null ||
+    (portalRoot?.querySelector(OPEN_MODAL_SURFACE_SELECTOR) ?? null) !== null
+  );
+}
+
 // The docked fullscreen surface contains Tab itself instead of going through
 // Radix FocusScope: FocusScope registers every mounted scope in a
 // module-global stack and pauses the current head even with trapped={false},
@@ -1951,6 +1974,19 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     lockedWorkspace: options.lockedWorkspace,
     workspaceOverview: options.workspaceOverview,
   };
+}
+
+// One availability rule for the two footer items the view navigation hotkeys
+// govern (#13175): the rail table and the chord gates both read this
+// predicate, so a key never opens a view the sidebar withholds, and an edit
+// in one place cannot leave the other reading stale.
+function isSidebarFooterItemAvailable(
+  item: 'sessionsOverview' | 'splitView',
+  projectFeaturesAvailable: boolean,
+  isLargeScreen: boolean,
+): boolean {
+  if (item === 'sessionsOverview') return projectFeaturesAvailable;
+  return projectFeaturesAvailable && isLargeScreen;
 }
 
 function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
@@ -10272,14 +10308,16 @@ export function App({
           sidebarOptions.footer?.items?.some((item) => {
             if (item === 'collapse') return false;
             if (item === 'settings') return settingsAvailable;
-            if (item === 'sessionsOverview') {
-              return projectFeaturesAvailable;
+            if (item === 'sessionsOverview' || item === 'splitView') {
+              return isSidebarFooterItemAvailable(
+                item,
+                projectFeaturesAvailable,
+                isLargeScreen,
+              );
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
             if (item === 'localFiles' || item === 'desktopRelay')
               return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'splitView')
-              return projectFeaturesAvailable && isLargeScreen;
             if (item === 'update') {
               return (
                 !isDesktopShell() &&
@@ -12593,7 +12631,11 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
-  const dialogOpen =
+  // Every modal the shell itself tracks, plus host-registered interaction
+  // blocks. View navigation hotkeys gate on this rather than dialogOpen,
+  // because dialogOpen also counts activePanel and the Session Overview is
+  // itself a panel.
+  const modalDialogOpen =
     capacityRecovery !== undefined ||
     showResumeDialog ||
     showDeleteDialog ||
@@ -12614,7 +12656,9 @@ export function App({
     showAddWorkspaceDialog ||
     managedWorkspaceCreationOpen ||
     scratchOutcomeUnknown !== 'clear' ||
-    externalInteractionBlockCount > 0 ||
+    externalInteractionBlockCount > 0;
+  const dialogOpen =
+    modalDialogOpen ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
     // Shift+Tab mode cycle, the btw hotkey). Escape is intercepted earlier and
@@ -19943,6 +19987,100 @@ export function App({
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
   }, [interactionBlocked, handleClearScreen, handleRetry, store, t]);
 
+  // The sidebar footer buttons for Session Overview and Split View; the view
+  // hotkeys below run these same callbacks.
+  const openSessionsOverviewFromSidebar = useCallback(() => {
+    closeMobileDrawer();
+    openPanel('sessions');
+  }, [closeMobileDrawer, openPanel]);
+  const openSplitViewFromSidebar = useCallback(() => {
+    closeMobileDrawer();
+    openSplitView();
+  }, [closeMobileDrawer, openSplitView]);
+  // The sidebar buttons' own availability gates, passed to WebShellSidebar
+  // below and shared with the view hotkeys; the rail table reads the same
+  // predicate, so button and chord cannot drift apart.
+  const canOpenSessionsOverview = isSidebarFooterItemAvailable(
+    'sessionsOverview',
+    projectFeaturesAvailable,
+    isLargeScreen,
+  );
+  const canOpenSplitView = isSidebarFooterItemAvailable(
+    'splitView',
+    projectFeaturesAvailable,
+    isLargeScreen,
+  );
+  // Each chord is live only while the sidebar offers its button (sidebar
+  // enabled, item in the resolved footer, the button's availability gate),
+  // so a key never opens what the host's chrome withholds and an inert chord
+  // leaves the key to the browser.
+  const sidebarFooterItems =
+    sidebarOptions.enabled && sidebarOptions.footer !== false
+      ? (sidebarOptions.footer?.items ?? [])
+      : [];
+  const sessionsOverviewHotkeyAvailable =
+    canOpenSessionsOverview && sidebarFooterItems.includes('sessionsOverview');
+  const splitViewHotkeyAvailable =
+    canOpenSplitView && sidebarFooterItems.includes('splitView');
+
+  useEffect(() => {
+    // View navigation hotkeys (#13175): Cmd/Ctrl+Shift+O presses the Session
+    // Overview button, Cmd/Ctrl+\ the Split View button. Match the physical
+    // key (e.code) rather than the produced character so the chords work on
+    // non-QWERTY layouts; ISO keyboards report the key that types "\" as
+    // IntlBackslash. Capture phase, so the chords also work while the
+    // composer has focus.
+    const onViewShortcut = (e: KeyboardEvent) => {
+      if (e.repeat || e.isComposing) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      let open: (() => void) | undefined;
+      if (e.shiftKey && e.code === 'KeyO') {
+        if (sessionsOverviewHotkeyAvailable) {
+          open = openSessionsOverviewFromSidebar;
+        }
+      } else if (
+        !e.shiftKey &&
+        (e.code === 'Backslash' || e.code === 'IntlBackslash')
+      ) {
+        if (splitViewHotkeyAvailable) open = openSplitViewFromSidebar;
+      }
+      if (!open) return;
+      // Covering surfaces keep the keyboard: a shell modal or a host
+      // interaction block (both in modalDialogOpen), the docked fullscreen
+      // artifact panel, a component-owned modal (dialog, confirm, drawer),
+      // and the web terminal.
+      if (modalDialogOpen || artifactPanelFullscreen) return;
+      if (isWebTerminalTarget(e)) return;
+      // Other editable targets — Session Overview search, session rename,
+      // settings inputs, the Live shortcut recorder — must not have the view
+      // yanked away while the user is typing, matching the codebase's
+      // isEditableTarget convention. The composer stays exempt: the chords
+      // produce no text there (issue #13175). Shadow-DOM portal hosts
+      // retarget the event to the host element, so resolve the real target.
+      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-web-shell-composer-editor]')
+      ) {
+        return;
+      }
+      if (hasOpenModalSurface(portalRoot)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      open();
+    };
+    window.addEventListener('keydown', onViewShortcut, true);
+    return () => window.removeEventListener('keydown', onViewShortcut, true);
+  }, [
+    artifactPanelFullscreen,
+    modalDialogOpen,
+    openSessionsOverviewFromSidebar,
+    openSplitViewFromSidebar,
+    portalRoot,
+    sessionsOverviewHotkeyAvailable,
+    splitViewHotkeyAvailable,
+  ]);
+
   const resetEscapeState = useCallback(() => {
     escArmedActionRef.current = null;
     setEscapeHintVisible(false);
@@ -22334,17 +22472,11 @@ export function App({
                         },
                       }
                     : {})}
-                  onOpenSessions={() => {
-                    closeMobileDrawer();
-                    openPanel('sessions');
-                  }}
+                  onOpenSessions={openSessionsOverviewFromSidebar}
                   canOpenSettings={settingsAvailable}
-                  canOpenSessionsOverview={projectFeaturesAvailable}
-                  onOpenSplitView={() => {
-                    closeMobileDrawer();
-                    openSplitView();
-                  }}
-                  canOpenSplitView={isLargeScreen && projectFeaturesAvailable}
+                  canOpenSessionsOverview={canOpenSessionsOverview}
+                  onOpenSplitView={openSplitViewFromSidebar}
+                  canOpenSplitView={canOpenSplitView}
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
