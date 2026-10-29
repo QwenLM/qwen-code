@@ -386,6 +386,120 @@
   color: #1e40af;
 }
 
+/* --- Tags --- */
+
+.tagChip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 9.5px;
+  font-weight: 600;
+  flex: none;
+  background: rgba(125, 125, 140, 0.25);
+  color: inherit;
+}
+
+.tagFilterRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.tagFilterChip {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 125, 140, 0.35);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tagFilterChip:hover {
+  border-color: #6d44e8;
+}
+
+.tagFilterChipActive {
+  background: #6d44e8;
+  color: #fff;
+  border-color: #6d44e8;
+}
+
+.tagEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(125, 125, 140, 0.25);
+  margin-top: 6px;
+}
+
+.tagEditorRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.tagChipRemovable {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(125, 125, 140, 0.25);
+  color: inherit;
+}
+
+.tagChipRemovable:hover {
+  filter: brightness(1.3);
+}
+
+.tagChipAdd {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tagChipAdd:hover {
+  filter: brightness(1.3);
+}
+
+.tagInput {
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(125, 125, 140, 0.35);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  width: 120px;
+}
+
+.tagColorInput {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(125, 125, 140, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
 /* --- A11y: keyboard focus + dark native form controls --- */
 
 .filter:focus-visible,

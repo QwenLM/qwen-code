@@ -52,6 +52,12 @@ interface TodoItem {
   status: TodoStatus;
   blockedBy?: string[];
   dueDate?: string | null;
+  tags?: string[];
+}
+
+interface TodoTagOverlay {
+  definitions: Record<string, { color: string }>;
+  assignments: Record<string, string[]>;
 }
 
 interface TodoPlanFile {
@@ -95,6 +101,11 @@ const UNMAPPED_PROJECT = '(unmapped project)';
 /** Sidecar overlay for due dates; see the file header for why it is separate. */
 const DUE_DATES_FILENAME = 'due-dates.json';
 const DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Sidecar overlay for tags; same rationale as due dates — todo_write wipes extras. */
+const TAGS_FILENAME = 'todo-tags.json';
+const TAG_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+const TAG_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,24}$/;
 
 /**
  * Session IDs are UUIDs or `default` — alphanumeric with hyphens. Rejecting
@@ -143,7 +154,26 @@ async function atomicWriteJson(filePath: string, data: string): Promise<void> {
   await fs.rename(tmp, filePath);
 }
 
-async function readDueDates(): Promise<Record<string, string>> {
+function isMissingFileError(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === 'ENOENT';
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Reads the due-date overlay. ENOENT is the legitimate first-run case and
+ * always yields an empty map. Any other failure (corrupt JSON, EACCES, …)
+ * must NOT silently degrade to `{}` on the write path: the POST handler's
+ * read-modify-write would then persist that `{}` and destroy the overlay.
+ * `strict: true` rethrows so the POST handler fails the request before any
+ * write happens; the non-strict GET path logs and serves the page without
+ * due dates.
+ */
+async function readDueDates(opts?: {
+  strict?: boolean;
+}): Promise<Record<string, string>> {
   try {
     const raw = JSON.parse(
       await fs.readFile(getDueDatesPath(), 'utf-8'),
@@ -155,7 +185,12 @@ async function readDueDates(): Promise<Record<string, string>> {
       }
     }
     return map;
-  } catch {
+  } catch (err) {
+    if (isMissingFileError(err)) return {};
+    if (opts?.strict) throw err;
+    writeStderrLine(
+      `qwen serve: reading ${DUE_DATES_FILENAME} failed (${describeError(err)}); serving without due dates`,
+    );
     return {};
   }
 }
@@ -163,6 +198,70 @@ async function readDueDates(): Promise<Record<string, string>> {
 async function writeDueDates(map: Record<string, string>): Promise<void> {
   await fs.mkdir(getTodoDir(), { recursive: true });
   await atomicWriteJson(getDueDatesPath(), JSON.stringify(map, null, 2));
+}
+
+function getTagsPath(): string {
+  return path.join(getTodoDir(), TAGS_FILENAME);
+}
+
+/**
+ * Reads the tag overlay. Same contract as `readDueDates`: ENOENT is the
+ * legitimate first-run case; `strict: true` rethrows every other failure so
+ * the POST handler's read-modify-write can never persist an empty overlay
+ * over a file it could not read.
+ */
+async function readTodoTags(opts?: {
+  strict?: boolean;
+}): Promise<TodoTagOverlay> {
+  try {
+    const raw = JSON.parse(await fs.readFile(getTagsPath(), 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    const overlay: TodoTagOverlay = { definitions: {}, assignments: {} };
+    const defs = raw['definitions'] as Record<string, unknown> | undefined;
+    if (defs && typeof defs === 'object') {
+      for (const [name, val] of Object.entries(defs)) {
+        if (
+          TAG_NAME_PATTERN.test(name) &&
+          val &&
+          typeof val === 'object' &&
+          typeof (val as Record<string, unknown>)['color'] === 'string' &&
+          TAG_COLOR_PATTERN.test(
+            (val as Record<string, unknown>)['color'] as string,
+          )
+        ) {
+          overlay.definitions[name] = {
+            color: (val as Record<string, unknown>)['color'] as string,
+          };
+        }
+      }
+    }
+    const assigns = raw['assignments'] as Record<string, unknown> | undefined;
+    if (assigns && typeof assigns === 'object') {
+      for (const [key, val] of Object.entries(assigns)) {
+        if (Array.isArray(val)) {
+          overlay.assignments[key] = val.filter(
+            (t): t is string =>
+              typeof t === 'string' && TAG_NAME_PATTERN.test(t),
+          );
+        }
+      }
+    }
+    return overlay;
+  } catch (err) {
+    if (isMissingFileError(err)) return { definitions: {}, assignments: {} };
+    if (opts?.strict) throw err;
+    writeStderrLine(
+      `qwen serve: reading ${TAGS_FILENAME} failed (${describeError(err)}); serving without tags`,
+    );
+    return { definitions: {}, assignments: {} };
+  }
+}
+
+async function writeTodoTags(overlay: TodoTagOverlay): Promise<void> {
+  await fs.mkdir(getTodoDir(), { recursive: true });
+  await atomicWriteJson(getTagsPath(), JSON.stringify(overlay, null, 2));
 }
 
 async function readTodoPlan(
@@ -294,9 +393,15 @@ export function registerTodosRoutes(
       }
 
       const dueDates = await readDueDates();
+      const tagOverlay = await readTodoTags();
       const sessions: TodoSessionView[] = [];
       for (const name of names) {
-        if (!name.endsWith('.json') || name === DUE_DATES_FILENAME) continue;
+        if (
+          !name.endsWith('.json') ||
+          name === DUE_DATES_FILENAME ||
+          name === TAGS_FILENAME
+        )
+          continue;
         const fileSessionId = name.slice(0, -'.json'.length);
         let mtimeMs = 0;
         try {
@@ -317,6 +422,7 @@ export function registerTodosRoutes(
             .map((todo) => ({
               ...todo,
               dueDate: dueDates[`${overlayPrefix}${todo.id}`] ?? null,
+              tags: tagOverlay.assignments[`${overlayPrefix}${todo.id}`] ?? [],
             })),
         });
       }
@@ -377,6 +483,7 @@ export function registerTodosRoutes(
         generatedAt: Date.now(),
         totals,
         groups,
+        tagDefinitions: tagOverlay.definitions,
       });
     } catch (err) {
       writeStderrLine(
@@ -424,9 +531,13 @@ export function registerTodosRoutes(
       });
       return;
     }
-    if (status === undefined && !hasDueDate) {
+    if (
+      status === undefined &&
+      !hasDueDate &&
+      !Object.prototype.hasOwnProperty.call(body, 'tags')
+    ) {
       res.status(400).json({
-        error: 'nothing to update: provide status and/or dueDate',
+        error: 'nothing to update: provide status, dueDate, and/or tags',
         code: 'todos_bad_request',
       });
       return;
@@ -453,6 +564,46 @@ export function registerTodosRoutes(
       });
       return;
     }
+    const hasTags = Object.prototype.hasOwnProperty.call(body, 'tags');
+    const rawTags = body['tags'];
+    if (hasTags) {
+      if (!Array.isArray(rawTags)) {
+        res.status(400).json({
+          error: 'tags must be an array of tag names',
+          code: 'todos_bad_tags',
+        });
+        return;
+      }
+      for (const tag of rawTags) {
+        if (typeof tag !== 'string' || !TAG_NAME_PATTERN.test(tag)) {
+          res.status(400).json({
+            error: `invalid tag name "${tag}": must be 1-24 chars, alphanumeric/hyphen/underscore`,
+            code: 'todos_bad_tag_name',
+          });
+          return;
+        }
+      }
+    }
+    const tagDefinition = body['tagDefinition'] as
+      | { name?: unknown; color?: unknown }
+      | undefined;
+    if (tagDefinition !== undefined) {
+      if (
+        typeof tagDefinition.name !== 'string' ||
+        !TAG_NAME_PATTERN.test(tagDefinition.name) ||
+        typeof tagDefinition.color !== 'string' ||
+        !TAG_COLOR_PATTERN.test(tagDefinition.color)
+      ) {
+        res.status(400).json({
+          error: 'tagDefinition must be {name: string, color: #rrggbb}',
+          code: 'todos_bad_tag_definition',
+        });
+        return;
+      }
+    }
+    const validatedTags: string[] | undefined = hasTags
+      ? (rawTags as unknown[]).filter((t): t is string => typeof t === 'string')
+      : undefined;
 
     // Narrow validated body fields to their runtime types — the `unknown`
     // from safeBody does not flow into the async closure below.
@@ -506,7 +657,7 @@ export function registerTodosRoutes(
         // serializes the entire read-modify-write cycle.
         let appliedDueDate: string | null = null;
         if (validatedDueDate !== undefined) {
-          const map = await readDueDates();
+          const map = await readDueDates({ strict: true });
           const key = `${sessionId}:${planId}:${todoId}`;
           if (validatedDueDate === null) {
             delete map[key];
@@ -517,6 +668,31 @@ export function registerTodosRoutes(
           appliedDueDate = validatedDueDate;
         }
 
+        // Tag assignment update — same lock, same overlay pattern as due dates.
+        let appliedTags: string[] | undefined;
+        if (validatedTags !== undefined || tagDefinition !== undefined) {
+          const overlay = await readTodoTags({ strict: true });
+          if (
+            tagDefinition !== undefined &&
+            typeof tagDefinition.name === 'string' &&
+            typeof tagDefinition.color === 'string'
+          ) {
+            overlay.definitions[tagDefinition.name] = {
+              color: tagDefinition.color,
+            };
+          }
+          if (validatedTags !== undefined) {
+            const tagKey = `${sessionId}:${planId}:${todoId}`;
+            if (validatedTags.length === 0) {
+              delete overlay.assignments[tagKey];
+            } else {
+              overlay.assignments[tagKey] = validatedTags;
+            }
+            appliedTags = validatedTags;
+          }
+          await writeTodoTags(overlay);
+        }
+
         res.status(200).json({
           v: 2,
           ok: true,
@@ -525,6 +701,7 @@ export function registerTodosRoutes(
           before,
           after: validatedStatus ?? undefined,
           dueDate: appliedDueDate,
+          tags: appliedTags,
         });
       } catch (err) {
         writeStderrLine(

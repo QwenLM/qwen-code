@@ -432,6 +432,11 @@ export interface DaemonTodoItem {
    * Null when the todo has no due date.
    */
   dueDate?: string | null;
+  /**
+   * Tag names from the sidecar overlay (`todos/todo-tags.json`).
+   * Empty array when the todo has no tags.
+   */
+  tags?: string[];
 }
 
 /** One session's todos, attributed to its project working directory. */
@@ -463,6 +468,8 @@ export interface DaemonTodosSnapshot {
     completed: number;
   };
   groups: DaemonTodoGroup[];
+  /** Tag definitions from the sidecar overlay (`todos/todo-tags.json`). */
+  tagDefinitions?: Record<string, { color: string }>;
 }
 
 export interface DaemonWorkspacePathSuggestion {
@@ -719,7 +726,12 @@ export interface DaemonWorkspaceActions {
   updateTodo(
     sessionId: string,
     todoId: string,
-    patch: { status?: DaemonTodoStatus; dueDate?: string | null },
+    patch: {
+      status?: DaemonTodoStatus;
+      dueDate?: string | null;
+      tags?: string[];
+      tagDefinition?: { name: string; color: string };
+    },
   ): Promise<void>;
 
   // Providers / env (read-only diagnostics)

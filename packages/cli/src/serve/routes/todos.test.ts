@@ -11,12 +11,15 @@ import * as os from 'node:os';
 
 const mockState = vi.hoisted(() => ({
   runtimeBaseDir: '',
+  globalQwenDir: '',
 }));
 
 vi.mock('@qwen-code/qwen-code-core/config/storage.js', () => ({
   Storage: {
     getRuntimeBaseDir: () => mockState.runtimeBaseDir,
-    getGlobalQwenDir: () => mockState.runtimeBaseDir,
+    // Deliberately distinct from the runtime base dir: the todo store and
+    // the project chat records must resolve from the runtime root alone.
+    getGlobalQwenDir: () => mockState.globalQwenDir,
   },
 }));
 
@@ -68,13 +71,16 @@ function createMockRes() {
 
 describe('registerTodosRoutes', () => {
   let tmpDir: string;
+  let globalDir: string;
   let app: ReturnType<typeof createMockApp>;
   let res: ReturnType<typeof createMockRes>;
   const isWorkspaceTrusted = vi.fn(() => true);
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todos-test-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todos-global-'));
     mockState.runtimeBaseDir = tmpDir;
+    mockState.globalQwenDir = globalDir;
     app = createMockApp();
     res = createMockRes();
     isWorkspaceTrusted.mockReturnValue(true);
@@ -91,10 +97,14 @@ describe('registerTodosRoutes', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
   });
 
   describe('GET /todos', () => {
     it('returns an empty aggregate when no todo files exist', async () => {
+      // Create the (empty) store directory so the handler exercises the
+      // readdir-returns-empty path, not readdir failing on a missing dir.
+      fs.mkdirSync(path.join(tmpDir, 'todos'), { recursive: true });
       const route = app.routes['GET /todos'];
       expect(route).toBeDefined();
       await route.handler({ query: {} }, res);
@@ -136,6 +146,45 @@ describe('registerTodosRoutes', () => {
       expect(body.totals.pending).toBe(1);
       expect(body.totals.completed).toBe(1);
       expect(body.totals.sessions).toBe(1);
+    });
+
+    it('attributes sessions to projects via the chat runtime records', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-abc.json'),
+        JSON.stringify({
+          todos: [{ id: '1', content: 'Task one', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      // Offline-session fallback: work_dir comes from the runtime root's
+      // project chat record — the global qwen dir points elsewhere and must
+      // never win attribution.
+      const chatsDir = path.join(
+        tmpDir,
+        'projects',
+        'home-user-project-a',
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(chatsDir, 'session-abc.runtime.json'),
+        JSON.stringify({ work_dir: '/home/user/project-a' }),
+      );
+      const route = app.routes['GET /todos'];
+      await route.handler({ query: {} }, res);
+      expect(res.statusCode).toBe(200);
+      const body = res.body as {
+        groups: Array<{
+          project: string;
+          sessions: Array<{ sessionId: string; cwd: string | null }>;
+        }>;
+      };
+      expect(body.groups).toHaveLength(1);
+      expect(body.groups[0].project).toBe('/home/user/project-a');
+      expect(body.groups[0].sessions[0].sessionId).toBe('session-abc');
+      expect(body.groups[0].sessions[0].cwd).toBe('/home/user/project-a');
     });
   });
 

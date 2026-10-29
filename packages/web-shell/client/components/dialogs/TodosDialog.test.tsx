@@ -6,9 +6,17 @@
  * @vitest-environment jsdom
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, waitFor, cleanup } from '@testing-library/react';
 import { TodosDialog } from './TodosDialog';
+
+// This package has no RTL auto-cleanup (vitest.config.ts sets no globals,
+// client/test/setup.ts registers no afterEach), so renders accumulate in
+// document.body without this — the second test's getByTestId finds multiple
+// boards and the third fails on "Found multiple elements" [R5-1].
+afterEach(() => {
+  cleanup();
+});
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => ({
@@ -66,12 +74,17 @@ vi.mock('../../utils/sessionPath', () => ({
 }));
 
 describe('TodosDialog', () => {
-  it('renders the board with project groups and todo cards', async () => {
+  it('renders the board with project groups, todo cards, and kanban columns', async () => {
     render(<TodosDialog />);
+    // Wait for the async data load to settle, then assert everything in one
+    // pass — the columns are siblings of the card content in the same board.
     await waitFor(() => {
       expect(screen.getByText('Write the deployment guide')).toBeDefined();
     });
     expect(screen.getByText('/home/user/project-a')).toBeDefined();
+    expect(screen.getByTestId('todos-column-pending')).toBeDefined();
+    expect(screen.getByTestId('todos-column-in_progress')).toBeDefined();
+    expect(screen.getByTestId('todos-column-completed')).toBeDefined();
   });
 
   it('shows view-conversation buttons on each card', async () => {
@@ -81,14 +94,5 @@ describe('TodosDialog', () => {
     });
     const buttons = screen.getAllByTitle('todos.viewConversation');
     expect(buttons.length).toBeGreaterThan(0);
-  });
-
-  it('shows the three kanban columns', async () => {
-    render(<TodosDialog />);
-    await waitFor(() => {
-      expect(screen.getByTestId('todos-column-pending')).toBeDefined();
-      expect(screen.getByTestId('todos-column-in_progress')).toBeDefined();
-      expect(screen.getByTestId('todos-column-completed')).toBeDefined();
-    });
   });
 });
