@@ -209,8 +209,8 @@ export function resolvePathFromEnv(envVar?: string): {
  * is never reminded about a style its prompt does not carry.
  */
 export function isSystemMdActive(): boolean {
-  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
-  return resolution.value !== null && !resolution.isDisabled;
+  // This distribution always uses its bundled custom base prompt.
+  return true;
 }
 
 /**
@@ -756,7 +756,9 @@ export function getCoreSystemPrompt(
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
   const systemMdEnabled = isSystemMdActive();
-  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
+  // Resolve the bundled prompt relative to the project root at runtime.
+  // QWEN_SYSTEM_MD can specify an explicit deployed copy.
+  let systemMdPath = path.resolve(process.cwd(), '.qwen', 'system.md');
 
   if (systemMdEnabled) {
     // Resolve the environment variable to get either a path or a switch value.
