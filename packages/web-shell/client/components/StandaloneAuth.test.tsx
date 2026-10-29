@@ -246,9 +246,11 @@ it('retries with the typed token, stores it per tab, and creates no connection',
     'good',
   );
   expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
-  expect(fetch.mock.calls[1][1].headers).toEqual({
-    Authorization: 'Bearer good',
-  });
+  expect(new Headers(fetch.mock.calls[1][1].headers)).toEqual(
+    new Headers({
+      Authorization: 'Bearer good',
+    }),
+  );
 });
 it('clears a rejected stored token after tokenless access succeeds', async () => {
   persistDaemonToken('wrong', 'http://daemon.test');
@@ -866,9 +868,11 @@ it('keeps a token typed during an automatic retry when that retry is rejected', 
   // The retry re-probes the credential the gate started with, so the 401 is a
   // verdict about that one — never about the value just typed.
   for (const call of fetch.mock.calls) {
-    expect((call[1] as RequestInit).headers).toEqual({
-      Authorization: 'Bearer stale-token',
-    });
+    expect(new Headers((call[1] as RequestInit).headers)).toEqual(
+      new Headers({
+        Authorization: 'Bearer stale-token',
+      }),
+    );
   }
   expect(tokenInput().value).toBe('fresh-token');
 });
@@ -1016,9 +1020,11 @@ it('trims a whitespace-padded typed token before probing and persisting', async 
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'padded-token',
   );
-  expect(fetch.mock.calls[1][1].headers).toEqual({
-    Authorization: 'Bearer padded-token',
-  });
+  expect(new Headers(fetch.mock.calls[1][1].headers)).toEqual(
+    new Headers({
+      Authorization: 'Bearer padded-token',
+    }),
+  );
 });
 
 it('lets a manual retry supersede an armed auto-retry', async () => {

@@ -4529,9 +4529,9 @@
       "type": "object",
       "properties": {
         "generatedUi": {
-          "description": "Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.",
+          "description": "Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default; set to false to turn it off. Restart the owning session to apply changes.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "mods": {
           "description": "Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.",

@@ -281,11 +281,27 @@ and does not start the ACP child. Use `GET /daemon/status?detail=full` for
 per-session diagnostics, ACP connection details, auth device-flow counts, and
 workspace status sections when you are actively investigating a problem.
 
-`GET /workspace/mcp`, `GET /workspace/skills`, and `GET /workspace/providers`
-report the live ACP runtime and do not start the ACP child when idle; an
-idle daemon returns `initialized: false` with an empty snapshot. Once a
-session is alive they switch to `initialized: true` and surface the real
-state.
+`GET /workspace/mcp` reports the live ACP runtime and does not start the ACP
+child when idle; an idle daemon returns `initialized: false` with an empty
+snapshot. Once a session is alive it switches to `initialized: true` and
+surfaces the real state.
+
+`GET /workspace/providers` is answered daemon-locally from workspace settings
+and environment, so it does not depend on an ACP child being live, and
+`acpChannelLive` is the liveness signal. If the workspace settings or model
+configuration cannot be resolved, the response has `initialized: false`, an
+empty `providers` array, and an `errors` entry. The route falls back to the
+live ACP snapshot only when a daemon is constructed without a daemon-local
+provider status builder; the daemon-local answer never includes
+runtime-registered models.
+
+`GET /workspace/skills` returns a retained daemon observation immediately and
+revalidates it in the background, so a warm read does not wait for the ACP
+child. The optional `snapshot` object reports `observedAt`, `ageMs`, `stale`,
+and `refreshing`; check `ageMs` before treating the catalog as current. Before
+the first successful observation, a read inside the one-second start-throttle
+window can return `initialized: false` with an `errors` entry instead of
+waiting; that is retryable unavailability, not an empty catalog.
 
 To update workspace Skill settings by name, call `POST /workspace/skills/:name/enable` with `{ "enabled": true | false }` after checking the `workspace_skill_settings_toggle` capability. To change several names, check `workspace_skill_settings_batch_toggle` and call `POST /workspace/skills/enable` with `{ "skillNames": ["review", "deploy"], "enabled": false }`; it processes every structurally valid name together, persists all resulting declaration changes in at most one locked settings write, and refreshes active ACP sessions once when anything changed. These routes write workspace `skills.disabled` and `skills.enabled` without consulting the loaded Skill catalog, so names may be disabled before installation or while their Extension is inactive. Enabling removes a matching workspace disable and records an explicit `skills.enabled` opt-in, even before installation, so this entry can override an Extension's internal Skill disablement. Repeating the same declaration is a no-op (`changed: false`). Their paths and request bodies are unchanged; the settings-specific capabilities replace the retired catalog-validated Skill toggle tags. The batch `errors` array remains for wire compatibility and is empty for structurally valid names. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not block the workspace from recording or removing its own declaration. Skill status cells expose `disabledReason` (`hard`, `default`, or `inactive_extension`) and an optional `lockedScope`. Untrusted workspace writes are still rejected. A `deferred` response means no child was live at the liveness check or a changed request lost its child/session during the required refresh; when `changed` is true, the persisted declaration applies when a child starts. Whether a declaration actually changed is reported by `changed` (on each result for a batch request). `skills.disabled` disables both manual and model use, unlike `disable-model-invocation: true`, which keeps direct `/skill-name` invocation available. For V2 Extension batches, check `extension_batch_activation_v2`: `PUT /extensions/activation` changes global defaults, while `PUT /workspaces/:workspace/extensions/activation` changes exact overrides for the selected workspace and accepts `"inherit"` to clear them. Both accept names in `extensionNames`; `enabled` and `disabled` may be declared before installation, while `inherit` for an unknown name is a no-op. Each request returns one operation to poll. When `extension_activation_explicit_refresh` is advertised, that operation finishes after the activation policy is committed and does not directly refresh active sessions. To apply it immediately, submit the independent primary or workspace-qualified Extension refresh after activation succeeds. Without that explicit refresh, other workspaces can continue using the previous activation for up to the next 30-second generation-reconciler pass; failed reconciliation is retried by later passes.
 

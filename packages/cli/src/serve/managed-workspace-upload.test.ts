@@ -10,7 +10,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { executeSshBootstrap } from './managed-runtime-bootstrap.js';
-import { MAX_WORKSPACE_UPLOAD_BYTES } from './managed-workspace-files.js';
+import {
+  MAX_WORKSPACE_UPLOAD_BYTES,
+  type SessionWorkspaceFileScope,
+} from './managed-workspace-files.js';
 import {
   workspaceUploadRequest,
   type WorkspaceUploadMetadata,
@@ -56,6 +59,7 @@ describe('Managed Workspace upload receipts and filesystem', () => {
     info: WorkspaceUploadMetadata,
     bytes?: Buffer,
     cwdRelative = '.',
+    sessionFileScope?: SessionWorkspaceFileScope,
   ) {
     const result = await executeSshBootstrap({
       protocolVersion: 1,
@@ -66,6 +70,7 @@ describe('Managed Workspace upload receipts and filesystem', () => {
       allowedRoots: [temporary],
       localRootIdentity: identity,
       cwdRelative,
+      ...(sessionFileScope ? { sessionFileScope } : {}),
       files: {
         protocolVersion: 1,
         operation: bytes === undefined ? 'upload-status' : 'upload',
@@ -78,6 +83,59 @@ describe('Managed Workspace upload receipts and filesystem', () => {
 
   const receiptDirectory = (info: WorkspaceUploadMetadata) =>
     path.join(stateDirectory, 'workspace-uploads', info.uploadId);
+
+  it('freezes the Session identity in upload receipts and refuses replay into another Session', async () => {
+    const cwd = '.qwen-managed-worktrees/owned';
+    await fs.mkdir(path.join(root, cwd), { recursive: true });
+    const stat = await fs.stat(path.join(root, cwd), { bigint: true });
+    const scope: SessionWorkspaceFileScope = {
+      sessionId: 'session-a',
+      contextDigest: `sha256:${'a'.repeat(64)}`,
+      worktreeId: 'owned',
+      worktreeRevision: 2,
+      cwdRelative: cwd,
+      worktreeRootIdentity: {
+        device: String(stat.dev),
+        inode: String(stat.ino),
+      },
+    };
+    const bytes = Buffer.from('session upload');
+    const info = metadata(bytes);
+    await expect(request(info, bytes, cwd)).rejects.toThrow();
+    expect(await request(info, bytes, cwd, scope)).toMatchObject({
+      state: 'completed',
+    });
+    expect(await fs.readFile(path.join(root, cwd, info.path))).toEqual(bytes);
+    expect(await request(info, undefined, cwd, scope)).toMatchObject({
+      state: 'completed',
+    });
+    await expect(
+      request(info, undefined, cwd, { ...scope, sessionId: 'session-b' }),
+    ).rejects.toMatchObject({ code: 'ssh_runtime_file_upload_conflict' });
+    await fs.rename(path.join(root, cwd), path.join(root, 'moved'));
+    await fs.mkdir(path.join(root, cwd));
+    expect(
+      await request(metadata(bytes, 'new.bin'), bytes, cwd, scope),
+    ).toMatchObject({
+      state: 'failed',
+      code: 'ssh_runtime_file_changed',
+    });
+    expect(await fs.readdir(path.join(root, cwd))).toEqual([]);
+    await fs.unlink(path.join(receiptDirectory(info), 'receipt.json'));
+    const temporary = path.join(
+      root,
+      cwd,
+      `.qwen-managed-upload-${info.uploadId}.tmp`,
+    );
+    await fs.writeFile(temporary, 'belongs to replacement');
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('absent'), { code: 'ESRCH' });
+    });
+    await expect(request(info, undefined, cwd, scope)).rejects.toMatchObject({
+      code: 'ssh_runtime_file_changed',
+    });
+    expect(await fs.readFile(temporary, 'utf8')).toBe('belongs to replacement');
+  });
 
   it('preserves binary bytes, Unicode paths and cwd and advertises its size limit', async () => {
     await fs.mkdir(path.join(root, 'working', 'nested'), { recursive: true });

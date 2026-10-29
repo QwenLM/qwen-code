@@ -11,6 +11,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -40,7 +41,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
     private final ObjectMapper objectMapper;
 
     public SignatureAuthFilter(BrokerSecurity security,
-            ObjectMapper objectMapper) {
+            @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper) {
         this.security = security;
         this.objectMapper = objectMapper;
     }

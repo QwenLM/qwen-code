@@ -2,6 +2,8 @@
 
 [English](2026-10-20-sdk-java-fair-lock-queue.md) | [简体中文](2026-10-20-sdk-java-fair-lock-queue.zh-CN.md)
 
+Database integration now runs on MySQL only. References below to the former MariaDB integration site retain historical measurements; its unchanged lock, cache write-back and budget rules apply to the retained MySQL job. See the [current database verification scope](managed-runtime-broker-jdbc.md#database-verification-scope).
+
 ## Problem
 
 `.github/workflows/sdk-java.yml` serializes every self-hosted Maven step on one
@@ -151,6 +153,22 @@ spins out its budget. In the bare-lock fallback, only `flock`'s timeout
 status is tolerated; any other status is an unknown setup failure and stays
 fatal.
 
+A red suite still reaches the write-back. The test job's Maven runs record a
+failure in `mvn_status` instead of aborting under errexit, the failure stops
+the remaining suites, and that deferred status fails the step after the copy.
+The downloads the failed run made are therefore published instead of
+re-fetched by the next leg, and a tolerated skip of the copy reports the same
+status rather than turning the step green. A red leg queues only as long as
+the copy itself may run (300 s) instead of spending the green lane's 9600 s
+budget to repeat a failure signal that is already decided. The copy publishes
+artifacts only: the resolver tracking markers and the `*.tmp` fragments an
+interrupted transfer leaves behind stay out, because a published marker would
+make every later reader of the host cache inherit that resolution outcome.
+Because the write-back output now sits between the failure and the log tail,
+every exit that can end a red step names the failing stage in an annotation;
+Maven exits 1 for nearly every failure mode, so the bare exit code cannot tell
+the three suites apart.
+
 The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
 They bound the queue, not the hold; the test lane's 9600 s is carried from
 the pre-split topology where its suite could queue behind several holds, and
@@ -285,16 +303,26 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper, the
-  test lane's 9600 s budget and 200-minute ceiling, the MariaDB write-back's
-  5400 s budget and 310-minute ceiling, the identical prelude and write-back
-  tail at both sites (modulo the intentional budget difference), both jobs'
-  Maven runs above their acquisition, their write-back children's fd 9
-  close, the two in-house coordinates' and the tracking markers' absence
-  from every seeded job-local repository, and the seed-drop/prune sets
-  agreeing at every site. The fault arms cover a missing `flock`, a broken
-  `mkdir`, a stray queue file, a lock path that is a directory, a timed-out
-  `flock`, and an unexpected `flock` status. The `.size-baseline` entry is
-  re-measured to the workflow's size after the last edit.
+  test lane's 9600 s budget and 200-minute ceiling, the red leg's 300 s
+  clamp, the MariaDB write-back's 5400 s budget and 310-minute ceiling, the
+  prelude and write-back tail at both sites — byte-identical apart from
+  three deliberate differences: the wait budget, the red-path clamp, and the
+  test job's deferred `mvn_status` exits and stage reporter, which the
+  comparison normalizes to `exit 0` and strips in the prelude and cuts off
+  after the write-back in the tail; the MariaDB site's arms keep `exit 0`
+  and never mention `mvn_status` because its suites fail inline — both jobs'
+  Maven runs above their acquisition, every test-lane `mvn` line ending in
+  `|| mvn_status=$?` with a named stage, the tolerated-skip arms exercised
+  with both a green and a red status (the red ones assert the stage
+  annotation and the 300 s budget), their write-back children's fd 9 close,
+  the two in-house coordinates' and the tracking-marker and `*.tmp` names'
+  absence from every seeded job-local repository and from both write-back
+  prunes, the annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
+  seed-drop/prune sets agreeing at every site. The fault arms cover a missing
+  `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
+  directory, a timed-out `flock`, and an unexpected `flock` status. The
+  `.size-baseline` entry is re-measured to the workflow's size after the last
+  edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 

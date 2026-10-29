@@ -2,6 +2,8 @@
 
 [English](workflow-intent.md) | [简体中文](workflow-intent.zh-CN.md)
 
+若希望对后续普通输入保存持续偏好，请参阅[会话级 Workflow 模式](workflow-mode.zh-CN.md)。
+
 启用 `tools.workflowsEnabled` 后，在人类提交的请求中加入 `ultracode` 或已有的
 `workflow` 关键词，可以建议模型在当前回合使用 Workflow 工具。例如：
 `ultracode: 检查这三个模块`。模型自行判断工作流是否适用。关键词不会直接启动工作流、

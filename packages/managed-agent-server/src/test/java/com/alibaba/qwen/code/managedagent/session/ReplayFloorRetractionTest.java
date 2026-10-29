@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -35,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ReplayFloorRetractionTest {
     @Autowired private MockMvc mvc;
     @Autowired private ManagedAgentStore store;
+    @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ManagedAgentService service;
     @Autowired private SessionEventHub hub;
