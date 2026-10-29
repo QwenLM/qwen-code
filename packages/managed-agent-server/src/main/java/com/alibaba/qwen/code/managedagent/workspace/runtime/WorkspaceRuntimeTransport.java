@@ -571,7 +571,16 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         Context context = context(lease, session, false);
         RuntimeBindingRecord binding = external(context) ? context.runtime() : bindings.findById(context.runtime().getBindingId());
         if (external(context)) {
-            if (binding.getState() != RuntimeBindingRecord.State.DRAINING) {
+            // A drain that runs without a lifecycle authority cannot force
+            // DRAINING: the claim stays LOST, and only the committed receipt
+            // proves the stop. Refusing that combination strands the provider
+            // worker holding the storage forever, because every retry repeats
+            // the same refusal. Admit a receipt-backed LOST as drain-proven.
+            boolean drainProven = binding.getState() == RuntimeBindingRecord.State.DRAINING
+                    || (binding.getState() == RuntimeBindingRecord.State.LOST
+                            && binding.getDrainReceipt() != null
+                            && binding.getDrainReceipt().matches(binding));
+            if (!drainProven) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             ownership.releaseStopped(context.binding(), context.session(), binding, bindings);
