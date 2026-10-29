@@ -802,19 +802,27 @@ async function readManifest(root) {
   }
 }
 
-// install renames a link over the distribution path; a crash between moving
-// a directory away and that rename leaves the link beside the missing path.
-async function interruptedInstall(current) {
+// The link install renames over the distribution path, which it names
+// <distribution>.upgrade-<8 hex digits>; other names are the operator's.
+function isInstallLink(current, entry) {
   const prefix = `${path.basename(current)}.upgrade-`;
+  return (
+    entry.isSymbolicLink() &&
+    entry.name.startsWith(prefix) &&
+    /^[0-9a-f]{8}$/.test(entry.name.slice(prefix.length))
+  );
+}
+
+// A crash between moving a directory away and the rename that puts the link
+// in its place leaves the link beside the missing path.
+async function interruptedInstall(current) {
   let entries;
   try {
     entries = await readdir(path.dirname(current), { withFileTypes: true });
   } catch {
     return undefined;
   }
-  const links = entries.filter(
-    (entry) => entry.isSymbolicLink() && entry.name.startsWith(prefix),
-  );
+  const links = entries.filter((entry) => isInstallLink(current, entry));
   return links.length === 1
     ? path.join(path.dirname(current), links[0].name)
     : undefined;
@@ -850,10 +858,8 @@ async function interruptedInstallLeftovers(deployment) {
     deployment.releases,
     (entry) => entry.isDirectory() && PARTIAL_COPY.test(entry.name),
   );
-  const prefix = `${path.basename(deployment.current)}.upgrade-`;
-  await collect(
-    path.dirname(deployment.current),
-    (entry) => entry.isSymbolicLink() && entry.name.startsWith(prefix),
+  await collect(path.dirname(deployment.current), (entry) =>
+    isInstallLink(deployment.current, entry),
   );
   await collect(
     path.join(deployment.releases, deployment.manifest.version, 'config'),
@@ -2169,6 +2175,8 @@ async function phaseInstall(system, deployment, options) {
   }
   const { version } = deployment.manifest;
   const target = path.join(deployment.releases, version);
+  // After the gate above: with the distribution path missing, inspect has
+  // refused, so the one link that finishes the install is never removed here.
   for (const leftover of await interruptedInstallLeftovers(deployment)) {
     await rm(leftover, { recursive: true, force: true });
     system.out(`Removed ${leftover}, which an interrupted install left`);
@@ -2936,11 +2944,20 @@ export async function runUpgrade(argv, system = createSystem()) {
     turn: values.turn,
   };
   const stopHandling = system.onSignal((name) => {
+    const lines = [];
     for (const file of removeOnSignal) {
-      rmSync(file, { recursive: true, force: true });
+      // One that cannot go must not keep the rest, or the exit, from happening.
+      try {
+        rmSync(file, { recursive: true, force: true });
+      } catch (error) {
+        lines.push(`${file} is left: ${error.message}`);
+      }
     }
+    lines.push(`${phase} stopped by ${name}`);
     try {
-      system.err(`${phase} stopped by ${name}`);
+      for (const line of lines) {
+        system.err(line);
+      }
     } catch {
       // A hung-up terminal.
     }

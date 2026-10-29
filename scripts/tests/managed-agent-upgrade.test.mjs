@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import fs, { existsSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import fsPromises, {
   chmod,
   cp,
@@ -1250,9 +1250,25 @@ test('a signal during backup removes what a failure would', async (t) => {
     }
     let seen;
     // What the real handler does before the process exits as the signal
-    // would have, skipping every finally block.
+    // would have, skipping every finally block. In a given directory the
+    // first file it removes cannot go, which must not keep the option file.
+    const database = path.join(to, 'database.sql');
+    const { rmSync: original } = fs;
+    t.after(() => {
+      fs.rmSync = original;
+      syncBuiltinESMExports();
+    });
     host.onDump = () => {
+      fs.rmSync = (file, options) => {
+        if (made && file === database) {
+          throw Object.assign(new Error('EBUSY: injected'), { code: 'EBUSY' });
+        }
+        return original(file, options);
+      };
+      syncBuiltinESMExports();
       host.signal('SIGTERM');
+      fs.rmSync = original;
+      syncBuiltinESMExports();
       seen = {
         credentials: existsSync(path.dirname(host.dumpCredentialsFile)),
         to: existsSync(to) && readdirSyncSorted(to),
@@ -1265,10 +1281,15 @@ test('a signal during backup removes what a failure would', async (t) => {
     });
     assert.equal(await backup(to), 1);
     assert.ok(host.output.includes('backup stopped by SIGTERM'));
+    assert.deepEqual(
+      host.output.filter((line) => line.includes(' is left: ')),
+      made ? [`${database} is left: EBUSY: injected`] : [],
+    );
     assert.deepEqual(seen, {
       credentials: false,
-      // A directory the backup made goes; one it was given stays, empty.
-      to: made ? [] : false,
+      // A directory the backup made goes; one it was given stays, empty
+      // but for the file that could not go.
+      to: made ? ['database.sql'] : false,
     });
     assert.equal(host.signal, undefined);
     host.onDump = undefined;
@@ -1761,6 +1782,33 @@ test('start gives up when the control plane never reports UP', async (t) => {
     );
     assert.equal(host.units[SERVER].ActiveState, 'inactive');
   }
+
+  // One exit is enough, though the restart RestartSec=5s brings would come
+  // up: start polls every second, so it sees the wait and does not take it.
+  let probes = 0;
+  host.responses['GET /actuator/health'] = () => {
+    probes += 1;
+    if (probes === 1) {
+      Object.assign(host.units[SERVER], {
+        ActiveState: 'activating',
+        SubState: 'auto-restart',
+      });
+    } else if (probes > 5) {
+      Object.assign(host.units[SERVER], {
+        ActiveState: 'active',
+        SubState: 'running',
+        NRestarts: '1',
+      });
+      return { status: 'UP' };
+    }
+    return { status: 'DOWN' };
+  };
+  assert.equal(await host.upgrade('start', '--timeout', '300'), 1);
+  assert.match(
+    host.output.at(-1),
+    /exited before it reported UP at .*, and is stopped now/,
+  );
+  assert.equal(host.units[SERVER].ActiveState, 'inactive');
 });
 
 test('a health probe that never answers ends at the timeout', async (t) => {
@@ -2212,13 +2260,15 @@ test('install leaves no partial copy, and an interrupted one is reported', async
   assert.ok((await lstat(host.current)).isDirectory());
   await rm(pipe);
 
-  // A crash between moving the directory and renaming the link over it.
+  // A crash between moving the directory and renaming the link over it,
+  // beside an operator's link that install would not have named.
   await cp(host.distribution, path.join(releases, '0.2.0'), {
     recursive: true,
   });
   await rename(host.current, path.join(releases, '0.1.0'));
   const link = `${host.current}.upgrade-0000abcd`;
   await symlink(path.join(releases, '0.2.0'), link);
+  await symlink(releases, `${host.current}.upgrade-backup`);
   assert.equal(await host.check(), 1);
   assert.equal(
     rowsOf(host.output).deployment,
@@ -2270,9 +2320,18 @@ test('install removes what an interrupted install left', async (t) => {
     recursive: true,
   });
   await mkdir(path.join(releases, '.0.1.9.partial-1111abcd'));
-  // A link made before anything moved, beside an operator's file named alike.
+  // A link made before anything moved, beside an operator's file and links
+  // named alike.
   await symlink(release, `${host.current}.upgrade-2222abcd`);
   await writeFile(`${host.current}.upgrade-notes`, 'mine\n');
+  const theirs = [
+    `${host.current}.upgrade-backup`,
+    `${host.current}.upgrade-2222abcd.old`,
+    `${host.current}.upgrade-2222abcde`,
+  ];
+  for (const each of theirs) {
+    await symlink(releases, each);
+  }
   // The release, with a configuration file killed before its rename.
   await cp(host.distribution, release, { recursive: true });
   await writeFile(
@@ -2303,12 +2362,15 @@ test('install removes what an interrupted install left', async (t) => {
     );
     await assert.rejects(lstat(each), { code: 'ENOENT' });
   }
-  // The link went, not the release it named; the operator's file stays.
+  // The link went, not the release it named; the operator's entries stay.
   assert.equal(await readlink(host.current), release);
   assert.equal(
     await readFile(`${host.current}.upgrade-notes`, 'utf8'),
     'mine\n',
   );
+  for (const each of theirs) {
+    assert.equal(await readlink(each), releases, each);
+  }
   assert.deepEqual((await readdir(path.join(release, 'config'))).sort(), [
     'application.example.yml',
     'application.yml',

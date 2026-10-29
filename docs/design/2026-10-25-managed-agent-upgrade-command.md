@@ -60,7 +60,7 @@ Three other problems show up only on a real host:
 - **`install`**
   - Requires: both units stopped; a backup that still describes the deployment; `check` has no FAIL.
   - Does:
-    1. Removes what an install killed earlier left: partial copies, `.upgrade-` links beside the distribution path, and `.tmp-` operator files in the release it will use. `check` lists them in the `layout` row.
+    1. Removes what an install killed earlier left: partial copies, `.upgrade-<8 hex digits>` links beside the distribution path, and `.tmp-` operator files in the release it will use. `check` lists them in the `layout` row.
     2. Copies the release to `<distribution>-releases/<version>`, verifies the copy and makes the files `SHA256SUMS` lists readable by every account, removing the copy when a step fails. An existing directory there is used only when its `SHA256SUMS` is the new distribution's and its files match it.
     3. Copies operator files from the installed `config/`.
     4. Replaces the distribution link with one `rename`. The first run instead moves the installed directory into the releases directory and puts a link in its place, and moves the directory back when the second `rename` fails. When that move back fails too, it keeps the link and names both `mv -T` commands.
@@ -69,7 +69,7 @@ Three other problems show up only on a real host:
   - Does:
     1. Starts the Harness, or restarts one an earlier `start` left running, and waits for its port.
     2. Runs the installed launcher's `--check` through `systemd-run`, with the unit's user, working directory and environment. The unit's `Environment=` assignments go in a `0600` environment file rather than on the `systemd-run` command line, which every local user can read.
-    3. Only when that passes, starts the control plane and waits for `/actuator/health` to report `UP`. One probe waits at most 5 seconds. A unit that exits is stopped and reported: one that shows `failed`, waits in `auto-restart`, or has a non-zero `NRestarts`, since the shipped units' `Restart=on-failure` restarts an exited process rather than leaving it failed. One still not healthy at `--timeout` keeps running, and the refusal names `verify` and `stop`.
+    3. Only when that passes, starts the control plane and waits for `/actuator/health` to report `UP`. One probe waits at most 5 seconds. A unit that exits is stopped and reported: one that shows `failed`, waits in `auto-restart`, or has a non-zero `NRestarts`, since the shipped units' `Restart=on-failure` restarts an exited process rather than leaving it failed. This holds for a unit the restart would bring up: an exit during the start that runs the new release's migrations is read in the journal before the release is trusted, not passed on a retry. Probing health before the unit would not change that, since the poll runs every second and `RestartSec=5s` keeps an exited unit in `auto-restart` for five. One still not healthy at `--timeout` keeps running, and the refusal names `verify` and `stop`.
 - **`verify`**
   - Requires: both units running.
   - Does:
@@ -80,7 +80,7 @@ Three other problems show up only on a real host:
     - skips both API reads when the configuration the server resolves sets signed authentication, with a `turn` row that says so when `--turn` was given.
     - No request outlasts `--timeout`.
 
-The phases keep no state file. Each re-reads the units, files and links, so a phase interrupted by a crash is simply run again. `SIGINT`, `SIGTERM` and `SIGHUP` remove the temporary files and the partial backup or copy a phase would remove on failure, which Node otherwise skips by exiting without running `finally` blocks. Running `stop` again changes nothing it already did, and `install` reuses a copy of the same build. Once the rename has installed the release, `install` run again says so and names `start`, before it reads the backup: a new backup taken then would record the new release as the one to return to. The one window a re-run cannot close is a crash between the first install's two renames. The distribution path is then missing and the new link sits beside it as `<distribution>.upgrade-<suffix>`. Every phase reports that state and names the `mv -T` that finishes the install.
+The phases keep no state file. Each re-reads the units, files and links, so a phase interrupted by a crash is simply run again. `SIGINT`, `SIGTERM` and `SIGHUP` remove the temporary files and the partial backup or copy a phase would remove on failure, which Node otherwise skips by exiting without running `finally` blocks. One that cannot be removed is named, and the rest still go before the command exits as the signal would have. Running `stop` again changes nothing it already did, and `install` reuses a copy of the same build. Once the rename has installed the release, `install` run again says so and names `start`, before it reads the backup: a new backup taken then would record the new release as the one to return to. The one window a re-run cannot close is a crash between the first install's two renames. The distribution path is then missing and the new link sits beside it as `<distribution>.upgrade-<suffix>`. Every phase reports that state and names the `mv -T` that finishes the install.
 
 ### Check rows
 
@@ -155,7 +155,7 @@ The control-plane unit adds `SuccessExitStatus=143`. `check` reports the changed
   - each check row;
   - every phase's refusals and its steps.
 - **Environment files.** 1579 random files read back through `systemd-run` on systemd 257, with no difference from the command's reader.
-- **Mutation testing.** 87 mutants of the script's decisions, 5 of the preflight changes and 8 of `ResolvedConfiguration` and the auth mode it reads; the follow-up added 33 for its own changes.
+- **Mutation testing.** 87 mutants of the script's decisions, 5 of the preflight changes and 8 of `ResolvedConfiguration` and the auth mode it reads; the follow-up added 33 for its own changes and 9 for its review.
 - **Preflight unit tests:**
   - Flyway ordering;
   - the validation hook;
