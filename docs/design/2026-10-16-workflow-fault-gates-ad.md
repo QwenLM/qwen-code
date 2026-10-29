@@ -115,7 +115,9 @@ hosted-harness`), the lose-once store/broker proxy shape from
    triage verdict recommended landing exactly these two first; the Hosted
    fork budget is under repair (#14148, open) and main CI carries a red
    neighbour (#14023, open), so the slice spends the minimum budget that
-   delivers the workflow-specific value.
+   delivers the workflow-specific value. _As delivered, FG10a alone
+   shipped here; FG10b–f, FG10d among them, landed in
+   [the relay design](2026-10-17-workflow-relay-fault-gates.md)._
 2. **Sequencing constraints re-evaluated, not inherited.** The issue's
    "land after FG8 and #14147" was written when FG8 had not started. FG8's
    slice 1 (#14120) has since merged and proved the per-letter driver
@@ -123,14 +125,15 @@ hosted-harness`), the lose-once store/broker proxy shape from
    blocked at P3, so this slice follows the **current pre-extraction**
    pattern and accepts the duplication FG8/FG9 already carry, exactly as
    FG8's slices did.
-3. **One IT class; no Spring kill; no cgroup dependency.** Both letters
-   live in `HostedWorkflowFaultGatesIT` with in-JVM Spring, selectors
-   `-Dqwen.fg10a.case` / `-Dqwen.fg10d.case`, and evidence under
-   `target/fg10-cases/`. The workflow kind owns no OS processes, so the
-   cgroup v2 delegation FG8 needed is unnecessary; the SIGKILL target is
-   the packaged Harness itself, which hosts both the parent session and
-   the in-process workflow run. POSIX signals confine the crash letter to
-   Linux/macOS, same as FG6c/FG7c/FG8.
+3. **One IT class; no Spring kill; no cgroup dependency.** FG10a lives
+   in `HostedWorkflowFaultGatesIT` with in-JVM Spring, selector
+   `-Dqwen.fg10a.case`, and evidence under `target/fg10-cases/`. FG10d,
+   planned here too, landed in `HostedWorkflowRelayFaultGatesIT` (the
+   relay design's slice 3, selector `-Dqwen.fg10d.case`), so this class
+   reads no FG10d selector. The workflow kind owns no OS processes, so the
+   cgroup v2 delegation FG8 needed is unnecessary; the crash letter's
+   SIGKILL target is the packaged Harness itself, which hosts both the
+   parent session and the in-process workflow run.
 4. **The relay must run in the in-JVM Spring.** `ChildResultRelay` is a
    `@Service` (`ChildResultRelay.java:47-48`), so it comes up with the
    application; the fixture keeps it enabled (FG8's fixture disabled the
@@ -194,18 +197,29 @@ never conflicts.
 
 ### FG10d — process crash
 
-**Deferred out of this slice.** The driver and the gate were built, and the
-gate went red on a genuine finding, not a fixture gap: after a SIGKILL of
-the Harness mid-workflow (a subagent in flight) and a restart, the child's
-unsettled workflow Turn was re-driven by the recovery — the script re-ran
-and re-dispatched its subagent (the post-kill model request carried the
-subagent's system prompt). That is exactly the "never re-executed on
-reopen" violation this letter exists to pin. The finding landed as a
-production bug (#14387) and was fixed in #14461: the recovery parks the
-Turn `hosted_workflow_recovery_blocked` — never re-driven, never settled —
-and the relay settles the record `recovery_blocked` over `outcome_unknown`.
-FG10d lands after it, asserting that shape; this section stays as its
-design. FG10a alone ships here.
+**Delivered on the coordinator-owned fixture.** The driver and the gate
+were built in this slice and went red on a genuine finding, not a fixture
+gap. After a SIGKILL of the Harness mid-workflow (a subagent in flight)
+and a restart, the recovery re-drove the child's unsettled workflow Turn:
+the script re-ran and re-dispatched its subagent (the post-kill model
+request carried the subagent's system prompt). That is exactly the "never
+re-executed on reopen" violation this letter exists to pin.
+
+The finding landed as a production bug (#14387) and was fixed in #14461.
+The recovery parks the Turn `hosted_workflow_recovery_blocked` — never
+re-driven, never settled — and the relay settles the record
+`recovery_blocked` over `outcome_unknown`.
+
+FG10d then landed after it, as slice 3 of
+[the relay design](2026-10-17-workflow-relay-fault-gates.md) in
+`HostedWorkflowRelayFaultGatesIT`, not in this driver-held class. Its
+expectations — the record's blocked settlement, its ledger and the
+parent's notification — are the relay's bind-to-deliver walk, which this
+class's driver-held parent cannot run (FG10a's note above); the
+coordinator-owned lead can. The two cases below keep their names; the
+relay design records how each injection and expectation landed, the two
+further defects the gate found there and fixed, and the mutations. FG10a
+alone ships here. The section below stays as the original design.
 
 POSIX-only. The driver owns the Harness child process and SIGKILLs it.
 The in-flight witness is the fake model server's request log: an `agent()`
@@ -246,18 +260,21 @@ afterwards so the case can prove the tamper landed. Evidence lives under
 **Driver.** `integration-tests/helpers/hosted-workflow-fault-driver.ts`,
 launched per letter as `node --import tsx … <driver.json>` like every
 FG6–FG8 driver. It owns: the per-case `HostedHarnessProcess` with isolated
-`HOME`/`QWEN_HOME`/`QWEN_RUNTIME_DIR`; the store-fronting proxy (FG10d's
-settlement-observed kill arm only — FG10a injects through the probe); the
-fake OpenAI server (below); and the canned workflow scripts. Markers:
-`FG10_CASE_OK <case>` sequences the IT, `FG10_STEP` / `FG10_DIAG` trace
-and dump, `FG10_TAMPERED` / `FG10_KILLED` prove the injections. If the
+`HOME`/`QWEN_HOME`/`QWEN_RUNTIME_DIR`; the store-fronting proxy, whose
+commit log is the launch's store-side evidence (FG10a injects through the
+probe; the settlement-observed kill arm planned here for FG10d went to the
+relay class's Java proxy instead); the fake OpenAI server (below); and the
+canned workflow scripts. Markers: `FG10_CASE_OK <case>` sequences the IT,
+`FG10_STEP` / `FG10_DIAG` trace and dump, `FG10_TAMPERED` proves the
+injection. If the
 driver calls `relayUpstream`, it joins the pinned caller list in
 `hosted-relay-headers.test.ts`.
 
 **Model.** A canned OpenAI-compatible server answers the parent turn with
 exactly one `fakeToolCall('workflow', …)`; the child run's `agent()`
-dispatches get short fixed replies — held open on request for the
-in-flight kill case, answered immediately for the others. The model is
+dispatches get short fixed replies, answered immediately (the held-open
+reply planned here for FG10d's in-flight kill went to the relay class's
+scripted model). The model is
 never the thing under gate; its request log is the in-flight witness.
 
 **CI.** The class name places it in the `hosted-harness-mysql` lane
@@ -283,10 +300,10 @@ reverted, following the FG6/FG7/FG8 documented manual procedure.
    `tampered-script-refused` and `same-length-substitution-refused` red —
    the tampered script executes and the fake model server records child
    requests.
-2. FG10d — the relay's bounded-watch classification for a child whose
-   Harness died rewritten to settle the record `failed` instead of
-   declaring the fact `unknown`: `kill-mid-workflow-subagents-in-flight`
-   red at the never-`failed` assertion.
+2. FG10d — planned here as the relay's bounded-watch classification for
+   a child whose Harness died rewritten to settle the record `failed`
+   instead of declaring the fact `unknown`. FG10d landed with the relay
+   design, whose slice-3 mutations replace this one.
 
 ## Validation and acceptance
 

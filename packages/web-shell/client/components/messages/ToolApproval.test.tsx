@@ -1010,6 +1010,23 @@ describe('ToolApproval accessibility', () => {
     act(() => optionButtons()[0].click());
     expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
   });
+  it('labels the Managed allow/deny plan options with the frozen execution policy', () => {
+    const req = {
+      ...planRequest,
+      options: [
+        { id: 'allow', label: 'Allow', kind: 'allow_once' as const },
+        { id: 'deny', label: 'Deny', kind: 'reject_once' as const },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'deny',
+      'allow',
+    ]);
+    expect(container!.textContent).toContain('Full Access');
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'allow');
+  });
 
   it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {
     render(undefined, request, undefined, 'en', undefined, 'yolo');

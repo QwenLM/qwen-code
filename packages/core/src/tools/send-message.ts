@@ -265,9 +265,10 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
-      if (entry.resumeBlockedReason) {
+      const blocked = entry.resumeBlockedReason ?? entry.messagesBlockedReason;
+      if (blocked) {
         return {
-          llmContent: `Error: Background task "${this.params.task_id}" cannot be continued: ${entry.resumeBlockedReason}`,
+          llmContent: `Error: Background task "${this.params.task_id}" cannot be continued: ${blocked}`,
           returnDisplay: 'Task cannot be continued.',
           error: {
             message: `Task cannot be continued: ${this.params.task_id}`,

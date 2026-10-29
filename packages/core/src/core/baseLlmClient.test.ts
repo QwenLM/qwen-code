@@ -24,7 +24,7 @@ import type { ContentGenerator } from './contentGenerator.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
@@ -270,6 +270,22 @@ describe('BaseLlmClient', () => {
 
       expect(retryWithBackoff).toHaveBeenCalledTimes(1);
       expectRetriedWith({ maxAttempts: 3 });
+    });
+
+    it('keeps explicitly bounded JSON requests out of persistent retries', async () => {
+      vi.mocked(isUnattendedMode).mockReturnValue(true);
+      try {
+        await generateJsonWith(
+          { color: 'cyan' },
+          { maxAttempts: 1, boundedRetries: true },
+        );
+        expectRetriedWith({ maxAttempts: 1, persistentMode: false });
+        vi.mocked(retryWithBackoff).mockClear();
+        await generateJsonWith({ color: 'blue' });
+        expectRetriedWith({ persistentMode: true });
+      } finally {
+        vi.mocked(isUnattendedMode).mockReturnValue(false);
+      }
     });
 
     it('should call retryWithBackoff with default maxAttempts when not provided', async () => {

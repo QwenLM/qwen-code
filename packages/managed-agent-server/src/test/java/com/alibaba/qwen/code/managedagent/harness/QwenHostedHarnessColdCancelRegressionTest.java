@@ -5,17 +5,17 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,6 +24,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -61,6 +62,7 @@ import static org.mockito.Mockito.when;
 })
 class QwenHostedHarnessColdCancelRegressionTest {
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -70,6 +72,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     private ManagedWorkspaceRegistry registry;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Test
@@ -96,17 +99,20 @@ class QwenHostedHarnessColdCancelRegressionTest {
         String turn = store.insertTurnCommand(tenant, "SUBMIT", "submit", "digest", session,
                 List.of(Map.of("type", "text", "text", "go")), "payload").turnId();
         assertThat(turn).isNotNull();
+        String prompt = store.findTurn(tenant, session, turn).orElseThrow().promptId();
 
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(boot);
+        when(capabilities.getFeatures()).thenReturn(List.of("targeted-cancel/1"));
         when(client.loadSession(any())).thenReturn(attached);
         when(attached.getHarnessBootId()).thenReturn(boot);
         when(attached.getApprovalMode()).thenReturn("yolo");
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.getCheckpointId()).thenReturn("checkpoint-of-T1");
+        when(recovery.getActivationId()).thenReturn("activation-of-T1");
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
@@ -132,7 +138,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             assertThat(store.bindHarness(tenant, session, turn, owner, boot)).isTrue();
             store.markSubmissionAttempted(tenant, session, turn, owner);
             store.recordAdmission(tenant, session, turn, owner, "epoch", 1);
-            assertThatThrownBy(() -> connector.recoverManagedRuntime(tenant, session, true))
+            assertThatThrownBy(() -> connector.recoverManagedRuntime(tenant, session, true, prompt))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
             jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
@@ -140,25 +146,28 @@ class QwenHostedHarnessColdCancelRegressionTest {
                     .commandEffect()).isTrue();
 
             coordinator.cancel(tenant, session, turn);
-            verify(client).cancelTurn(attached);
+            verify(client).cancelTurn(attached, prompt);
             clearInvocations(client);
             ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
 
             doThrow(new IllegalStateException("temporary cancel failure"))
-                    .when(client).cancelTurn(attached);
-            assertThatThrownBy(() -> connector.cancel(tenant, session))
+                    .when(client).cancelTurn(attached, prompt);
+            assertThatThrownBy(() -> connector.cancelOriginalTurn(tenant, session, prompt))
                     .isInstanceOf(IllegalStateException.class);
-            assertThat(connector.recoverManagedRuntime(tenant, session, true).runtimeRecovery())
+            assertThat(connector.recoverManagedRuntime(tenant, session, true, prompt).runtimeRecovery())
                     .isSameAs(recovery);
             clearInvocations(client);
-            doNothing().when(client).cancelTurn(attached);
+            doNothing().when(client).cancelTurn(attached, prompt);
             coordinator.cancel(tenant, session, turn);
             jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
-            assertThat(connector.recoverManagedRuntime(tenant, session, false).runtimeRecovery()).isNull();
+            var retained = connector.recoverManagedRuntime(tenant, session, false).runtimeRecovery();
+            assertThat(retained).isSameAs(recovery);
+            assertThat(retained.getCheckpointId()).isEqualTo("checkpoint-of-T1");
+            assertThat(retained.getActivationId()).isEqualTo("activation-of-T1");
             jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
 
             assertThat(store.findTurn(tenant, session, turn).orElseThrow().status()).isEqualTo("CANCELLING");
-            verify(client).cancelTurn(attached);
+            verify(client).cancelTurn(attached, prompt);
             assertThat(execution.verifiedRecoveryEnabled()).isFalse();
             assertThatThrownBy(() -> connector.submit(tenant, session, "later", List.of(), "digest"))
                     .isInstanceOf(RuntimeBrokerException.class);
@@ -173,14 +182,14 @@ class QwenHostedHarnessColdCancelRegressionTest {
                 clearInvocations(client);
                 ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
                 coordinator.cancel(tenant, session, turn);
-                verify(client).cancelTurn(attached);
+                verify(client).cancelTurn(attached, prompt);
             }
 
             ManagedAgentService service = new ManagedAgentService(store, new RequestDigests(),
                     coordinator, connector, registry);
             clearInvocations(client);
             assertThatThrownBy(() -> service.cancelTurn(tenant, "actor-a", "cancel-fresh", session, turn))
-                    .isInstanceOfSatisfying(ApiException.class,
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
             assertThat(store.findCommand(tenant, "CANCEL", "cancel-fresh")).isEmpty();
         } finally {
@@ -257,19 +266,22 @@ class QwenHostedHarnessColdCancelRegressionTest {
     @Transactional
     void admittedOwnerCanForceFailureCancellationWithoutOpeningTheOrdinaryCancelGate() {
         try (var fixture = recoveryFixture(true, true, "epoch", Duration.ofMinutes(1))) {
+            String prompt = fixture.store().findTurn(fixture.tenant(), fixture.session(), fixture.turn())
+                    .orElseThrow().promptId();
             assertThatThrownBy(() -> fixture.connector().recoverManagedCancellation(
-                    fixture.tenant(), fixture.session())).isInstanceOf(RuntimeBrokerException.class);
+                    fixture.tenant(), fixture.session(), prompt)).isInstanceOf(RuntimeBrokerException.class);
             verifyNoInteractions(fixture.client());
             var recovered = fixture.connector().recoverManagedFailureCancellation(
-                    fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner());
+                    fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner(), prompt);
             assertThat(recovered.runtimeRecovery()).isSameAs(fixture.recovery());
             clearInvocations(fixture.client());
             fixture.connector().recoverManagedFailureCancellation(
-                    fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner());
+                    fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner(), prompt);
             var request = ArgumentCaptor.forClass(LoadHarnessSession.class);
             verify(fixture.client()).loadSession(request.capture());
             Map<String, Object> fields = ReflectionTestUtils.invokeMethod(request.getValue(), "toJson");
             assertThat(fields).containsEntry("cancellationTakeover", true)
+                    .containsEntry("cancellationPromptId", prompt)
                     .containsEntry("passiveManagedRuntimeRecovery", true)
                     .doesNotContainKey("driveRuntimeRecovery");
             assertThat(fixture.store().findTurn(fixture.tenant(), fixture.session(), fixture.turn())
@@ -289,6 +301,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         try (var fixture = recoveryFixture(true, !"attempted".equals(missing),
                 "epoch".equals(missing) ? null : "epoch",
                 "expired".equals(missing) ? Duration.ofSeconds(1) : Duration.ofMinutes(1))) {
+            String prompt = fixture.store().findTurn(fixture.tenant(), fixture.session(), fixture.turn())
+                    .orElseThrow().promptId();
             String tenant = fixture.tenant();
             String session = fixture.session();
             String turn = fixture.turn();
@@ -316,8 +330,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
             String requestTurn = turn;
             String requestOwner = owner;
             assertThatThrownBy(() -> fixture.connector().recoverManagedFailureCancellation(
-                    requestTenant, requestSession, requestTurn, requestOwner))
-                    .isInstanceOfAny(RuntimeBrokerException.class, ApiException.class);
+                    requestTenant, requestSession, requestTurn, requestOwner, prompt))
+                    .isInstanceOfAny(RuntimeBrokerException.class, ManagedAgentException.class);
             verifyNoInteractions(fixture.client());
             assertThat(failedEvents(fixture)).isZero();
         }
@@ -327,10 +341,12 @@ class QwenHostedHarnessColdCancelRegressionTest {
     @Transactional
     void persistedUserCancellationWinsOverFailureCleanupAndTerminalProjection() {
         try (var fixture = recoveryFixture(true, true, "epoch", Duration.ofMinutes(1))) {
+            String prompt = fixture.store().findTurn(fixture.tenant(), fixture.session(), fixture.turn())
+                    .orElseThrow().promptId();
             assertThat(fixture.store().insertCancelCommand(fixture.tenant(), "CANCEL", "user-cancel", "digest",
                     fixture.session(), fixture.turn()).commandEffect()).isTrue();
             assertThatThrownBy(() -> fixture.connector().recoverManagedFailureCancellation(
-                    fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner()))
+                    fixture.tenant(), fixture.session(), fixture.turn(), fixture.owner(), prompt))
                     .isInstanceOf(RuntimeBrokerException.class);
             verifyNoInteractions(fixture.client());
             assertThat(fixture.store().failRecoveryBlockedTurn(fixture.tenant(), fixture.session(),
@@ -391,6 +407,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(boot);
+        when(capabilities.getFeatures()).thenReturn(List.of("targeted-cancel/1"));
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         when(client.loadSession(any())).thenReturn(attached);
         when(attached.getHarnessBootId()).thenReturn(boot);

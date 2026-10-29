@@ -16,6 +16,7 @@ import type {
   SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
+import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
 import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
@@ -368,8 +369,11 @@ export class QwenAgentManager {
    *
    * @param message - Message content
    */
-  async sendMessage(message: string | ContentBlock[]): Promise<void> {
-    await this.connection.sendPrompt(message);
+  async sendMessage(
+    message: string | ContentBlock[],
+    options?: PromptSubmissionOptions,
+  ): Promise<void> {
+    await this.connection.sendPrompt(message, options);
   }
 
   async rewindSession(

@@ -3,6 +3,7 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
+import { findDaemonRewindUserBlock } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -17,19 +18,6 @@ interface RewindDialogProps {
   rewind: (promptId: string) => Promise<void>;
   onError: (error: unknown) => void;
   onClose: () => void;
-}
-
-function promptTextForTurn(
-  blocks: readonly DaemonTranscriptBlock[],
-  turnIndex: number,
-): string {
-  let userIndex = 0;
-  for (const block of blocks) {
-    if (block.kind !== 'user') continue;
-    if (userIndex === turnIndex) return block.text.trim();
-    userIndex += 1;
-  }
-  return '';
 }
 
 function formatSnapshotTime(timestamp: string): string {
@@ -79,16 +67,38 @@ export function RewindDialog({
     };
   }, [loadSnapshots, onError]);
 
-  const items = useMemo(
-    () =>
-      snapshots
-        .map((snapshot) => ({
+  const items = useMemo(() => {
+    // Count identities once so duplicate detection is a lookup instead of a
+    // nested filter.
+    const identityCounts = new Map<string, number>();
+    for (const snapshot of snapshots) {
+      const identity = snapshot.daemonPromptId;
+      if (identity !== undefined) {
+        identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
+      }
+    }
+    return snapshots
+      .map((snapshot) => {
+        const identity = snapshot.daemonPromptId;
+        // A duplicated identity cannot be resolved to one turn, so both rows
+        // refuse rather than pointing at the same checkpoint twice.
+        const usable =
+          identity !== undefined && identityCounts.get(identity) === 1;
+        const block = usable
+          ? findDaemonRewindUserBlock(blocks, identity)
+          : undefined;
+        return {
           snapshot,
-          promptText: promptTextForTurn(blocks, snapshot.turnIndex),
-        }))
-        .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex),
-    [blocks, snapshots],
-  );
+          promptText: block?.text.trim() ?? '',
+          // The rewind itself carries only the prompt identity, so a turn
+          // outside the loaded transcript window stays targetable: the block
+          // lookup above supplies the preview text, not the permission. Only a
+          // snapshot with no usable identity is unavailable, and it says why.
+          available: usable,
+        };
+      })
+      .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex);
+  }, [blocks, snapshots]);
 
   // Keep the cursor in range as snapshots load / change.
   useEffect(() => {
@@ -124,7 +134,7 @@ export function RewindDialog({
   // button, consistent with the other destructive dialogs (delete / release).
   const commitRow = (index: number) => {
     const item = items[index];
-    if (item) {
+    if (item?.available) {
       setCursorIdx(index);
       setSelectedPromptId(item.snapshot.promptId);
     }
@@ -175,24 +185,26 @@ export function RewindDialog({
           items.length > 0 ? optionId(cursorIdx) : undefined
         }
       >
-        {items.map(({ snapshot, promptText }, index) => {
+        {items.map(({ snapshot, promptText, available }, index) => {
           const isCursor = index === cursorIdx;
           const isSelected = selectedPromptId === snapshot.promptId;
           const label =
             promptText ||
-            t('rewind.promptFallback', {
-              id: snapshot.promptId.slice(-8),
-            });
+            (snapshot.daemonPromptId
+              ? t('rewind.promptFallback', {
+                  id: snapshot.promptId.slice(-8),
+                })
+              : t('rewind.identityUnavailable'));
           return (
             <div
               key={snapshot.promptId}
               id={optionId(index)}
               role="option"
               aria-selected={isSelected}
-              aria-disabled={isRewinding || undefined}
+              aria-disabled={isRewinding || !available || undefined}
               className={`${styles.item} ${isCursor ? styles.itemCursor : ''} ${
                 isSelected ? styles.itemSelected : ''
-              } ${isRewinding ? styles.itemDisabled : ''}`}
+              } ${isRewinding || !available ? styles.itemDisabled : ''}`}
               onClick={() => {
                 if (!isRewinding) commitRow(index);
               }}
@@ -227,7 +239,12 @@ export function RewindDialog({
           type="button"
           className={`${dp('dialog-danger-button')} ${styles.dangerButton}`}
           onClick={() => handleRewind(selectedPromptId)}
-          disabled={!selectedPromptId || rewindingPromptId !== null}
+          disabled={
+            !items.some(
+              (item) =>
+                item.snapshot.promptId === selectedPromptId && item.available,
+            ) || rewindingPromptId !== null
+          }
         >
           {rewindingPromptId ? t('rewind.rewinding') : t('rewind.confirm')}
         </button>

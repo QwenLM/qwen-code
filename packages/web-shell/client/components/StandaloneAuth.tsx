@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import {
   useCallback,
   useEffect,
@@ -39,6 +40,7 @@ import {
 } from './ui/card';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Spinner } from './ui/spinner';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -282,7 +284,12 @@ export function StandaloneAuth({
         timerRef.current = setTimeout(() => setAttempt((n) => n + 1), delayMs);
       };
       try {
-        const response = await fetch(`${baseUrl}/capabilities`, {
+        const response = await createDaemonRestRequest(
+          baseUrl,
+          candidate,
+          undefined,
+          true,
+        )('/capabilities', {
           headers: candidate ? { Authorization: `Bearer ${candidate}` } : {},
           signal: controller.signal,
         });
@@ -388,6 +395,39 @@ export function StandaloneAuth({
   ]);
 
   if (accepted) return children(accepted.token);
+  // A credential supplied at boot (the desktop `#token=` URL, `serve --open`,
+  // or a per-tab stored token) almost always authenticates on the first
+  // probe. Painting the credential form during that round trip flashes a login
+  // screen at startup, so hold it back until the probe asks for input.
+  const verifyingBootCredential =
+    busy &&
+    attempt === 0 &&
+    !invalidTarget &&
+    !confirming &&
+    !awaitingPairing &&
+    Boolean(initialToken);
+  if (verifyingBootCredential) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        data-web-shell-gate
+        className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
+          theme === WebShellThemeId.Light
+            ? AppStyles.themeLight
+            : `${AppStyles.themeDark} dark`
+        }`}
+      >
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Spinner aria-hidden="true" />
+          <span>{copy.connecting}</span>
+        </div>
+      </div>
+    );
+  }
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
   const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (

@@ -3,6 +3,7 @@ import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
   ManagedAgentSessionSummary,
+  ManagedAgentRequestOptions,
 } from './managed-agent-provider';
 import {
   isAuthFailure,
@@ -143,47 +144,126 @@ export function useManagedSession(
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const summaryRef = useRef<ManagedAgentSessionSummary | undefined>(undefined);
-  const retainSummary = useCallback((incoming: ManagedAgentSessionSummary) => {
-    const previous = summaryRef.current;
-    const workspace = previous?.workspace;
-    let next =
-      previous?.sessionId === incoming.sessionId &&
-      workspace &&
-      incoming.workspace?.workspaceId === workspace.workspaceId &&
-      (workspace.contextRevision ?? 0) >
-        (incoming.workspace.contextRevision ?? 0)
-        ? { ...incoming, workspace }
-        : incoming;
-    if (
-      previous?.sessionId === incoming.sessionId &&
-      (previous.modelSelection?.revision ?? 0) >
-        (incoming.modelSelection?.revision ?? 0)
-    ) {
-      next = {
-        ...next,
-        modelSelection: previous.modelSelection,
-        modelContext: previous.modelContext,
-      };
-    }
-    if (
-      previous?.sessionId === incoming.sessionId &&
-      (previous.approvalRevision ?? 0) > (incoming.approvalRevision ?? 0)
-    ) {
-      next = {
-        ...next,
-        approvalMode: previous.approvalMode,
-        approvalRevision: previous.approvalRevision,
-        initialApprovalMode: previous.initialApprovalMode,
-      };
-    }
-    summaryRef.current = next;
-    return next;
+  const selectedSession = useRef(sessionId);
+  selectedSession.current = sessionId;
+  const confirmedTitle = useRef<
+    | {
+        sessionId: string;
+        title: string;
+        generation: number;
+      }
+    | undefined
+  >(undefined);
+  const readSummary = useCallback(
+    async (id: string, options: ManagedAgentRequestOptions) => {
+      const generation = confirmedTitle.current?.generation ?? 0;
+      const summary = await provider.getSession(id, options);
+      options.signal?.throwIfAborted();
+      return { summary, generation };
+    },
+    [provider],
+  );
+  const applyTitle = useCallback((id: string, title: string) => {
+    if (selectedSession.current !== id) return;
+    // Retain the confirmation even while a manual reload has no summary.
+    confirmedTitle.current = {
+      sessionId: id,
+      title,
+      generation: (confirmedTitle.current?.generation ?? 0) + 1,
+    };
+    const current = summaryRef.current;
+    if (current?.sessionId !== id) return;
+    const summary = { ...current, title };
+    summaryRef.current = summary;
+    setState((state) => ({ ...state, summary }));
   }, []);
+  const retainSummary = useCallback(
+    (read: { summary: ManagedAgentSessionSummary; generation: number }) => {
+      const incoming = read.summary;
+      const previous = summaryRef.current;
+      const confirmation = confirmedTitle.current;
+      const workspace = previous?.workspace;
+      let next =
+        previous?.sessionId === incoming.sessionId &&
+        workspace &&
+        incoming.workspace?.workspaceId === workspace.workspaceId &&
+        (workspace.contextRevision ?? 0) >
+          (incoming.workspace.contextRevision ?? 0)
+          ? { ...incoming, workspace }
+          : incoming;
+      if (
+        read.generation !== (confirmation?.generation ?? 0) &&
+        confirmation?.sessionId === incoming.sessionId
+      ) {
+        next = {
+          ...next,
+          title:
+            previous?.sessionId === incoming.sessionId
+              ? previous.title
+              : confirmation.title,
+        };
+      }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.modelSelection?.revision ?? 0) >
+          (incoming.modelSelection?.revision ?? 0)
+      ) {
+        next = {
+          ...next,
+          modelSelection: previous.modelSelection,
+          modelContext: previous.modelContext,
+        };
+      }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.approvalRevision ?? 0) > (incoming.approvalRevision ?? 0)
+      ) {
+        next = {
+          ...next,
+          approvalMode: previous.approvalMode,
+          approvalRevision: previous.approvalRevision,
+          initialApprovalMode: previous.initialApprovalMode,
+          planMode: previous.planMode,
+        };
+      }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.worktree?.revision ?? 0) > (incoming.worktree?.revision ?? 0)
+      ) {
+        next = {
+          ...next,
+          worktree: previous.worktree,
+          workspace: next.workspace
+            ? { ...next.workspace, state: previous.workspace?.state }
+            : previous.workspace,
+          ...(previous.worktree?.state === 'ready'
+            ? {}
+            : {
+                planModeSupported: false,
+                capabilities: {
+                  ...next.capabilities,
+                  canSend: false,
+                  canRename: false,
+                  workspaceTurns: false,
+                  childAgents: false,
+                  modelChange: false,
+                  contextCompression: false,
+                  approvalModeChange: false,
+                  inputAttachments: false,
+                },
+              }),
+        };
+      }
+      summaryRef.current = next;
+      return next;
+    },
+    [],
+  );
   const refreshSummary = useCallback(
     async (signal?: AbortSignal) => {
       const abort = lifetime.current;
       if (!sessionId || !abort || abort.signal.aborted) return undefined;
-      const read = await provider.getSession(sessionId, {
+      const read = await readSummary(sessionId, {
         clientId,
         signal: signal ? composeSignals([signal, abort.signal]) : abort.signal,
       });
@@ -192,7 +272,7 @@ export function useManagedSession(
       setState((current) => ({ ...current, summary }));
       return summary;
     },
-    [provider, clientId, sessionId, retainSummary],
+    [readSummary, clientId, sessionId, retainSummary],
   );
   const cursorRef = useRef<string | undefined>(undefined);
   // Whether any loop ended terminally on a session-leg answer; a later
@@ -238,10 +318,7 @@ export function useManagedSession(
     const opts = { clientId, signal: abort.signal };
     const update = (change: Partial<ManagedSessionState>) => {
       if (abort.signal.aborted) return;
-      const next = change.summary
-        ? { ...change, summary: retainSummary(change.summary) }
-        : change;
-      setState((current) => ({ ...current, ...next }));
+      setState((current) => ({ ...current, ...change }));
     };
     const record = (leg: SignalLeg, error: unknown, final: boolean) => {
       if (abort.signal.aborted) return;
@@ -364,7 +441,7 @@ export function useManagedSession(
       // before the transcript leg's: whether the bootstrap terminates for a
       // gone session is decided by the answer, not by response ordering.
       const [sessionRead, transcriptRead] = await Promise.allSettled([
-        provider.getSession(sessionId, opts),
+        readSummary(sessionId, opts),
         provider.getTranscript(sessionId, { ...opts, limit: 100 }),
       ]);
       if (sessionRead.status === 'rejected') {
@@ -597,7 +674,16 @@ export function useManagedSession(
               ...current,
               events: mergeManagedEvents(current.events, [event]),
             }));
-            if (event.type === 'context_changed') {
+            if (
+              event.type === 'context_changed' ||
+              (provider.recovery &&
+                [
+                  'completed',
+                  'cancelled',
+                  'failed',
+                  'runtime_released',
+                ].includes(event.type))
+            ) {
               void refreshSummary().catch((error: unknown) =>
                 failed(error, 'session'),
               );
@@ -654,9 +740,7 @@ export function useManagedSession(
             // verdicts.
             try {
               update({
-                summary: retainSummary(
-                  await provider.getSession(sessionId, opts),
-                ),
+                summary: retainSummary(await readSummary(sessionId, opts)),
               });
               retire('session');
             } catch (error) {
@@ -697,7 +781,7 @@ export function useManagedSession(
         if (abort.signal.aborted) return;
         try {
           update({
-            summary: retainSummary(await provider.getSession(sessionId, opts)),
+            summary: retainSummary(await readSummary(sessionId, opts)),
           });
           retire('session');
           failures = 0;
@@ -712,7 +796,15 @@ export function useManagedSession(
       }
     })();
     return () => abort.abort();
-  }, [provider, clientId, sessionId, revision, retainSummary, refreshSummary]);
+  }, [
+    provider,
+    clientId,
+    sessionId,
+    revision,
+    retainSummary,
+    readSummary,
+    refreshSummary,
+  ]);
 
   const loadOlder = useCallback(async () => {
     const abort = lifetime.current;
@@ -836,5 +928,6 @@ export function useManagedSession(
     loadOlder,
     reload,
     refreshSummary,
+    applyTitle,
   };
 }

@@ -8,6 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestSuccessfulTodos,
   getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
@@ -148,6 +149,59 @@ describe('getFloatingTodos', () => {
         content: 'Build',
         status: 'pending',
         blockedBy: ['research'],
+      },
+    ]);
+  });
+
+  it('reads a top-level blockedBy when _meta is absent', () => {
+    const tool: ACPToolCall = {
+      callId: 'call-flat',
+      toolName: 'todo_write',
+      status: 'completed',
+      rawOutput: {
+        entries: [
+          { content: 'Deploy', status: 'pending', blockedBy: ['build'] },
+        ],
+      },
+    };
+    const state = getFloatingTodos([
+      { id: 'message-flat', role: 'tool_group', tools: [tool] },
+    ]);
+    expect(state.todos).toEqual([
+      {
+        id: 'plan-0',
+        content: 'Deploy',
+        status: 'pending',
+        blockedBy: ['build'],
+      },
+    ]);
+  });
+
+  it('lets _meta.qwenTodo.blockedBy win when both sources are present', () => {
+    const tool: ACPToolCall = {
+      callId: 'call-both',
+      toolName: 'todo_write',
+      status: 'completed',
+      rawOutput: {
+        entries: [
+          {
+            content: 'Deploy',
+            status: 'pending',
+            blockedBy: ['stale-top-level'],
+            _meta: { qwenTodo: { id: 'deploy', blockedBy: ['build'] } },
+          },
+        ],
+      },
+    };
+    const state = getFloatingTodos([
+      { id: 'message-both', role: 'tool_group', tools: [tool] },
+    ]);
+    expect(state.todos).toEqual([
+      {
+        id: 'deploy',
+        content: 'Deploy',
+        status: 'pending',
+        blockedBy: ['build'],
       },
     ]);
   });
@@ -1450,4 +1504,32 @@ describe('todoDetailSignature', () => {
     ]);
     expect(b).toBe(a);
   });
+});
+
+it('uses committed Managed Todo output, ignoring requested, failed and cancelled lists', () => {
+  const committed = (id: string, todos: TodoItem[]): Message => ({
+    id,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: id,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: { todos },
+      },
+    ],
+  });
+  const first = committed('first', [todo('a', 'pending')]);
+  const failed = committed('failed', []);
+  const cancelled = committed('cancelled', []);
+  if (failed.role !== 'tool_group' || cancelled.role !== 'tool_group')
+    throw new Error('Invalid fixture');
+  failed.tools[0].status = 'failed';
+  cancelled.tools[0].wasCancelled = true;
+  const requested = todoWriteMessage('requested', []);
+  expect(
+    getLatestSuccessfulTodos([first, failed, cancelled, requested]),
+  ).toEqual([expect.objectContaining({ id: 'a', status: 'pending' })]);
+  expect(getLatestSuccessfulTodos([first, committed('clear', [])])).toEqual([]);
+  expect(getLatestSuccessfulTodos([requested])).toBeUndefined();
 });

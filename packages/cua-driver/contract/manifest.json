@@ -47,66 +47,44 @@
             "type": "integer"
           },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
-            ]
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "x": {
             "type": "number"
@@ -128,7 +106,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -443,8 +420,11 @@
             "type": "array"
           },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
@@ -456,58 +436,33 @@
             "type": "integer"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
-            ]
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "to_x": {
             "type": "number"
@@ -531,7 +486,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -839,39 +793,30 @@
           "motion": {
             "properties": {
               "arc_flow": {
-                "format": "double",
                 "type": "number"
               },
               "arc_size": {
-                "format": "double",
                 "type": "number"
               },
               "dwell_after_click_ms": {
-                "format": "double",
                 "type": "number"
               },
               "end_handle": {
-                "format": "double",
                 "type": "number"
               },
               "glide_duration_ms": {
-                "format": "double",
                 "type": "number"
               },
               "idle_hide_ms": {
-                "format": "double",
                 "type": "number"
               },
               "spring": {
-                "format": "double",
                 "type": "number"
               },
               "start_handle": {
-                "format": "double",
                 "type": "number"
               },
               "turn_radius": {
-                "format": "double",
                 "type": "number"
               }
             },
@@ -891,11 +836,9 @@
           "position": {
             "properties": {
               "x": {
-                "format": "double",
                 "type": "number"
               },
               "y": {
-                "format": "double",
                 "type": "number"
               }
             },
@@ -950,7 +893,6 @@
           "visual_state": {
             "properties": {
               "frame": {
-                "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
               },
@@ -964,7 +906,6 @@
                 "type": "string"
               },
               "preempted_count": {
-                "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
               },
@@ -1264,12 +1205,10 @@
             "type": "boolean"
           },
           "expires_in_seconds": {
-            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
           "idle_seconds": {
-            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
@@ -1448,10 +1387,7 @@
         "properties": {
           "app_context": {
             "description": "Use the compact macOS application observation with contextual menus.",
-            "type": [
-              "boolean",
-              "null"
-            ]
+            "type": "boolean"
           },
           "include_screenshot": {
             "description": "Default true. Set false to skip the screenshot and return the tree only.",
@@ -1491,7 +1427,8 @@
                 "type": "string"
               },
               "version": {
-                "const": 1,
+                "maximum": 1,
+                "minimum": 1,
                 "type": "integer"
               }
             },
@@ -1631,66 +1568,44 @@
             "type": "array"
           },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
-            ]
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -1705,7 +1620,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -1876,7 +1790,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -2014,12 +1927,8 @@
           },
           "limit": {
             "description": "Maximum number of content-free summaries to return (default 50, max\n100). Ordinary agent transports are scoped to their own lease.",
-            "format": "uint32",
             "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
+            "type": "integer"
           }
         },
         "required": [],
@@ -2055,12 +1964,10 @@
                   "type": "boolean"
                 },
                 "expires_in_seconds": {
-                  "format": "uint64",
                   "minimum": 0,
                   "type": "integer"
                 },
                 "idle_seconds": {
-                  "format": "uint64",
                   "minimum": 0,
                   "type": "integer"
                 },
@@ -2146,67 +2053,44 @@
         "additionalProperties": false,
         "properties": {
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Preferred per-call target. New callers should set this field.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
+            },
+            "required": [
+              "kind"
             ],
-            "description": "Preferred per-call target. New callers should set this field."
+            "type": "object"
           },
           "x": {
             "type": "number"
@@ -2228,7 +2112,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -2361,11 +2244,7 @@
         "additionalProperties": false,
         "properties": {
           "app_context": {
-            "default": null,
-            "type": [
-              "boolean",
-              "null"
-            ]
+            "type": "boolean"
           },
           "format": {
             "default": "text",
@@ -2402,7 +2281,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -2566,7 +2444,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -2709,66 +2586,44 @@
             "type": "array"
           },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
-            ]
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -2783,7 +2638,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -2938,66 +2792,44 @@
             "type": "string"
           },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
-            ]
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "x": {
             "type": "number"
@@ -3020,7 +2852,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -3161,10 +2992,7 @@
             "type": "integer"
           },
           "prefix": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "selection": {
             "default": "text",
@@ -3176,10 +3004,7 @@
             "type": "string"
           },
           "suffix": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "text": {
             "type": "string"
@@ -3204,7 +3029,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -3385,70 +3209,34 @@
         "additionalProperties": false,
         "properties": {
           "arc_flow": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "arc_size": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "dwell_after_click_ms": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "end_handle": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "glide_duration_ms": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "idle_hide_ms": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "session": {
             "type": "string"
           },
           "spring": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "start_handle": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           },
           "turn_radius": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "type": "number"
           }
         },
         "required": [
@@ -3462,39 +3250,30 @@
           "motion": {
             "properties": {
               "arc_flow": {
-                "format": "double",
                 "type": "number"
               },
               "arc_size": {
-                "format": "double",
                 "type": "number"
               },
               "dwell_after_click_ms": {
-                "format": "double",
                 "type": "number"
               },
               "end_handle": {
-                "format": "double",
                 "type": "number"
               },
               "glide_duration_ms": {
-                "format": "double",
                 "type": "number"
               },
               "idle_hide_ms": {
-                "format": "double",
                 "type": "number"
               },
               "spring": {
-                "format": "double",
                 "type": "number"
               },
               "start_handle": {
-                "format": "double",
                 "type": "number"
               },
               "turn_radius": {
-                "format": "double",
                 "type": "number"
               }
             },
@@ -3676,7 +3455,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -3852,7 +3630,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -3995,6 +3772,7 @@
             "type": "string"
           },
           "cursor_theme": {
+            "additionalProperties": true,
             "description": "Optional initial cursor theme. The host applies it before the cursor is\nfirst made visible, avoiding a flash of the default theme.",
             "properties": {
               "reduced_motion": {
@@ -4013,10 +3791,7 @@
             "required": [
               "theme_id"
             ],
-            "type": [
-              "object",
-              "null"
-            ]
+            "type": "object"
           },
           "session": {
             "description": "Optional stable public label for this run (e.g. \"research-run-1\").\nWhen omitted, the authenticated transport lease's implicit session is\ncreated or returned.",
@@ -4124,66 +3899,44 @@
         "additionalProperties": false,
         "properties": {
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "description": "Deprecated flat desktop target retained for wire compatibility.",
+            "enum": [
+              "desktop"
+            ],
+            "type": "string"
           },
           "session": {
             "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
             "type": "string"
           },
           "target": {
-            "anyOf": [
-              {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
-                "oneOf": [
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "kind": {
-                        "const": "window",
-                        "type": "string"
-                      },
-                      "pid": {
-                        "format": "uint32",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "window_id": {
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "pid",
-                      "window_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": true,
-                    "properties": {
-                      "display_id": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "const": "desktop",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "display_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
+            "additionalProperties": true,
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "properties": {
+              "display_id": {
+                "description": "Use primary for the primary display.",
+                "type": "string"
               },
-              {
-                "type": "null"
+              "kind": {
+                "enum": [
+                  "window",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "minimum": 0,
+                "type": "integer"
               }
-            ]
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "text": {
             "type": "string"
@@ -4201,7 +3954,6 @@
             "additionalProperties": false,
             "properties": {
               "delivered_count": {
-                "format": "uint32",
                 "minimum": 0,
                 "type": [
                   "integer",
@@ -4342,23 +4094,14 @@
                   "additionalProperties": false,
                   "properties": {
                     "enabled": {
-                      "type": [
-                        "boolean",
-                        "null"
-                      ]
+                      "type": "boolean"
                     },
                     "exists": {
                       "description": "Assert that at least one trusted element matches the selector.\n\nElement walks are not yet exhaustive on every platform, so absence\ncannot be proven. `false` is rejected instead of returning an\nindefinitely-unknown predicate.",
-                      "enum": [
-                        true
-                      ],
                       "type": "boolean"
                     },
                     "selected": {
-                      "type": [
-                        "boolean",
-                        "null"
-                      ]
+                      "type": "boolean"
                     },
                     "selector": {
                       "additionalProperties": false,
@@ -4376,19 +4119,13 @@
                       "type": "object"
                     },
                     "value_equals": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
+                      "type": "string"
                     }
                   },
                   "required": [
                     "selector"
                   ],
-                  "type": [
-                    "object",
-                    "null"
-                  ]
+                  "type": "object"
                 },
                 "window": {
                   "additionalProperties": false,
@@ -4420,22 +4157,14 @@
                         "width",
                         "height"
                       ],
-                      "type": [
-                        "object",
-                        "null"
-                      ]
+                      "type": "object"
                     },
                     "exists": {
-                      "type": [
-                        "boolean",
-                        "null"
-                      ]
+                      "type": "boolean"
                     }
                   },
-                  "type": [
-                    "object",
-                    "null"
-                  ]
+                  "required": [],
+                  "type": "object"
                 }
               },
               "required": [],
@@ -4447,10 +4176,7 @@
           },
           "include_screenshot": {
             "description": "Return the final window screenshot as image content for a multimodal\ncaller. The driver does not interpret that image.",
-            "type": [
-              "boolean",
-              "null"
-            ]
+            "type": "boolean"
           },
           "pid": {
             "description": "Exact process whose window may be observed.",
@@ -4491,7 +4217,6 @@
         "additionalProperties": true,
         "properties": {
           "elapsed_ms": {
-            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
@@ -4499,7 +4224,6 @@
             "items": {
               "properties": {
                 "index": {
-                  "format": "uint64",
                   "minimum": 0,
                   "type": "integer"
                 },
@@ -4552,7 +4276,6 @@
             "type": "array"
           },
           "samples": {
-            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },

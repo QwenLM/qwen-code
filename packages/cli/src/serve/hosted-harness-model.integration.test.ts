@@ -11,10 +11,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { HostedContextCompression } from './hosted-context-compression.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 
 let root: string;
 let server: Server;
+let reply: string;
+let promptTokens: number;
 let requests: Array<{
   model?: string;
   messages: Array<{
@@ -28,15 +33,40 @@ let requests: Array<{
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'pr12713-model-repro-'));
   requests = [];
+  reply = 'HOSTED_TEXT_OK';
+  promptTokens = 37;
   server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString());
     requests.push(body);
+    if (body.stream !== true) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'fixture',
+          object: 'chat.completion',
+          model: 'pr12713-fixture',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: reply },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: promptTokens,
+            completion_tokens: 11,
+            total_tokens: promptTokens + 11,
+          },
+        }),
+      );
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     for (const [delta, finishReason] of [
       [{ role: 'assistant', reasoning_content: 'HOSTED_REASONING_OK' }, null],
-      [{ content: 'HOSTED_TEXT_OK' }, null],
+      [{ content: reply }, null],
       [{}, 'stop'],
     ]) {
       res.write(
@@ -56,7 +86,11 @@ beforeEach(async () => {
         created: 0,
         model: 'pr12713-fixture',
         choices: [],
-        usage: { prompt_tokens: 37, completion_tokens: 11, total_tokens: 48 },
+        usage: {
+          prompt_tokens: promptTokens,
+          completion_tokens: 11,
+          total_tokens: promptTokens + 11,
+        },
       })}\n\n`,
     );
     res.end('data: [DONE]\n\n');
@@ -142,6 +176,103 @@ it('completes a real hosted no-tool text turn', async () => {
   expect(requests).toHaveLength(1);
   expect(requests[0]?.tools ?? []).toEqual([]);
 });
+
+it('uses the real compression engine and restores its journal snapshot in the next provider request after reopening', async () => {
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: randomUUID(),
+  };
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: root,
+    sessionKey,
+  });
+  const definitionRef = await resources.publish(
+    'definition',
+    Buffer.from('{}'),
+  );
+  const options = {
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'manual-transcript.jsonl'),
+    sessionId: sessionKey.sessionId,
+    sessionKey,
+    version: 'test',
+    workerId: 'worker',
+    activationLeaseDurationMs: 60_000,
+  };
+  let managed = await openManagedSession({
+    ...options,
+    create: {
+      definitionRef,
+      rootSnapshotRef: definitionRef,
+      createdBy: 'test',
+    },
+  });
+  try {
+    const promptId = randomUUID();
+    for (const type of ['user', 'assistant'] as const)
+      await managed.sink.write({
+        ...record(type, 'RAW_BEFORE_COMPRESSION '.repeat(1_000)),
+        sessionId: sessionKey.sessionId,
+        daemonPromptId: promptId,
+      });
+    await managed.sink.write({
+      ...record('user', ''),
+      sessionId: sessionKey.sessionId,
+      type: 'system',
+      subtype: 'turn_result',
+      message: undefined,
+      systemPayload: {
+        promptId,
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.now(),
+      },
+    });
+    const compression = new HostedContextCompression({
+      session: managed,
+      cwd: root,
+      instructions: async () => 'Remember the requested color.',
+      busy: () => false,
+      hasPendingHooks: () => false,
+    });
+    const operationId = randomUUID();
+    reply =
+      '<state_snapshot><overall_goal>MANUAL_MEMORY_BLUE</overall_goal></state_snapshot>';
+    promptTokens = 12_000;
+    await compression.admit({ operationId, expectedCompactionRevision: 0 });
+    await compression.wait();
+    expect(compression.status(operationId)).toMatchObject({
+      outcome: 'compressed',
+    });
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0])).toContain('RAW_BEFORE_COMPRESSION');
+    await managed.close();
+    managed = await openManagedSession({ ...options, workerId: 'replacement' });
+    reply = 'HOSTED_TEXT_OK';
+    promptTokens = 37;
+    const result = await runHostedHarnessTextTurn({
+      sessionId: sessionKey.sessionId,
+      cwd: root,
+      history: await managed.sink.projectModelRecords(),
+      prompt: 'Use the remembered color.',
+      promptId: randomUUID(),
+      signal: AbortSignal.timeout(15_000),
+    });
+    expect(result.text).toBe('HOSTED_TEXT_OK');
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1])).toContain('MANUAL_MEMORY_BLUE');
+    expect(JSON.stringify(requests[1])).not.toContain('RAW_BEFORE_COMPRESSION');
+    expect(
+      (await managed.sink.project()).filter(
+        (entry) => entry.type === 'user' || entry.type === 'assistant',
+      ),
+    ).toHaveLength(2);
+  } finally {
+    await managed.close();
+  }
+}, 30_000);
 
 it('persists normalized provider prompt usage with the resolved configured capacity', async () => {
   const complete = vi.fn().mockResolvedValue(undefined);
@@ -279,6 +410,38 @@ it.each([
     ],
     ['OLD_UNANSWERED_PROMPT'],
     ['OLD_PROMPT', 'OLD_RESPONSE'],
+  ],
+  [
+    'completed turn with queued guidance following an unanswered turn',
+    [
+      record('user', 'OLD_UNANSWERED_PROMPT'),
+      record('user', 'OLD_PROMPT'),
+      {
+        ...record('user', 'FIRST_GUIDANCE'),
+        subtype: 'mid_turn_user_message' as const,
+      },
+      {
+        ...record('user', 'SECOND_GUIDANCE'),
+        subtype: 'mid_turn_user_message' as const,
+      },
+      record('assistant', 'OLD_RESPONSE'),
+    ],
+    ['OLD_UNANSWERED_PROMPT'],
+    ['OLD_PROMPT', 'FIRST_GUIDANCE', 'SECOND_GUIDANCE', 'OLD_RESPONSE'],
+  ],
+  [
+    'completed turn with guidance after an initial answer',
+    [
+      record('user', 'OLD_PROMPT'),
+      record('assistant', 'INITIAL_RESPONSE'),
+      {
+        ...record('user', 'LATE_GUIDANCE'),
+        subtype: 'mid_turn_user_message' as const,
+      },
+      record('assistant', 'FINAL_RESPONSE'),
+    ],
+    [],
+    ['OLD_PROMPT', 'INITIAL_RESPONSE', 'LATE_GUIDANCE', 'FINAL_RESPONSE'],
   ],
 ])(
   'sends the current prompt after a %s',

@@ -18,7 +18,7 @@
 
 ## 非目标
 
-- 开启 public Shell、v2 capability advertisement、Automation、Channels 或留存默认值。
+- 开启 public Shell 执行、Automation、Channels 或留存默认值。统一 Shell v2 能力声明遵循 [Shell 生命周期设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。
 - 发布容器镜像或决定长期使用的容器仓库。
 - 支持两个存活 Java 控制面、跨主机接管、公开 CSI 或稳定支持等级。
 - 把 npm CLI 或 Hosted Harness 打入 Java 压缩包。
@@ -30,6 +30,18 @@
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-admin
+bin/qwen-managed-agent-bootstrap
+bin/qwen-managed-agent-bootstrap.mjs
+bin/qwen-managed-agent-upgrade
+bin/qwen-managed-agent-upgrade.mjs
+config/application.example.yml
+systemd/qwen-hosted-harness.service
+systemd/qwen-managed-agent-server.service
+systemd/harness.env.example
+systemd/server.env.example
+systemd/README.md
+systemd/README.zh-CN.md
 lib/qwen-managed-agent-server-<component-version>.jar
 lib/qwen-managed-agent-server-<component-version>-operator-recovery.jar
 docs/deployment.md
@@ -42,9 +54,13 @@ SHA256SUMS
 LICENSE
 ```
 
-启动脚本只使用 bundle 内的相对 JAR 路径，并把参数原样传给 Java。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。
+启动脚本只使用 bundle 内的相对 JAR 路径。运维人员在 bundle 根目录创建 `config/application.yml` 后，启动脚本会在该变量未设置时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION`，位置参数原样传给 Java。模板本身不包含生效配置，复制后在编辑前不改变任何行为。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。`systemd/` 模板落实了文档要求的 kill mode：控制面使用 `process`，使 Runtime worker 在 Broker 重启后继续存活；Harness 使用 `mixed`，使其工具进程随 Harness 终止。控制面 unit 还把 JVM 收到 `SIGTERM` 后的退出状态 143 视为成功。
 
 发布页同时提供独立的 `manifest.json` 副本与 `SHA256SUMS.txt`。外层校验和覆盖压缩包和独立 manifest；bundle 内的校验和覆盖全部载荷文件以及 `manifest.json`。
+
+## 凭据生成
+
+`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token 与 Runtime 凭据密钥，并写出 `harness.env`、`server.env` 与 `application.yml`，权限为 0600。目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径。digest 是任意共享标识：Harness 回显配置值，而不是从能力集推导。生成器不会编造数据源凭据。
 
 ## Manifest 契约
 
@@ -55,7 +71,7 @@ LICENSE
 - 同一源码树中的精确 Qwen Code 版本与 Hosted Harness profile；
 - 从同一源码树读取的 Serve 协议、Runtime Broker 协议、公开 API、Java、Node.js 和 Flyway migration 兼容范围；
 - 已接受的单控制面、可信 Linux、嵌入式 Broker 拓扑；
-- public Shell 和 v2 advertisement 默认关闭的明确 `false` 值；
+- 明确的默认值：public Shell 执行为 `false`，统一 Shell v2 能力声明为 `true`，MCP 生命周期仍须显式启用；
 - bundle 内的部署与恢复文档路径。
 
 必需产物或兼容性来源缺失、存在歧义时，打包直接失败，不猜测数值，也不发布描述不完整的产物。
@@ -72,7 +88,7 @@ LICENSE
 
 运维人员先校验 `SHA256SUMS.txt`，解压产物并读取 `manifest.json`，安装精确兼容的 Qwen CLI/Harness，配置 MySQL 和既有 server 环境，启动 `qwen serve --profile hosted-harness`，再运行 bundle 中的 server 启动脚本。`/actuator/health` 是启动门禁。
 
-在已接受的单控制面拓扑中，升级使用一次停止准入窗口：保留数据库、Runtime credential key 和 durable Runtime state 并完成备份；停止入口流量、server 和 Harness；核验新产物及其兼容性 manifest；启动匹配的 Harness；再启动新 server，由 Flyway 向前迁移。只有健康检查和一个新的无工具 Turn 成功后才恢复流量。数据库不支持降级；发生 migration 后如需回滚，必须在接收新写入前恢复升级前的数据库与状态备份。
+在已接受的单控制面拓扑中，升级使用一次停止准入窗口：保留数据库、Runtime credential key 和 durable Runtime state 并完成备份；停止入口流量、server 和 Harness；核验新产物及其兼容性 manifest；启动匹配的 Harness；再启动新 server，由 Flyway 向前迁移。只有健康检查和一个新的无工具 Turn 成功后才恢复流量。数据库不支持降级；发生 migration 后如需回滚，必须在接收新写入前恢复升级前的数据库与状态备份。在 systemd 布局下，`bin/qwen-managed-agent-upgrade` 分阶段执行停止、备份、安装、启动和验证，并把留给运维的步骤（例如停止入口流量、安装 Harness）打印在对应位置，参见[升级命令设计](2026-10-25-managed-agent-upgrade-command.zh-CN.md)。
 
 ## 失败语义
 
@@ -96,10 +112,10 @@ LICENSE
 - CI 和手工 dry run 生成同名发布产物且不执行发布。
 - Manifest 标识精确源码以及所有声明的兼容边界。
 - 使用者无需仓库 checkout 即可核验和解压产物。
-- Bundle 中的 server 与 operator-recovery 启动脚本只引用 bundle 内相对文件。
+- Bundle 中的 server、operator-recovery 与 admin 启动脚本只引用 bundle 内相对文件。
 - 精确解压得到的 server 能启动并完成参考 smoke path。
 - 生产流程只从 `main` 发布不可覆盖的实验性 prerelease。
-- Public Shell 与 v2 advertisement 默认保持关闭。
+- Public Shell 执行默认保持关闭；统一 Shell v2 能力声明默认开启，MCP 生命周期须显式启用。
 
 ## 后续工作
 

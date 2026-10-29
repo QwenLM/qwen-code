@@ -17,11 +17,13 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
+export type { WebShellApprovalMode } from './utils/planMode';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
 export {
   JavaManagedAgentClient,
   JavaManagedAgentHttpError,
   type JavaAgentCommandAdmission,
+  type JavaAgentTurnAdmission,
   type JavaAgentEnvironment,
   type JavaAgentEvent,
   type JavaAgentSession,
@@ -295,6 +297,7 @@ export type {
   WebShellAtProviderTab,
   WebShellAtItem,
   WebShellAtProvider,
+  WebShellWorkspaceDirectoryPicker,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
@@ -368,6 +371,12 @@ export type {
 } from './settings';
 
 export type { WebShellModelManagementOptions } from './modelManagement';
+export type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipHandle,
+  WebShellUnavailableModelTooltipInfo,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
 export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,
