@@ -24,6 +24,30 @@ function event(
 }
 
 describe('Managed transcript projection', () => {
+  it.each([
+    ['A', 'B', 'AB'],
+    ['B', 'A', 'AB'],
+    ['z', 'Z', 'Zz'],
+    ['\u{1f600}', '\ue000', '\ue000\u{1f600}'],
+  ])(
+    'keeps distinct Item identities in SQL order for %s then %s',
+    (left, right, expected) => {
+      const first = {
+        ...event(10, 'assistant_delta', { itemId: left, text: left }),
+        assembledFromItem: true,
+      };
+      const second = {
+        ...event(10, 'assistant_delta', { itemId: right, text: right }),
+        assembledFromItem: true,
+      };
+      const merged = mergeManagedEvents([first], [second], true);
+      expect(merged).toHaveLength(2);
+      expect(managedEventsToMessages(merged)).toEqual([
+        expect.objectContaining({ role: 'assistant', content: expected }),
+      ]);
+      expect(mergeManagedEvents([first], [second])).toEqual([second]);
+    },
+  );
   it('keeps distinct Items separate even when their tool call id matches', () => {
     const messages = managedEventsToMessages(
       [

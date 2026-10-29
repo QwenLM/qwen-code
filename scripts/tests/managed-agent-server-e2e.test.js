@@ -320,6 +320,7 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-result',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+      'test:e2e:managed-harness-restart-approval-load-reply-lost',
       'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
       'test:e2e:managed-harness-restart-approval-terminal-write-failed',
       'test:e2e:managed-harness-restart-approval-cleanup-failed',
@@ -438,6 +439,17 @@ describe('managed-agent-server e2e runner', () => {
       'Cleanup fault was not retried after the replacement',
     );
     expect(source).toContain("owner_kind='HOSTED_CLEANUP'");
+    // A4 loses the first takeover load reply once via a test-gated hook on the
+    // replacement, and asserts the fault landed before trusting the recovery
+    // (a redrive that never lost a reply would prove nothing).
+    expect(source).toContain('QWEN_E2E_DROP_LOAD_REPLY: session.id');
+    expect(source).toContain("'Takeover load reply lost'");
+    expect(source).toContain('E2E dropping first load reply');
+    const harnessSource = read(
+      'packages/cli/src/serve/hosted-harness-session.ts',
+    );
+    expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
+    expect(harnessSource).toContain('E2E dropping first load reply');
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

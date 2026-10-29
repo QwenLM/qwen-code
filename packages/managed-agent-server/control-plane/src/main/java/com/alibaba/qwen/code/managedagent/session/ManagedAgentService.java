@@ -1206,6 +1206,23 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 page.nextCursor(), page.hasMore(), page.coveredSequence());
     }
 
+    public WebShellTranscript messageTranscript(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, true);
+        return new WebShellTranscript(page.items().stream().map(this::webShellItem).toList(),
+                page.events().stream().map(this::webShellEvent).toList(), page.coveredSequence(),
+                page.nextCursor(), page.hasMore(), page.coveredSequence());
+    }
+
+    public WebShellExportPage messageExportPage(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit, boolean backward) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, backward);
+        return new WebShellExportPage(page.items().stream().map(this::webShellItem).toList(),
+                page.nextCursor(), page.hasMore(), page.throughSequence());
+    }
+
     // Events are read before the floor: a floor that is not above the cursor
     // after the read was not above it during the read either, so no event
     // after the cursor had been pruned. A stream reconciliation discards the

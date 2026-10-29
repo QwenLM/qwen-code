@@ -843,6 +843,9 @@ public interface AgentStateStore {
 
     StoreModels.SnapshotPage findRecentSnapshotPage(String tenantId, String sessionId, String cursor, int limit);
 
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward);
+
     public Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
