@@ -26,6 +26,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -68,7 +69,7 @@ class WorkspaceSessionRetentionTest {
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
     @Autowired ManagedSessionStore journal;
-    @Autowired JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired OnceCloseRuntime runtime;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
@@ -511,7 +512,8 @@ class WorkspaceSessionRetentionTest {
             };
         }
         @Bean @Primary OnceCloseRuntime retentionRuntime() { return new OnceCloseRuntime(); }
-        @Bean @Primary ManagedAgentStore retentionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
+        @Bean @Primary ManagedAgentStore retentionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);

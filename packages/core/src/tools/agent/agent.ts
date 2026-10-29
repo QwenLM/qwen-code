@@ -11,6 +11,7 @@ import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { buildTranscriptMarker } from './transcript-marker.js';
 import {
   buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
@@ -1521,8 +1522,6 @@ The background-agent rules above apply to background forks unchanged.${delegatio
  */
 type SubagentOutcomeSink = (metadata: SubagentSpanMetadata) => void;
 
-const EARLIER_OUTPUT_OMITTED = '[earlier output omitted]\n';
-
 /**
  * Compose `reason` + `header` + `text` + `suffix` inside the tool's own budget.
  * `truncateKeep: 'tail'` deletes the head of an oversized result outright, and
@@ -1545,9 +1544,9 @@ function composeIncompleteResult(
   text: string,
   suffix: string,
   transcriptPath: string,
-): string {
+): { text: string; recoveryText: string } {
   const prefix = `${reason}\n\n${header}\n\n`;
-  const marker = `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`;
+  const marker = buildTranscriptMarker(transcriptPath);
   // `suffix` is producer-sized, not bounded: `formatExecutionCleanupFailure`
   // interpolates the child-process message verbatim. Left unbounded it pushes
   // the composition past the tool budget while the `outputBudgetApplied` mark
@@ -1558,9 +1557,10 @@ function composeIncompleteResult(
     suffix,
     AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - marker.length,
   );
-  if (!text) return reason + safeSuffix;
+  if (!text) return { text: reason + safeSuffix, recoveryText: reason };
   const room = AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - safeSuffix.length;
-  if (text.length <= room) return prefix + text + safeSuffix;
+  if (text.length <= room)
+    return { text: prefix + text + safeSuffix, recoveryText: reason };
   // The cut index is a length, not a content boundary, and the tail is the one
   // field this helper exists to hand over intact: snap it off a high surrogate
   // rather than starting it with an unpaired one.
@@ -1568,7 +1568,10 @@ function composeIncompleteResult(
   const before = text.charCodeAt(start - 1);
   const safeStart =
     start > 0 && before >= 0xd800 && before <= 0xdbff ? start + 1 : start;
-  return prefix + marker + text.slice(safeStart) + safeSuffix;
+  return {
+    text: prefix + marker + text.slice(safeStart) + safeSuffix,
+    recoveryText: prefix + marker,
+  };
 }
 
 /**
@@ -5077,14 +5080,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           );
           // Not 'Partial result follows:': an external executor (Codex) puts
           // its failure diagnostic in finalText, which is not work product.
+          const incomplete = composeIncompleteResult(
+            reason,
+            'Output captured before the failure follows:',
+            modelVisibleText,
+            stopHookSuffix + wtSuffix,
+            fgJsonlPath,
+          );
           return {
-            llmContent: composeIncompleteResult(
-              reason,
-              'Output captured before the failure follows:',
-              modelVisibleText,
-              stopHookSuffix + wtSuffix,
-              fgJsonlPath,
-            ),
+            llmContent: incomplete.text,
+            recoveryText: incomplete.recoveryText,
             outputBudgetApplied: true,
             returnDisplay: this.currentDisplay!,
           };
@@ -5110,18 +5115,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // fall-through already refuses to do. The header is decided off the
           // agent's own text and the warning rides the suffix, exactly as those
           // two returns do.
+          const incomplete = composeIncompleteResult(
+            'Agent was cancelled by the user.',
+            'Partial result follows:',
+            modelVisibleText,
+            stopHookSuffix + wtSuffix,
+            fgJsonlPath,
+          );
           return {
-            llmContent: [
-              {
-                text: composeIncompleteResult(
-                  'Agent was cancelled by the user.',
-                  'Partial result follows:',
-                  modelVisibleText,
-                  stopHookSuffix + wtSuffix,
-                  fgJsonlPath,
-                ),
-              },
-            ],
+            llmContent: [{ text: incomplete.text }],
+            recoveryText: incomplete.recoveryText,
             outputBudgetApplied: true,
             returnDisplay: this.currentDisplay!,
           };
@@ -5143,26 +5146,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           undefined,
           subagentConfig.executor !== undefined,
         );
+        // Compose off `modelVisibleText` — not `visibleFinalText`, and
+        // not `finalText`. The first is a placeholder written for the GOAL
+        // return above; the second can be nothing but the stop-hook cap
+        // warning. Announcing 'Partial result follows:' in front of either
+        // promises agent output and then hands over a framework string the
+        // parent can quote as the subagent's finding. The warning still
+        // reaches the parent, via the suffix. The ERROR branch above omits
+        // the section on the same empty input; do the same here.
+        const incomplete = composeIncompleteResult(
+          reason,
+          'Partial result follows:',
+          modelVisibleText,
+          stopHookSuffix + wtSuffix,
+          fgJsonlPath,
+        );
         return {
-          llmContent: [
-            {
-              // Compose off `modelVisibleText` — not `visibleFinalText`, and
-              // not `finalText`. The first is a placeholder written for the GOAL
-              // return above; the second can be nothing but the stop-hook cap
-              // warning. Announcing 'Partial result follows:' in front of either
-              // promises agent output and then hands over a framework string the
-              // parent can quote as the subagent's finding. The warning still
-              // reaches the parent, via the suffix. The ERROR branch above omits
-              // the section on the same empty input; do the same here.
-              text: composeIncompleteResult(
-                reason,
-                'Partial result follows:',
-                modelVisibleText,
-                stopHookSuffix + wtSuffix,
-                fgJsonlPath,
-              ),
-            },
-          ],
+          llmContent: [{ text: incomplete.text }],
+          recoveryText: incomplete.recoveryText,
           outputBudgetApplied: true,
           returnDisplay: this.currentDisplay!,
         };

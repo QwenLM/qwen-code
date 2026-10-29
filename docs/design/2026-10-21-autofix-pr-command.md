@@ -143,9 +143,11 @@ Helpers live under `packages/cli/src/commands/autofix-pr.ts` and
 `packages/cli/src/commands/autofix-pr/`, and the skill runs them through the
 `autofix_pr` core tool (Section 6.12); the reviewer probe lives with the
 other `qwen review` helpers. Per-PR state lives next to the worktree, outside
-it, under the clone's main worktree. Branches are shared by every worktree of
-a clone, so each helper finds the same watch from any of them, the autofix
-worktree included:
+it, under the worktree the watch was prepared from — the session's own
+worktree in a daemon session, else the clone's main worktree (see
+[2026-10-29-autofix-pr-worktree-rooted-storage.md](2026-10-29-autofix-pr-worktree-rooted-storage.md)).
+Branches are shared by every worktree of a clone; the watch listing scans them
+all, so a watch is found whichever of them holds it:
 
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
@@ -155,7 +157,9 @@ worktree included:
 - what GitHub said of bot comments: `.qwen/tmp/autofix-pr-<n>-replies.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - the user's instructions for every round: `.qwen/tmp/autofix-pr-<n>-instructions.txt`
-- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
+- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json` — this
+  one stays under the clone's **main** worktree (`repoRoot()`), not the watch
+  root: `qwen review watch-repo` is a clone-level probe, not a per-session watch
 
 ## 6. Helper contracts
 
@@ -214,17 +218,37 @@ worktree included:
    another repository's PR of the same number is a refusal. Repositories
    compare as on GitHub: owner and name without case, and the host without
    case or the default port, but with any other port, which may name another
-   instance. In a daemon session (`QWEN_CODE_SERVE=1`), a worktree outside
-   the session's working directory is a refusal before the state file is
-   read, on a resume or take-over as on a new watch: the daemon runs a fix
-   agent's commands only inside that directory, so a round there could not
-   test, commit or push. The refusal names the clone root to prepare from.
+   instance. In a daemon session (`QWEN_CODE_SERVE=1`), the watch is rooted
+   at the session's own worktree toplevel, so a session in a linked worktree
+   of the clone prepares it inside its own directory. A worktree that would
+   still fall outside the session's working directory (the session sits in a
+   subdirectory of the worktree, or in another clone) is a refusal before the
+   state file is read, on a resume or take-over as on a new watch: the daemon
+   runs a fix agent's commands only inside that directory, so a round there
+   could not test, commit or push. The refusal names the directory to prepare
+   from.
 8. Print a JSON report: worktree path, branch, head SHA, base/head refs, push
    target, viewer and PR author logins, draft and fork flags, and
    `localUnpushedCommits`, the number of commits on the user's own copy of the
    head branch that the PR does not have. The worktree never sees them. Only a
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
+   The report also carries `localUncommittedChanges`: whether a worktree of
+   this clone has that copy checked out and holds changes git reports. It is
+   read with `--no-optional-locks`, `--untracked-files=normal` and
+   `--ignore-submodules=none`, so a user's `status.showUntrackedFiles` or
+   submodule `ignore` setting cannot hide work; only `.qwen/tmp`, where the
+   helpers write, is left out, and anything else under `.qwen` is the user's.
+   It is computed only when the copy exists and only for checkouts of that
+   branch; work in a checkout of another branch is not work on that copy.
+   `worktree list --porcelain -z` keeps a path git would quote, with the line
+   form as the fallback where git has no `-z` (before 2.36): a path it quotes
+   then reads as unknown, not as no work. `localWorkUnknown` says the
+   comparison could not be made at all — the PR head is not in this clone, or
+   git could not read a checkout — which is never reported as "no work". The
+   helper reports them and does not refuse: the skill's start does not go on
+   while the work or that flag is set, unless the user asks once told, because
+   the watch's push and the user's own go to the same head branch.
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 
@@ -921,10 +945,12 @@ into, and a fresh lock is never touched.
 
 ### 6.10 `status [<pr>]`
 
-Lists the watches of the clone, read from their files under the main
-worktree's `.qwen/tmp` (`--no-work` leaves `worktreeWork` null, skipping
-its git scan): no lock is taken and GitHub is not asked, so it
-answers while a helper runs and whichever session owns a watch. Output:
+Lists the watches of the clone, read from their files under each worktree's
+`.qwen/tmp` — every worktree of the clone is scanned, so a watch rooted in any
+of them is listed (`--no-work` leaves `worktreeWork` null, skipping its git
+scan): no lock is taken and GitHub is not asked, so it answers while a helper
+runs and whichever session owns a watch. An explicit root scans just that one
+worktree. Output:
 `{ "now": "<time>", "watches": [...] }`, and `unreadable` with the PR and
 the reason for a state file that could not be read. Each watch carries:
 
@@ -1412,13 +1438,14 @@ watch of the workspaces it reaches.
 **What the daemon serves.** `GET /autofix-pr/watches` (the primary
 workspace) and `GET /workspaces/:workspace/autofix-pr/watches` (a registered,
 trusted one), advertised as `autofix_pr_watches`, answer what `status`
-lists for the workspace's clone. The main worktree is found with
-`git worktree list`, so a workspace that is a linked worktree or a
-subdirectory reads the clone's watches, and the answer names it (`root`).
-`runStatus` takes that root and no session, rather than the daemon's own
-directory and environment, and runs no git command (`git: false`): the
-daemon lists the watches on its own thread, where a git command that hangs
-would hold every request. It reads the files only, each opened without
+lists for the workspace's clone. One `git worktree list` finds every
+worktree of the clone, so a workspace that is a linked worktree or a
+subdirectory reads the clone's watches; the answer still names the main
+worktree as `root` (for display). `runStatus` takes that set of worktrees
+(`roots`) and no session, rather than the daemon's own directory and
+environment, and runs no git command (`git: false`): the daemon lists the
+watches on its own thread, where a git command that hangs would hold every
+request. It reads the files only, each opened without
 following a link and without blocking, so a FIFO put in place of one cannot
 hold the daemon either (the helpers read them so too). No lock is taken and
 GitHub is not asked, so the answer comes back while a helper runs. Left out

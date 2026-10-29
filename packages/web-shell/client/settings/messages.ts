@@ -45,6 +45,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.description.voiceModel':
     'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
 
+  'settings.category.Archived': 'Archived conversations',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -217,6 +218,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.category.Tools': '工具',
   'settings.category.Daemon': '守护进程',
   'settings.category.Connections': '连接',
+  'settings.category.Archived': '归档会话',
   'settings.category.Experimental': '实验性',
   'settings.category.Advanced': '高级',
   'settings.label.general.enableAutoUpdate': '启用自动更新',

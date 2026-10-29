@@ -24,12 +24,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.AbstractExecutorService;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executor;
+import java.util.concurrent.FutureTask;
 import java.util.function.Supplier;
 
 /**
@@ -40,9 +37,11 @@ import java.util.function.Supplier;
  * the host tz database, records one decision per slot — fired, skipped or
  * missed, by the overlap and catch-up policies — and fires an occurrence as
  * one idempotent Harness operation whose claim row was durable first. Rows
- * are worked on a bounded pool so one slow gated fire never stalls every
- * definition on the node; each row claims itself at task start and leases
- * from the claim time (#15418). A
+ * are worked on a bounded pool, so one slow gated fire does not stall the
+ * other definitions' rows within a tick; each row claims itself at task
+ * start and leases from the claim time (#15418). The tick still joins its
+ * rows before returning, so one slow row delays the next tick for every
+ * definition the node works (#15667). A
  * claim whose answer was lost is re-driven by later ticks with bounded
  * backoff and, past the bound, recorded unknown — never guessed; a scanner
  * that lost its lease cannot move the ledger. See
@@ -79,7 +78,7 @@ public class AutomationScanner {
     private final ManagedAgentProperties.Automation settings;
     private final Supplier<Long> clock;
     private final String owner;
-    private final ExecutorService pool;
+    private final Executor executor;
 
     @Autowired
     public AutomationScanner(AutomationLedgerStore store,
@@ -94,56 +93,19 @@ public class AutomationScanner {
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
             Supplier<Long> clock, String owner) {
-        this(store, harness, settings, clock, owner, DIRECT);
+        this(store, harness, settings, clock, owner, Runnable::run);
     }
 
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
-            Supplier<Long> clock, String owner, ExecutorService pool) {
+            Supplier<Long> clock, String owner, Executor executor) {
         this.store = store;
         this.harness = harness;
         this.settings = settings;
         this.clock = clock;
         this.owner = owner;
-        this.pool = pool;
+        this.executor = executor;
     }
-
-    /**
-     * Runs every submitted task on the submitting thread, in submit order.
-     * Unit tests pin the serial shape of the tick through the same fan-out
-     * and join the production pool takes. It owns no threads, so its
-     * lifecycle surface is inert and never stopped.
-     */
-    private static final ExecutorService DIRECT = new AbstractExecutorService() {
-        @Override
-        public void shutdown() {
-        }
-
-        @Override
-        public List<Runnable> shutdownNow() {
-            return List.of();
-        }
-
-        @Override
-        public boolean isShutdown() {
-            return false;
-        }
-
-        @Override
-        public boolean isTerminated() {
-            return false;
-        }
-
-        @Override
-        public boolean awaitTermination(long timeout, TimeUnit unit) {
-            return true;
-        }
-
-        @Override
-        public void execute(Runnable task) {
-            task.run();
-        }
-    };
 
     @Scheduled(scheduler = "managedAutomationScheduler", fixedDelayString =
             "${qwen.managed-agent.automation.scan-delay:10s}")
@@ -169,10 +131,10 @@ public class AutomationScanner {
         // queued task never holds an expiring lease, and two tasks racing
         // one row meet the same atomic claim guard two nodes do. The tick
         // joins before returning, so fixedDelay still never overlaps ticks.
-        List<Callable<Integer>> tasks = new ArrayList<>();
+        Map<FutureTask<Integer>, ScheduleRow> pending = new LinkedHashMap<>();
         Set<String> submitted = new HashSet<>();
         for (ScheduleRow row : store.findArmed(now, SCAN_LIMIT)) {
-            tasks.add(() -> claimed(row, now, true));
+            pending.put(new FutureTask<>(() -> claimed(row, now, true)), row);
             // The same NUL separator the store's composite keys use: no
             // tenant or schedule id character set has to keep this safe.
             submitted.add(row.tenantId() + '\0' + row.scheduleId());
@@ -183,22 +145,23 @@ public class AutomationScanner {
         // the same task, so it appears in this loop once.
         for (ScheduleRow row : store.findFiringSchedules(now, SCAN_LIMIT)) {
             if (submitted.add(row.tenantId() + '\0' + row.scheduleId())) {
-                tasks.add(() -> claimed(row, now, false));
+                pending.put(new FutureTask<>(() -> claimed(row, now, false)), row);
             }
         }
-        List<Future<Integer>> pending = new ArrayList<>();
-        for (Callable<Integer> task : tasks) {
-            pending.add(pool.submit(task));
+        for (FutureTask<Integer> task : pending.keySet()) {
+            executor.execute(task);
         }
         int fired = 0;
         Throwable failure = null;
-        for (Future<Integer> task : pending) {
+        int additionalFailures = 0;
+        List<String> failureSample = new ArrayList<>();
+        for (Map.Entry<FutureTask<Integer>, ScheduleRow> task : pending.entrySet()) {
             try {
-                fired += task.get();
+                fired += task.getKey().get();
             } catch (InterruptedException error) {
-                // Context close interrupted the join: the in-flight tasks
-                // still finish under their own leases. Stop joining instead
-                // of parking the shutdown behind the relay's timeouts.
+                // Context close interrupted the join: any acquired claims
+                // remain durable. Stop joining instead of parking the
+                // shutdown behind the relay's timeouts.
                 Thread.currentThread().interrupt();
                 if (failure == null) {
                     failure = error;
@@ -210,8 +173,30 @@ public class AutomationScanner {
                 // still owed to the caller's lease accounting.
                 if (failure == null) {
                     failure = error.getCause();
+                } else {
+                    additionalFailures++;
+                }
+                if (failureSample.size() < 3) {
+                    ScheduleRow row = task.getValue();
+                    // The sample is the only record of an additional
+                    // failure, so a message-less one must still name
+                    // itself instead of rendering "failure=null".
+                    Throwable cause = error.getCause();
+                    String detail = cause.getMessage() != null
+                            ? cause.getMessage()
+                            : cause.getClass().getName();
+                    failureSample.add("tenant=" + row.tenantId()
+                            + " schedule=" + row.scheduleId()
+                            + " failure=" + detail);
                 }
             }
+        }
+        if (additionalFailures > 0) {
+            LOG.warn("automation scan had additionalObservedTaskFailures={}"
+                    + " submitted={} sample={} (an interrupted join stops early;"
+                    + " the count excludes the rethrown first failure,"
+                    + " the sample includes it)",
+                    additionalFailures, pending.size(), failureSample);
         }
         if (failure instanceof Error error) {
             throw error;

@@ -2137,6 +2137,37 @@ public final class JdbcRuntimeBindingRepository
         return selectById(connection, BrokerValues.requireId(bindingId, "bindingId"), true, 10);
     }
 
+    public RuntimeBindingRecord releaseResidentForRetirement(Connection connection,
+            RuntimeBindingRecord expected) throws SQLException {
+        RuntimeBindingRecord current = lockActiveForRetirement(connection, expected);
+        if (!ResidentWorkspaceProfile.selects(current.getRequest().getScope())
+                || current.getState() != RuntimeBindingRecord.State.DRAINING || !current.isDrainRequested()
+                || current.getOperationOwner() != null || current.getOperationLeaseUntil() != null
+                || current.getVersion() != expected.getVersion() || !current.sameOperation(expected)
+                || !current.hasSameLease(expected.getLease())
+                || !Objects.equals(current.getResourceHandle(), expected.getResourceHandle())
+                || current.getAttestationGeneration() != expected.getAttestationGeneration()) {
+            throw new IllegalStateException("Original resident retirement is unavailable");
+        }
+        WorkspaceCsiRuntimeIdentity.verify(current);
+        RuntimeBindingRecord released = current.withState(RuntimeBindingRecord.State.RELEASED,
+                current.getLease(), JdbcRepositorySupport.databaseNow(connection))
+                .withOperation(null, null, current.getOperationGeneration() + 1)
+                .withVersion(current.getVersion() + 1);
+        updateBinding(connection, released);
+        try (var statement = connection.prepareStatement("UPDATE ma_runtime_slot SET active_binding_id = NULL"
+                + " WHERE request_key = ? AND active_binding_id = ? AND last_generation = ?")) {
+            statement.setQueryTimeout(10);
+            statement.setString(1, JdbcRepositorySupport.requestKey(current.getRequest()));
+            JdbcRepositorySupport.setStringParameter(statement, 2, current.getBindingId());
+            statement.setLong(3, current.getGeneration());
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException("Original resident slot is unavailable");
+            }
+        }
+        return released;
+    }
+
     public RuntimeBindingRecord findByIdInReadOnlySnapshot(Connection connection,
             String bindingId) throws SQLException {
         if (connection == null || connection.getAutoCommit() || !connection.isReadOnly()

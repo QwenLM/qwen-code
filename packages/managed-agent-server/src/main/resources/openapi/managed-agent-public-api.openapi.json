@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.94.0",
+    "version": "1.95.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes."
   },
   "servers": [
@@ -6886,7 +6886,7 @@
           {
             "name": "workspaceId",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -6896,7 +6896,7 @@
           {
             "name": "cwdRelative",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -6933,6 +6933,16 @@
               "maxLength": 36,
               "format": "uuid"
             }
+          },
+          {
+            "name": "sessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Exactly one locator: Session ID, or Workspace ID plus cwdRelative."
           }
         ],
         "requestBody": {
@@ -7045,6 +7055,409 @@
             "$ref": "#/components/responses/Unavailable"
           }
         }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/options": {
+      "post": {
+        "operationId": "webShellSessionWorktreeOptions",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Options a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeOptionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktreeOptions"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/query": {
+      "post": {
+        "operationId": "webShellSessionWorktreeQuery",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Query a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktreePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/inspect": {
+      "post": {
+        "operationId": "webShellSessionWorktreeInspect",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Inspect a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeInspectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktreeInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/cleanup": {
+      "post": {
+        "operationId": "webShellSessionWorktreeCleanup",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Cleanup a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeCleanupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktree"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees/options": {
+      "get": {
+        "operationId": "sessionWorktreeOptions",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "."
+            }
+          },
+          {
+            "name": "base_ref",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktreeOptions"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Options a main Session worktree"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees": {
+      "get": {
+        "operationId": "sessionWorktreeQuery",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktreePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Query a main Session worktree"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}": {
+      "get": {
+        "operationId": "sessionWorktreeInspect",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "worktreeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktreeInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Inspect a main Session worktree"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}/cleanup": {
+      "post": {
+        "operationId": "sessionWorktreeCleanup",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "worktreeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktree"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Cleanup a main Session worktree"
       }
     }
   },
@@ -7522,6 +7935,19 @@
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
             },
             "description": "Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime."
+          },
+          "worktree": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "base_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [],
+            "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
           }
         }
       },
@@ -7756,6 +8182,16 @@
           },
           "recovery": {
             "$ref": "#/components/schemas/SessionRecovery"
+          },
+          "worktree": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionWorktree"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -8532,6 +8968,19 @@
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
             },
             "description": "Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime."
+          },
+          "worktree": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "baseRef": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [],
+            "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
           }
         }
       },
@@ -8817,6 +9266,16 @@
           },
           "recovery": {
             "$ref": "#/components/schemas/SessionRecovery"
+          },
+          "worktree": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WebShellSessionWorktree"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -14241,7 +14700,7 @@
       "WebShellWorkspaceFileQueryRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspaceId", "cwdRelative", "directory"],
+        "required": ["directory"],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -14265,18 +14724,38 @@
           "expectedScopeRevision": {
             "type": "string",
             "maxLength": 64
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": ["sessionId"],
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["workspaceId"]
+                },
+                {
+                  "required": ["cwdRelative"]
+                }
+              ]
+            }
+          },
+          {
+            "required": ["workspaceId", "cwdRelative"],
+            "not": {
+              "required": ["sessionId"]
+            }
+          }
+        ]
       },
       "WebShellWorkspaceFileReadRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "workspaceId",
-          "cwdRelative",
-          "path",
-          "expectedScopeRevision"
-        ],
+        "required": ["path", "expectedScopeRevision"],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -14297,8 +14776,33 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": ["sessionId"],
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["workspaceId"]
+                },
+                {
+                  "required": ["cwdRelative"]
+                }
+              ]
+            }
+          },
+          {
+            "required": ["workspaceId", "cwdRelative"],
+            "not": {
+              "required": ["sessionId"]
+            }
+          }
+        ]
       },
       "WebShellWorkspaceFileEntry": {
         "type": "object",
@@ -15958,6 +16462,283 @@
             "format": "uuid"
           }
         }
+      },
+      "SessionWorktree": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "base_commit": {
+            "type": "string"
+          },
+          "cwd_relative": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "ready",
+              "failed",
+              "blocked",
+              "removing",
+              "removed"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error_code": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "workspace_id",
+          "branch",
+          "base_commit",
+          "cwd_relative",
+          "operation_id",
+          "state",
+          "revision"
+        ]
+      },
+      "WebShellSessionWorktree": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "baseCommit": {
+            "type": "string"
+          },
+          "cwdRelative": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "ready",
+              "failed",
+              "blocked",
+              "removing",
+              "removed"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "errorCode": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "id",
+          "sessionId",
+          "workspaceId",
+          "branch",
+          "baseCommit",
+          "cwdRelative",
+          "operationId",
+          "state",
+          "revision"
+        ]
+      },
+      "WebShellSessionWorktreeOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": ["string", "null"]
+          },
+          "baseCommit": {
+            "type": ["string", "null"]
+          },
+          "currentBranch": {
+            "type": ["string", "null"],
+            "description": "Source checkout branch independent of base ref; HEAD when detached, null when unavailable."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["supported", "branches"]
+      },
+      "SessionWorktreeOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": ["string", "null"]
+          },
+          "base_commit": {
+            "type": ["string", "null"]
+          },
+          "current_branch": {
+            "type": ["string", "null"],
+            "description": "Source checkout branch independent of base ref; HEAD when detached, null when unavailable."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["supported", "branches"]
+      },
+      "WebShellSessionWorktreePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebShellSessionWorktree"
+            }
+          }
+        },
+        "required": ["data"]
+      },
+      "WebShellSessionWorktreeInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "worktree": {
+            "$ref": "#/components/schemas/WebShellSessionWorktree"
+          },
+          "canCleanup": {
+            "type": "boolean"
+          },
+          "cleanupBlocker": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": ["worktree", "canCleanup"]
+      },
+      "SessionWorktreePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionWorktree"
+            }
+          }
+        },
+        "required": ["data"]
+      },
+      "SessionWorktreeInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "worktree": {
+            "$ref": "#/components/schemas/SessionWorktree"
+          },
+          "can_cleanup": {
+            "type": "boolean"
+          },
+          "cleanup_blocker": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": ["worktree", "can_cleanup"]
+      },
+      "WebShellSessionWorktreeOptionsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "cwdRelative": {
+            "type": "string"
+          },
+          "baseRef": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId", "cwdRelative"]
+      },
+      "WebShellSessionWorktreeQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId"]
+      },
+      "WebShellSessionWorktreeInspectRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "worktreeId": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId", "worktreeId"]
+      },
+      "WebShellSessionWorktreeCleanupRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "worktreeId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId", "worktreeId", "idempotencyKey"]
       }
     }
   }

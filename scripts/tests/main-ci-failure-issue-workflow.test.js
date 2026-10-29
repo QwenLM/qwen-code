@@ -47,6 +47,7 @@ describe('main CI failure issue workflow', () => {
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
       'Desktop Checks': 'desktop-packaging-check',
+      'tui-parity': 'tui-parity',
     };
     // workflow_run matches the list as a set, so its order is not pinned.
     expect([...yml.on.workflow_run.workflows].sort()).toEqual(
@@ -83,7 +84,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
@@ -104,6 +105,14 @@ describe('main CI failure issue workflow', () => {
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
     ['SDK Python', 'workflow_dispatch', 'main', 'failure', false],
     ['SDK Java', 'schedule', 'main', 'failure', true],
+    ['tui-parity', 'schedule', 'main', 'failure', true],
+    ['tui-parity', 'schedule', 'main', 'success', false],
+    ['tui-parity', 'schedule', 'main', 'cancelled', false],
+    ['tui-parity', 'schedule', 'main', 'skipped', false],
+    ['tui-parity', 'schedule', 'feature', 'failure', false],
+    ['tui-parity', 'pull_request', 'feature', 'failure', false],
+    ['tui-parity', 'workflow_dispatch', 'feature', 'failure', false],
+    ['tui-parity', 'workflow_dispatch', 'main', 'failure', false],
     ['Managed Agent gate', 'push', 'main', 'failure', true],
     ['Managed Agent gate', 'pull_request_review', 'feature', 'failure', true],
     ['Managed Agent gate', 'pull_request', 'feature', 'failure', true],
@@ -340,15 +349,18 @@ cat "\${RUNNER_TEMP}/pulls.json"
       );
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
-    it('files a main dispatch failure without a PR', () => {
-      const resolved = resolve([], {
-        EVENT_NAME: 'workflow_dispatch',
-        HEAD_BRANCH: 'main',
-      });
-      expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
-      expect(resolved.args).toBe('');
-      expect(resolved.stdout).not.toContain('::warning::');
-    });
+    it.each(['workflow_dispatch', 'schedule'])(
+      'files a main %s failure without a PR',
+      (event) => {
+        const resolved = resolve([], {
+          EVENT_NAME: event,
+          HEAD_BRANCH: 'main',
+        });
+        expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+        expect(resolved.args).toBe('');
+        expect(resolved.stdout).not.toContain('::warning::');
+      },
+    );
     it('still files for a later attempt of a main run', () => {
       // The attempt guard lives in the PR-lookup else branch, so a main run
       // files at every attempt; hoisting it below the `fi` would silently

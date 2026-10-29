@@ -66,6 +66,7 @@ describe('bundled Generated UI candidate', () => {
         args: [join(assets, 'main.js')],
         includeTools: ['generated_ui_show'],
         trust: false,
+        alwaysLoadTools: true,
       },
     });
   });

@@ -205,6 +205,106 @@ class ExternalStorageRegistrationTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isZero();
     }
 
+    @Test
+    void theProvisionerReadPathResolvesOnlyTheTenantBoundAlias() {
+        var registration = registration("provider", "volume", "workspace", "/aliases/one");
+        store.registerExternalStorage("tenant", "key", registration);
+        int storage = jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class);
+        int owners = jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class);
+        int receipts = jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt", Integer.class);
+
+        var found = store.find("tenant", "workspace");
+        assertThat(found).isPresent();
+        assertThat(found.get().providerId()).isEqualTo("provider");
+        assertThat(found.get().physicalKey()).isEqualTo("volume");
+        assertThat(found.get().registrationRevision()).isEqualTo(1);
+        assertThat(found.get().tenantWorkspaceId()).isEqualTo("workspace");
+        assertThat(found.get().aliasPath()).isEqualTo("/aliases/one");
+        assertThat(found.get().mountRoot()).isEqualTo("/worker/workspace");
+        assertThat(found.get().toString()).isEqualTo("RegisteredExternalStorage[redacted]");
+
+        // The read path resolves no other tenant and no other alias, and writes nothing.
+        assertThat(store.find("tenant-other", "workspace")).isEmpty();
+        assertThat(store.find("tenant", "workspace-other")).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isEqualTo(storage);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(owners);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt", Integer.class)).isEqualTo(receipts);
+        assertThatThrownBy(() -> store.find(null, "workspace"))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(400);
+                    assertThat(error.getCode()).isEqualTo("invalid_external_storage_registration");
+                });
+    }
+
+    @Test
+    void theProvisionerReadPathRefusesADurableRowThatDisagreesWithItself() {
+        store.registerExternalStorage("tenant", "key",
+                registration("provider", "volume", "workspace", "/aliases/one"));
+        // A revision or mount root that drifted away from the persisted JSON is
+        // never reconciled by picking one side.
+        jdbc.update("UPDATE ma_storage SET registration_revision = 2");
+        assertReadPathMismatch();
+        jdbc.update("UPDATE ma_storage SET registration_revision = 1");
+        jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/other'");
+        assertReadPathMismatch();
+    }
+
+    @Test
+    void aRetiredOrRetiringRegistrationResolvesEmpty() {
+        store.registerExternalStorage("tenant", "key",
+                registration("provider", "volume", "workspace", "/aliases/one"));
+        assertThat(store.find("tenant", "workspace")).isPresent();
+        for (String state : List.of("RETIRING", "RETIRED")) {
+            jdbc.update("UPDATE ma_storage SET registration_state = ?", state);
+            assertThat(store.find("tenant", "workspace"))
+                    .as("a %s row is not a registration", state).isEmpty();
+        }
+        jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED'");
+        assertThat(store.find("tenant", "workspace")).isPresent();
+    }
+
+    @Test
+    void aRegistrationRevisionMustStayInsideTheExactJsonRange() {
+        long max = ExternalStorageRegistration.ExternalStorageIdentity
+                .MAX_REGISTRATION_REVISION;
+        assertThat(max).isEqualTo(9_007_199_254_740_991L);
+        assertThat(new ExternalStorageRegistration.ExternalStorageIdentity(
+                "provider", "volume", max).registrationRevision()).isEqualTo(max);
+        assertThatThrownBy(() -> new ExternalStorageRegistration.ExternalStorageIdentity(
+                "provider", "volume", max + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid external storage registration.");
+        // The registry record mirrors the same bound without importing the DTO.
+        assertThat(com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry
+                .RegisteredExternalStorage.MAX_REGISTRATION_REVISION).isEqualTo(max);
+        assertThatThrownBy(() -> new com.alibaba.qwen.code.runtimebroker.provisioning
+                .ExternalStorageRegistry.RegisteredExternalStorage("provider", "volume",
+                        max + 1, "workspace", "/aliases/one", "/worker/workspace"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void anUnreadableRegistrationIsRetryableInsteadOfPermanent() {
+        store.registerExternalStorage("tenant", "key",
+                registration("provider", "volume", "workspace", "/aliases/one"));
+        jdbc.update("UPDATE ma_storage SET registration_json = 'not-json'");
+        assertThatThrownBy(() -> store.find("tenant", "workspace"))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("runtime_external_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                });
+    }
+
+    private void assertReadPathMismatch() {
+        assertThatThrownBy(() -> store.find("tenant", "workspace"))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("external_storage_registration_mismatch");
+                });
+    }
+
     private MockHttpServletRequestBuilder operator() {
         return post(ROUTE).contentType("application/json").header("X-Qwen-Tenant-Id", "tenant")
                 .header("Authorization", "Bearer operator-secret").with(request -> {

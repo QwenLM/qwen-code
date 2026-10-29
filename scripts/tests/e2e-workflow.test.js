@@ -161,7 +161,7 @@ describe('TUI product evidence', () => {
     for (const job of [workflow.jobs.parity, workflow.jobs.noflicker]) {
       expect(job.needs).toBe('changes');
       expect(job.if).toBe(
-        "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
+        "${{ !cancelled() && github.event_name != 'schedule' && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
       );
       expect(job.steps.find((step) => step.name === 'Build cli').run).toBe(
         'npm run build -- --cli-only',
@@ -237,6 +237,14 @@ describe('TUI product evidence', () => {
     );
     expect(
       existsSync('integration-tests/interactive/tui-session-recovery.test.ts'),
+    ).toBe(true);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-extension-acquisition.test.ts',
+    );
+    expect(
+      existsSync(
+        'integration-tests/interactive/tui-extension-acquisition.test.ts',
+      ),
     ).toBe(true);
   });
 
@@ -949,6 +957,21 @@ describe('installed npm acceptance workflow', () => {
     readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
   );
   const job = workflow.jobs['installed-npm'];
+  it('runs installed acceptance nightly and manually, never for PR updates', () => {
+    expect(Object.keys(workflow.on).sort()).toEqual([
+      'pull_request',
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(workflow.on.schedule).toEqual([{ cron: '17 19 * * *' }]);
+    expect(job.if).toBe(
+      "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+    );
+    expect(job.needs).toBeUndefined();
+    expect(workflow.jobs.changes.if).toBe(
+      "${{ github.event_name != 'schedule' }}",
+    );
+  });
   it('keeps installed setup independent of the original source parity budget', () => {
     expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
     expect(job['timeout-minutes']).toBe(60);
@@ -992,6 +1015,10 @@ describe('installed distribution matrix workflow', () => {
       (step) => step.name === 'Upload canonical installed npm artifact',
     );
     expect(upload.if).toBe('${{ success() }}');
+    expect(canonical.outputs['canonical-artifact-id']).toBe(
+      '${{ steps.canonical.outputs.artifact-id }}',
+    );
+    expect(upload.id).toBe('canonical');
     expect(upload.with.name).toBe(
       'installed-npm-canonical-${{ github.run_id }}-${{ github.run_attempt }}',
     );
@@ -1084,12 +1111,12 @@ describe('installed distribution matrix workflow', () => {
   });
 
   it('binds the same downloaded canonical artifact once before either product leg', () => {
-    const upload = canonical.steps.find(
-      (step) => step.name === 'Upload canonical installed npm artifact',
-    );
     const download = named('Download canonical installed npm artifact');
     expect(download.uses).toMatch(/^actions\/download-artifact@/);
-    expect(download.with.name).toBe(upload.with.name);
+    expect(download.with['artifact-ids']).toBe(
+      '${{ needs.installed-npm.outputs.canonical-artifact-id }}',
+    );
+    expect(download.with.name).toBeUndefined();
     expect(download.with.path).toBe(
       '${{ env.QWEN_DISTRIBUTION_ARTIFACT_DIR }}',
     );

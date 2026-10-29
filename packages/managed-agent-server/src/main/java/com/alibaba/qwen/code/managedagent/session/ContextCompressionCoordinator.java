@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStor
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -31,7 +32,7 @@ public class ContextCompressionCoordinator {
     private final Set<String> active = ConcurrentHashMap.newKeySet();
 
     public ContextCompressionCoordinator(AgentStateStore store, ManagedExtensionRecordStore records,
-            HarnessConnector harness, ExecutorService executor, Clock clock,
+            HarnessConnector harness, @Qualifier("managedAgentExecutor") ExecutorService executor, @Qualifier("managedAgentClock") Clock clock,
             ManagedAgentProperties properties) {
         this.store = store;
         this.records = records;
@@ -55,7 +56,7 @@ public class ContextCompressionCoordinator {
         });
     }
 
-    @Scheduled(fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recover() {
         for (var target : store.findContextCompressions(50)) {
             dispatch(target.tenantId(), target.sessionId(), target.operationId());

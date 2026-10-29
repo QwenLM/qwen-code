@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,12 +36,13 @@ import java.util.UUID;
 import java.util.function.Function;
 
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class ManagedActionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
 
-    public ManagedActionStore(JdbcTemplate jdbc, AgentStateStore sessions) {
+    public ManagedActionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, AgentStateStore sessions) {
         this.jdbc = jdbc;
         this.sessions = sessions;
     }

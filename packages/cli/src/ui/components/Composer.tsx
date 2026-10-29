@@ -19,7 +19,8 @@ import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { useModBand } from '../hooks/use-mod-band.js';
-import { ModBand, modBandMaxRows } from './ModBand.js';
+import { ModBand } from './ModBand.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import { t } from '../../i18n/index.js';
 
 interface ComposerProps {

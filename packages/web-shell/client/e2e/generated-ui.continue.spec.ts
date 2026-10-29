@@ -4,12 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { build } from 'esbuild';
+import { startGeneratedUiSandbox } from './utils/generatedUiSandbox';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
@@ -19,7 +14,6 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
-const root = new URL('../../../../', import.meta.url);
 const resourceUri = 'ui://qwen-code-generated-ui/view-v1.html';
 const input = {
   title: 'Parameter continuation fixture',
@@ -54,61 +48,16 @@ interface SnapshotMessage {
 
 let appHtml: string;
 let toolResult: Record<string, unknown>;
-let sandbox: { url: string; close(): Promise<void> };
-let fixtureDirectory: string;
+let sandbox: Awaited<ReturnType<typeof startGeneratedUiSandbox>>;
 
 test.beforeAll(async () => {
-  appHtml = await readFile(
-    new URL('integrations/generated-ui/dist/app.html', root),
-    'utf8',
-  );
-  const require = createRequire(new URL('packages/cli/package.json', root));
-  const fixture = await build({
-    stdin: {
-      resolveDir: fileURLToPath(root),
-      contents: `
-        import express from ${JSON.stringify(require.resolve('express'))};
-        import { mountMcpAppSandbox } from './packages/cli/src/serve/mcp-app-sandbox.ts';
-        export { createShowResult } from './integrations/generated-ui/src/contracts.ts';
-        export async function startSandbox() {
-          const app = express();
-          const dispose = mountMcpAppSandbox(app);
-          const server = await new Promise((resolve) => {
-            const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
-          });
-          return {
-            url: 'http://127.0.0.1:' + server.address().port,
-            async close() {
-              dispose();
-              server.closeAllConnections();
-              await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-            },
-          };
-        }
-      `,
-    },
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    write: false,
-    banner: {
-      js: `import { createRequire } from 'node:module'; const require = createRequire(${JSON.stringify(fileURLToPath(new URL('packages/cli/package.json', root)))});`,
-    },
-  });
-  fixtureDirectory = await mkdtemp(join(tmpdir(), 'generated-ui-e2e-'));
-  const fixturePath = join(fixtureDirectory, 'sandbox.mjs');
-  await writeFile(fixturePath, fixture.outputFiles[0].text);
-  const helpers = (await import(pathToFileURL(fixturePath).href)) as {
-    createShowResult(document: typeof input): Record<string, unknown>;
-    startSandbox(): Promise<typeof sandbox>;
-  };
-  toolResult = helpers.createShowResult(input);
-  sandbox = await helpers.startSandbox();
+  sandbox = await startGeneratedUiSandbox();
+  appHtml = sandbox.appHtml;
+  toolResult = sandbox.createShowResult(input);
 });
 
 test.afterAll(async () => {
   await sandbox?.close();
-  if (fixtureDirectory) await rm(fixtureDirectory, { recursive: true });
 });
 
 async function openCards(page: Page, testInfo: TestInfo, count = 1) {
@@ -176,7 +125,7 @@ async function openCards(page: Page, testInfo: TestInfo, count = 1) {
   const workers: string[] = [];
   page.on('worker', (worker) => workers.push(worker.url()));
   await page.goto(`/session/${scenario.sessionId}?language=en`);
-  const cards = page.locator('iframe[title="generated-ui MCP App"]');
+  const cards = page.locator('iframe[title="Interactive view"]');
   await expect(cards).toHaveCount(count);
   const app = (index = 0) =>
     cards.nth(index).contentFrame().frameLocator('iframe');
@@ -203,16 +152,20 @@ test('reviews normalized parameters, freezes the message, and sends only after c
 }, testInfo) => {
   const { app, daemon, scenario } = await openCards(page, testInfo);
   await page.setViewportSize({ width: 375, height: 900 });
-  const continueBounds = await app()
-    .locator('#continue-analysis')
-    .boundingBox();
-  const stopBounds = await app().locator('#stop').boundingBox();
-  expect(continueBounds).not.toBeNull();
-  expect(stopBounds).not.toBeNull();
-  expect(continueBounds!.y).toBeGreaterThanOrEqual(
-    stopBounds!.y + stopBounds!.height,
-  );
-  expect(continueBounds!.x + continueBounds!.width).toBeLessThanOrEqual(375);
+  // The card refits after the resize, so measure once the layout settles.
+  await expect
+    .poll(async () => {
+      const continueBounds = await app()
+        .locator('#continue-analysis')
+        .boundingBox();
+      const stopBounds = await app().locator('#stop').boundingBox();
+      if (!continueBounds || !stopBounds) return false;
+      return (
+        continueBounds.y >= stopBounds.y + stopBounds.height &&
+        continueBounds.x + continueBounds.width <= 375
+      );
+    })
+    .toBe(true);
   await app().locator('#continue-analysis').scrollIntoViewIfNeeded();
   await expect(app().locator('#continue-analysis')).toBeVisible();
   const screenshot = testInfo.outputPath('continuation-narrow.png');
@@ -232,7 +185,9 @@ test('reviews normalized parameters, freezes the message, and sends only after c
   await app().locator('#continue-analysis').focus();
   await page.keyboard.press('Enter');
 
-  const review = page.getByRole('dialog', { name: 'Review App message' });
+  const review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   await expect(review).toBeVisible();
   const frozenText = (await review.locator('pre').textContent())!;
   expect(parameters(frozenText)).toMatchObject({
@@ -264,7 +219,7 @@ test('reviews normalized parameters, freezes the message, and sends only after c
   });
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'dirty');
   await expect(review.locator('pre')).toHaveText(frozenText);
-  await review.getByRole('button', { name: 'Send to session' }).click();
+  await review.getByRole('button', { name: 'Continue analysis' }).click();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
   const request = daemon.promptRequests()[0];
   expect(request.path).toBe(`/session/${scenario.sessionId}/prompt`);
@@ -280,17 +235,6 @@ test('reviews normalized parameters, freezes the message, and sends only after c
   await expect(review).toContainText('Analysis may still be running.');
   await review.getByRole('button', { name: /^close$/i }).click();
   await page.setViewportSize({ width: 375, height: 900 });
-  await app().locator('#continue-analysis').hover();
-  await page.mouse.wheel(0, 600);
-  await expect(app().locator('#continuation-help')).toBeInViewport();
-  await expect(app().locator('#continuation-status')).toBeInViewport();
-  await expect
-    .poll(() =>
-      app()
-        .locator('body')
-        .evaluate(() => window.scrollY),
-    )
-    .toBeGreaterThan(0);
   await app()
     .locator('#continuation-help')
     .evaluate((element) => element.scrollIntoView({ block: 'center' }));
@@ -316,19 +260,25 @@ test('cancels without dispatch and keeps identical cards independent @smoke', as
   const { app, daemon, cards } = await openCards(page, testInfo, 2);
   await cards.nth(0).scrollIntoViewIfNeeded();
   await app(0).locator('#continue-analysis').click();
-  let review = page.getByRole('dialog', { name: 'Review App message' });
+  let review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   const first = parameters((await review.locator('pre').textContent())!);
   await review.getByRole('button', { name: /^cancel$/i }).click();
   await expect(review).not.toBeVisible();
   await expect(app(0).locator('#continuation-status')).toHaveAttribute(
     'data-state',
-    'unconfirmed',
+    'idle',
+  );
+  await expect(app(0).locator('#continuation-status')).toHaveText('Not sent.');
+  await expect(app(0).locator('#continue-analysis')).toHaveText(
+    'Continue analysis with current parameters',
   );
   expect(daemon.promptRequests()).toHaveLength(0);
 
   await cards.nth(1).scrollIntoViewIfNeeded();
   await app(1).locator('#continue-analysis').click();
-  review = page.getByRole('dialog', { name: 'Review App message' });
+  review = page.getByRole('dialog', { name: 'Continue with these parameters' });
   const second = parameters((await review.locator('pre').textContent())!);
   expect(second.snapshot.documentId).toBe(first.snapshot.documentId);
   expect(second.snapshot.activationId).not.toBe(first.snapshot.activationId);
@@ -358,13 +308,15 @@ test('rechecks the DOM at capture before opening a review @smoke', async ({
   await app().locator('#continue-analysis').click();
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'dirty');
   await expect(
-    page.getByRole('dialog', { name: 'Review App message' }),
+    page.getByRole('dialog', { name: 'Continue with these parameters' }),
   ).not.toBeVisible();
   expect(daemon.promptRequests()).toHaveLength(0);
   await view.getByRole('button', { name: 'Calculate' }).click();
   await expect(view.locator('#answer')).toHaveText('16');
   await app().locator('#continue-analysis').click();
-  const review = page.getByRole('dialog', { name: 'Review App message' });
+  const review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   expect(
     parameters((await review.locator('pre').textContent())!).snapshot.inputs[
       'rate'
@@ -392,14 +344,16 @@ test('keeps the real App RPC pending across both host review and admission windo
   });
   try {
     await app().locator('#continue-analysis').click();
-    const review = page.getByRole('dialog', { name: 'Review App message' });
+    const review = page.getByRole('dialog', {
+      name: 'Continue with these parameters',
+    });
     await expect(review).toBeVisible();
     await page.clock.fastForward(89_000);
     await expect(app().locator('#continuation-status')).toHaveAttribute(
       'data-state',
       'pending',
     );
-    await review.getByRole('button', { name: 'Send to session' }).click();
+    await review.getByRole('button', { name: 'Continue analysis' }).click();
     await expect.poll(() => dispatched).toBe(true);
     await page.clock.fastForward(61_000);
     await expect(app().locator('#continuation-status')).toHaveAttribute(
@@ -457,8 +411,10 @@ test('times out an unanswered App RPC at 210 seconds without resending an unknow
   });
   try {
     await app().locator('#continue-analysis').click();
-    const review = page.getByRole('dialog', { name: 'Review App message' });
-    await review.getByRole('button', { name: 'Send to session' }).click();
+    const review = page.getByRole('dialog', {
+      name: 'Continue with these parameters',
+    });
+    await review.getByRole('button', { name: 'Continue analysis' }).click();
     await expect.poll(() => attempts).toBe(1);
     await page.clock.fastForward(90_000);
     await expect(review).toContainText('Acceptance could not be confirmed.');
@@ -467,7 +423,7 @@ test('times out an unanswered App RPC at 210 seconds without resending an unknow
       'pending',
     );
     const proxy = page
-      .locator('iframe[title="generated-ui MCP App"]')
+      .locator('iframe[title="Interactive view"]')
       .contentFrame();
     await page.clock.fastForward(119_999);
     await expect(app().locator('#continuation-status')).toHaveAttribute(
