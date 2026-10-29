@@ -2264,6 +2264,13 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
       agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      # Report-footer attribution: the configured model, the runner's CLI
+      # version, and the content hash of the base-pinned skill that ran.
+      # Empty when the run step never reached its output writes; the
+      # publisher then keeps its generic signature.
+      model: '${{ steps.run.outputs.model }}'
+      cli_version: '${{ steps.run.outputs.cli_version }}'
+      skill_hash: '${{ steps.run.outputs.skill_hash }}'
       # Deterministic flakiness gate (#9125): `flaky` demotes the published
       # headline; every other value is informational. The summary is
       # gate-authored fixed text plus counters — never PR-controlled strings.
@@ -4689,6 +4696,25 @@ jobs:
             esac
           fi
           echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
+
+          # Attribution for the published report's footer: the model this
+          # lane configured, the CLI installed on the runner, and the content
+          # hash of the base-pinned skill the agent actually loaded. All three
+          # are workflow-owned — never read from the agent-writable artifact
+          # tree, which PR code could plant. Best-effort: an empty value makes
+          # the publisher keep its generic signature instead of posting a
+          # half-attributed footer.
+          # timeout: these run after the agent era, so a planted shim must
+          # not be able to hang the step until the job ceiling.
+          CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
+          # --no-filters: the agent era left .git node-owned, and a planted
+          # clean filter would otherwise let PR code choose what gets hashed.
+          SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
+          {
+            echo "model=$(printf '%s' "${OPENAI_MODEL:-}" | tr -d '\r\n' | cut -c1-200)"
+            echo "cli_version=$CLI_VERSION"
+            echo "skill_hash=$SKILL_HASH"
+          } >> "$GITHUB_OUTPUT"
           echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
@@ -5277,6 +5303,9 @@ jobs:
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
           AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
+          VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
+          VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
           FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
           FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -6115,7 +6144,15 @@ jobs:
                 printf '%s' "$EVIDENCE_SECTION"
               fi
               printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
-              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              # Attribution footer, the same shape /review posts: model, CLI
+              # version, and the content hash of the skill that ran. Only
+              # when all three workflow-owned values arrived — a half-known
+              # identity keeps the generic signature instead.
+              if [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
+                printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\n' "$VERIFY_MODEL" "$VERIFY_CLI_VERSION" "$VERIFY_SKILL_HASH"
+              else
+                printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              fi
             } > "$BODY_FILE"
           fi
 
