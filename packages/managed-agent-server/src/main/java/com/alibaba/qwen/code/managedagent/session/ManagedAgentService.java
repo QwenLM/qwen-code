@@ -50,7 +50,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
