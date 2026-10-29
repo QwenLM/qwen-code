@@ -596,16 +596,16 @@ function hasStateSnapshot(summary: string): boolean {
  * Only closed `<analysis>` blocks are set aside: a snapshot often quotes the
  * compression directive, `<analysis>` tag included, and stripping from an
  * unclosed `<analysis>` to the end would take the snapshot's closing tag too.
- * The first opening tag is the one that counts: a later mention, such as a
- * closing sentence that names the tag, opens nothing. The cost is the
- * opposite shape: a summary that first quotes a complete example snapshot
- * and is then cut inside its real one passes this check. The guard this
- * one extends missed that shape too.
+ * The first opening tag that starts a line is the one that counts: a tag
+ * named mid-sentence, before the snapshot or after it, opens nothing. The
+ * cost is the opposite shape: a summary that first quotes a complete example
+ * snapshot and is then cut inside its real one passes this check. The guard
+ * this one extends missed that shape too.
  */
 function hasUnclosedStateSnapshot(summary: string): boolean {
   const body = summary.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
-  const start = body.indexOf('<state_snapshot>');
-  return start >= 0 && !body.includes('</state_snapshot>', start);
+  const opening = /(?:^|\n)[ \t]*<state_snapshot>/.exec(body);
+  return opening !== null && !body.includes('</state_snapshot>', opening.index);
 }
 
 export class ChatCompressionService {
@@ -1063,9 +1063,11 @@ export class ChatCompressionService {
         if (outputTokens < minCompactionOutputTokens(window)) {
           return { kind: 'too-large' };
         }
+        // The provider rejected this for context length, so a reduction
+        // that cannot get any smaller leaves nothing that would fit.
         return estimateColdRequest(retry) < rejectedTokens
           ? { kind: 'retry', history: retry, sizing: { window, outputTokens } }
-          : { kind: 'none' };
+          : { kind: 'too-large' };
       };
       if (promptTokens !== undefined) {
         const inputLimit =
@@ -1384,7 +1386,9 @@ export class ChatCompressionService {
           const retry: OverflowRetry =
             attempt === 0
               ? shrinkAfterOverflow(error, coldHistory)
-              : { kind: 'none' };
+              : getContextLengthExceededInfo(error).isExceeded
+                ? { kind: 'too-large' }
+                : { kind: 'none' };
           if (retry.kind !== 'retry') {
             const tooLarge = retry.kind === 'too-large';
             config
@@ -1478,30 +1482,26 @@ export class ChatCompressionService {
     // fixed ceiling: since issue #7960's clamp the requested budget can sit
     // below COMPACT_MAX_OUTPUT_TOKENS, and output can never exceed what was
     // requested — comparing against the fixed ceiling would make this guard
-    // unreachable on every clamped request. That includes the floor regime
-    // (budget 1): a 1-token cap cannot hold a usable summary, so any output
-    // at the cap is definitionally truncated and must be dropped.
+    // unreachable on every clamped request.
     //
     // Local estimates instead keep the pre-clamp fixed-ceiling threshold:
     // unlike provider counts they can overshoot the budget purely from
     // estimator error (the ±30% variance the margin documents), so comparing
     // them against a clamped budget would convert that error into false
     // truncation verdicts for complete summaries. The fixed ceiling
-    // preserves the pre-#7960 semantics for the usage-missing path. The one
-    // exception is the floor regime (budget 1): no complete summary can
-    // exist at a 1-token cap, so the false-positive rationale cannot apply
-    // and estimates must be dropped there too — otherwise a provider that
-    // omits usage would persist a 1-token fragment as COMPRESSED.
+    // preserves the pre-#7960 semantics for the usage-missing path. No
+    // request is sent with a budget below minCompactionOutputTokens (the
+    // admission check and the retry sizing both refuse it), so the old floor
+    // regime, a 1-token cap that needed its own exception here, cannot occur.
     //
     // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
     // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
-    const truncationThreshold =
-      outputCountIsEstimated && coldOutputBudget > 1
-        ? COMPACT_MAX_OUTPUT_TOKENS
-        : coldOutputBudget;
+    const truncationThreshold = outputCountIsEstimated
+      ? COMPACT_MAX_OUTPUT_TOKENS
+      : coldOutputBudget;
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&

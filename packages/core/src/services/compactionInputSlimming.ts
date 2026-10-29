@@ -13,7 +13,10 @@ import {
   stripSystemReminderBlocks,
 } from '../core/environmentContext.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
-import { escapeUserMessageTags } from '../utils/xml.js';
+import {
+  escapeSystemReminderTags,
+  escapeUserMessageTags,
+} from '../utils/xml.js';
 import {
   isTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
@@ -355,7 +358,9 @@ export function slimCompactionInput(
     let touched = false;
     const newParts: Part[] = content.parts.map((part, index) => {
       const replacement =
-        typed?.[index] && isUserTextPart(part)
+        typed?.[index] &&
+        isUserTextPart(part) &&
+        !isWrappedSystemReminderPart(part)
           ? capTypedText(part, stats)
           : transformPart(part, stats, supportedModalities, options);
       if (replacement !== part) {
@@ -535,7 +540,7 @@ export const CONDENSED_USER_MESSAGE_MAX_CHARS = 8_000;
  * holds that compaction's summary, the densest record of everything before.
  */
 export const CONDENSED_FIRST_MESSAGE_MAX_CHARS = 32_000;
-/** Longest quote of all user messages together in a condensed side-query. */
+/** Longest condensed block in a side-query: its note and every quote. */
 export const CONDENSED_USER_MESSAGES_MAX_CHARS = 64_000;
 /**
  * Least of the oldest and of the newest user message a condensed block
@@ -567,9 +572,11 @@ const QUOTE_ELISION = `${SLIM_TEXT_TRUNCATION_MARKER}\n`;
  * quoted, shortened in the middle when long, and the kept turns' text is
  * capped before either falls below CONDENSED_MESSAGE_MIN_CHARS. The kept
  * turns start on a model turn, so no function call is separated from its
- * response and the roles keep alternating after the quote block. Undefined
- * when no model turn can start the kept turns, or when `maxChars` cannot hold
- * the quotes' minimum.
+ * response and the roles keep alternating after the quote block. When even
+ * the capped kept turns leave the quotes no room, as a wide parallel tool
+ * batch can, no turn is kept and every user message is quoted instead.
+ * Undefined when no model turn can start the kept turns, or when `maxChars`
+ * cannot hold the quotes' minimum.
  */
 export function condenseToUserMessages(
   history: Content[],
@@ -612,6 +619,17 @@ export function condenseToUserMessages(
       : [{ role: 'user', parts: [{ text: block }] }, ...kept];
   };
   const kept = history.slice(cut);
+  const quotesOnly = (): Content[] | undefined => {
+    const allTexts = userMessageTexts(history);
+    const block = condensedBlock(
+      allTexts,
+      history.length - allTexts.length,
+      maxChars,
+    );
+    return block === undefined
+      ? undefined
+      : [{ role: 'user', parts: [{ text: block }] }];
+  };
   return (
     (contentChars(kept, imageTokenEstimate) <= keptBudget
       ? condenseBeside(kept)
@@ -621,7 +639,8 @@ export function condenseToUserMessages(
         maxTextChars: KEPT_TURN_TEXT_CAP_CHARS,
         preserveUserText: true,
       }).slimmedHistory,
-    )
+    ) ??
+    quotesOnly()
   );
 }
 
@@ -655,10 +674,9 @@ function condensedBlock(
   const middle = newer.slice(0, -1);
   // The note is sized for its longest form: every middle quote omitted, and
   // a quote shortened.
-  const available = Math.min(
-    CONDENSED_USER_MESSAGES_MAX_CHARS,
-    room - note(middle.length, true).length,
-  );
+  const available =
+    Math.min(CONDENSED_USER_MESSAGES_MAX_CHARS, room) -
+    note(middle.length, true).length;
   const minimum = (text: string) =>
     quotedLength(text, CONDENSED_MESSAGE_MIN_CHARS);
   const oldestFloor = quoteCost(minimum(oldest));
@@ -710,7 +728,7 @@ function condensedBlock(
       middle[i]!,
       quotedLength(middle[i]!, CONDENSED_USER_MESSAGE_MAX_CHARS),
     );
-    if (quoteCost(quote.length) > left) break;
+    if (quoteCost(quote.length) > left) continue;
     keptMiddle.unshift(quote);
     left -= quoteCost(quote.length);
     shortened ||= isShortened(quote, middle[i]!);
@@ -774,7 +792,9 @@ function userMessageTexts(history: Content[]): string[] {
         ),
     );
     const text = escapeUserMessageTags(
-      [typedText, attachedContentNote(attached)].filter(Boolean).join('\n'),
+      escapeSystemReminderTags(
+        [typedText, attachedContentNote(attached)].filter(Boolean).join('\n'),
+      ),
     );
     if (text) texts.push(text);
   }
@@ -848,15 +868,26 @@ function attachedContentNote(parts: Part[]): string {
     return [];
   });
   if (names.length === 0) return '[Attached content, not quoted]';
-  const listed = names
-    .slice(0, ATTACHED_NAMES_MAX)
-    .map((name) => name.slice(0, ATTACHED_NAME_MAX_CHARS));
+  const listed = names.slice(0, ATTACHED_NAMES_MAX).map(plainName);
   const more = names.length - listed.length;
   return (
     `[Attached, not quoted: ${listed.join(', ')}` +
     (more > 0 ? ` and ${more} more` : '') +
     ']'
   );
+}
+
+/**
+ * `name` on one line and without markup, at most ATTACHED_NAME_MAX_CHARS
+ * long and never cut inside a surrogate pair: the names come from labels and
+ * paths the user does not control, and the note joins the quoted text after
+ * reminders were stripped from it.
+ */
+function plainName(name: string): string {
+  const flat = name.replace(/\s+/g, ' ').replace(/[<>]/g, '').trim();
+  let end = Math.min(flat.length, ATTACHED_NAME_MAX_CHARS);
+  if (isHighSurrogate(flat.charCodeAt(end - 1))) end--;
+  return flat.slice(0, end);
 }
 
 /** A quote of `text`, tags included, at most `maxQuoteChars` long. */

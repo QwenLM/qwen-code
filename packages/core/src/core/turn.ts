@@ -525,7 +525,8 @@ export enum CompressionStatus {
    * budget in the receiving model's window, even after tool output was
    * truncated and older turns were condensed to the user's messages (#9455).
    * Either it was refused before it was sent, or the provider rejected it for
-   * context length and no retry would fit, so the retry was not sent.
+   * context length and no smaller request could be built, or the one retry
+   * was rejected for context length too.
    */
   COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }

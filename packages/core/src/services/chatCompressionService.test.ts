@@ -3629,6 +3629,35 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expectCompressed(result);
   });
 
+  it('keeps a complete summary whose prose only mentions the snapshot tag', async () => {
+    // A tag named mid-sentence opens no block; only one that starts a line
+    // does.
+    mockVllmBackend(WINDOW, false, {
+      text: 'Goal: port the parser. The previous attempt died mid-<state_snapshot>.',
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectCompressed(result);
+  });
+
+  it('drops a clamped-cap summary with no snapshot when usage is missing', async () => {
+    // No tag opens, so only the clamped-budget clause can drop this: the
+    // estimate cannot tell a complete summary from one the cap cut short.
+    mockVllmBackend(WINDOW, false, {
+      omitUsage: true,
+      text: 'Goal: port the parser. Next: finish the',
+    });
+
+    const result = await compressChars(220_000, 55_000);
+
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
   describe('computeCompactionOutputBudget', () => {
     it('returns the fixed ceiling when the window has ample room', () => {
       expect(computeCompactionOutputBudget(10_000, 128_000)).toBe(
@@ -4266,8 +4295,10 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     // request; the retry falls back to the fixed step.
     mockBackend({
       ratio: 2,
+      // Taken at face value, a count past this untyped limit would bound
+      // the window to 1,500 tokens and refuse the retry locally.
       rejection: () =>
-        new Error('prompt is too long: 100 tokens > 200 maximum'),
+        new Error('prompt is too long: 2000 tokens > 1500 maximum'),
     });
 
     const result = await compressHistory(toolSession(20, 6_000), 60_000);
@@ -4284,10 +4315,12 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     mockBackend({
       ratio: 1.2,
       alwaysReject: true,
-      rejection: (promptTokens) =>
+      // Taken at face value, 50,000 leaves the prompt nearly whole and the
+      // retry would cut far less than the fixed step.
+      rejection: () =>
         new Error(
           `This model's maximum context length is 131072 tokens. However, ` +
-            `your messages resulted in ${promptTokens} tokens.`,
+            `your messages resulted in 50000 tokens.`,
         ),
     });
 
@@ -4297,13 +4330,16 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens * 0.65);
   });
 
-  it('gives up after one retry', async () => {
+  it('gives up after one retry, as too large when the retry overflows too', async () => {
     mockBackend({ alwaysReject: true });
 
     const result = await compressHistory(toolSession(20, 6_000), 30_000);
 
     expect(sent).toHaveLength(2);
-    expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
   });
 
   it('does not retry errors other than a context overflow', async () => {
@@ -4318,13 +4354,78 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
   });
 
-  it('does not retry when no smaller request can be built', async () => {
+  it('does not retry when no smaller request can be built, and says it is too large', async () => {
     mockBackend({ alwaysReject: true });
 
     const result = await compressHistory(turns('q', 'ok'), 2_000);
 
     expect(sent).toHaveLength(1);
-    expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+  });
+
+  it('sizes the retry for a compaction model smaller than the main one', async () => {
+    // The admission check keeps the first request inside the compaction
+    // model's window by the estimate; the denser real count overruns it.
+    // Sized for that window, the prompt still fits and only the output
+    // budget comes down. Sized for the main model's, the fixed step would
+    // cut the prompt instead.
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('small-model');
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'small-model', contextWindowSize: 32_768 },
+    ] as never[]);
+    mockBackend({ ratio: 1.5, window: 32_768 });
+
+    const result = await compressHistory(toolSession(4, 9_600), 10_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.contents).toEqual(sent[0]!.contents);
+    expect(sent[1]!.maxOutputTokens).toBeLessThan(sent[0]!.maxOutputTokens);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(32_768);
+  });
+
+  it('estimates the post-compression count after a reduced retry', async () => {
+    // The usage of a reduced request describes the request, not the history
+    // it replaces.
+    const logger = { warn: vi.fn(), debug: vi.fn() };
+    (
+      mockConfig as unknown as { getDebugLogger: () => typeof logger }
+    ).getDebugLogger = () => logger;
+    mockBackend({ ratio: 2 });
+    const history = toolSession(20, 6_000);
+
+    const result = await compressHistory(
+      history,
+      estimateContentTokens(history) + 1_000,
+    );
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.contents).not.toEqual(sent[0]!.contents);
+    const lines = logger.debug.mock.calls.map((args) => String(args[0]));
+    expect(lines.some((l) => l.includes('reduced compression request'))).toBe(
+      true,
+    );
+    expect(result.info.newTokenCount).toBeLessThan(10_000);
+  });
+
+  it('holds the retry to the configured window when the rejection states a larger one', async () => {
+    // The message names a 131,072-token window the endpoint does not have,
+    // with counts past it; the retry is sized for the configured 65,536.
+    mockBackend({ ratio: 3, rejection: openAiRejection(131_072) });
+
+    const result = await compressHistory(toolSession(20, 7_600), 60_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
   });
 
   it('rethrows an abort that lands on a rejected request instead of retrying', async () => {
