@@ -116,6 +116,76 @@ export function isIpv4MappedLoopback(canonical: string): boolean {
   return Number.parseInt(match[1], 16) >> 8 === 0x7f;
 }
 
+/**
+ * The hostnames a browser may legitimately put in the Host header when it
+ * reaches a loopback-bound daemon. `host.docker.internal` is here because a
+ * container-side browser resolves the host that way.
+ */
+const LOOPBACK_HOST_HEADER_NAMES: ReadonlySet<string> = new Set([
+  '127.0.0.1',
+  'localhost',
+  '[::1]',
+  'host.docker.internal',
+]);
+
+/**
+ * Split an authority into its hostname and (optional) port, keeping a
+ * bracketed IPv6 literal intact. Returns `undefined` for anything that isn't
+ * `<host>` or `<host>:<digits>`, so a malformed Host header is rejected by the
+ * gate rather than silently matching on its leading label.
+ */
+export function parseAuthority(
+  authority: string,
+): { hostname: string; port?: string } | undefined {
+  const normalized = authority.trim().toLowerCase();
+  if (normalized === '') return undefined;
+  let hostname: string;
+  let rest: string;
+  if (normalized.startsWith('[')) {
+    const close = normalized.indexOf(']');
+    if (close === -1) return undefined;
+    hostname = normalized.slice(0, close + 1);
+    rest = normalized.slice(close + 1);
+  } else {
+    const colon = normalized.indexOf(':');
+    hostname = colon === -1 ? normalized : normalized.slice(0, colon);
+    rest = colon === -1 ? '' : normalized.slice(colon);
+  }
+  if (hostname === '' || hostname === '[]') return undefined;
+  if (rest === '') return { hostname };
+  if (!/^:\d+$/.test(rest)) return undefined;
+  return { hostname, port: rest.slice(1) };
+}
+
+/**
+ * Does this Host header belong to a loopback-bound daemon?
+ *
+ * **Only the hostname is matched; the port is ignored.** That is what makes
+ * the gate survive a port-forwarding hop — VS Code's `asExternalUri` hands
+ * the webview a client-side port that need not equal the one the daemon
+ * bound, and the browser then sends that forwarded port in the Host header
+ * (#12059). The port carries no weight in the defense this gate provides: a
+ * browser always sends the authority of the URL it fetched, so to reach the
+ * daemon at all an attacker page must have been served the daemon's port, and
+ * a page on `evil.example` rebound to 127.0.0.1 still sends
+ * `Host: evil.example` and is still rejected here. A non-browser client can
+ * spell any Host it likes and always could; the bearer token, not this gate,
+ * is what stops it.
+ *
+ * `bind` is the hostname the listener was started with: a daemon pinned to
+ * some other address in 127.0.0.0/8 accepts that address too.
+ */
+export function hostHeaderMatchesLoopbackBind(
+  host: string,
+  bind?: string,
+): boolean {
+  const parsed = parseAuthority(host);
+  if (parsed === undefined) return false;
+  if (LOOPBACK_HOST_HEADER_NAMES.has(parsed.hostname)) return true;
+  if (bind === undefined || !isLoopbackBind(bind)) return false;
+  return parsed.hostname === formatHostForAuthority(bind);
+}
+
 export function formatHostForAuthority(hostname: string): string {
   const normalized = hostname.toLowerCase();
   if (normalized.startsWith('[') && normalized.endsWith(']')) {

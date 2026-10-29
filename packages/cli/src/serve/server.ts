@@ -788,10 +788,10 @@ export interface ServeAppDeps {
  * Build the Express app for `qwen serve`. Pure function — no side effects on
  * the network or process; `runQwenServe` does the listen/signal handling.
  *
- * `getPort` is invoked lazily by the host-allowlist middleware so callers
- * binding to port 0 (ephemeral) can supply the actual port after `listen()`
- * resolves. Defaults to `opts.port` for callers (e.g. tests) that pin a port
- * up front.
+ * `getPort` is invoked lazily by the middleware that needs the live port (the
+ * self-origin strip) so callers binding to port 0 (ephemeral) can supply the
+ * actual port after `listen()` resolves. Defaults to `opts.port` for callers
+ * (e.g. tests) that pin a port up front.
  *
  * Route modules are registered below in middleware order. Keep this file as
  * the assembly point so auth/rate-limit/body-parser/REST/ACP/Web Shell order
@@ -2338,7 +2338,7 @@ export function createServeApp(
   // PRIMARY gate is a pass-through (the bearer gate authenticates there);
   // the Local Control listener keeps its own Host gate whatever the primary
   // bind is.
-  app.use(hostAllowlist(opts.hostname, getPort));
+  app.use(hostAllowlist(opts.hostname));
 
   installRemoteSelfOriginMiddleware(
     app,
