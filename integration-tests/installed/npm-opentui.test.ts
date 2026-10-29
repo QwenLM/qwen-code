@@ -503,10 +503,6 @@ it('actual installed Node26 hands strict OpenTUI to private Bun144 and exits nat
   const workspace = path.join(out, 'workspace');
   for (const dir of [home, workspace, path.join(out, 'tmp')])
     fs.mkdirSync(dir, { recursive: true });
-  const system = path.join(out, 'system-settings.json');
-  const defaults = path.join(out, 'system-defaults.json');
-  save(system, { $version: 4 });
-  save(defaults, { $version: 4 });
   save(path.join(home, 'settings.json'), {
     $version: 4,
     experimental: { mods: false },
@@ -570,8 +566,6 @@ it('actual installed Node26 hands strict OpenTUI to private Bun144 and exits nat
         PATH: path.dirname(node) + ':/usr/bin:/bin:/usr/sbin:/sbin',
         HOME: home,
         QWEN_HOME: home,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
         QWEN_RUNTIME_DIR: path.join(out, 'runtime'),
         TMPDIR: path.join(out, 'tmp'),
         TERM: 'xterm-256color',
@@ -752,10 +746,6 @@ for (const condition of conditions)
         const workspace = path.join(out, 'workspace');
         for (const d of [home, workspace, path.join(out, 'tmp')])
           fs.mkdirSync(d, { recursive: true });
-        const system = path.join(out, 'system.json');
-        const defaults = path.join(out, 'defaults.json');
-        save(system, { $version: 4 });
-        save(defaults, { $version: 4 });
         save(path.join(home, 'settings.json'), {
           $version: 4,
           experimental: { mods: false },
@@ -833,8 +823,6 @@ for (const condition of conditions)
                 PATH: path.dirname(node) + ':/usr/bin:/bin:/usr/sbin:/sbin',
                 HOME: home,
                 QWEN_HOME: home,
-                QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-                QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
                 QWEN_RUNTIME_DIR: path.join(out, 'runtime'),
                 TMPDIR: path.join(out, 'tmp'),
                 TERM: 'xterm-256color',
@@ -1004,10 +992,6 @@ it('actual installed npm registry subprocess retains original Node26 identity', 
   const workspace = path.join(out, 'workspace');
   for (const dir of [home, workspace, path.join(out, 'tmp')])
     fs.mkdirSync(dir, { recursive: true });
-  const system = path.join(out, 'system-settings.json');
-  const defaults = path.join(out, 'system-defaults.json');
-  save(system, { $version: 4 });
-  save(defaults, { $version: 4 });
   save(path.join(home, 'settings.json'), {
     $version: 4,
     experimental: { mods: false },
@@ -1139,8 +1123,6 @@ it('actual installed npm registry subprocess retains original Node26 identity', 
           ':/usr/bin:/bin:/usr/sbin:/sbin',
         HOME: home,
         QWEN_HOME: home,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
         QWEN_RUNTIME_DIR: path.join(out, 'runtime'),
         TMPDIR: path.join(out, 'tmp'),
         TERM: 'xterm-256color',
@@ -1436,10 +1418,6 @@ it('actual installed private Bun cold-reads Node legacy secrets with correct, ab
   const tmp = path.join(out, 'tmp');
   for (const directory of [home, workspace, tmp])
     fs.mkdirSync(directory, { recursive: true });
-  const system = path.join(out, 'system.json');
-  const defaults = path.join(out, 'defaults.json');
-  save(system, { $version: 4 });
-  save(defaults, { $version: 4 });
   const name = 'owned-legacy-secret';
   const secret = 'OWNED_NODE_LEGACY_SECRET_019';
   const writer = path.join(out, 'node-legacy-writer.mjs');
@@ -1514,8 +1492,6 @@ console.log(JSON.stringify({ username, node: process.versions.node, id }));
         TEMP: tmp,
         QWEN_RUNTIME_DIR: path.join(out, 'runtime'),
         QWEN_CODE_FORCE_FILE_STORAGE: 'true',
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
         QWEN_CODE_LANG: 'en',
         QWEN_CODE_MODELS_DEV_REFRESH: 'off',
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',

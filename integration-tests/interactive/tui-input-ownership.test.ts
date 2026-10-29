@@ -52,8 +52,6 @@ it(`preserves composer ownership through ${runtime}+${renderer} product requests
   const workspace = join(scratch, 'workspace');
   const home = join(scratch, 'home');
   const runtimeDir = join(scratch, 'runtime');
-  const system = join(scratch, 'system.json');
-  const defaults = join(scratch, 'defaults.json');
   const output =
     process.env['QWEN_TUI_ACCEPTANCE_OUT'] ??
     join(root, '.qwen/e2e-tests/tui-input-ownership');
@@ -92,8 +90,6 @@ it(`preserves composer ownership through ${runtime}+${renderer} product requests
   const frames: Record<string, string> = {};
   let failure: string | undefined;
   try {
-    json(system, { $version: 4 });
-    json(defaults, { $version: 4 });
     session = await InteractiveSession.start({
       cwd: workspace,
       cols: 100,
@@ -104,8 +100,6 @@ it(`preserves composer ownership through ${runtime}+${renderer} product requests
         HOME: scratch,
         QWEN_HOME: home,
         QWEN_RUNTIME_DIR: runtimeDir,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
         TERM: 'xterm-256color',
         LANG: 'en_US.UTF-8',
         QWEN_CODE_LANG: 'en',

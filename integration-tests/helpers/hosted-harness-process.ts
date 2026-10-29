@@ -77,16 +77,6 @@ export class HostedHarnessProcess {
           },
         }),
       );
-      // System scopes: the trust gate (#13513) only honors a root-owned
-      // file, so on an unprivileged host the CLI fails closed to the
-      // platform default (absent on the CI host); as root these empty
-      // fixtures are honored and keep the harness isolated from the host
-      // system settings.
-      await Promise.all(
-        ['system-settings.json', 'system-defaults.json'].map((name) =>
-          writeFile(path.join(this.root, name), '{"$version":4}'),
-        ),
-      );
       const env: NodeJS.ProcessEnv = {};
       for (const [key, value] of Object.entries(process.env)) {
         if (
@@ -126,14 +116,6 @@ export class HostedHarnessProcess {
             USERPROFILE: this.root,
             QWEN_HOME: config,
             QWEN_CODE_MODELS_DEV_REFRESH: 'off',
-            QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
-              this.root,
-              'system-settings.json',
-            ),
-            QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(
-              this.root,
-              'system-defaults.json',
-            ),
             QWEN_RUNTIME_DIR: path.join(this.root, 'runtime'),
             OPENAI_API_KEY: 'local-fixture-key',
             OPENAI_BASE_URL: modelUrl,

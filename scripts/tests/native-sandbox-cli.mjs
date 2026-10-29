@@ -88,14 +88,11 @@ async function fixture(name, policy) {
       privacy: { usageStatisticsEnabled: false },
     }),
   );
-  // System scopes: the trust gate (#13513) only honors a root-owned file, so
-  // on the unprivileged Linux runner the CLI fails closed to the platform
-  // default (absent there); as root the empty fixtures below are honored.
-  const system = path.join(dirs.home, 'system.json');
-  const defaults = path.join(dirs.home, 'defaults.json');
-  await Promise.all(
-    [system, defaults].map((file) => fs.writeFile(file, '{"$version":4}')),
-  );
+  // The system scopes stay at the platform default: the trust gate
+  // (#13513) rejects a user-owned temp fixture and fails loud when the
+  // platform default is absent (exit 52), so the unprivileged runner
+  // leaves QWEN_CODE_SYSTEM_*_PATH unset. The sandbox policy under test
+  // lives in the user scope above.
   return {
     name,
     ...dirs,
@@ -104,8 +101,6 @@ async function fixture(name, policy) {
       HOME: dirs.home,
       QWEN_HOME: globalDir,
       QWEN_RUNTIME_DIR: dirs.runtime,
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
       TMPDIR: dirs.scratch,
       LANG: 'C.UTF-8',
       TERM: 'dumb',

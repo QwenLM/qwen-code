@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -120,16 +119,6 @@ const ENVIRONMENT_KEYS = [
       'dist',
       'auto-recall.js',
     );
-    const systemSettingsSourcePath = join(
-      import.meta.dirname,
-      '..',
-      '..',
-      'integrations',
-      'external-context',
-      'examples',
-      'managed-auto-recall-system-settings.json',
-    );
-    const systemSettingsPath = join(qwenHome, 'system-settings.json');
     const hook =
       process.platform === 'win32'
         ? {
@@ -154,10 +143,6 @@ const ENVIRONMENT_KEYS = [
       }),
     );
     rig.createFile(
-      '.qwen-home/system-settings.json',
-      await readFile(systemSettingsSourcePath, 'utf8'),
-    );
-    rig.createFile(
       '.qwen-home/trustedFolders.json',
       JSON.stringify({ [rig.testDir!]: 'TRUST_FOLDER' }),
     );
@@ -180,7 +165,6 @@ const ENVIRONMENT_KEYS = [
     rig.createFile('context.txt', fileCanary);
 
     process.env['QWEN_HOME'] = qwenHome;
-    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
     process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
     process.env['QWEN_EXTERNAL_CONTEXT_CONFIG'] = configPath;
     process.env['CONTEXT_TOKEN'] = 'bound-context-token';

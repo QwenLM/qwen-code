@@ -350,7 +350,11 @@ describe('operator execution sandbox policy', () => {
       mockExistingSystemPaths.add(platformSystemSettingsPath());
       vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', rejected);
       try {
-        expect(() => readOperatorSandboxSettings()).not.toThrow();
+        const read = () => readOperatorSandboxSettings();
+        expect(read).not.toThrow();
+        // The rejected override is not honored; the present platform file is
+        // the system layer instead (an empty stand-in here).
+        expect(read().tools?.executionSandbox).toBeUndefined();
       } finally {
         fs.rmSync(outside, { recursive: true, force: true });
       }

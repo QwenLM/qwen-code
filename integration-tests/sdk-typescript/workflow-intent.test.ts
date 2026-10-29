@@ -77,7 +77,6 @@ describe('DW03: public SDK workflow intent', () => {
         model: { skipNextSpeakerCheck: true },
       }),
     );
-    await helper.createFile('system.json', '{}');
     await helper.createFile('sample.txt', 'fixture content');
     await helper.createFile('sample-2.txt', 'fixture content second');
   });
@@ -99,8 +98,6 @@ describe('DW03: public SDK workflow intent', () => {
       USERPROFILE: home,
       QWEN_HOME: home,
       QWEN_RUNTIME_DIR: join(home, 'runtime'),
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: join(cwd, 'system.json'),
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(cwd, 'system.json'),
       QWEN_CODE_DISABLE_WORKFLOWS: '0',
       QWEN_CODE_DISABLE_CRON: '1',
       OPENAI_API_KEY: 'fake-key',

@@ -95,8 +95,6 @@ const child = spawn(
       TMPDIR: '/tmp/qwen-ack',
       TMP: '/tmp/qwen-ack',
       TEMP: '/tmp/qwen-ack',
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: '/tmp/qwen-ack/no-system-settings.json',
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: '/tmp/qwen-ack/no-system-defaults.json',
       QWEN_CODE_TRUSTED_FOLDERS_PATH: '/tmp/qwen-ack/no-trusted-folders.json',
     },
   },
