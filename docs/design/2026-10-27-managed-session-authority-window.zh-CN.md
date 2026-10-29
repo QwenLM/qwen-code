@@ -36,7 +36,7 @@ Session 与历史仓库显式选择 `managedJdbcTemplate`，历史 codec 选择 
 
 Core 使用 native 身份及事件范围查询。领域身份枚举目前使用独立重建的 canonical 文件目录；SQL 的 `extension-domain` 类型可供服务调用方使用，但并非 Core 的目录读取器。来源校验重新计算 canonical 事件/marker 摘要，核对序列、数量、范围及跨事务物理 parent；仅刷新原始字节 checksum 不能使篡改后的 canonical 内容有效。
 
-CSI application inventory 包含两张历史表的完整类型定义，共 40 张 managed 表、827 列。派生元数据不能发现 authority 关联，也不能参与全局 JSON-carrier 扫描；按范围和已捕获主键读取时仍核对准确行。覆盖前缀内的事实必须匹配 canonical 事务、条数及 bucket 清单。终态 cut 通过正常 append 的提取器生成准确的五个历史事实，只跨连续前缀推进覆盖。缺失 state 时新建 generation，覆盖从零开始。freeze 在既有资格上限内预留九行，包含可能新增的 state 行。
+CSI application inventory 包含两张历史表的完整类型定义及 main 的 session-worktree 表，共 41 张 managed 表、842 列。派生元数据不能发现 authority 关联，也不能参与全局 JSON-carrier 扫描；按范围和已捕获主键读取时仍核对准确行。覆盖前缀内的事实必须匹配 canonical 事务、条数及 bucket 清单。终态 cut 通过正常 append 的提取器生成准确的五个历史事实，只跨连续前缀推进覆盖。缺失 state 时新建 generation，覆盖从零开始。freeze 在既有资格上限内预留九行，包含可能新增的 state 行。
 
 事务来源分页固定读取一次 head，并以该 revision 同时约束长度候选与正文行。在 READ_COMMITTED 下，后续提交不能混入候选的前瞻行并被误判为 journal 损坏。连续性、缺行、字节、范围及摘要校验仍是强制要求。native 历史查询、补建与来源读取不先续约普通 writer：生命周期清理可在普通写准入关闭后使用仍有效的 read grant。客户端已停止/sealed 屏障和服务端 token、租约及 read-grant 校验均保留。未结算追加对应的 native 视图仍不可读，且只由既有追加协议结算。
 

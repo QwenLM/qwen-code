@@ -245,6 +245,8 @@ interface ChatEditorProps {
   currentModel?: string;
   modelControlsDisabled?: boolean;
   gitBranch?: string;
+  /** Service-owned Git control in the workspace row below the composer. */
+  gitContextControl?: ReactNode;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
   /** Git working directory for worktree sessions; targets git operations. */
@@ -1565,6 +1567,7 @@ export const ChatEditor = memo(
       currentModel = '',
       modelControlsDisabled = false,
       gitBranch,
+      gitContextControl,
       gitWorktree,
       gitCwd,
       gitModeIntent,
@@ -2696,7 +2699,9 @@ export const ChatEditor = memo(
       gitBranchVisible && contextChipPlacement !== 'below';
     const contextRowVisible =
       contextChipPlacement === 'below' &&
-      (workspaceSelectVisible || gitBranchVisible);
+      (workspaceSelectVisible ||
+        gitBranchVisible ||
+        Boolean(gitContextControl));
 
     useLayoutEffect(() => {
       if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
@@ -2779,7 +2784,10 @@ export const ChatEditor = memo(
       isMobile &&
       !isSimple &&
       !mobileVoiceActive &&
-      (workspaceSelectVisible || workspaceIndicatorVisible || gitBranchVisible);
+      (workspaceSelectVisible ||
+        workspaceIndicatorVisible ||
+        gitBranchVisible ||
+        Boolean(gitContextControl));
     // The workspace/Git row lives inside the capped box and wraps on narrow
     // viewports, so its measured height is added back to the cap.
     const mobileContextRowRef = useRef<HTMLDivElement>(null);
@@ -2995,6 +3003,7 @@ export const ChatEditor = memo(
         )}
         {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
           renderGitBranchChip(inToolbar && !showGitBranchLabel)}
+        {!inToolbar && gitContextControl}
       </>
     );
 
@@ -4457,6 +4466,7 @@ export const ChatEditor = memo(
           >
             {workspaceSelectVisible && renderWorkspaceSelector(false)}
             {gitBranchVisible && renderGitBranchChip(false)}
+            {gitContextControl}
           </div>
         )}
         {core.mobileComposer && (

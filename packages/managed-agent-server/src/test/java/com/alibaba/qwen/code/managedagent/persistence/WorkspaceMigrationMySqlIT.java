@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -72,11 +73,11 @@ class WorkspaceMigrationMySqlIT {
     }
 
     @Test
-    void freshBaselineContainsOneGcAuthorityAndExactly40Tables() {
+    void freshBaselineContainsOneGcAuthorityAndEveryContractTable() {
         ManagedSchema.initialize(data);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema"
-                                        + " = ?", Integer.class, schema)).isEqualTo(40);
+                                        + " = ?", Integer.class, schema)).isEqualTo(ManagedSchemaContract.TABLES.size());
         assertThat(jdbc.queryForList(
                                 "SELECT table_name FROM information_schema.tables WHERE table_schema"
                                         + " = ? AND table_name IN ('ma_session_history_fact', 'ma_session_history_state')",

@@ -128,7 +128,7 @@ public class WorkspaceCreationStore {
                             Path root = localDirectories.root(project);
                             String relative = new WorkspaceSelection("workspace-" + receiptKey,
                                     root.relativize(project).toString()).cwdRelative();
-                            details = new Details("workspace-" + receiptKey, "created-" + receiptKey, name,
+                            details = new Details("workspace-" + receiptKey, WorkspaceCreationRoots.IMPORTED_PREFIX + receiptKey, name,
                                     UUID.randomUUID().toString(), null, null, relative,
                                     guard.identity(root));
                         } else {

@@ -472,7 +472,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(41);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(42);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

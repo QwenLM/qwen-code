@@ -373,6 +373,15 @@ class SurfaceAdmissionAcceptanceTest {
     void belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
             throws Exception {
         switch (entry.ruleClass()) {
+            case SESSION_WORKTREE -> {
+                expect(entry, null, 401, "actor_required");
+                if (entry.template().endsWith("/options")) {
+                    expect(entry, STRANGER, 404, "workspace_not_found");
+                    expect(entry, READER, 403, "workspace_forbidden");
+                } else {
+                    expect(entry, STRANGER, 404, "worktree_not_found");
+                }
+            }
             case SESSION_EXTENSION_READER -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, "session_not_found");
@@ -1492,6 +1501,7 @@ class SurfaceAdmissionAcceptanceTest {
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
         variables.put("workspaceId", "ws");
+        variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
         variables.put("packageDigest", digest());
@@ -1610,6 +1620,7 @@ class SurfaceAdmissionAcceptanceTest {
             case STORE_HISTORY_QUERY -> "{\"workspaceId\":\"ws\",\"view\":{\"journalRevision\":1,\"committedSequence\":0},"
                     + "\"family\":\"event-id\",\"identity\":\"history-probe\",\"mode\":\"first\",\"limit\":1}";
             case STORE_HISTORY_BACKFILL -> "{\"workspaceId\":\"ws\",\"view\":{\"journalRevision\":1,\"committedSequence\":0},\"limit\":1}";
+            case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";
