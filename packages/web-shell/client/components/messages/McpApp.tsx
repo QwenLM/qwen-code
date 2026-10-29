@@ -8,6 +8,7 @@ import {
   McpAppHostContext,
   useMcpAppAdmission,
   isBuiltInGeneratedUi,
+  isBundledGeneratedUi,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
@@ -306,7 +307,7 @@ export function McpAppRuntime({
   retained?: GeneratedUiInstance['runtime'];
 }) {
   const { t, language } = useI18n();
-  const builtInGeneratedUi = isBuiltInGeneratedUi(display);
+  const builtInGeneratedUi = isBundledGeneratedUi(display);
   const maxHeight = builtInGeneratedUi
     ? MAX_GENERATED_UI_HEIGHT
     : MAX_APP_HEIGHT;
@@ -410,6 +411,9 @@ export function McpAppRuntime({
           return await requestMessage({
             serverName: current.serverName,
             resourceUri: current.resourceUri,
+            ...(isBundledGeneratedUi(current)
+              ? { requiredFeature: 'generated-ui' as const }
+              : {}),
             text: content[0].text,
             signal,
           });

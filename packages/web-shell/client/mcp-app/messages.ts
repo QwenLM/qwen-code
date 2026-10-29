@@ -22,6 +22,9 @@ export const MCP_APP_MESSAGES_EN: Record<string, Message> = {
     `The assistant will receive these values from “${title}” in this session and continue the analysis. Later edits in the view are not included.`,
   'mcpApp.generatedUi.parameter': 'Parameter',
   'mcpApp.generatedUi.value': 'Value',
+  'mcpApp.generatedUi.rejectedEvents': ({ count } = {}) =>
+    `${count} earlier interactions were not processed because the queue was full; these values include only the applied ones.`,
+  'mcpApp.generatedUi.noParameters': 'This view has no parameters to send.',
   'mcpApp.generatedUi.fullMessage': 'Full message sent to the session',
   'mcpApp.generatedUi.send': 'Continue analysis',
   'toolName.mcp__generated-ui__generated_ui_show': 'Interactive view',
@@ -66,6 +69,9 @@ export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
     `助手会在此会话中收到“${title}”里的这些参数并继续分析。之后在视图中的修改不会包含在内。`,
   'mcpApp.generatedUi.parameter': '参数',
   'mcpApp.generatedUi.value': '值',
+  'mcpApp.generatedUi.rejectedEvents': ({ count } = {}) =>
+    `队列已满，此前有 ${count} 次交互未处理；这些参数只包含已生效的部分。`,
+  'mcpApp.generatedUi.noParameters': '此视图没有可发送的参数。',
   'mcpApp.generatedUi.fullMessage': '发送到会话的完整消息',
   'mcpApp.generatedUi.send': '继续分析',
   'toolName.mcp__generated-ui__generated_ui_show': '交互视图',

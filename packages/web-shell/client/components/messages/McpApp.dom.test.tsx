@@ -221,6 +221,9 @@ describe('McpApp host lifetime', () => {
         text,
       }),
     );
+    expect(requestMessage.mock.calls[0][0]).not.toHaveProperty(
+      'requiredFeature',
+    );
   });
 
   it('releases settled message requests and aborts pending ones on resource replacement', async () => {
@@ -1381,6 +1384,54 @@ describe('built-in Generated UI admission', () => {
       'mcpApp.generatedUi.title',
     );
     expect(container.textContent).not.toContain('MCP App');
+  });
+
+  it('marks its messages as coming from the bundled server', async () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppMessagesContext.Provider
+          value={{ sessionId: 'owner', requestMessage }}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpApp display={display} />
+          </McpAppSessionContext.Provider>
+        </McpAppMessagesContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    await appBridgeMocks.last!.onmessage!(
+      { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+      { signal: new AbortController().signal },
+    );
+    expect(requestMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ requiredFeature: 'generated-ui' }),
+    );
+  });
+
+  it('keeps the MCP framing for a server that only claims the bundled resource', () => {
+    const claimed = { ...display, serverName: 'third-party' };
+    delete claimed.requiredFeature;
+    const { container, rerender } = renderApp(claimed);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={claimed} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    expect(container.querySelector('iframe')?.title).toBe(
+      'third-party MCP App',
+    );
+    expect(container.textContent).toContain('MCP App');
+    expect(container.textContent).toContain('third-party');
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { containerDimensions: { maxHeight: 960 } },
+    });
   });
 
   it('retains manually installed legacy Generated UI behavior', () => {

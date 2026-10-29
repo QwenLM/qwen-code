@@ -76,13 +76,20 @@ function setup() {
   mounted.push({ root, container });
   const request = (
     signal = new AbortController().signal,
-    message: { resourceUri?: string; text?: string } = {},
+    message: {
+      resourceUri?: string;
+      requiredFeature?: 'generated-ui';
+      text?: string;
+    } = {},
   ) => {
     let result!: ReturnType<McpAppMessages['requestMessage']>;
     act(() => {
       result = context!.requestMessage({
         serverName: 'trusted-host-server',
         resourceUri: message.resourceUri ?? 'ui://host/resource',
+        ...(message.requiredFeature
+          ? { requiredFeature: message.requiredFeature }
+          : {}),
         text: message.text ?? '<script>untrusted text</script>\nFull message',
         signal,
       });
@@ -113,30 +120,31 @@ const notSent = (phase: 'cancelled' | 'expired' | 'failed') => ({
   _meta: { 'qwen-code/message-review': phase },
 });
 
-const parameterText =
+const parameterMessage = (
+  inputs: Record<string, { value: string; checked: boolean }> = {
+    people: { value: '7', checked: false },
+    annual: { value: 'on', checked: true },
+  },
+  rejectedEvents = 0,
+) =>
   'Continue the analysis using the captured view parameters below.\n\n' +
   JSON.stringify(
     {
       kind: 'qwen.generated-ui.parameters',
       title: 'Bill splitter',
-      snapshot: {
-        schemaVersion: 1,
-        inputs: {
-          people: { value: '7', checked: false },
-          annual: { value: 'on', checked: true },
-        },
-      },
-      rejectedEvents: 0,
+      snapshot: { schemaVersion: 1, inputs },
+      rejectedEvents,
     },
     null,
     2,
   );
+const parameterText = parameterMessage();
 
 describe('Generated UI parameter review', () => {
   it('reads only the built-in parameter message', () => {
     expect(
       readGeneratedUiParameters({
-        resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+        requiredFeature: 'generated-ui',
         text: parameterText,
       }),
     ).toEqual({
@@ -145,16 +153,13 @@ describe('Generated UI parameter review', () => {
         { id: 'people', value: '7', checked: false },
         { id: 'annual', value: 'on', checked: true },
       ],
+      rejectedEvents: 0,
     });
+    // Any server can claim the bundled resource URI; only core's mark counts.
+    expect(readGeneratedUiParameters({ text: parameterText })).toBeUndefined();
     expect(
       readGeneratedUiParameters({
-        resourceUri: 'ui://other/app',
-        text: parameterText,
-      }),
-    ).toBeUndefined();
-    expect(
-      readGeneratedUiParameters({
-        resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+        requiredFeature: 'generated-ui',
         text: 'Fix the view.\n{not json',
       }),
     ).toBeUndefined();
@@ -168,6 +173,7 @@ describe('Generated UI parameter review', () => {
     });
     const result = h.request(undefined, {
       resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      requiredFeature: 'generated-ui',
       text: parameterText,
     });
     const dialog = h.container.querySelector('[role="dialog"]')!;
@@ -184,6 +190,35 @@ describe('Generated UI parameter review', () => {
     await act(async () => h.button('Continue analysis').click());
     expect(h.submit).toHaveBeenCalledWith(parameterText, expect.anything());
     expect(await result).toEqual({});
+  });
+
+  it('keeps the generic review for an App that only claims the resource URI', () => {
+    const h = setup();
+    h.request(undefined, {
+      resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      text: parameterText,
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).not.toContain('Continue with these parameters');
+    expect(dialog.querySelector('table')).toBeNull();
+    expect(dialog.querySelector('details')).toBeNull();
+    expect(dialog.querySelector('pre')?.textContent).toBe(parameterText);
+  });
+
+  it('says when interactions were dropped and when there is nothing to send', () => {
+    const h = setup();
+    h.request(undefined, {
+      requiredFeature: 'generated-ui',
+      text: parameterMessage({}, 3),
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain(
+      '3 earlier interactions were not processed',
+    );
+    expect(dialog.textContent).toContain(
+      'This view has no parameters to send.',
+    );
+    expect(dialog.querySelector('table')).toBeNull();
   });
 });
 

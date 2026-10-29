@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BUNDLED_GENERATED_UI_RESOURCE,
   MCP_APP_MESSAGE_REVIEW_META,
   type McpAppMessageRequest,
   type McpAppMessages,
@@ -302,16 +301,19 @@ export function useMcpAppMessages(host: MessageHost) {
 interface GeneratedUiParameters {
   title: string;
   inputs: Array<{ id: string; value: string; checked: boolean }>;
+  rejectedEvents: number;
 }
 
 /**
  * Reads the parameter message the built-in Generated UI App sends, so the
- * review can show the values first. Anything else keeps the generic layout.
+ * review can show the values first. Anything else keeps the generic layout:
+ * the table folds the message text away, so only the bundled server counts,
+ * not any App that claims its resource URI.
  */
 export function readGeneratedUiParameters(
-  review: Pick<McpAppMessageRequest, 'resourceUri' | 'text'>,
+  review: Pick<McpAppMessageRequest, 'requiredFeature' | 'text'>,
 ): GeneratedUiParameters | undefined {
-  if (review.resourceUri !== BUNDLED_GENERATED_UI_RESOURCE) return undefined;
+  if (review.requiredFeature !== 'generated-ui') return undefined;
   const start = review.text.indexOf('\n{');
   if (start < 0) return undefined;
   let message: unknown;
@@ -321,7 +323,10 @@ export function readGeneratedUiParameters(
     return undefined;
   }
   if (!message || typeof message !== 'object') return undefined;
-  const { kind, title, snapshot } = message as Record<string, unknown>;
+  const { kind, title, snapshot, rejectedEvents } = message as Record<
+    string,
+    unknown
+  >;
   const inputs =
     snapshot && typeof snapshot === 'object'
       ? (snapshot as Record<string, unknown>)['inputs']
@@ -329,6 +334,9 @@ export function readGeneratedUiParameters(
   if (
     kind !== 'qwen.generated-ui.parameters' ||
     typeof title !== 'string' ||
+    typeof rejectedEvents !== 'number' ||
+    !Number.isSafeInteger(rejectedEvents) ||
+    rejectedEvents < 0 ||
     !inputs ||
     typeof inputs !== 'object'
   ) {
@@ -347,7 +355,7 @@ export function readGeneratedUiParameters(
     const { value, checked } = input as { value: string; checked: boolean };
     rows.push({ id, value, checked });
   }
-  return { title, inputs: rows };
+  return { title, inputs: rows, rejectedEvents };
 }
 
 function McpAppMessageReview({
@@ -403,33 +411,46 @@ function McpAppMessageReview({
         </DialogHeader>
         {parameters ? (
           <>
-            <div className="max-h-[40vh] overflow-auto rounded-md border">
-              <table className="w-full text-sm">
-                <thead className="text-xs text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-medium">
-                      {t('mcpApp.generatedUi.parameter')}
-                    </th>
-                    <th className="px-3 py-2 text-left font-medium">
-                      {t('mcpApp.generatedUi.value')}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {parameters.inputs.map((input) => (
-                    <tr key={input.id} className="border-t">
-                      <td className="px-3 py-1.5 font-mono text-xs break-all">
-                        {input.id}
-                      </td>
-                      <td className="px-3 py-1.5 break-all">
-                        {input.checked ? '✓ ' : ''}
-                        {input.value}
-                      </td>
+            {parameters.rejectedEvents > 0 && (
+              <p className="text-sm text-destructive">
+                {t('mcpApp.generatedUi.rejectedEvents', {
+                  count: parameters.rejectedEvents,
+                })}
+              </p>
+            )}
+            {parameters.inputs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {t('mcpApp.generatedUi.noParameters')}
+              </p>
+            ) : (
+              <div className="max-h-[40vh] overflow-auto rounded-md border">
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">
+                        {t('mcpApp.generatedUi.parameter')}
+                      </th>
+                      <th className="px-3 py-2 text-left font-medium">
+                        {t('mcpApp.generatedUi.value')}
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {parameters.inputs.map((input) => (
+                      <tr key={input.id} className="border-t">
+                        <td className="px-3 py-1.5 font-mono text-xs break-all">
+                          {input.id}
+                        </td>
+                        <td className="px-3 py-1.5 break-all">
+                          {input.checked ? '✓ ' : ''}
+                          {input.value}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
             <details className="text-sm">
               <summary className="cursor-pointer text-muted-foreground">
                 {t('mcpApp.generatedUi.fullMessage')}
