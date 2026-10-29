@@ -24,7 +24,7 @@ import {
 } from './utils/mockDaemon';
 
 const resourceUri = 'ui://qwen-code-generated-ui/view-v1.html';
-const frameSelector = 'iframe[title="generated-ui MCP App"]';
+const frameSelector = 'iframe[title="Interactive view"]';
 const input = {
   title: 'Retained parameter fixture',
   summary: 'Original summary. Reopening starts from the original values.',
@@ -488,7 +488,9 @@ async function openCards(
 
 async function reviewSnapshot(page: Page, app: FrameLocator) {
   await app.locator('#continue-analysis').click();
-  const review = page.getByRole('dialog', { name: 'Review App message' });
+  const review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   await expect(review).toBeVisible();
   const text = (await review.locator('pre').textContent())!;
   const payload = JSON.parse(
@@ -819,7 +821,7 @@ test('New task parks the same App and Worker and revokes host authority @smoke',
   await view.locator('#rate').fill('9');
   const before = await probe.snapshot(app());
   await page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first()
     .click();
   await expect(cards).toBeHidden();
@@ -1252,7 +1254,9 @@ test('parking cancels a pending review and never repeats an accepted request', a
   await cards.first().scrollIntoViewIfNeeded();
   const before = await probe.snapshot(app());
   await app().locator('#continue-analysis').click();
-  const review = page.getByRole('dialog', { name: 'Review App message' });
+  const review = page.getByRole('dialog', {
+    name: 'Continue with these parameters',
+  });
   await expect(review).toBeVisible();
   // The modal deliberately blocks user scrolling. Change the actual viewport
   // to exercise a row eviction while its asynchronous review is still open.
@@ -1276,7 +1280,7 @@ test('parking cancels a pending review and never repeats an accepted request', a
     .click();
   await app().locator('#continue-analysis').click();
   await expect(review.locator('pre')).toContainText('"12"');
-  await review.getByRole('button', { name: 'Send to session' }).click();
+  await review.getByRole('button', { name: 'Continue analysis' }).click();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
   expect(daemon.promptRequests()[0].path).toBe(
     `/session/${scenario.sessionId}/prompt`,
@@ -1483,7 +1487,7 @@ test('a main card hidden by Settings loses host authority and keeps its runtime 
   });
   expect(response.result?.isError).toBe(true);
   await expect(
-    page.getByRole('dialog', { name: 'Review App message' }),
+    page.getByRole('dialog', { name: 'Continue with these parameters' }),
   ).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
   expect(await probe.snapshot(app())).toEqual(before);
@@ -1642,7 +1646,7 @@ test('maximizing another split pane revokes hidden tool RPCs without recreating 
   expect(hiddenReply.error).toBeDefined();
   expect(calls).toHaveLength(1);
   await expect(
-    page.getByRole('dialog', { name: 'Review App message' }),
+    page.getByRole('dialog', { name: 'Continue with these parameters' }),
   ).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
   expect(await probe.snapshot(app)).toEqual(before);

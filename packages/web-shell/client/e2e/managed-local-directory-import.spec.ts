@@ -76,7 +76,7 @@ for (const width of [1280, 390]) {
     await page
       .getByRole('menuitem', { name: 'Choose existing directory', exact: true })
       .click();
-    const dialog = page.getByRole('dialog', { name: 'Add Workspace' });
+    const dialog = page.getByRole('dialog', { name: 'Add workspace' });
     await expect(dialog).toBeVisible();
     await expect(page.locator('#managed-directory-root-label')).toHaveCount(0);
     await expect(

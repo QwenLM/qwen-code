@@ -38,7 +38,7 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -333,7 +333,7 @@ export interface ReplyArgs {
 
 export function runReply(args: ReplyArgs): ReplyOutcome {
   const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
 }
 

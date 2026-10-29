@@ -175,6 +175,32 @@ describe('autofix-pr watch routes', () => {
     }
   });
 
+  it('lists a watch rooted in a linked worktree from the main workspace', async () => {
+    // A daemon session in a linked worktree roots its watch there; the clone
+    // listing scans every worktree, so the main workspace still lists it.
+    rmSync(paths.statePath, { force: true });
+    const linked = join(root, '..', `${root.split('/').at(-1)}-linked`);
+    git(root, 'worktree', 'add', '-q', '--detach', linked);
+    try {
+      const linkedPaths = autofixPrPaths(linked, 7);
+      mkdirSync(dirname(linkedPaths.statePath), { recursive: true });
+      writeState(
+        linkedPaths.statePath,
+        watchState({
+          branch: linkedPaths.branch,
+          worktreePath: linkedPaths.worktreePath,
+        }),
+      );
+      const view = await listAutofixPrWatches(root);
+      expect(view.available).toBe(true);
+      expect(view.root).toBe(root);
+      expect(view.watches.map((watch) => watch.pr)).toEqual([7]);
+    } finally {
+      git(root, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
     'runs no git command but the one that finds the clone',
     async () => {
@@ -205,7 +231,7 @@ describe('autofix-pr watch routes', () => {
         const view = await listAutofixPrWatches(root);
         expect(view.watches.map((watch) => watch.pr)).toEqual([7]);
         const calls = readFileSync(log, 'utf8').trim().split('\n');
-        expect(calls).toEqual([`-C ${root} worktree list --porcelain`]);
+        expect(calls).toEqual([`-C ${root} worktree list --porcelain -z`]);
       } finally {
         vi.unstubAllEnvs();
         rmSync(shim, { recursive: true, force: true });
@@ -318,5 +344,24 @@ describe('autofix-pr watch routes', () => {
     );
     expect(fromQualified.status).toBe(503);
     expect(fromQualified.body).not.toHaveProperty('watches');
+  });
+
+  it('redacts sibling worktree paths from the unreadable errors', async () => {
+    const linked = join(root, '..', `${root.split('/').at(-1)}-linked`);
+    git(root, 'worktree', 'add', '-q', '--detach', linked);
+    try {
+      const linkedPaths = autofixPrPaths(linked, 9);
+      mkdirSync(dirname(linkedPaths.statePath), { recursive: true });
+      // The filename says PR 9 but the state says PR 7: unreadable.
+      writeState(linkedPaths.statePath, watchState());
+      const view = await listAutofixPrWatches(root);
+      expect(view.unreadable?.some((u) => u.pr === 9)).toBe(true);
+      const json = JSON.stringify(view);
+      expect(json).not.toContain(linked);
+      expect(json).not.toContain('autofix-pr-9-state.json');
+    } finally {
+      git(root, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
   });
 });

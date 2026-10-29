@@ -12,6 +12,7 @@ import {
   type StatusOutcome,
   type WatchStatus,
 } from '../../commands/autofix-pr/status.js';
+import { parseWorktreePaths } from '../../commands/autofix-pr/state.js';
 import { sanitizedGitEnv } from '../../commands/review/lib/worktree.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
@@ -54,29 +55,46 @@ export interface AutofixPrWatchesView {
 }
 
 /**
- * The clone's main worktree, where every watch of the clone keeps its files
- * (`.qwen/tmp`), whichever of its worktrees the workspace is; null when the
- * directory is in no git repository.
+ * Every worktree of the clone of `cwd`, main first; empty when the directory
+ * is in no git repository. A watch keeps its files (`.qwen/tmp`) under the
+ * worktree it was prepared from — under the daemon, the session's own — so
+ * the listing scans all of them to find every watch of the clone. One git
+ * call answers, on the listing's own short timeout.
  */
-export async function cloneRootOf(cwd: string): Promise<string | null> {
+export async function cloneWorktreesOf(cwd: string): Promise<string[]> {
+  const opts = {
+    timeout: GIT_TIMEOUT_MS,
+    windowsHide: true,
+    // As the helpers run git: an exported `GIT_DIR` or `GIT_CONFIG_*` would
+    // point it at another repository.
+    env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
+  };
   try {
+    // NUL-delimited so a worktree path holding a newline cannot fabricate an
+    // extra root the listing would then read outside the clone.
     const { stdout } = await execFileAsync(
       'git',
-      ['-C', cwd, 'worktree', 'list', '--porcelain'],
-      {
-        timeout: GIT_TIMEOUT_MS,
-        windowsHide: true,
-        // As the helpers run git: an exported `GIT_DIR` or `GIT_CONFIG_*`
-        // would point it at another repository.
-        env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
-      },
+      ['-C', cwd, 'worktree', 'list', '--porcelain', '-z'],
+      opts,
     );
-    const first = stdout.split('\n')[0] ?? '';
-    return first.startsWith('worktree ')
-      ? first.slice('worktree '.length).replace(/\r$/, '')
-      : null;
+    return parseWorktreePaths(stdout);
   } catch {
-    return null;
+    // git before 2.36 has no `-z`, and the line form cannot safely list a
+    // path that holds a newline, so fall back to the main worktree alone
+    // (always the first record) rather than risk a fabricated root.
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['-C', cwd, 'worktree', 'list', '--porcelain'],
+        opts,
+      );
+      const first = stdout
+        .split('\n')
+        .find((line) => line.startsWith('worktree '));
+      return first ? [first.slice('worktree '.length).replace(/\r$/, '')] : [];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -94,10 +112,23 @@ export async function listAutofixPrWatches(
   assertGenerationOpen?: () => void,
 ): Promise<AutofixPrWatchesView> {
   assertGenerationOpen?.();
-  const root = await cloneRootOf(cwd);
+  const worktrees = await cloneWorktreesOf(cwd);
   assertGenerationOpen?.();
-  if (root === null) return { v: 1, available: false, watches: [] };
-  const outcome = runStatus({ root, git: false, session: null });
+  if (worktrees.length === 0) return { v: 1, available: false, watches: [] };
+  // The main worktree names the clone for display; the scan covers every
+  // worktree, so a watch prepared from any of them is listed.
+  const root = worktrees[0]!;
+  const outcome = runStatus({ roots: worktrees, git: false, session: null });
+  // The CLI prints `unreadable[].error` with the full state-file path; this
+  // view crosses the workspace boundary, so a sibling checkout's absolute
+  // path and state-file name are redacted (the remedy names only the PR).
+  const redactError = (error: string): string => {
+    let redacted = error;
+    for (const worktree of worktrees) {
+      redacted = redacted.split(worktree).join('<worktree>');
+    }
+    return redacted.replace(/autofix-pr-\d+-state\.json/g, '<state-file>');
+  };
   return {
     v: 1,
     available: true,
@@ -113,7 +144,14 @@ export async function listAutofixPrWatches(
         ...watch
       }) => watch,
     ),
-    ...(outcome.unreadable ? { unreadable: outcome.unreadable } : {}),
+    ...(outcome.unreadable
+      ? {
+          unreadable: outcome.unreadable.map(({ pr, error }) => ({
+            pr,
+            error: redactError(error),
+          })),
+        }
+      : {}),
   };
 }
 
