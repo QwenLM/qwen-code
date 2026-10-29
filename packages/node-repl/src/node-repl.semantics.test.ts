@@ -37,6 +37,24 @@ function textOf(events: Array<{ type: string; text?: string }>): string {
 }
 
 describe('binding semantics through the real kernel', () => {
+  it.each([
+    ['1 + 1', ''],
+    ['nodeRepl.write(carried)', '1'],
+    ['carried += 1\nnodeRepl.write(carried) // trailing comment', '2'],
+  ])(
+    'accepts a semicolon-free cell after carried bindings: %s',
+    async (code, expected) => {
+      const manager = makeManager();
+      expect(
+        (await manager.exec({ code: 'var carried = 1;', timeoutMs: 30_000 }))
+          .status,
+      ).toBe('ok');
+      const result = await manager.exec({ code, timeoutMs: 30_000 });
+      expect(result.status).toBe('ok');
+      expect(textOf(result.events).trim()).toBe(expected);
+    },
+  );
+
   it('persists a var declared inside a block across cells', async () => {
     const manager = makeManager();
     const first = await manager.exec({

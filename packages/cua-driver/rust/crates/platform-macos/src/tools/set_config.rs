@@ -54,8 +54,8 @@ fn def() -> &'static ToolDef {
                 },
                 "experimental_pip_geometry": {
                     "type": "string",
-                    "description": "PiP window size + optional position in `WxH` or `WxH+X+Y` \
-                        form (e.g. `320x200+24+24`). Applies on next daemon restart."
+                    "description": "Maximum PiP card size + optional initial window position in `WxH` or `WxH+X+Y` \
+                        form (e.g. `400x300+24+24`). Applies on next daemon restart."
                 }
             },
             "additionalProperties": false

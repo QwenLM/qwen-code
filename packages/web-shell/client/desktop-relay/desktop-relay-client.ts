@@ -25,7 +25,7 @@ export const DESKTOP_RELAY_URL = 'http://127.0.0.1:47821';
  * must publish that version before the setup command can be used.
  */
 export const DESKTOP_RELAY_INSTALL_COMMAND =
-  'npx -y @qwen-code/node-repl-mcp@0.26.0 desktop-relay install';
+  'npx -y @qwen-code/node-repl-mcp@0.27.0 desktop-relay install';
 
 export type DesktopRelayRemotePhase =
   | 'connecting'

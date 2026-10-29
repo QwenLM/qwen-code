@@ -52,6 +52,12 @@ pub(crate) fn dialog_window_ids(pid: i32) -> HashSet<u32> {
                     }
                 }
             }
+            if Instant::now() < deadline {
+                let (sheets, complete) = super::sheets::copy_attached_sheets(&roots.elements);
+                if complete {
+                    ids.extend(sheets.iter().filter_map(|sheet| sheet.window_id));
+                }
+            }
         }
         for root in roots.elements {
             CFRelease(root as CFTypeRef);
