@@ -107,6 +107,7 @@ describe('TUI product evidence', () => {
     'packages/vscode-ide-companion/esbuild.js',
     'packages/vscode-ide-companion/tsconfig.json',
     'packages/vscode-ide-companion/src-extra/index.ts',
+    'packages/vscode-ide-companion/scripts/copy-bundled-cli.js',
     'packages/core/src/core/client.ts',
     'packages/channels/base/index.ts',
     'packages/web-templates/package.json',
@@ -145,20 +146,31 @@ describe('TUI product evidence', () => {
     },
   );
 
-  it('still skips a rename contained within the unrelated subtrees', async () => {
-    // Pins the negative arm: `previous_filename` present, but itself
-    // unrelated. Without it, weakening that arm to a presence check keeps the
-    // suite green while re-running both gates on any unrelated restructure.
-    expect(
-      await required([
-        {
-          filename: companionFile,
-          previous_filename:
-            'packages/vscode-ide-companion/src/services/oldWriter.ts',
-        },
-      ]),
-    ).toBe(false);
-  });
+  it.each([
+    [
+      'both ends in the Java service',
+      serverFile,
+      'packages/managed-agent-server/src/main/java/Old.java',
+    ],
+    [
+      'both ends in a Companion source subtree',
+      companionFile,
+      'packages/vscode-ide-companion/src/services/oldWriter.ts',
+    ],
+  ])(
+    'still skips a rename with %s',
+    async (_label, filename, previousFilename) => {
+      // Pins the negative arm: `previous_filename` present, but itself
+      // unrelated. Without it, weakening that arm to a presence check keeps
+      // the suite green while re-running both gates on any unrelated
+      // restructure. Every excluded subtree needs its own row: a mutation
+      // confined to the arm (narrowing it to one prefix) leaves the shared
+      // `unrelated()` predicate and every single-file case green.
+      expect(
+        await required([{ filename, previous_filename: previousFilename }]),
+      ).toBe(false);
+    },
+  );
 
   it('uses files beyond the first API page and runs on incomplete diffs', async () => {
     const files = Array.from({ length: 101 }, () => ({ filename: serverFile }));
