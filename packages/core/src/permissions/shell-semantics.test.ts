@@ -1289,3 +1289,24 @@ describe('R6 review round: redirect provenance and cwd uncertainty', () => {
     },
   );
 });
+
+describe('glued redirect operators (#12280 R8-5)', () => {
+  // bash's ordinary `word>target` spelling is one token with the operator glued
+  // after the operand. It must split like the spaced form, otherwise the cwd
+  // operand and the redirect write both collapse into one literal word and a
+  // deny rule over the real target certifies falsely.
+  it('splits a glued redirect after a cd operand across a command', () => {
+    expect(sorted(across('cd .qwen>log && echo {} > settings.json'))).toEqual([
+      write('/repo/.qwen/settings.json'),
+      write('/repo/log'),
+    ]);
+  });
+
+  it('splits a glued redirect after a read operand', () => {
+    expectSorted('cat /etc/shadow>/tmp/x', [read('/etc/shadow'), write('/tmp/x')]);
+  });
+
+  it('still treats a bare fd prefix as an fd, not an operand', () => {
+    expectSorted('cat foo 2>&1', [read('/home/user/project/foo')]);
+  });
+});

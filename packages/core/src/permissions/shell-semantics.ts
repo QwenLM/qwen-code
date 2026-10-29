@@ -589,7 +589,6 @@ interface RedirectTokenMatch {
 function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
   for (let start = 0; start < token.text.length; start++) {
     const prefix = token.text.slice(0, start);
-    if (start > 0 && !/^(?:\d+|\{\w+\})$/.test(prefix)) continue;
     const operator = REDIRECT_OPERATORS.find((candidate) =>
       token.text.startsWith(candidate, start),
     );
@@ -603,8 +602,13 @@ function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
       target,
       targetInToken: target !== '' || token.trailingSyntax,
       prefix,
+      // A prefix is an operand to keep, not an fd specifier to drop, unless it
+      // is the bare `2` / `{fd}` spelling. Quoting an fd-ish prefix turns it
+      // back into a word, which is why the bare-chars test disqualifies it.
       prefixIsOperand:
-        start > 0 && !token.bareChars.slice(0, start).every(Boolean),
+        start > 0 &&
+        (!/^(?:\d+|\{\w+\})$/.test(prefix) ||
+          !token.bareChars.slice(0, start).every(Boolean)),
     };
   }
   return null;
