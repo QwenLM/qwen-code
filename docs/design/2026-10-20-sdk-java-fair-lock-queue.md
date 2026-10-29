@@ -120,10 +120,12 @@ write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
 and runs before the acquisition; it then drops the two in-house fixed-release
 coordinates from the job-local copy, so the unlocked `mvn install` writes
 fresh inodes instead of rewriting the host cache through a hardlink. Maven
-truncates and rewrites its tracking markers (`resolver-status.properties`,
-`*.lastUpdated`, `_remote.repositories`) and its version metadata
-(`maven-metadata-*.xml`) in place, so the seed drops those hardlinks too and
-Maven recreates them job-locally. Only entries the seed created are dropped,
+maintains tracking markers (`resolver-status.properties`, `*.lastUpdated`,
+`_remote.repositories`), version metadata and checksums (`maven-metadata-*.xml*`).
+The seed drops those hardlinks too, along with `*.tmp`, `*.part` and
+`*.part.lock` residue, so each job resolves this state locally. This does not
+assume every Resolver version writes through an existing inode.
+Only entries the seed created are dropped,
 and a missing host cache stays quiet while a real copy failure warns, so the
 warning still means the seed failed. The Maven runs run unlocked; the
 write-back holds one acquisition, and its `mkdir` and bounded `find`/`cp`
@@ -170,29 +172,32 @@ suite status: the suite captures its own result before the write-back, so a
 failed suite still publishes the dependencies it downloaded and the step
 still reports the failure.
 
-A red suite still reaches the write-back. The test job's Maven runs record a
+A red suite still reaches the write-back. Both jobs' Maven runs record a
 failure in `mvn_status` instead of aborting under errexit, the failure stops
 the remaining suites, and that deferred status fails the step after the copy.
 The downloads the failed run made are therefore published instead of
 re-fetched by the next leg, and a tolerated skip of the copy reports the same
 status rather than turning the step green. A red leg queues only as long as
 the copy itself may run (300 s) instead of spending the green lane's 9600 s
-budget to repeat a failure signal that is already decided. The copy publishes
-artifacts only: the resolver tracking markers and the `*.tmp` fragments an
-interrupted transfer leaves behind stay out, because a published marker would
-make every later reader of the host cache inherit that resolution outcome.
+or 5400 s budget to repeat a failure signal that is already decided. The copy publishes
+artifacts only: resolver tracking markers, metadata and its checksum files,
+current Resolver `*.tmp` fragments, and older Resolver `*.part` / `*.part.lock`
+residue stay out, because a published marker would make every later reader
+of the host cache inherit that resolution outcome.
 Because the write-back output now sits between the failure and the log tail,
 every exit that can end a red step names the failing stage in an annotation;
 Maven exits 1 for nearly every failure mode, so the bare exit code cannot tell
 the three suites apart.
 
-The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
+The green-suite 9600 s test-lane and 5400 s MySQL write-back budgets are unchanged.
+Both lanes cap a failed suite's write-back wait at 300 s.
 They bound the queue, not the hold; the test lane's 9600 s is carried from
 the pre-split topology where its suite could queue behind several holds, and
 with the suite unlocked it is a conservative bound (about 32 queued 300 s
 copies) rather than a measured need. The 1200 s promotion window stays well
-inside both. What changed is that the wait now guards an optional bounded
-copy, so an expired budget skips the copy instead of failing the step.
+inside both green budgets; a red suite expires before promotion. The wait
+guards an optional bounded copy, so an expired budget skips the copy instead
+of failing the step.
 Shortening the test lane's budget to 1800 s (six queued copies) is a
 queue-depth trade-off left to a follow-up.
 

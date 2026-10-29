@@ -235,17 +235,16 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(end).toBeGreaterThan(start);
       return run.slice(start, end + '\nfi\n'.length);
     });
-    // The test job alone passes its tier, owns the deferred status and
-    // clamps its wait on a red leg; the prelude must otherwise stay
+    // The test job alone passes its tier; the prelude must otherwise stay
     // byte-identical. The comment block between the prelude and the
     // write-back differs by site, so the tail is pinned from its first
     // command instead.
     expect(preludes[0]).toContain(
       'sdk_java_lock_acquire "${lock_wait}" "${TIER}"',
     );
-    expect(preludes[1]).toContain('sdk_java_lock_acquire 5400 >&7');
+    expect(preludes[1]).toContain('sdk_java_lock_acquire "${lock_wait}" >&7');
     expect(preludes[0]).toContain('flock --wait "${lock_wait}" 9');
-    expect(preludes[1]).toContain('flock --wait 5400 9');
+    expect(preludes[1]).toContain('flock --wait "${lock_wait}" 9');
     // Both jobs defer their Maven status to the end of the step and name the
     // failed stage from their tolerated-skip arms, so only the wait budget
     // above may differ. Normalize the deferred names on both sides before
@@ -255,19 +254,19 @@ describe('SDK Java self-hosted workflow guards', () => {
         .replaceAll('exit "${mvn_status}"', 'exit 0')
         .replaceAll(/\n[ \t]+mvn_report_failed_suite(?=\n)/g, '');
     expect(
-      normalizePrelude(preludes[1])
-        .replace(
-          'sdk_java_lock_acquire 5400 >&7',
-          'sdk_java_lock_acquire "${lock_wait}" "${TIER}" >&7',
-        )
-        .replace('flock --wait 5400 9', 'flock --wait "${lock_wait}" 9'),
+      normalizePrelude(preludes[1]).replace(
+        'sdk_java_lock_acquire "${lock_wait}" >&7',
+        'sdk_java_lock_acquire "${lock_wait}" "${TIER}" >&7',
+      ),
     ).toBe(normalizePrelude(preludes[0]));
     // A red leg waits only as long as the copy itself may run: a failure
     // that is already decided must not spend the green lane's queue budget.
     expect(runs[0]).toMatch(
       /lock_wait=9600[\s\S]{0,80}if \[ "\$\{mvn_status:-0\}" -ne 0 \]; then\s+lock_wait=300/,
     );
-    expect(runs[1]).not.toContain('lock_wait');
+    expect(runs[1]).toMatch(
+      /lock_wait=5400[\s\S]{0,80}if \[ "\$\{mvn_status:-0\}" -ne 0 \]; then\s+lock_wait=300/,
+    );
     const tails = runs.map((run) => {
       const start = run.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-');
       expect(start).toBeGreaterThan(-1);
@@ -339,9 +338,11 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
     const expectedMarkers = [
       '*.lastUpdated',
+      '*.part',
+      '*.part.lock',
       '*.tmp',
       '_remote.repositories',
-      'maven-metadata-*.xml',
+      'maven-metadata-*.xml*',
       'resolver-status.properties',
     ];
     expect(seedMarkers.length).toBe(drops.length);
@@ -369,9 +370,11 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(writeBacks).toHaveLength(2);
     const expected = [
       '*.lastUpdated',
+      '*.part',
+      '*.part.lock',
       '*.tmp',
       '_remote.repositories',
-      'maven-metadata-*.xml',
+      'maven-metadata-*.xml*',
       'resolver-status.properties',
     ];
     seeds.forEach((match, index) => {
@@ -528,6 +531,13 @@ describe('SDK Java self-hosted workflow guards', () => {
           ['_remote.repositories'],
           ['third-party-1.0.pom.lastUpdated'],
           ['maven-metadata-local.xml'],
+          ['maven-metadata-central.xml.sha1'],
+          ['maven-metadata-central.xml.md5'],
+          ['maven-metadata-central.xml.sha256'],
+          ['maven-metadata-central.xml.sha512'],
+          ['third-party-1.0.jar.part'],
+          ['third-party-1.0.jar.part.lock'],
+          ['third-party-1.0.jar.1234.tmp'],
         ].map((parts) =>
           join(hostRepo, 'org', 'example', 'third-party', '1.0', ...parts),
         );
@@ -721,12 +731,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const run = jobs[name].steps.find((candidate) =>
           candidate.run?.includes('sdk-java-tests.lock'),
         ).run;
-        // The test job's exits name the deferred stage behind a red-path
-        // budget clamp, both of which sit above the shared prelude; the
-        // MariaDB lane fails inline and keeps neither.
-        const clampAt = run.indexOf('lock_wait=9600');
-        const start =
-          clampAt === -1 ? run.indexOf('lock_setup_fault() {') : clampAt;
+        const start = run.indexOf('lock_wait=');
         expect(start, name).toBeGreaterThan(-1);
         const slice = run.slice(start);
         // Both jobs defer their Maven status to the end of the step, so the
@@ -908,14 +913,8 @@ describe('SDK Java self-hosted workflow guards', () => {
               );
             }
             if (arm === 'helper' || arm === 'helper-capitalised') {
-              // Only the test job declares `lock_wait`; the MariaDB lane
-              // passes its 5400 s budget literally and takes no red clamp.
-              const clamped = slice.includes('lock_wait=9600');
-              const expectedWait = clamped
-                ? status === 0
-                  ? '9600'
-                  : '300'
-                : '5400';
+              const expectedWait =
+                status !== 0 ? '300' : name === 'test' ? '9600' : '5400';
               expect(
                 readFileSync(join(runnerTemp, 'lock-wait'), 'utf8').trim(),
                 label,
@@ -1001,7 +1000,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // copy. The prune stays best-effort: `bash -e` would otherwise abort the
     // leg before Maven on an entry it cannot delete.
     const deAlias =
-      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml' -o -name '*.tmp' \\) -links +1 -delete 2>/dev/null || true";
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -links +1 -delete 2>/dev/null || true";
     let from = 0;
     for (const seed of seeds) {
       const seedAt = workflow.indexOf(seed, from);
@@ -1131,6 +1130,12 @@ describe('SDK Java self-hosted workflow guards', () => {
       const planted = {
         'marker.txt': 'downloaded\n',
         'com/example/lib/maven-metadata-central.xml': '<metadata/>\n',
+        'com/example/lib/maven-metadata-central.xml.sha1': 'sha1\n',
+        'com/example/lib/maven-metadata-central.xml.md5': 'md5\n',
+        'com/example/lib/maven-metadata-central.xml.sha256': 'sha256\n',
+        'com/example/lib/maven-metadata-central.xml.sha512': 'sha512\n',
+        'com/example/lib/x-1.0.jar.part': 'partial\n',
+        'com/example/lib/x-1.0.jar.part.lock': 'lock\n',
         'com/example/lib/resolver-status.properties': 'resolved\n',
       };
       for (const [name, content] of Object.entries(planted)) {
@@ -1159,16 +1164,11 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.error, body).toBeUndefined();
         expect(result.status, body + result.stderr).toBe(0);
         expect(existsSync(join(hostCache, 'marker.txt'))).toBe(true);
-        expect(
-          existsSync(
-            join(hostCache, 'com/example/lib/maven-metadata-central.xml'),
-          ),
-        ).toBe(false);
-        expect(
-          existsSync(
-            join(hostCache, 'com/example/lib/resolver-status.properties'),
-          ),
-        ).toBe(false);
+        for (const name of Object.keys(planted).filter(
+          (name) => name !== 'marker.txt',
+        )) {
+          expect(existsSync(join(hostCache, name)), name).toBe(false);
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -1372,8 +1372,14 @@ describe('SDK Java self-hosted workflow guards', () => {
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-mysql-failed-'));
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'runner-temp');
+      const workspace = join(dir, 'workspace');
       const planted = join(runnerTemp, 'm2-repo', 'marker.txt');
       const published = join(home, '.m2', 'repository', 'marker.txt');
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        'sdk_java_lock_acquire() { printf "%s\\n" "$1" > "${RUNNER_TEMP}/lock-wait"; }\n',
+      );
       mkdirSync(dirname(planted), { recursive: true });
       writeFileSync(planted, 'downloaded\n');
       try {
@@ -1395,13 +1401,16 @@ describe('SDK Java self-hosted workflow guards', () => {
               ...process.env,
               HOME: home,
               RUNNER_TEMP: runnerTemp,
-              GITHUB_WORKSPACE: process.cwd(),
+              GITHUB_WORKSPACE: workspace,
               MVN_FAIL_AT: String(failAt),
             },
           },
         );
         expect(result.error, body).toBeUndefined();
         expect(result.status, body + result.stderr).toBe(1);
+        expect(readFileSync(join(runnerTemp, 'lock-wait'), 'utf8').trim()).toBe(
+          '300',
+        );
         expect(existsSync(published), body + result.stderr).toBe(true);
         expect(readFileSync(published, 'utf8')).toBe('downloaded\n');
       } finally {
@@ -2619,11 +2628,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     );
     // Same ref-independence guard as the test job: a resumed release tag may
     // predate the helper, so this site must also keep the bare-lock arm.
-    expect(step.run).toContain('flock --wait 5400 9');
+    expect(step.run).toContain('flock --wait "${lock_wait}" 9');
     expect(step.run).toContain(
       '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget',
     );
-    const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
+    const seconds = Number(step.run.match(/lock_wait=(\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
     // this ticket still waits, then waits out its hold. This write-back
     // keeps the shorter budget because its hold is the bounded copy and it
@@ -2634,7 +2643,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
     expect(step.run).toContain(
-      'sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?',
+      'sdk_java_lock_acquire "${lock_wait}" >&7 2>&1 || lock_rc=$?',
     );
     // Promotion must fire strictly inside the acquisition budget; at or
     // above it the rename lands in the iteration whose timeout arm deletes
@@ -2645,7 +2654,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     );
     expect(promoteAfter).toBeGreaterThan(0);
     expect(promoteAfter).toBeLessThan(seconds);
-    const lockWait = step.run.match(/sdk_java_lock_acquire \d+/)?.[0];
+    const lockWait = step.run.match(
+      /sdk_java_lock_acquire "\$\{lock_wait\}"/,
+    )?.[0];
     expect(lockWait).toBeDefined();
     const lockAt = step.run.indexOf(lockWait);
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
@@ -2729,7 +2740,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(
