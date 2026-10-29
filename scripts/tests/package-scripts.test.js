@@ -2185,8 +2185,8 @@ describe('package scripts', () => {
       ) || [];
 
     // The validation jobs reuse the anchored install step; only the anchor
-    // definition plus prepare and publish appear as full textual copies.
-    expect(installSteps.length).toBe(3);
+    // definition plus prepare, build_release, and publish are textual copies.
+    expect(installSteps.length).toBe(4);
     for (const installStep of installSteps.slice(0, 2)) {
       expect(installStep).toContain('npm run generate');
     }
