@@ -1553,6 +1553,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean sessionWorktreesEnabled;
         private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
@@ -1785,6 +1786,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public boolean isChildWorkspacesEnabled() {
             return childWorkspacesEnabled;
+        }
+
+        public boolean isSessionWorktreesEnabled() {
+            return sessionWorktreesEnabled;
+        }
+
+        public void setSessionWorktreesEnabled(boolean sessionWorktreesEnabled) {
+            this.sessionWorktreesEnabled = sessionWorktreesEnabled;
         }
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {

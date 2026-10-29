@@ -7,6 +7,7 @@ public final class ManagedSchemaContract {
     public static final Set<String> TABLES =
             Set.of(
                     "ma_session",
+                    "ma_session_worktree",
                     "ma_session_head",
                     "ma_turn",
                     "ma_user_message_queue",
@@ -60,6 +61,7 @@ public final class ManagedSchemaContract {
         CHILD_SESSION_START,
         CHILD_SESSION_CLOSE,
         CHILD_WORKSPACE,
+        SESSION_WORKTREE,
         OUTPUT_UPLOAD,
         OUTPUT_VERIFY,
         OUTPUT_FINISH,
