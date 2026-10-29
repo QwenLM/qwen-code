@@ -99,7 +99,15 @@ export function useMcpAppMessages(host: MessageHost) {
         (previous &&
           (isPending(previous.phase) || previous.phase === 'unknown'))
       ) {
-        return Promise.resolve({ isError: true });
+        // Refused before review: nothing was sent.
+        return Promise.resolve({
+          isError: true,
+          _meta: {
+            [MCP_APP_MESSAGE_REVIEW_META]: input.signal.aborted
+              ? 'cancelled'
+              : 'failed',
+          },
+        });
       }
       return new Promise((resolve) => {
         const controller = new AbortController();
@@ -139,8 +147,10 @@ export function useMcpAppMessages(host: MessageHost) {
             resolve(
               request.phase === 'accepted'
                 ? {}
-                : request.phase === 'cancelled' || request.phase === 'expired'
-                  ? // Both end before dispatch, so the App can say nothing was sent.
+                : request.phase === 'cancelled' ||
+                    request.phase === 'expired' ||
+                    request.phase === 'failed'
+                  ? // None reached the session, so the App can say nothing was sent.
                     {
                       isError: true,
                       _meta: { [MCP_APP_MESSAGE_REVIEW_META]: request.phase },

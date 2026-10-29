@@ -11,6 +11,7 @@ import {
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
 import { useMcpAppMessages } from '../../hooks/useMcpAppMessages';
+import { I18nProvider } from '../../i18n';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -546,6 +547,40 @@ describe('McpApp host lifetime', () => {
     expect(appBridgeMocks.close).not.toHaveBeenCalled();
     expect(appBridgeMocks.setHostContext).toHaveBeenCalledWith(
       expect.objectContaining({ theme: WebShellThemeId.Light }),
+    );
+  });
+
+  it('sends the Web Shell language and pushes language changes', async () => {
+    const display = appDisplay();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (language: 'zh-CN' | 'en') => (
+      <I18nProvider language={language}>
+        <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+          <ThemeProvider value={WebShellThemeId.Dark}>
+            <McpApp display={display} />
+          </ThemeProvider>
+        </McpAppHostContext.Provider>
+      </I18nProvider>
+    );
+
+    act(() => root.render(wrap('zh-CN')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { locale: 'zh-CN' },
+    });
+
+    act(() => root.render(wrap('en')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.constructed).toBe(1);
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ locale: 'en' }),
     );
   });
 

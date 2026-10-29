@@ -5,7 +5,7 @@
  */
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { ViewSurface } from './surface.js';
+import { VIEW_BASE_STYLE, ViewSurface } from './surface.js';
 
 function harness(html: string) {
   const frame = document.createElement('iframe');
@@ -36,6 +36,40 @@ describe('view height', () => {
     body.getBoundingClientRect = () => ({ height: 200 }) as DOMRect;
     h.surface.apply([{ kind: 'text', id: 'out', value: 'Updated' }]);
     expect(h.frame.style.height).toBe('226px');
+  });
+});
+
+describe('view height with viewport-sized content', () => {
+  it('does not grow the frame on its own resize', () => {
+    const h = harness('<p id="out">Ready</p>');
+    let width = 600;
+    Object.defineProperty(h.frame, 'clientWidth', { get: () => width });
+    const body = h.content.body;
+    body.style.margin = '12px';
+    // Like body{min-height:100vh}: the body is as tall as the frame.
+    let measured = 0;
+    body.getBoundingClientRect = () => {
+      measured++;
+      return { height: parseFloat(h.frame.style.height) || 0 } as DOMRect;
+    };
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('106px');
+    // Writing the height resizes the frame; that resize is not measured.
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    expect(h.frame.style.height).toBe('106px');
+    expect(measured).toBe(1);
+    // A width change reflows the content, so it is measured again.
+    body.getBoundingClientRect = () => ({ height: 300 }) as DOMRect;
+    width = 400;
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    expect(h.frame.style.height).toBe('326px');
+  });
+
+  it('contains child margins in the measured body', () => {
+    // A first child's margin would otherwise collapse through the body and
+    // escape its measured height.
+    expect(VIEW_BASE_STYLE).toContain('body{margin:12px;display:flow-root;');
   });
 });
 

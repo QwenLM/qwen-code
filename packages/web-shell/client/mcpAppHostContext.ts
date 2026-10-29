@@ -21,14 +21,17 @@ export interface McpAppMessageRequest {
 }
 
 /**
- * Result metadata naming a review that ended before the message was sent:
- * `cancelled` by the user or the host, or `expired` while awaiting review.
+ * Result metadata naming a review that ended without the session accepting
+ * the message: `cancelled` by the user or the host, `expired` while awaiting
+ * review, or `failed` when it was refused before or at admission.
  */
 export const MCP_APP_MESSAGE_REVIEW_META = 'qwen-code/message-review';
 
 export interface McpAppMessageResult {
   isError?: boolean;
-  _meta?: { [MCP_APP_MESSAGE_REVIEW_META]?: 'cancelled' | 'expired' };
+  _meta?: {
+    [MCP_APP_MESSAGE_REVIEW_META]?: 'cancelled' | 'expired' | 'failed';
+  };
   [key: string]: unknown;
 }
 

@@ -140,6 +140,8 @@ async function reconnect(context: Record<string, unknown>) {
 describe('card frame', () => {
   it('uses the host locale for its own text', async () => {
     await reconnect({ locale: 'zh-CN' });
+    expect(text('title')).toBe('交互视图');
+    expect(frame().title).toBe('生成的交互内容');
     ready();
     expect(text('stop')).toBe('停止');
     expect(text('continue-analysis')).toBe('用当前参数继续分析');
@@ -154,6 +156,36 @@ describe('card frame', () => {
     bridge.events.get('hostcontextchanged')!();
     expect(text('stop')).toBe('停止');
     expect(text('status')).toBe('已应用最新更新');
+  });
+
+  it('localizes the frame’s own failures but not the document’s', async () => {
+    await reconnect({ locale: 'zh-CN' });
+    ready();
+    present({
+      phase: 'error',
+      viewAvailable: false,
+      error: 'The view exceeded its execution time limit.',
+    });
+    expect(text('status')).toBe('视图超出了执行时间限制。');
+    await reconnect({ locale: 'zh-CN' });
+    ready();
+    present({
+      phase: 'error',
+      viewAvailable: false,
+      error: "Script error: ReferenceError: 'total' is not defined",
+    });
+    expect(text('status')).toBe(
+      "Script error: ReferenceError: 'total' is not defined",
+    );
+  });
+
+  it('says how to start again when stopped before the view appeared', () => {
+    present({ phase: 'stopped', viewAvailable: false });
+    expect(document.getElementById('stopped')!.hidden).toBe(true);
+    expect(document.getElementById('notice')!.hidden).toBe(false);
+    expect(text('notice')).toBe(
+      'Reopen the view to start again from its initial values.',
+    );
   });
 
   it('overlays a stopped view instead of leaving its controls looking live', () => {
@@ -174,8 +206,12 @@ describe('card frame', () => {
     expect(summary.dataset['collapsed']).toBe('false');
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(toggle.textContent).toBe('Show less');
+    // Widened while expanded: the collapsed summary now fits.
+    Object.defineProperty(summary, 'scrollHeight', { value: 39 });
+    Object.defineProperty(summary, 'clientHeight', { value: 39 });
     toggle.click();
     expect(summary.dataset['collapsed']).toBe('true');
+    expect(toggle.hidden).toBe(true);
   });
 });
 
@@ -183,6 +219,7 @@ describe('review outcomes reported by the host', () => {
   it.each([
     ['cancelled', 'Not sent.'],
     ['expired', 'The review timed out. Nothing was sent.'],
+    ['failed', 'Not sent.'],
   ])(
     'returns to the original action after a %s review',
     async (outcome, message) => {
@@ -199,6 +236,30 @@ describe('review outcomes reported by the host', () => {
       expect(continuation().disabled).toBe(false);
     },
   );
+
+  it('keeps an earlier attempt’s warning when a retry is not sent', async () => {
+    bridge.sendMessage.mockResolvedValueOnce({ isError: true });
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continue-analysis')).toBe(
+        'Review again after checking the session',
+      ),
+    );
+    bridge.sendMessage.mockResolvedValueOnce({
+      isError: true,
+      _meta: { 'qwen-code/message-review': 'cancelled' },
+    });
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain(
+        'An earlier request may still be in flight',
+      ),
+    );
+    expect(text('continue-analysis')).toBe(
+      'Review again after checking the session',
+    );
+  });
 
   it('keeps the unconfirmed warning for outcomes after dispatch', async () => {
     bridge.sendMessage.mockResolvedValue({

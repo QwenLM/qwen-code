@@ -115,7 +115,9 @@ function renderState(): void {
   setText(
     status,
     phase === 'error'
-      ? (state.error ?? t('status.error'))
+      ? state.error
+        ? t.error(state.error)
+        : t('status.error')
       : t(`status.${phase}` as MessageKey),
   );
   status.title = status.textContent ?? '';
@@ -132,6 +134,9 @@ function renderState(): void {
   );
   stoppedOverlay.hidden = phase !== 'stopped' || !state.viewAvailable;
   const notices: string[] = [];
+  // Without a view to overlay, the notice line says how to start again.
+  if (phase === 'stopped' && !state.viewAvailable)
+    notices.push(t('stopped.body'));
   if (!terminal) {
     if (state.lastUpdate === 'superseded') notices.push(t('notice.superseded'));
     else if (state.lastUpdate === 'outdated')
@@ -146,7 +151,11 @@ function renderState(): void {
 }
 
 function renderLabels(): void {
-  if (!documentTitle) setText(summary, t('status.waiting'));
+  if (!documentTitle) {
+    setText(title, t('title.placeholder'));
+    setText(summary, t('status.waiting'));
+  }
+  frame.title = t('view.label');
   setText(stop, t('stop'));
   setText(stoppedTitle, t('stopped.title'));
   setText(stoppedBody, t('stopped.body'));
@@ -159,6 +168,8 @@ function renderLabels(): void {
 }
 
 function fitSummary(): void {
+  // Only a collapsed summary shows whether it overflows; an expanded one keeps
+  // its toggle until collapsing measures it again.
   if (summary.dataset['collapsed'] !== 'true') return;
   summaryToggle.hidden = summary.scrollHeight <= summary.clientHeight + 1;
 }
@@ -205,12 +216,17 @@ async function send(
   pendingAttempt = undefined;
   if (
     continuationState === 'unconfirmed' &&
-    (outcome === 'cancelled' || outcome === 'expired')
+    (outcome === 'cancelled' || outcome === 'expired' || outcome === 'failed')
   ) {
-    // The host reports that nothing left the review: offer it again as is.
-    continuationState = previous === 'unconfirmed' ? 'idle' : previous;
+    // The host reports that nothing was sent: offer it again as is, keeping
+    // the warning of an earlier attempt that may still be in flight.
+    continuationState = previous;
     continuationMessage =
-      outcome === 'expired' ? 'continuation.expired' : 'continuation.notSent';
+      previous === 'unconfirmed'
+        ? 'continuation.notSentEarlier'
+        : outcome === 'expired'
+          ? 'continuation.expired'
+          : 'continuation.notSent';
   } else {
     continuationMessage =
       continuationState === 'accepted'
@@ -361,6 +377,7 @@ summaryToggle.addEventListener('click', () => {
   summary.dataset['collapsed'] = String(collapsed);
   summaryToggle.setAttribute('aria-expanded', String(!collapsed));
   setText(summaryToggle, t(collapsed ? 'showMore' : 'showLess'));
+  fitSummary();
 });
 globalThis.addEventListener('resize', fitSummary);
 continueAnalysis.addEventListener('click', () =>

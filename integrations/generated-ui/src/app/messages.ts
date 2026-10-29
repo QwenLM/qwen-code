@@ -7,6 +7,8 @@
 // Text for the trusted card frame. The host's locale selects the catalog;
 // generated content and messages sent to the session are not translated.
 const EN = {
+  'title.placeholder': 'Interactive view',
+  'view.label': 'Generated interactive content',
   stop: 'Stop',
   showMore: 'Show more',
   showLess: 'Show less',
@@ -46,6 +48,8 @@ const EN = {
   'continuation.accepted':
     'The session accepted the request. Analysis may still be running; follow it in the original session.',
   'continuation.notSent': 'Not sent.',
+  'continuation.notSentEarlier':
+    'Not sent. An earlier request may still be in flight; check the original session before reviewing again.',
   'continuation.expired': 'The review timed out. Nothing was sent.',
   'continuation.unconfirmed':
     'Acceptance could not be confirmed. The request may still be in flight. Check the original session before reviewing again; another submission could duplicate a request. Nothing is retried automatically.',
@@ -56,6 +60,8 @@ const EN = {
 export type MessageKey = keyof typeof EN;
 
 const ZH_CN: Record<MessageKey, string> = {
+  'title.placeholder': '交互视图',
+  'view.label': '生成的交互内容',
   stop: '停止',
   showMore: '展开',
   showLess: '收起',
@@ -90,6 +96,8 @@ const ZH_CN: Record<MessageKey, string> = {
   'continuation.accepted':
     '会话已接受请求，分析可能仍在进行，请在原会话中查看。',
   'continuation.notSent': '未发送。',
+  'continuation.notSentEarlier':
+    '未发送。之前的请求可能仍在处理中，请先查看原会话再重新审阅。',
   'continuation.expired': '审阅已超时，没有发送任何内容。',
   'continuation.unconfirmed':
     '无法确认是否已被接受，请求可能仍在处理中。请先查看原会话再重新审阅，重复提交可能产生重复请求。不会自动重试。',
@@ -97,11 +105,41 @@ const ZH_CN: Record<MessageKey, string> = {
     '已停止等待确认。请查看原会话：已经发出的请求仍可能被接受，停止此卡片不会撤回会话请求。',
 };
 
-export type Translate = (key: MessageKey) => string;
+// Failures the frame itself reports. Errors from the generated document
+// (script errors, rejected markup) are shown as written.
+const ZH_CN_ERRORS: Record<string, string> = {
+  'The interactive host is unavailable. Use the summary.':
+    '交互宿主不可用，请参考摘要。',
+  'This browser cannot run the view. Use the summary.':
+    '此浏览器无法运行该视图，请参考摘要。',
+  'This browser cannot display the view.': '此浏览器无法显示该视图。',
+  'This card changed unexpectedly. Open a new view.':
+    '此卡片发生了意外变化，请打开新的视图。',
+  'The generated view returned an invalid update.':
+    '生成的视图返回了无效的更新。',
+  'The view runtime failed. The summary is still available.':
+    '视图运行失败，摘要仍然可用。',
+  'The saved view is invalid or unsupported.': '保存的视图无效或不受支持。',
+  'The view could not read its current inputs.': '视图无法读取当前输入。',
+  'The view runtime could not receive an interaction.':
+    '视图运行时无法接收交互。',
+  'The view exceeded its execution time limit.': '视图超出了执行时间限制。',
+  'The view exceeded its input limit.': '视图超出了输入限制。',
+};
+
+export interface Translate {
+  (key: MessageKey): string;
+  /** The frame's own failures in the host locale; other errors unchanged. */
+  error(message: string): string;
+}
 
 export function translator(locale: string | undefined): Translate {
-  const catalog: Record<MessageKey, string> = /^zh(-|$)/i.test(locale ?? '')
-    ? ZH_CN
-    : EN;
-  return (key) => catalog[key];
+  const zh = /^zh(-|$)/i.test(locale ?? '');
+  const catalog: Record<MessageKey, string> = zh ? ZH_CN : EN;
+  const translate = (key: MessageKey) => catalog[key];
+  translate.error = (message: string) =>
+    (zh && Object.hasOwn(ZH_CN_ERRORS, message)
+      ? ZH_CN_ERRORS[message]
+      : undefined) ?? message;
+  return translate;
 }

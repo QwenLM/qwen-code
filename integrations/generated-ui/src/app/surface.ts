@@ -41,7 +41,7 @@ export const VIEW_BASE_STYLE = [
     '--gu-danger:var(--color-text-danger,#d92d20);' +
     '--gu-radius:var(--border-radius-md,6px)}',
   'html{background:transparent;color:var(--gu-text)}',
-  'body{margin:12px;font:14px/1.5 var(--font-sans,system-ui,sans-serif);overflow-wrap:anywhere}',
+  'body{margin:12px;display:flow-root;font:14px/1.5 var(--font-sans,system-ui,sans-serif);overflow-wrap:anywhere}',
   '*{box-sizing:border-box}',
   'h1,h2,h3,h4{margin:0 0 8px;line-height:1.3}h1{font-size:20px}h2{font-size:17px}h3,h4{font-size:15px}',
   'p{margin:0 0 8px}',
@@ -99,6 +99,7 @@ export class ViewSurface {
   private cancelMount?: () => void;
   private stopped = false;
   private hostStyle: HostStyle = {};
+  private fittedWidth = 0;
 
   constructor(
     private readonly frame: HTMLIFrameElement,
@@ -166,8 +167,13 @@ export class ViewSurface {
     doc.body.replaceChildren(this.markup(html));
     this.validate(doc.body);
     this.fit();
+    // Content reflows with width, never with the height fit() writes, so a
+    // resize that keeps the width is the frame's own and needs no refit.
+    const resize = () => {
+      if (this.frame.clientWidth !== this.fittedWidth) this.fit();
+    };
     const refit = () => this.fit();
-    doc.defaultView?.addEventListener('resize', refit);
+    doc.defaultView?.addEventListener('resize', resize);
     doc.body.addEventListener('toggle', refit, true);
     const listener = (event: Event) => {
       if (this.stopped) return;
@@ -197,7 +203,7 @@ export class ViewSurface {
       for (const type of ['input', 'change', 'click']) {
         doc.body.removeEventListener(type, listener);
       }
-      doc.defaultView?.removeEventListener('resize', refit);
+      doc.defaultView?.removeEventListener('resize', resize);
       doc.body.removeEventListener('toggle', refit, true);
     };
   }
@@ -392,7 +398,11 @@ export class ViewSurface {
     if (!body || !view || this.frame.hidden || this.frame.clientWidth === 0)
       return;
     // The root's scroll height never drops below the frame, so measure the
-    // body and its margins to let the frame shrink as well as grow.
+    // body and its margins to let the frame shrink as well as grow. Measure at
+    // the minimum height so content sized by the viewport (100vh, height:100%)
+    // cannot grow the frame on every fit.
+    this.fittedWidth = this.frame.clientWidth;
+    this.frame.style.height = `${MIN_VIEW_HEIGHT}px`;
     const style = view.getComputedStyle(body);
     const content =
       body.getBoundingClientRect().height +

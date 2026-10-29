@@ -104,7 +104,7 @@ function setup() {
 }
 
 // A review that ended before dispatch reports why nothing was sent.
-const notSent = (phase: 'cancelled' | 'expired') => ({
+const notSent = (phase: 'cancelled' | 'expired' | 'failed') => ({
   isError: true,
   _meta: { 'qwen-code/message-review': phase },
 });
@@ -159,7 +159,7 @@ describe('MCP App host message review', () => {
   it('rejects duplicate reviews and cancels with zero submissions', async () => {
     const h = setup();
     const first = h.request();
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     await act(async () => h.button('cancel').click());
     expect(await first).toEqual(notSent('cancelled'));
     expect(h.submit).not.toHaveBeenCalled();
@@ -219,7 +219,7 @@ describe('MCP App host message review', () => {
       'Acceptance could not be confirmed',
     );
     expect(h.container.textContent).toContain('session-a');
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     expect(h.submit).toHaveBeenCalledTimes(1);
     await act(async () =>
       h.submit.mock.calls[0][1].onAdmitted({ promptId: 'late-real-receipt' }),
@@ -282,7 +282,9 @@ describe('MCP App host message review', () => {
       });
       const result = h.request();
       await act(async () => h.button('Send to session').click());
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(
+        definite ? notSent('failed') : { isError: true },
+      );
       expect(h.container.textContent).toContain(
         definite
           ? 'The message was not accepted'
@@ -313,7 +315,7 @@ describe('MCP App host message review', () => {
     expect(h.container.textContent).toContain(
       'Acceptance could not be confirmed',
     );
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
   });
 
   it('shows a host refusal before dispatch as a failed review with its reason', async () => {
@@ -321,7 +323,7 @@ describe('MCP App host message review', () => {
     h.submit.mockRejectedValue(new Error('The session is busy'));
     const result = h.request();
     await act(async () => h.button('Send to session').click());
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('failed'));
     expect(h.container.textContent).toContain('The message was not accepted');
     expect(h.container.textContent).toContain('The session is busy');
     expect(h.container.textContent).not.toContain(
@@ -349,7 +351,7 @@ describe('MCP App host message review', () => {
     expect(h.container.querySelector('pre')?.textContent).toBe(
       '<script>untrusted text</script>\nFull message',
     );
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     await act(async () => pending.reject(new Error('lost response')));
     expect(await result).toEqual({ isError: true });
     expect(h.submit).toHaveBeenCalledTimes(1);
@@ -406,7 +408,7 @@ describe('MCP App host message review', () => {
     const requestMessage = h.context()!.requestMessage;
     h.render({ enabled: false });
     expect(h.context()!.requestMessage).toBe(requestMessage);
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     expect(h.submit).not.toHaveBeenCalled();
     h.render({ clientId: '' });
     expect(h.context()).toBeUndefined();
@@ -435,7 +437,7 @@ describe('MCP App host message review', () => {
         'Acceptance could not be confirmed',
       );
       expect(settled).not.toHaveBeenCalled();
-      expect(await h.request()).toEqual({ isError: true });
+      expect(await h.request()).toEqual(notSent('failed'));
       await act(async () =>
         h.submit.mock.calls[0][1].onAdmitted({ promptId: 'late-receipt' }),
       );
@@ -525,7 +527,9 @@ describe('MCP App host message review', () => {
       });
       const result = h.request();
       await act(async () => h.button('Send to session').click());
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(
+        status < 500 ? notSent('failed') : { isError: true },
+      );
       expect(h.container.textContent).toContain(
         status < 500
           ? 'The message was not accepted'
