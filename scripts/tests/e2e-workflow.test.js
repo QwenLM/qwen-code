@@ -157,6 +157,15 @@ describe('TUI product evidence', () => {
       companionFile,
       'packages/vscode-ide-companion/src/services/oldWriter.ts',
     ],
+    [
+      // Reachable only inside a mixed PR: `on.pull_request.paths` has no
+      // `docs/**` entry, so a docs-only PR never starts this workflow. The row
+      // still earns its place — the arm must keep skipping a docs rename that
+      // rides alongside package changes.
+      'both ends under docs/',
+      'docs/design/runtime.md',
+      'docs/design/old-runtime.md',
+    ],
   ])(
     'still skips a rename with %s',
     async (_label, filename, previousFilename) => {
