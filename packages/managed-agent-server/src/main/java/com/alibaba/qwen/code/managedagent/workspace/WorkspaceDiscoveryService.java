@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -19,7 +20,7 @@ public class WorkspaceDiscoveryService {
     private final ObjectMapper mapper;
 
     public WorkspaceDiscoveryService(ManagedWorkspaceRegistry registry,
-            ObjectMapper mapper) {
+            @Qualifier("managedAgentObjectMapper") ObjectMapper mapper) {
         this.registry = registry;
         this.mapper = mapper;
     }

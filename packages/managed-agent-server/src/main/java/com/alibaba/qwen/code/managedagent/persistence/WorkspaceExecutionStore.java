@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -30,8 +31,8 @@ public class WorkspaceExecutionStore {
     private final ResidentWorkspaces residents;
 
     @Autowired
-    public WorkspaceExecutionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
+    public WorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
             com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
@@ -69,7 +70,8 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         ResidentWorkspaces.requireRegistration(jdbc, selected);
-        var rows = jdbc.queryForList("SELECT rs.runtime_session_id FROM ma_runtime_session rs"
+        var rows = jdbc.query("SELECT rs.runtime_session_id, b.resource_handle_json, o.csi_revision, o.csi_reservation_id"
+                + " FROM ma_runtime_session rs"
                 + " JOIN ma_runtime_binding b ON b.binding_id = rs.binding_id AND b.runtime_generation = rs.runtime_generation"
                 + " JOIN ma_runtime_slot slot ON slot.active_binding_id = b.binding_id AND slot.request_key = b.request_key"
                 + " JOIN ma_storage_owner o ON o.binding_id = b.binding_id AND o.runtime_generation = b.runtime_generation"
@@ -79,18 +81,27 @@ public class WorkspaceExecutionStore {
                         ? "'ACQUIRING', 'READY', 'RELEASING', 'RELEASED'" : "'ACQUIRING', 'READY'") + ")"
                 + " AND b.request_key = ? AND b.binding_state = 'READY' AND b.drain_requested = FALSE"
                 + " AND o.storage_key = ? AND o.storage_kind = 'CSI' AND o.csi_phase = 'RESERVED'"
-                + " AND o.csi_revision = 1 AND o.csi_registration_key = ? AND o.csi_registration_revision = ?"
+                + " AND o.csi_registration_key = ? AND o.csi_registration_revision = ?"
                 + " AND o.csi_provision_request_id = b.provision_request_id AND o.holder_key IS NULL"
-                + " AND o.runtime_session_id IS NULL", String.class, session.getBindingId(), session.getRuntimeGeneration(),
+                + " AND o.runtime_session_id IS NULL", (row, index) -> new ResidentHeld(row.getString(1), row.getString(2),
+                        row.getLong(3), row.getString(4)), session.getBindingId(), session.getRuntimeGeneration(),
                 session.getRuntimeSessionId(), session.getSession().getHarnessSessionId(), residents.request(binding).requestKey(),
                 selected.registration().physicalKey(), selected.registration().aliasKey(), selected.registration().revision());
-        if (rows.size() != 1 || !session.getRuntimeSessionId().equals(rows.getFirst())
+        if (rows.size() != 1 || !session.getRuntimeSessionId().equals(rows.getFirst().sessionId())
                 || !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id <> ? AND session_state <> 'RELEASED'",
                 String.class, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId()).isEmpty()) {
             throw busy();
         }
+        var held = rows.getFirst();
+        var storage = ResidentWorkspaces.heldStorage(held.handle());
+        if (!Long.toString(held.revision()).equals(storage.get("reservationRevision"))
+                || !held.reservationId().equals(storage.get("reservationId"))) {
+            throw unavailable();
+        }
     }
+
+    private record ResidentHeld(String sessionId, String handle, long revision, String reservationId) { }
 
     public void authorize(SessionRecord session) {
         authorizePassiveAttachment(session);
@@ -202,6 +213,9 @@ public class WorkspaceExecutionStore {
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
+        if (!cancellation && !committedStop && authority == null && !legacyClose) {
+            requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
+        }
         var resident = residents.find(binding);
         if (resident == null) {
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -303,6 +317,24 @@ public class WorkspaceExecutionStore {
         if (grants.getFirst() != 2) {
             throw unavailable();
         }
+    }
+
+    private static void requireWorktreeAncestorsReady(JdbcTemplate jdbc, String tenantId, String sessionId) {
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        String current = sessionId;
+        while (visited.add(current)) {
+            SessionWorktreeStore.requireReady(jdbc, tenantId, current);
+            var parents = jdbc.query("SELECT parent_session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                    (row, index) -> row.getString(1), tenantId, current);
+            if (parents.size() != 1) {
+                throw unavailable();
+            }
+            if (parents.getFirst() == null) {
+                return;
+            }
+            current = parents.getFirst();
+        }
+        throw unavailable();
     }
 
     static byte[] inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
@@ -422,6 +454,9 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean beginRewind(ContextBinding binding, RuntimeSessionRecord session) {
+        if (storageGuard != null) {
+            storageGuard.requireOwnedRoot(binding.getTenantId(), binding.getStorageId());
+        }
         return Boolean.TRUE.equals(transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             String key = storageKey(binding);
@@ -551,8 +586,9 @@ public class WorkspaceExecutionStore {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
-            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
-                    Long.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, binding.getTenantId(), maintenanceId));
+            WorkspaceOperations.Kind kind = WorkspaceMaintenanceRecovery.kind(jdbc, binding, maintenanceId);
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
+                    Long.class, WorkspaceOperations.key(kind, binding.getTenantId(), maintenanceId), kind.name());
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
                 throw unavailable();
             }

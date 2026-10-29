@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -64,7 +65,7 @@ public class SessionMessageRelay {
     @Autowired
     public SessionMessageRelay(SessionMessageRelayStore store,
             ChildResultRelayStore records, HarnessConnector harness,
-            ObjectMapper mapper) {
+            @Qualifier("managedAgentObjectMapper") ObjectMapper mapper) {
         this(store, records, harness, mapper, System::currentTimeMillis);
     }
 
