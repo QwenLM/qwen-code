@@ -93,6 +93,11 @@ for is a file no round produces, and a check over an absent file is silent:
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
 
+Each prepared artifact directory keeps `context.json` containing only its
+`headRefOid`. The checker prefers that round's snapshot and names the source it
+uses. Older directories fall back to the shared per-PR snapshot; an unreadable
+or invalid round snapshot warns instead of using a later round's shared head.
+
 ## Attribution footer
 
 A published verification comment ends with the same attribution shape
@@ -344,6 +349,9 @@ A published verification comment ends with the same attribution shape
   skill and the publisher carry the same footer template, pinned by a
   meta-test, and `report.md` carries no footer of its own.
 - No script executes PR code.
+- A report with its own round snapshot keeps the same checked head after a
+  later preparation into a different artifact directory. Publishable round
+  snapshots contain no PR title or body.
 
 ## Open questions
 

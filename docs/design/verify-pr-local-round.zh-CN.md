@@ -33,6 +33,8 @@
 - `assertions.json` 在 `fail` 非零时带 `failures: [{ id, attribution }]`，每条失败断言一项，归因为 `pr`、`harness` 或 `environment`。若 `findings`/`blocked` 的账本里没有任何一条归因为 `pr`，报错；账本长度与 `fail` 不一致，同样报错。有失败但没有账本只报警告，因此旧产物仍能通过。
 - `mutations.json` 可以声明 `coverageClaim: "per-commit"`，并给出来自 `git log --no-merges <previous>..<head> --not <target>` 的 `productionCommits` 与 `rows[].commit`。列出的提交没有对应行时报错，并点名这些提交；列表为空同样报错——对空集合做的声明恒真。
 
+每个已准备的产物目录保存只含 `headRefOid` 的 `context.json`。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
+
 ## 署名页脚
 
 发布出去的验证评论以与 `/review` 相同的署名形状收尾：
@@ -90,6 +92,7 @@
 - 条目正文变了而时间戳没变、或 review 的 state 变了时，`guard --compare` 报 dirty；条目不带 body、或 review 不带 state 的列表，`guard --snapshot` 直接拒绝。
 - 模型、CLI 版本、skill 哈希三者都解析成功时，发布的报告评论以署名页脚收尾；否则以通用签名收尾；弱通知一律保留通用签名。skill 与发布侧携带同一页脚模板并有元测试钉住，`report.md` 本身不带页脚。
 - 所有脚本都不执行 PR 代码。
+- 对于自带轮次快照的报告，在不同产物目录中准备后续轮次不会改变检查所用的提交号。可发布的轮次快照不包含 PR 标题或正文。
 
 ## 未决问题
 
