@@ -3,9 +3,9 @@
  * Fail a PR's Lint & Static lane when the base branch changed the lint gate
  * after this branch last incorporated it.
  *
- * The lane checks out refs/pull/N/head — the branch alone, a deliberate
- * trade-off recorded above the Checkout step in ci.yml (GitHub rebuilds the
- * merge ref asynchronously and can serve it stale for minutes). A green run
+ * The lane checks out the event PR head SHA — the branch alone, not the
+ * merge ref, which GitHub rebuilds asynchronously and can serve stale for
+ * minutes. A green run
  * therefore proves "the branch passes the gate AS THE BRANCH DEFINES IT",
  * not as the base defines it. When the base changes the gate between branch
  * point and merge, the branch keeps validating with the old gate: #11117
@@ -20,13 +20,16 @@
  * package-lock.json: at 50-100 merges a day a dependency bump lands almost
  * daily, and forcing every in-flight PR to rebase behind one recreates the
  * "require up-to-date branch" treadmill. A prettier/eslint version bump
- * cannot sneak changed semantics past a branch either — both run repo-wide
- * (`--check .`, `eslint .`), so the bumping PR must bring the whole tree
- * under the new semantics in its own run. What can sneak is a change to
- * how the gate RUNS (the lane definitions in lint.js, the configs they
- * read, this check), which is exactly the list below. Rare enough — lint.js
- * saw five commits in the months before this check — that an occasional
- * "rebase, the gate moved" is cheap.
+ * cannot sneak changed semantics past a branch either:
+ * `affectsAllFiles()` in scripts/lint-scope.js restores full checking
+ * whenever a manifest or lockfile it names changes, so the bumping PR still
+ * brings the whole tree under the new semantics in its own run. That
+ * predicate — not a repo-wide sweep inherent to the lanes — is what carries
+ * the exclusion, so trimming its name list re-opens this treadmill. What can
+ * sneak past a branch is a change to how the gate RUNS (the lane definitions
+ * in lint.js, the configs they read, this check), which is exactly the list
+ * below. Rare enough — lint.js saw five commits in the months before this
+ * check — that an occasional "rebase, the gate moved" is cheap.
  *
  * Fail-open on API errors: with no required status checks this step is
  * advisory by convention (red means do not merge), and a GitHub API
@@ -46,6 +49,7 @@ const execFileAsync = promisify(execFile);
 
 export const GATE_FILES = [
   'scripts/lint.js',
+  'scripts/lint-scope.js',
   'eslint.config.js',
   'eslint.legacy-filenames.mjs',
   'eslint.legacy-core-barrel-imports.mjs',

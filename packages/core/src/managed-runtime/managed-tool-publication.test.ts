@@ -36,9 +36,21 @@ const fixtures = JSON.parse(
     requestDigest: string;
     argsDigest: string;
   }>;
+  payloadVectors: Array<{
+    id: string;
+    valid: boolean;
+    payloadJson: string;
+    requestDigest: string;
+    argsDigest: string;
+  }>;
   digestVectors: Array<{ id: string; binding: unknown; digest: string }>;
   tokenVector: { token: string; hash: string };
   bindingDigest: string;
+  referenceSizeCases: Array<{
+    field: 'argsRef' | 'checkpointRef';
+    byteLength: number;
+    valid: boolean;
+  }>;
   cases: Array<{
     id: string;
     kind: 'binding' | 'request' | 'grant';
@@ -75,6 +87,21 @@ describe('managed-tool-publication/1', () => {
     });
   }
 
+  it.each(fixtures.referenceSizeCases)(
+    'bounds $field at $byteLength bytes',
+    ({ field, byteLength, valid }) => {
+      const binding = parseToolPublicationBinding(fixtures.cases[0].value);
+      const value = {
+        ...binding,
+        [field]: { ...binding[field], byteLength },
+      };
+      expect(ajv.getSchema('publication#/$defs/binding')!(value)).toBe(valid);
+      const parse = () => parseToolPublicationBinding(value);
+      if (valid) expect(parse).not.toThrow();
+      else expect(parse).toThrow();
+    },
+  );
+
   it('matches independent Unicode, key-order and integer digest vectors', () => {
     for (const vector of fixtures.digestVectors) {
       expect(
@@ -86,6 +113,23 @@ describe('managed-tool-publication/1', () => {
     expect(
       createHash('sha256').update(fixtures.tokenVector.token).digest('hex'),
     ).toBe(fixtures.tokenVector.hash);
+  });
+
+  describe('publication payload families', () => {
+    const binding = parseToolPublicationBinding(fixtures.cases[0].value);
+    for (const vector of fixtures.payloadVectors) {
+      it(`${vector.id}`, () => {
+        const bound = {
+          ...binding,
+          requestDigest: vector.requestDigest,
+          reference: { ...binding.reference, argsDigest: vector.argsDigest },
+        };
+        const check = () =>
+          assertToolPublicationPayload(bound, vector.payloadJson);
+        if (vector.valid) expect(check).not.toThrow();
+        else expect(check).toThrow();
+      });
+    }
   });
 
   it('keeps original Runtime identity and both digests separate from model pairing', () => {

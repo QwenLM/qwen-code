@@ -28,6 +28,7 @@ import type {
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
 } from './bridgeTypes.js';
+import type { WorkflowAncestorTrustHandler } from './workflow-ancestor-trust.js';
 
 export type BridgeExecutionEngine = SessionExecutionEngine;
 // The ACP host writes this receipt and the Bridge checks it: one definition.
@@ -706,6 +707,10 @@ export interface BridgeOptions {
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
+  /** Resolves ancestor workflow trust from the owning daemon runtime. */
+  onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler;
+  /** Live owner authorization, read immediately before forwarding a prompt. */
+  isWorkflowModeWriteAllowed?: (sessionId: string) => boolean;
 }
 
 /**
@@ -788,12 +793,17 @@ export interface CurrentSessionScheduledTaskCreateInfo {
   cron: string;
   prompt: string;
   recurring: boolean;
+  /** Shell command run at each fire outside the model (a scheduled-task gate). */
+  gate?: string;
   assertCallerPromptActive: () => void;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate stored with the task, or null for none: echoed so the child can
+   * tell a daemon that dropped a requested gate. */
+  gate?: string | null;
 }
 
 export type CurrentSessionScheduledTaskCreateHandler = (

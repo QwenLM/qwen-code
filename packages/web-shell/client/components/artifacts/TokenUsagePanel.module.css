@@ -4,6 +4,7 @@
 
 .heroHeader {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -31,8 +32,13 @@
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
+.heroLabel {
+  font-size: 12px;
+  color: var(--foreground);
+}
 
 .heroMeta {
+  margin-left: auto;
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -52,52 +58,72 @@
   cursor: pointer;
 }
 
+.refreshButton:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+
 .refreshButton:hover,
 .refreshButton:focus-visible {
   background: var(--muted);
   color: var(--foreground);
 }
 
-.legend {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  margin-top: 10px;
+.overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 20px 0 12px;
 }
 
-.legendEntry {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.summaryMetric {
+  min-width: 0;
+  padding: 0 8px;
+}
+.summaryMetric:first-child {
+  padding-left: 0;
+}
+.summaryMetric:last-child {
+  padding-right: 0;
+}
+.summaryMetric + .summaryMetric {
+  border-left: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.summaryMetric dt {
+  line-height: 1.3;
   font-size: 12px;
+  font-weight: 600;
 }
-
-.legendSwatch {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.summaryMetric dd {
+  margin: 8px 0 0;
 }
-
-.legendValue {
-  color: var(--muted-foreground);
+.summaryValue {
+  display: block;
+  font-family: ui-monospace, monospace;
+  font-size: 24px;
+  line-height: 1.2;
+  letter-spacing: -0.04em;
   font-variant-numeric: tabular-nums;
 }
 
-.legendPercent {
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--success-color) 14%, transparent);
-  color: var(--success-color);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
+.inputLabel {
+  color: color-mix(in srgb, #1686ef 70%, var(--foreground));
+}
+.outputLabel {
+  color: color-mix(in srgb, #00a8e8 70%, var(--foreground));
 }
 
 .modelList {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+}
+
+.overview,
+.modelSection,
+.detailSection {
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: 0 4px 24px color-mix(in srgb, #4c7ee8 8%, transparent);
 }
 
 .section {
@@ -105,12 +131,12 @@
 }
 
 details.section {
-  margin-top: 8px;
+  margin-top: 16px;
 }
 
 .sectionTitle {
-  margin: 0 0 8px;
-  color: var(--muted-foreground);
+  margin: 0;
+  color: color-mix(in srgb, #6f86ac 80%, var(--foreground));
   font-size: 12px;
   font-weight: 600;
 }
@@ -135,10 +161,6 @@ details.section {
   display: none;
 }
 
-.collapsibleSummary .sectionTitle {
-  margin: 0;
-}
-
 .section[open] .collapsibleSummary {
   margin-bottom: 8px;
 }
@@ -148,46 +170,42 @@ details.section {
   transition: transform 150ms ease;
 }
 
-.section[open] .collapseIcon {
+details[open] > summary > .collapseIcon {
   transform: rotate(90deg);
 }
 
 .modelCard {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card);
+  padding: 12px 0;
+}
+
+.modelCard[data-color='0'] {
+  --model-color: #4b67ff;
+}
+.modelCard[data-color='1'] {
+  --model-color: #4f94e7;
+}
+.modelCard[data-color='2'] {
+  --model-color: #42b17e;
+}
+.modelCard[data-color='3'] {
+  --model-color: #ed8b21;
+}
+.modelCard[data-color='4'] {
+  --model-color: #9468ed;
 }
 
 .modelHeader {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 10px;
 }
 
 .modelName {
-  font-size: 13px;
-  font-weight: 600;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.modelMeta {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
-}
-
-.modelBreakdown {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  margin-top: 10px;
 }
 
 .toolList {
@@ -200,7 +218,6 @@ details.section {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--card);
 }
 
 .toolHeader {
@@ -237,46 +254,38 @@ details.section {
 .subagentList {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .subagentCard {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card);
+  --model-color: #4b67ff;
+  padding: 12px 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: 8px;
 }
-
 .subagentHeader {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 12px;
 }
-
 .subagentName {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
 }
-
 .subagentType {
   flex-shrink: 0;
-  font-size: 11px;
-  color: var(--muted-foreground);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 12px;
 }
-
-.subagentBreakdown {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-
 .error {
   display: flex;
   align-items: center;
@@ -311,4 +320,137 @@ details.section {
   .collapseIcon {
     transition: none;
   }
+}
+
+.collapsibleSummary:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+
+.modelShare {
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--model-color) 65%, var(--foreground));
+  font-family: ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.modelStats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 8px;
+  margin: 10px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+.modelStats > div {
+  min-width: 0;
+}
+.modelStats dt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--foreground) 70%, var(--card));
+  font-size: 11px;
+  line-height: 1.4;
+}
+.modelStats dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.shareRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.shareTrack {
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, #4f94e7 12%, var(--card));
+}
+
+.shareTrack:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 3px;
+}
+
+.shareFill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4f94e7, var(--model-color));
+}
+
+.summaryCaption {
+  display: block;
+  margin-top: 10px;
+  color: var(--foreground);
+  font-family: inherit;
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.subagentCard .modelShare {
+  font-size: 12px;
+}
+.tokenDetails {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 12px 0 0;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+.tokenDetails > div {
+  display: inline;
+}
+.tokenDetails dt,
+.tokenDetails dd {
+  display: inline;
+  margin: 0;
+}
+
+.tokenDetails > div + div::before {
+  content: '·';
+  margin: 0 8px;
+  color: var(--muted-foreground);
+}
+.tokenDetails dt {
+  margin-right: 4px;
+}
+
+.tokenDetails[tabindex] {
+  cursor: default;
+}
+.tokenDetails:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 3px;
+}
+.tokenDetailsTooltip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.tokenDetailsTooltip > div {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+}
+.tokenDetailsTooltip dt,
+.tokenDetailsTooltip dd {
+  margin: 0;
 }

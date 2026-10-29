@@ -19,6 +19,15 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { ToolErrorType } from './tool-error.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { applyNotebookEdit, NotebookEditTool } from './notebook-edit.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
@@ -68,6 +77,7 @@ describe('NotebookEditTool', () => {
       getMemoryFileCount: () => 0,
       setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as never,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
     tool = new NotebookEditTool(config);
   });
@@ -184,6 +194,84 @@ describe('NotebookEditTool', () => {
       expect(cacheState.entry.lastReadWasFull).toBe(true);
       expect(cacheState.entry.lastReadCacheable).toBe(false);
     }
+  });
+
+  it('records the edited notebook as a session artifact', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await replaceLoadData(filePath);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'automatically recorded as a workspace artifact with workspacePath "analysis.ipynb"',
+    );
+    expect(result.artifacts).toEqual([
+      {
+        title: 'analysis.ipynb',
+        kind: 'notebook',
+        storage: 'workspace',
+        workspacePath: 'analysis.ipynb',
+        mimeType: 'application/x-ipynb+json',
+        sizeBytes: fs.statSync(filePath).size,
+      },
+    ]);
+  });
+
+  it('only refreshes a notebook when record_as_artifact is false', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await edit({
+      notebook_path: filePath,
+      cell_id: 'load-data',
+      new_source: 'x = 2\nprint(x)',
+      record_as_artifact: false,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).not.toContain('automatically recorded');
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({
+        workspacePath: 'analysis.ipynb',
+        updateOnly: true,
+      }),
+    ]);
+  });
+
+  it('does not record a notebook when artifact recording is disabled', async () => {
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await replaceLoadData(filePath);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toBeUndefined();
+  });
+
+  it('does not record a notebook when the edit fails', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await edit({
+      notebook_path: filePath,
+      cell_id: 'missing-cell',
+      new_source: 'x = 2\n',
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.artifacts).toBeUndefined();
   });
 
   it('blocks writing a secret into a team-memory notebook', async () => {
@@ -657,6 +745,64 @@ describe('NotebookEditTool', () => {
     const result = await edit(updatedParams);
 
     expect(result.error?.type).toBe(ToolErrorType.NOTEBOOK_INVALID_JSON);
+  });
+
+  it("asks the user for an edit in a background fix's worktree, but for its own agent", async () => {
+    const worktree = path.join(tempDir, 'wt');
+    fs.mkdirSync(worktree);
+    grantUnattendedFixes('s-nb', {
+      pr: 3,
+      worktree: canonicalWorktreePath(worktree),
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('s-nb', {
+      pr: 3,
+      repo: 'o/r',
+      host: null,
+      targetDir: tempDir,
+      preparedAt: null,
+      worktree: canonicalWorktreePath(worktree),
+      authorCanPush: true,
+    });
+    recordWatchTask('s-nb', 3, { task: 't', reply: true, instructions: '' });
+    try {
+      const fix = await openBackgroundFix(
+        's-nb',
+        worktree,
+        new AbortController().signal,
+      );
+      fix.attach(
+        'fix-agent',
+        () => {},
+        (id) => id === 'fix-agent-child',
+      );
+      const inside = writeNotebook(path.join('wt', 'a.ipynb'), nb45([CODE_A]));
+      const outside = writeNotebook('b.ipynb', nb45([CODE_A]));
+      const build = (notebook_path: string) =>
+        buildInvocation({ notebook_path, cell_id: 'a', new_source: 'x = 2' });
+      expect(build(inside).requiresUserInteraction?.()).toBe(true);
+      expect(
+        await runWithAgentContext('fix-agent', async () =>
+          build(inside).requiresUserInteraction?.(),
+        ),
+      ).toBe(false);
+      // An agent the fix agent started is its own; another agent is not.
+      expect(
+        await runWithAgentContext('fix-agent-child', async () =>
+          build(inside).requiresUserInteraction?.(),
+        ),
+      ).toBe(false);
+      expect(
+        await runWithAgentContext('session-agent', async () =>
+          build(inside).requiresUserInteraction?.(),
+        ),
+      ).toBe(true);
+      expect(build(outside).requiresUserInteraction?.()).toBe(false);
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
   });
 
   it('rejects direct attempts to set internal modified notebook content params', () => {

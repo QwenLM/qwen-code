@@ -47,6 +47,23 @@ vi.mock('./lib/platform/aone.js', async (importOriginal) => {
   };
 });
 
+// The gh seam — `gh` is the one export that reaches a real `gh pr view`, and
+// it is a plain function on a frozen ESM namespace, so observing it needs a
+// module mock rather than a spy. `...actual` is load-bearing: the handler
+// harness below saves and restores the host through the REAL getGhHost /
+// setGhHost, so mocking those would break it (and asserting on them would be
+// a false red — the harness itself calls them).
+const { ghCallMock } = vi.hoisted(() => ({
+  ghCallMock: vi.fn(() => ''),
+}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghCallMock,
+  };
+});
+
 import {
   testPlanCommand,
   extractTestPlanSection,
@@ -1033,6 +1050,119 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('exit 1');
     });
 
+    it('settles a test claim by a related run, read as the suite it stands in for', () => {
+      const report = (exitCode: number, whole?: number) =>
+        ({
+          build: [],
+          test: [
+            ...(whole === undefined
+              ? []
+              : [
+                  {
+                    command: 'npm test --workspace="packages/core"',
+                    exitCode: whole,
+                    seconds: 3,
+                    timedOut: false,
+                    output: '',
+                  },
+                ]),
+            {
+              command:
+                'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+              exitCode,
+              seconds: 3,
+              timedOut: false,
+              output: '',
+            },
+          ],
+        }) as unknown as BuildTestReport;
+      const claim = (text: string, bt: BuildTestReport) =>
+        run(`## Test Plan\n\nRan \`${text}\``, [], bt).claims.find(
+          (c) => c.text === text,
+        );
+      // A failed related run contradicts, alone or beside a green whole one.
+      for (const bt of [report(1), report(1, 0)]) {
+        expect(claim('npm test', bt)).toMatchObject({
+          verdict: 'contradicted',
+          observed: 'exit 1',
+          note: 'this review ran the tests related to the diff (vitest related) and they failed',
+        });
+      }
+      expect(
+        claim('npm test --workspace="packages/cli"', report(1)),
+      ).toMatchObject({ verdict: 'contradicted', observed: 'exit 1' });
+      // A green one says it ran a part, never that it ran the suite.
+      expect(claim('npm test', report(0))).toMatchObject({
+        verdict: 'reproduces',
+        observed: 'exit 0',
+        note: 'this review ran only its tests related to the diff (vitest related), in packages/cli, and they passed',
+      });
+      expect(claim('npm test', report(0, 0))?.note).toBe(
+        // The whole-suite run settled the claim: the narrowed run beside it
+        // is not what the verdict rests on, so the note must not say it was.
+        'this review ran it',
+      );
+      // A claim no suite command settles is not one a related run settles.
+      expect(claim('npm run test:e2e', report(1))?.note).not.toContain(
+        'this review ran',
+      );
+      expect(
+        claim('npm test --workspace="packages/other"', report(1))?.note,
+      ).not.toContain('this review ran');
+    });
+
+    it('does not settle a claim by a related run that found no test', () => {
+      // vitest related exits 0 when it collects nothing; that run executed no
+      // test, so it certifies nothing about the claimed suite.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: 'No test files found, exiting with code 0',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const claim = run('## Test Plan\n\nRan `npm test`', [], bt).claims.find(
+        (c) => c.text === 'npm test',
+      );
+      expect(claim?.observed).toBeUndefined();
+      expect(claim?.note).not.toContain('this review ran');
+      expect(claim?.note).toBe('`test` is a defined script');
+    });
+
+    it('does not let an npm related run settle a pnpm or yarn claim', () => {
+      // The review ran npm, not the claimed package manager: its exit code is
+      // no evidence for `pnpm test` / `yarn test`.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      for (const claimText of ['pnpm test', 'yarn test']) {
+        const claim = run(
+          `## Test Plan\n\nRan \`${claimText}\``,
+          [],
+          bt,
+        ).claims.find((c) => c.text === claimText);
+        expect(claim?.note).not.toContain('this review ran');
+        expect(claim?.observed).toBeUndefined();
+        expect(claim?.note).toBe('`test` is a defined script');
+      }
+    });
+
     it('does not rule on a command killed by the deadline', () => {
       // A timeout is an infrastructure result, never a defect in the PR.
       const bt = {
@@ -1118,6 +1248,109 @@ describe('runTestPlan', () => {
           output: `Tests  ${n} passed (${n})`,
         })),
       }) as unknown as BuildTestReport;
+
+    it('says a differing count may come from a suite the review narrowed', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+        ],
+        relatedTests: ['packages/cli'],
+      } as unknown as BuildTestReport;
+      const claim = run(
+        '## Test Plan\n\n1351 tests passed',
+        [],
+        bt,
+      ).claims.find((c) => c.kind === 'count');
+      expect(claim?.verdict).toBe('differs');
+      expect(claim?.note).toContain(
+        'in packages/cli, this review ran only the tests related to the diff',
+      );
+      // A related run the deadline killed printed no count, so it is not what
+      // the differing number was measured against.
+      const killed = run('## Test Plan\n\n1351 tests passed', [], {
+        ...bt,
+        test: [
+          {
+            command: 'npm test --workspace="packages/core"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  472 passed (472)',
+          },
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: null,
+            seconds: 60,
+            timedOut: true,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport).claims.find((c) => c.kind === 'count');
+      expect(killed?.verdict).toBe('differs');
+      expect(killed?.note).not.toContain('related to the diff');
+    });
+
+    it('says a matching count came from a narrowed run', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const claim = run('## Test Plan\n\n312 tests passed', [], bt).claims.find(
+        (c) => c.kind === 'count',
+      );
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain(
+        'in packages/cli, this review ran only the tests related to the diff',
+      );
+    });
+
+    it('renders the root suite as the root package, not a bare dot', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+          {
+            command: 'npm exec --yes=false -- vitest related --run "a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  9 passed (9)',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const claim = run(
+        '## Test Plan\n\n1351 tests passed',
+        [],
+        bt,
+      ).claims.find((c) => c.kind === 'count');
+      expect(claim?.note).toContain('the root package');
+      expect(claim?.note).not.toContain('in .,');
+    });
 
     it('reproduces a count a suite in this review reported', () => {
       const r = run('## Test Plan\n\n471 tests passed', [], withCounts(471));
@@ -1349,6 +1582,14 @@ describe('the handler wiring — the integration point of the Aone fix', () => {
       29295886,
       'maxcompute/odps_src',
     );
+    // The "never touches gh" half of this pin's title. The two assertions
+    // above are satisfied by the reader alone, so an added `gh pr view`
+    // fallback (a dropped args.host, a handler reverted to runTestPlan)
+    // would still leave them green — only this one observes the gh seam.
+    // Targeted at `gh` itself, NOT getGhHost/setGhHost: the harness in this
+    // describe calls the real getGhHost/setGhHost to save and restore the
+    // host, so asserting on those would fail on the harness's own call.
+    expect(ghCallMock).not.toHaveBeenCalled();
   });
 
   it('a refused gate fails the command (exit 1) with the actionable message, before any fetch', async () => {

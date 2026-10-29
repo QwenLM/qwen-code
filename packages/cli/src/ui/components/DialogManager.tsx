@@ -160,6 +160,7 @@ export const DialogManager = ({
   if (uiState.loopDetectionConfirmationRequest) {
     return (
       <LoopDetectionConfirmation
+        cause={uiState.loopDetectionConfirmationRequest.cause}
         onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );
@@ -423,7 +424,7 @@ export const DialogManager = ({
   if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
-        <AuthDialog />
+        <AuthDialog availableTerminalHeight={listDialogHeight} />
       </Box>
     );
   }

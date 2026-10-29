@@ -21,8 +21,10 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import wrapAnsi from 'wrap-ansi';
 import { useRenderer, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { Logger } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import {
@@ -38,7 +40,11 @@ import {
 } from '../editors/editorSettingsManager.js';
 import { getScopeItems } from '../../config/dialogScopeUtils.js';
 import { t } from '../../i18n/index.js';
-import { wrappedRows, type DialogListItem } from './dialogs-core.js';
+import {
+  scrollDialogLayout,
+  wrappedRows,
+  type DialogListItem,
+} from './dialogs-core.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -71,6 +77,7 @@ export function Shell({
   children,
   borderStyle = 'rounded',
   shrinkable = false,
+  bodyLayout,
 }: {
   title: string;
   onClose?: () => void;
@@ -84,6 +91,7 @@ export function Shell({
    * body that would fit one row later.
    */
   shrinkable?: boolean;
+  bodyLayout?: ReturnType<typeof scrollDialogLayout>;
 }) {
   return (
     // The rule measured for the list-carrying dialog frames in the fixed
@@ -96,18 +104,22 @@ export function Shell({
     // (/diff's and /subagents' scrollboxes) must window that height from the
     // region budget rather than rely on the clip alone.
     <box
+      key={bodyLayout?.compact ? `compact-${bodyLayout.border}` : 'normal'}
       flexDirection="column"
       borderStyle={borderStyle}
+      border={bodyLayout?.border === false ? [] : true}
       borderColor={C.borderDefault}
       paddingLeft={1}
       paddingRight={1}
-      paddingTop={1}
-      paddingBottom={1}
+      paddingTop={bodyLayout?.compact ? 0 : 1}
+      paddingBottom={bodyLayout?.compact ? 0 : 1}
       flexShrink={shrinkable ? 1 : 0}
     >
-      <text fg={C.text} attributes={1}>
-        {title}
-      </text>
+      {!bodyLayout?.compact ? (
+        <text fg={C.text} attributes={1}>
+          {title}
+        </text>
+      ) : null}
       {children}
     </box>
   );
@@ -402,11 +414,13 @@ export function OpenTuiDeleteDialog({
   onClose,
   notify,
   availableTerminalHeight,
-}: P) {
+  logger,
+}: P & { logger?: Logger | null }) {
   const currentBranch = useGitBranchName(config?.getTargetDir() ?? '');
   const currentSessionId = config?.getSessionId() ?? '';
   const { handleDelete, handleDeleteMany } = useDeleteCommand({
     config: config ?? null,
+    logger,
     addItem: (item) => {
       if ('text' in item) {
         notify?.(String(item.text), item.type === 'error' ? 'error' : 'info');
@@ -525,17 +539,11 @@ export function OpenTuiDiffDialog({
   // inside it instead of painting past it.
   const regionHeight = clampDialogHeight(availableTerminalHeight);
   const { width } = useTerminalDimensions();
-  const bodyRows =
-    regionHeight === undefined
-      ? DIFF_BODY_ROWS
-      : Math.max(
-          1,
-          Math.min(
-            DIFF_BODY_ROWS,
-            regionHeight -
-              shellBodyChromeRows('Diff', dialogContentWidth(width)),
-          ),
-        );
+  const bodyLayout = scrollDialogLayout(
+    regionHeight,
+    shellBodyChromeRows('Diff', dialogContentWidth(width)),
+    DIFF_BODY_ROWS,
+  );
   const [lines, setLines] = useState<string[]>([]);
   useEffect(() => {
     if (sandboxed) return;
@@ -566,20 +574,29 @@ export function OpenTuiDiffDialog({
       alive = false;
     };
   }, [sandboxed]);
-  if (sandboxed) {
-    return (
-      <Shell title="Diff" onClose={onClose}>
-        <text fg={C.dim}>
-          Diff preview unavailable in tool sandbox. Run git diff through the
-          Shell tool.
-        </text>
-      </Shell>
-    );
-  }
   return (
-    <Shell title="Diff" onClose={onClose}>
-      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
-        {lines.length === 0 ? (
+    <Shell title="Diff" onClose={onClose} bodyLayout={bodyLayout}>
+      <scrollbox
+        key={`body-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+        height={bodyLayout.bodyRows}
+        marginTop={bodyLayout.compact ? 0 : 1}
+        flexShrink={1}
+        stickyScroll={false}
+        focused
+      >
+        {sandboxed ? (
+          wrapAnsi(
+            'Diff preview unavailable in tool sandbox. Run git diff through the Shell tool.',
+            Math.max(1, dialogContentWidth(width) - 1),
+            { hard: true, trim: false },
+          )
+            .split('\n')
+            .map((line, index) => (
+              <text key={index} height={1} flexShrink={0} fg={C.dim}>
+                {line}
+              </text>
+            ))
+        ) : lines.length === 0 ? (
           <text fg={C.dim}>{'no working-tree changes'}</text>
         ) : (
           lines.map((l, i) => (
@@ -617,17 +634,11 @@ export function OpenTuiSubagentListDialog({
   useEsc(onClose);
   const regionHeight = clampDialogHeight(availableTerminalHeight);
   const { width } = useTerminalDimensions();
-  const bodyRows =
-    regionHeight === undefined
-      ? SUBAGENTS_BODY_ROWS
-      : Math.max(
-          1,
-          Math.min(
-            SUBAGENTS_BODY_ROWS,
-            regionHeight -
-              shellBodyChromeRows('Subagents', dialogContentWidth(width)),
-          ),
-        );
+  const bodyLayout = scrollDialogLayout(
+    regionHeight,
+    shellBodyChromeRows('Subagents', dialogContentWidth(width)),
+    SUBAGENTS_BODY_ROWS,
+  );
   const [rows, setRows] = useState<Array<{ name: string; desc: string }>>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
@@ -663,8 +674,14 @@ export function OpenTuiSubagentListDialog({
     };
   }, [config]);
   return (
-    <Shell title="Subagents" onClose={onClose}>
-      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
+    <Shell title="Subagents" onClose={onClose} bodyLayout={bodyLayout}>
+      <scrollbox
+        key={`body-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+        height={bodyLayout.bodyRows}
+        marginTop={bodyLayout.compact ? 0 : 1}
+        flexShrink={1}
+        stickyScroll={false}
+      >
         {loading ? (
           <text fg={C.dim}>{'loading subagents…'}</text>
         ) : rows.length === 0 ? (

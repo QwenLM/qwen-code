@@ -116,7 +116,7 @@ Schema version 1。链以 `messageId` 为键。所有键都必填;可空的键�
 - `packages/core/src/managed-runtime/managed-session-records.ts`:续跑门禁。
 - `packages/core/src/managed-runtime/managed-child-operations.ts`:`childContinuationBody`。
 - `packages/core/src/managed-runtime/http-managed-session-store.ts`:`session_message_lineage_refused` 是可回滚的未提交。
-- `packages/sdk-java/managed-agent-server`:
+- `packages/managed-agent-server`:
   - `ManagedSessionMessageRecords`(新增):校验器。
   - `ManagedExtensionProjection`:记录体登记。
   - `ManagedExtensionRecordStore`:闭包、跨记录与血缘规则、事务内的 input 绑定,以及续跑规则。

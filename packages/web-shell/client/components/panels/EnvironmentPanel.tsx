@@ -120,9 +120,19 @@ function taskStatusKey(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   return `tasks.${status}` as const;
 }
 
+/**
+ * Statuses this panel renders with a spinner. The header's activity dot keys
+ * off the same set, so the dot cannot promise a row the panel shows settled.
+ */
+export function isTaskInProgress(
+  status: DaemonSessionTaskWithWorkflowStatus['status'],
+): boolean {
+  return status === 'running' || status === 'pausing';
+}
+
 function taskStatusIcon(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   if (status === 'completed') return <CircleCheckIcon />;
-  if (status === 'running' || status === 'pausing') {
+  if (isTaskInProgress(status)) {
     return <LoaderCircleIcon className={styles.statusRunning} />;
   }
   if (status === 'failed') return <CircleXIcon />;

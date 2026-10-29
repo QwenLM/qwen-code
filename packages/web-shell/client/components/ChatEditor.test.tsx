@@ -22,6 +22,10 @@ import type {
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 import { WebShellPortalRootContext } from '../portalRoot';
 import { PASTE_TITLE_MAX_CHARS } from '../utils/largePaste';
 
@@ -154,8 +158,6 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   imageDragActive: false,
-  navigatePrevHistory: vi.fn(),
-  navigateNextHistory: vi.fn(),
   hasContent: false,
   pendingImageBatchCount: 0,
   shellMode: false,
@@ -302,8 +304,6 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchInput: vi.fn(),
           handleSearchCompositionEnd: vi.fn(),
         },
-        navigatePrevHistory: composerCoreState.navigatePrevHistory,
-        navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
         disabled: Boolean(options?.disabled),
@@ -379,8 +379,6 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
-  composerCoreState.navigatePrevHistory.mockReset();
-  composerCoreState.navigateNextHistory.mockReset();
   composerCoreState.setShellMode.mockReset();
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
@@ -410,6 +408,7 @@ interface ChatEditorRenderProps
     | 'btwEnabled'
     | 'isPreparing'
     | 'contextChipPlacement'
+    | 'gitContextControl'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
     | 'workspaceSelectionDisabled'
@@ -434,14 +433,19 @@ interface ChatEditorRenderProps
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
+  availableModes?: ComponentProps<typeof ChatEditor>['availableModes'];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
+  planControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
   onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
   onCancel?: () => void;
   currentModel?: string;
+  modelControlsDisabled?: boolean;
   availableModels?: Array<{ id: string; label?: string }>;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -454,6 +458,7 @@ interface ChatEditorRenderProps
   }) => void;
   tokenCount?: number;
   contextWindow?: number;
+  contextUsageKnown?: boolean;
   onShowContextUsage?: () => void;
   contextUsageAlwaysVisible?: boolean;
   commands?: ComponentProps<typeof ChatEditor>['commands'];
@@ -461,6 +466,7 @@ interface ChatEditorRenderProps
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
+  fileUploadTarget?: ComponentProps<typeof ChatEditor>['fileUploadTarget'];
   attachmentsEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
@@ -551,6 +557,274 @@ function rerenderChatEditor(
   if (!entry) throw new Error('container is not mounted by renderChatEditor');
   renderChatEditorInto(entry.root, entry.portalRoot, props);
 }
+
+describe('ChatEditor simple composer', () => {
+  const simple = { composerVariant: 'simple' } as const;
+
+  async function openSimpleMenu(container: HTMLDivElement) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="composer-add-menu-trigger"]',
+        )!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    return portalRoot;
+  }
+
+  it('provides the add entry in simple mode without changing the default', () => {
+    const defaults = renderChatEditor({});
+    const explicitDefault = renderChatEditor({
+      customization: { composerVariant: 'default' },
+    });
+    const compact = renderChatEditor({
+      customization: simple,
+      visibleToolbarActions: ['voice'],
+    });
+
+    for (const container of [defaults, explicitDefault]) {
+      expect(
+        container.querySelector('[data-web-shell-composer-variant="simple"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+      ).toBeNull();
+    }
+    expect(
+      compact.querySelector('[data-web-shell-composer-variant="simple"]'),
+    ).not.toBeNull();
+    expect(
+      compact.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).not.toBeNull();
+    expect(
+      compact.querySelector('[data-web-shell-composer-editor]'),
+    ).not.toBeNull();
+  });
+
+  it('preserves the editor mount when switching between variants', () => {
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]');
+    expect(editor).not.toBeNull();
+
+    rerenderChatEditor(container, { customization: simple });
+    expect(container.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+
+    rerenderChatEditor(container, {
+      customization: { composerVariant: 'default' },
+    });
+    expect(container.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+  });
+
+  it('keeps the editor and controls mounted throughout simple voice capture', () => {
+    const container = renderChatEditor({
+      customization: simple,
+      visibleToolbarActions: ['voice'],
+    });
+    const composer = container.querySelector('[data-web-shell-composer]')!;
+    const editor = composer.querySelector('[data-web-shell-composer-editor]');
+    const add = composer.querySelector(
+      '[data-testid="composer-add-menu-trigger"]',
+    );
+    const submit = composer.querySelector('[data-web-shell-composer-submit]');
+    expect(editor).not.toBeNull();
+    expect(add).not.toBeNull();
+    expect(submit).not.toBeNull();
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(composer.hasAttribute('data-web-shell-simple-voice-active')).toBe(
+      true,
+    );
+    expect(composer.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+    expect(
+      composer.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBe(add);
+    expect(composer.querySelector('[data-web-shell-composer-submit]')).toBe(
+      submit,
+    );
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(composer.hasAttribute('data-web-shell-simple-voice-active')).toBe(
+      false,
+    );
+    expect(composer.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+    expect(
+      composer.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBe(add);
+    expect(composer.querySelector('[data-web-shell-composer-submit]')).toBe(
+      submit,
+    );
+  });
+
+  it.each(['session', 'images'] as const)(
+    'keeps the idle microphone hidden while preparing %s without hiding active capture',
+    (source) => {
+      composerCoreState.hasContent = false;
+      composerCoreState.pendingImageBatchCount = source === 'images' ? 1 : 0;
+      const props = {
+        customization: simple,
+        visibleToolbarActions: ['voice'] as const,
+        isPreparing: source === 'session',
+      };
+      const container = renderChatEditor(props);
+      const voice = container.querySelector<HTMLElement>(
+        '[data-web-shell-simple-voice]',
+      )!;
+      expect(voice.hidden).toBe(true);
+      expect(
+        container.querySelector('[data-web-shell-simple-idle]'),
+      ).toBeNull();
+      const submit = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+      expect(submit.disabled).toBe(true);
+      expect(submit.getAttribute('aria-label')).toBe('Loading...');
+
+      act(() => voiceButtonState.onActiveChange?.(true));
+      expect(voice.hidden).toBe(false);
+      act(() => voiceButtonState.onActiveChange?.(false));
+      expect(voice.hidden).toBe(true);
+
+      composerCoreState.pendingImageBatchCount = 0;
+      rerenderChatEditor(container, { ...props, isPreparing: false });
+      expect(voice.hidden).toBe(false);
+      expect(
+        container.querySelector('[data-web-shell-simple-idle]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it('keeps advanced and host controls out of the simple menu', async () => {
+    const props: ChatEditorRenderProps = {
+      customization: {
+        ...simple,
+        renderComposerToolbarStart: () => <button>Host start action</button>,
+        renderComposerToolbarEnd: () => <button>Host end action</button>,
+        renderComposerToolbarRight: () => <button>Host right action</button>,
+      },
+      visibleToolbarActions: ['approvalMode', 'model', 'contextUsage'],
+      availableModels: [{ id: 'qwen', label: 'Qwen' }],
+      contextUsageAlwaysVisible: true,
+      onShowContextUsage: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+
+    expect(container.querySelector('[data-web-shell-mode-button]')).toBeNull();
+    expect(container.querySelector('[data-web-shell-model-button]')).toBeNull();
+    expect(container.textContent).not.toContain('Host start action');
+    const menu = await openSimpleMenu(container);
+    expect(menu.querySelector('[data-web-shell-mode-button]')).toBeNull();
+    expect(menu.querySelector('[data-web-shell-model-button]')).toBeNull();
+    expect(menu.querySelector('[data-web-shell-context-usage]')).toBeNull();
+    expect(menu.textContent).not.toContain('Host start action');
+    expect(menu.textContent).not.toContain('Host end action');
+    expect(menu.textContent).not.toContain('Host right action');
+
+    rerenderChatEditor(container, {
+      ...props,
+      customization: { ...props.customization, composerVariant: 'default' },
+    });
+    expect(
+      container.querySelector('[data-web-shell-mode-button]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-model-button]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-context-usage]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Host start action');
+    expect(container.textContent).toContain('Host end action');
+    expect(container.textContent).toContain('Host right action');
+  });
+
+  it('keeps excluded optional actions out of the simple input and menu', async () => {
+    const container = renderChatEditor({
+      customization: simple,
+      visibleToolbarActions: [],
+      availableModels: [{ id: 'qwen' }],
+    });
+    const menu = await openSimpleMenu(container);
+    for (const root of [container, menu]) {
+      expect(root.querySelector('[data-web-shell-mode-button]')).toBeNull();
+      expect(root.querySelector('[data-web-shell-model-button]')).toBeNull();
+      expect(root.querySelector('[data-testid="voice-button"]')).toBeNull();
+    }
+  });
+
+  it('preserves send, disabled, and running cancellation behavior', () => {
+    composerCoreState.hasContent = true;
+    const onCancel = vi.fn();
+    const props = { customization: simple, onCancel };
+    const container = renderChatEditor(props);
+    const submit = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+    expect(submit().disabled).toBe(false);
+    act(() => submit().click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+    rerenderChatEditor(container, { ...props, disabled: true });
+    expect(submit().disabled).toBe(true);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!.disabled,
+    ).toBe(true);
+
+    composerCoreState.hasContent = false;
+    rerenderChatEditor(container, { ...props, isRunning: true });
+    expect(submit().disabled).toBe(false);
+    act(() => submit().click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+  });
+
+  it('ingests session attachments from the simple add menu', async () => {
+    const container = renderChatEditor({
+      customization: simple,
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: true,
+    });
+    const menu = await openSimpleMenu(container);
+    await act(async () => {
+      menu
+        .querySelector<HTMLElement>('[data-testid="composer-add-menu-file"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const file = new File(['simple attachment'], 'note.txt', {
+      type: 'text/plain',
+    });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    Object.defineProperty(input, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await act(async () => {
+      menu
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([file]);
+  });
+});
 
 describe('ChatEditor voice toolbar integration', () => {
   it('keeps dictation and Live together when the host toolbar allows voice', () => {
@@ -970,6 +1244,48 @@ describe('ChatEditor context usage ring', () => {
       '[data-web-shell-context-usage]',
     );
 
+  it('shows observed zero and enables a read-only popup without inventing action handlers', async () => {
+    const container = renderChatEditor({
+      tokenCount: 0,
+      contextWindow: 1000,
+      contextUsageKnown: true,
+      visibleToolbarActions: ['contextUsage'],
+    });
+    expect(ring(container)!.disabled).toBe(false);
+    expect(ring(container)!.textContent).toBe('0.0%');
+    await act(async () => ring(container)!.click());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')?.textContent).toContain('0 tokens');
+    expect(card.querySelectorAll('button')).toHaveLength(0);
+    await act(async () => ring(container)!.click());
+    expect(
+      document.querySelector('[data-web-shell-context-popover]'),
+    ).toBeNull();
+  });
+
+  it('keeps explicit unknown separate from Local inferred counts and preserves the Local details action', async () => {
+    const openDetails = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 123,
+      contextWindow: 1000,
+      contextUsageKnown: false,
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage: openDetails,
+    });
+    expect(ring(container)!.textContent).toBe('');
+    await act(async () => ring(container)!.click());
+    expect(openDetails).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-web-shell-context-popover]'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      tokenCount: 123,
+      contextWindow: 1000,
+      onOpenContextUsage: openDetails,
+    });
+    expect(ring(container)!.textContent).toBe('12.3%');
+  });
+
   it('renders in toolbarRight before the voice actions', () => {
     const container = renderChatEditor({
       tokenCount: 34_298,
@@ -1082,7 +1398,27 @@ describe('ChatEditor context usage ring', () => {
     expect(getContextUsage).not.toHaveBeenCalled();
   });
 
-  it('opens the context breakdown when clicked', () => {
+  it('opens the details panel when clicked', () => {
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onOpenContextUsage).toHaveBeenCalledTimes(1);
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a transcript snapshot when the host has no details panel', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
       tokenCount: 100,
@@ -1097,6 +1433,24 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the conversation hint once the click opens the details panel', async () => {
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).not.toContain(
+      'Click to view the breakdown in the conversation.',
+    );
   });
 
   it('shows the used/total detail in the hover card on focus', async () => {
@@ -1500,9 +1854,11 @@ describe('ChatEditor attachment reporting', () => {
       '[data-web-shell-composer-images]',
     );
     const editor = container.querySelector('[data-web-shell-composer-editor]');
-    expect(imageStrip?.parentElement).toBe(
-      editor?.parentElement?.parentElement,
+    const content = container.querySelector(
+      '[data-web-shell-composer-content]',
     );
+    expect(imageStrip?.parentElement).toBe(content);
+    expect(editor?.closest('[data-web-shell-composer-content]')).toBe(content);
     act(() => img!.click());
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
@@ -1681,6 +2037,16 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
     ).toBe(true);
+    renderChatEditor({
+      composerScopeKey: 'managed:tenant:actor:session',
+      workspaceFeaturesEnabled: false,
+      disableLegacyHistoryFallback: true,
+      shellModeEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+    expect(latestComposerCoreOptions.current?.shellModeEnabled).toBe(false);
   });
 
   it('shows the workspace indicator when the workspace action is visible', () => {
@@ -1699,6 +2065,23 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('retains the native Workspace selector for a sole explicit Managed choice', () => {
+    const container = renderChatEditor({
+      workspaces: [
+        { id: 'ws-a', cwd: 'ws-a', label: 'A', primary: false, trusted: true },
+      ],
+      onSelectWorkspace: vi.fn(),
+      workspaceSelectorAlwaysVisible: true,
+      contextChipPlacement: 'below',
+      visibleToolbarActions: ['workspace'],
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-composer-context-row] button[aria-label="Workspace"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -1811,6 +2194,30 @@ describe('ChatEditor context chip placement', () => {
     expect(
       toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
     ).toBeNull();
+  });
+
+  it('places a service-owned Git control beside the workspace without a Local Git picker', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    )!;
+    expect(row.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      container
+        .querySelector('[data-web-shell-composer-surface]')!
+        .contains(row),
+    ).toBe(false);
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
   });
 
   it('leaves the workspace to the header and keeps git in the toolbar', () => {
@@ -2743,6 +3150,84 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     ).toBeNull();
   });
 
+  it('disables a pinned model and closes an existing model menu without changing Local defaults', () => {
+    const select = vi.fn();
+    const props = {
+      visibleToolbarActions: ['model'] as const,
+      currentModel: 'pinned-model',
+      availableModels: [{ id: 'pinned-model' }, { id: 'other-model' }],
+      onSelectModel: select,
+    };
+    const container = renderChatEditor(props);
+    const trigger = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-button]',
+      )!;
+    expect(trigger().disabled).toBe(false);
+    act(() => trigger().click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, modelControlsDisabled: true });
+    expect(trigger().disabled).toBe(true);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    act(() => trigger().click());
+    expect(select).not.toHaveBeenCalled();
+    rerenderChatEditor(container, props);
+    act(() => trigger().click());
+    const option = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ].find((button) => button.textContent?.includes('other-model'))!;
+    act(() => option.click());
+    expect(select).toHaveBeenCalledWith('other-model');
+  });
+
+  it('filters policies for a host while retaining all Local policies when omitted', () => {
+    const onSelectMode = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      currentMode: 'default',
+      onSelectMode,
+    };
+    const container = renderChatEditor({
+      ...props,
+      availableModes: ['default', 'auto-edit'],
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const choices = () => [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ];
+    expect(choices().map((item) => item.textContent)).toHaveLength(2);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Classifier');
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Full Access');
+    const edit = choices().find((item) =>
+      item.textContent?.includes('Auto Edit'),
+    )!;
+    act(() => edit.click());
+    expect(onSelectMode).toHaveBeenCalledWith('auto-edit');
+    rerenderChatEditor(container, props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    expect(choices()).toHaveLength(4);
+  });
+
   it('omits Plan from permissions and retains every execution policy', () => {
     const onSelectMode = vi.fn();
     const container = renderChatEditor({
@@ -2778,6 +3263,544 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
         .querySelector('[data-web-shell-plan-button]')
         ?.getAttribute('aria-checked'),
     ).toBe('true');
+  });
+
+  it('renders only the supplied mode choices and retains the actual current mode', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      currentMode: 'yolo',
+      availableModes: ['auto', 'plan', 'default', 'unsupported', 'auto'],
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    expect(trigger.textContent).toContain('Full Access');
+    act(() => trigger.click());
+    const labels = Array.from(
+      document.querySelectorAll('[data-web-shell-toolbar-popover] button'),
+    ).map((button) => button.textContent);
+    expect(labels).toHaveLength(2);
+    expect(labels[0]).toContain('(default)');
+    expect(labels[1]).toContain('(auto)');
+  });
+
+  it('disables the mode picker for an empty list', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      availableModes: [],
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.disabled,
+    ).toBe(true);
+  });
+
+  it('closes an open mode dropdown when the list becomes empty', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    act(() => modeButton.click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    // The list emptying while the trigger holds focus must hand focus to the
+    // composer; a disabled button cannot keep it and the body must not get it.
+    act(() => modeButton.focus());
+    // A real browser blurs a focused button to the body the moment it becomes
+    // disabled; jsdom never does, so emulate the loss explicitly. The handoff
+    // must still find the composer.
+    act(() => modeButton.blur());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.disabled,
+    ).toBe(true);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('leaves focus alone when the list is empty from the start', () => {
+    renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      availableModes: [],
+    });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to the composer when a narrowing list unmounts the focused row', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto', 'yolo'],
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const rows = () =>
+      document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-mode-popover] button[title]',
+      );
+    expect(rows()).toHaveLength(3);
+    act(() => rows()[2]!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      availableModes: ['default', 'auto'],
+    });
+    // The picker stays open with the surviving rows; focus cannot stay on the
+    // removed row, so it is handed on rather than dropped to the body.
+    expect(rows()).toHaveLength(2);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('keeps focus on a row that survives a narrowing', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto', 'yolo'],
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const rows = () =>
+      document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-mode-popover] button[title]',
+      );
+    expect(rows()).toHaveLength(3);
+    act(() => rows()[0]!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      availableModes: ['default', 'auto'],
+    });
+    expect(rows()).toHaveLength(2);
+    expect(document.activeElement).toBe(rows()[0]);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('leaves the composer unfocused when the mode list widens with no row lost', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default'],
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    act(() => modeButton.focus());
+    // A blur that lands nowhere (reading transcript text, say) keeps the
+    // ownership record; a widening loses no row and must not steal focus
+    // back to the composer.
+    act(() => modeButton.blur());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      availableModes: ['default', 'auto'],
+    });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to the composer when the list empties after a narrowing kept the focused row', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto', 'yolo'],
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const rows = () =>
+      document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-mode-popover] button[title]',
+      );
+    expect(rows()).toHaveLength(3);
+    act(() => rows()[0]!.focus());
+    composerCoreState.focus.mockClear();
+    // The narrowing keeps the focused row: focus stays put, and the
+    // ownership record must survive for the handoff a later emptying owes.
+    rerenderChatEditor(container, {
+      ...props,
+      availableModes: ['default', 'auto'],
+    });
+    expect(rows()).toHaveLength(2);
+    expect(document.activeElement).toBe(rows()[0]);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    // A real browser drops an unmounted row's focus to the body; emulate the
+    // loss explicitly, as jsdom never fires that blur.
+    act(() => rows()[0]!.blur());
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      flip: { modeControlsDisabled: true },
+      label: 'the controls lock',
+    },
+    {
+      flip: {
+        modeControlsDisabled: true,
+        availableModes: [] as string[],
+      },
+      label: 'the controls lock and the list empties',
+    },
+  ])(
+    'hands focus from an open picker row to the composer when $label',
+    ({ flip }) => {
+      const props = {
+        visibleToolbarActions: ['approvalMode'] as const,
+        availableModes: ['default', 'auto'],
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+          .click(),
+      );
+      const row = document.querySelector<HTMLElement>(
+        '[data-web-shell-mode-popover] button[title]',
+      )!;
+      act(() => row.focus());
+      composerCoreState.focus.mockClear();
+      // The picker's rows are portaled, so they are never inside the toolbar;
+      // the handoff must still find them through the ownership record.
+      rerenderChatEditor(container, { ...props, ...flip });
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    },
+  );
+
+  it('leaves an open model dropdown alone when the mode list empties', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }, { id: 'other' }],
+      currentModel: 'qwen',
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+        .click(),
+    );
+    const popover = () =>
+      document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover()).not.toBeNull();
+    const option = popover()!.querySelector<HTMLElement>('button[title]')!;
+    act(() => option.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(popover()).not.toBeNull();
+  });
+
+  it.each([
+    { flip: { disabled: true }, label: 'the input is disabled' },
+    { flip: { modeControlsDisabled: true }, label: 'the mode controls lock' },
+  ])(
+    'leaves an open model dropdown alone with an empty list when $label',
+    ({ flip }) => {
+      const props = {
+        visibleToolbarActions: ['approvalMode', 'model'] as const,
+        availableModes: [] as string[],
+        availableModels: [{ id: 'qwen' }, { id: 'other' }],
+        currentModel: 'qwen',
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+          .click(),
+      );
+      const popover = () =>
+        document.querySelector('[data-web-shell-toolbar-popover]');
+      expect(popover()).not.toBeNull();
+      const option = popover()!.querySelector<HTMLElement>('button[title]')!;
+      act(() => option.focus());
+      composerCoreState.focus.mockClear();
+      rerenderChatEditor(container, { ...props, ...flip });
+      expect(composerCoreState.focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(option);
+      expect(popover()).not.toBeNull();
+    },
+  );
+
+  it('does not pull focus from another editor instance when its own list empties', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const first = renderChatEditor(props);
+    act(() =>
+      first
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const row = document.querySelector<HTMLElement>(
+      '[data-web-shell-mode-popover] button[title]',
+    )!;
+    act(() => row.focus());
+    const second = renderChatEditor(props);
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(second, { ...props, availableModes: [] });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(row);
+    expect(
+      document.querySelector('[data-web-shell-mode-popover]'),
+    ).not.toBeNull();
+  });
+
+  it('does not pull focus from another instance when this one holds a stale ownership record', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const first = renderChatEditor(props);
+    const firstButton = first.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    // This instance's control held focus and lost it to nowhere, so its
+    // ownership record outlives the focus...
+    act(() => firstButton.focus());
+    act(() => firstButton.blur());
+    // ...while the user moves on to another instance's open picker.
+    const second = renderChatEditor(props);
+    act(() =>
+      second
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const row = document.querySelector<HTMLElement>(
+      '[data-web-shell-mode-popover] button[title]',
+    )!;
+    act(() => row.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(first, { ...props, availableModes: [] });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('hands focus past a disabled model control when the list empties', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }],
+      currentModel: 'qwen',
+      modelControlsDisabled: true,
+      disabled: true,
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+    expect(modelButton.disabled).toBe(true);
+    act(() => modeButton.focus());
+    const modelFocus = vi.spyOn(modelButton, 'focus');
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    // The disabled model control cannot take focus, and with the input
+    // disabled too the handoff goes nowhere rather than to a dead target.
+    expect(modelFocus).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to an enabled model control when the list empties with the input disabled', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }],
+      currentModel: 'qwen',
+      disabled: true,
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+    expect(modelButton.disabled).toBe(false);
+    act(() => modeButton.focus());
+    const modelFocus = vi.spyOn(modelButton, 'focus');
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(modelFocus).toHaveBeenCalled();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the composer on a coarse pointer when no toolbar control can take focus', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    act(() => modeButton.focus());
+    composerCoreState.focus.mockClear();
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      rerenderChatEditor(container, { ...props, availableModes: [] });
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('hands focus to an enabled toolbar control rather than the composer on a coarse pointer', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }],
+      currentModel: 'qwen',
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+    expect(modelButton.disabled).toBe(false);
+    act(() => modeButton.focus());
+    const modelFocus = vi.spyOn(modelButton, 'focus');
+    composerCoreState.focus.mockClear();
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      rerenderChatEditor(container, { ...props, availableModes: [] });
+      // A programmatic composer focus outside a gesture claims the active
+      // element on touch devices without raising the keyboard; an enabled
+      // toolbar control takes the handoff instead.
+      expect(modelFocus).toHaveBeenCalled();
+      expect(composerCoreState.focus).not.toHaveBeenCalled();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('does not hand focus to a busy plan chip when the list empties on a coarse pointer', () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['addMenu', 'approvalMode', 'plan'] as const,
+      availableModes: ['default', 'auto'],
+      planMode: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-chip]',
+    )!;
+    expect(chip.getAttribute('aria-disabled')).toBeNull();
+    act(() => modeButton.focus());
+    const chipFocus = vi.spyOn(chip, 'focus');
+    composerCoreState.focus.mockClear();
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      // The mode change's round trip is still in flight when the list
+      // empties: the busy chip is inert and must not take the handoff.
+      rerenderChatEditor(container, {
+        ...props,
+        availableModes: [],
+        modeControlsDisabled: true,
+      });
+      expect(chip.getAttribute('aria-disabled')).toBe('true');
+      expect(chipFocus).not.toHaveBeenCalled();
+      expect(document.activeElement).not.toBe(chip);
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('can disable Plan independently while keeping execution approval selectable', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      planControlsDisabled: true,
+      planMode: true,
+      currentMode: 'default',
+      onSelectMode,
+      onTogglePlan,
+    });
+    const plan = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    );
+    expect(plan?.disabled).toBe(true);
+    act(() => plan!.click());
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const choice = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Full Access'));
+    expect(choice).toBeDefined();
+    act(() => choice!.click());
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    expect(onTogglePlan).not.toHaveBeenCalled();
   });
 
   it('keeps permission and Plan controls operable while approval disables input', () => {
@@ -3231,6 +4254,70 @@ describe('ChatEditor toolbar popovers', () => {
     },
   );
 
+  it.each([
+    ['official', ['low', 'high', 'max']],
+    ['maas-pro', ['high', 'max']],
+  ] as const)(
+    'renders only supported DeepSeek %s efforts with off and default controls',
+    async (route, efforts) => {
+      const onSelectReasoningEffort = vi.fn();
+      const props: ChatEditorRenderProps = {
+        visibleToolbarActions: ['model'],
+        currentModel: route,
+        availableModels: [{ id: route, label: 'DeepSeek' }],
+        reasoning: {
+          enabled: true,
+          effort: 'high',
+          defaultEffort: 'high',
+          efforts: [...efforts],
+        },
+        onSelectReasoningEffort,
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const controls = document.querySelector(
+        '[data-web-shell-model-reasoning]',
+      );
+      expect(
+        Array.from(
+          controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+        ).map((button) => button.getAttribute('data-web-shell-effort')),
+      ).toEqual(efforts);
+      await act(async () =>
+        controls
+          ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      await act(async () =>
+        controls
+          ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(
+        'none',
+        'toggle',
+      );
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, enabled: false, effort: 'none' },
+      });
+      await act(async () =>
+        document
+          .querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(
+        'high',
+        'toggle',
+      );
+    },
+  );
+
   it('localizes every fixed effort tier after a runtime language change', () => {
     const props: ChatEditorRenderProps = {
       visibleToolbarActions: ['model'],
@@ -3338,6 +4425,156 @@ describe('ChatEditor toolbar popovers', () => {
     ).find((button) => button.textContent?.includes(modelLabel));
     expect(option).not.toBeUndefined();
     expect(option?.title).toBe(modelLabel);
+  });
+
+  it('renders host-injected models as disabled and ignores their selection', () => {
+    const onSelectModel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [
+        { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+      ],
+      onSelectModel,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    const disabled = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+    );
+    expect(disabled?.getAttribute('aria-disabled')).toBe('true');
+    expect(disabled?.textContent).toContain('Qwen Max');
+    expect(
+      disabled?.querySelector('[data-web-shell-unavailable-model-lock]'),
+    ).not.toBeNull();
+    act(() => disabled?.click());
+    expect(onSelectModel).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+
+    const available = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes('Qwen Plus'));
+    act(() => available?.click());
+    expect(onSelectModel).toHaveBeenCalledWith('qwen-plus');
+  });
+
+  it('shows a host string tooltip on focus of a disabled model', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [
+        { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+      ],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    const disabled = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+    );
+    act(() => disabled?.focus());
+    const hint = document.querySelector(
+      '[data-web-shell-unavailable-model-tooltip]',
+    );
+    expect(
+      hint?.querySelector('[data-web-shell-unavailable-model-title]')
+        ?.textContent,
+    ).toBe('Qwen Max');
+    expect(hint?.textContent).toContain('Need Pro');
+  });
+
+  it('mounts host tooltip content and keeps the picker open when a button is clicked', () => {
+    const onSelectModel = vi.fn();
+    const authorize = vi.fn();
+    const mount: WebShellUnavailableModelTooltipMount = (container, info) => {
+      const button = container.ownerDocument.createElement('button');
+      button.type = 'button';
+      button.textContent = `Authorize ${info.model.id}`;
+      button.addEventListener('click', () => authorize(info.model.id));
+      container.append(button);
+      return {
+        update() {},
+        dispose() {
+          container.replaceChildren();
+        },
+      };
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      mountUnavailableModelTooltip: mount,
+      onSelectModel,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    const disabled = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+    );
+    act(() => disabled?.focus());
+    const authorizeButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-unavailable-model-tooltip] button',
+      ),
+    ).find((button) => button.textContent === 'Authorize qwen-max');
+    expect(authorizeButton).toBeDefined();
+    act(() => authorizeButton?.click());
+    expect(authorize).toHaveBeenCalledWith('qwen-max');
+    expect(onSelectModel).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps disabled models visible in search results', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    );
+    act(() => {
+      if (!search) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      valueSetter?.call(search, 'Max');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(
+      document.querySelector(
+        '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+      ),
+    ).not.toBeNull();
   });
 
   it('switches between sibling toolbar popovers without dismissing the target', async () => {
@@ -3576,6 +4813,24 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
   });
 
+  it('hides the mobile Shell entry for Managed while retaining the ordinary default', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      shellModeEnabled: false,
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-editing-actions]'),
+    ).not.toBeNull();
+    const shellButton = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Shell mode',
+      );
+    expect(shellButton()).toBeUndefined();
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(shellButton()).toBeDefined();
+  });
+
   it('returns focus to the composer after entering Shell from the drawer', async () => {
     mobileComposer('draft');
     renderChatEditor({ visibleToolbarActions: ['addMenu'] });
@@ -3587,36 +4842,6 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       document.querySelector('[data-web-shell-mobile-add-menu]'),
     ).toBeNull();
-  });
-
-  it('calls history navigation directly without submitting or moving focus', async () => {
-    const backend = mobileComposer('working draft');
-    const onSubmit = vi.fn();
-    const container = renderChatEditor({ onSubmit });
-    act(() => backend.textareaRef.current!.focus());
-    const previous = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Previous input"]',
-    )!;
-    const pointerDown = new Event('pointerdown', {
-      bubbles: true,
-      cancelable: true,
-    });
-    previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(false);
-    const mouseDown = new MouseEvent('mousedown', {
-      bubbles: true,
-      cancelable: true,
-    });
-    previous.dispatchEvent(mouseDown);
-    expect(mouseDown.defaultPrevented).toBe(true);
-    composerCoreState.focus.mockClear();
-    await clickButton('Previous input');
-    await clickButton('Next input');
-    expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledOnce();
-    expect(composerCoreState.navigateNextHistory).toHaveBeenCalledOnce();
-    expect(composerCoreState.focus).not.toHaveBeenCalled();
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(backend.textareaRef.current);
   });
 
   it('prevents mousedown default on the remaining migrated buttons', async () => {
@@ -3659,18 +4884,17 @@ describe('ChatEditor mobile composer actions', () => {
     );
   });
 
-  it('disables both history buttons when the composer is disabled', () => {
+  it('disables the editing row actions when the composer is disabled', () => {
     mobileComposer('draft');
     const container = renderChatEditor({ disabled: true });
-    for (const label of ['Previous input', 'Next input', 'Expand editor']) {
+    for (const label of ['Input history', 'Expand editor']) {
       const button = container.querySelector<HTMLButtonElement>(
         `[aria-label="${label}"]`,
       )!;
       expect(button.disabled).toBe(true);
       act(() => button.click());
     }
-    expect(composerCoreState.navigatePrevHistory).not.toHaveBeenCalled();
-    expect(composerCoreState.navigateNextHistory).not.toHaveBeenCalled();
+    expect(composerCoreState.openHistorySearch).not.toHaveBeenCalled();
   });
 
   it.each([['approvalMode', 'model'], ['commands']] as const)(
@@ -3754,6 +4978,25 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       container.querySelector('[data-web-shell-context-usage]'),
     ).not.toBeNull();
+  });
+
+  it('keeps the service-owned Git control once in the mobile context row', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+      visibleToolbarActions: [],
+    });
+    const row = container.querySelector('[class*="mobileContextRow"]')!;
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
   });
 
   it.each([{ sessionId: 'b' }, { atWorkspaceCwd: '/b' }, { disabled: true }])(
@@ -4067,12 +5310,6 @@ describe('ChatEditor mobile composer actions', () => {
     }
   });
 
-  it('keeps the history arrow controls out of the desktop composer', () => {
-    const container = renderChatEditor({});
-    expect(container.querySelector('[aria-label="Previous input"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Next input"]')).toBeNull();
-  });
-
   it('gates the drawer Live entry by support and host voice opt-in and opens the controlled dialog', async () => {
     mobileComposer();
     const props: ChatEditorRenderProps = {
@@ -4320,6 +5557,57 @@ describe('ChatEditor file upload gating', () => {
     expect(
       container.querySelector('[data-web-shell-upload-input]'),
     ).not.toBeNull();
+  });
+
+  it('uploads through an explicit Managed target without enabling daemon features', async () => {
+    const metadata = { managedUpload: { source: 'managed-workspace' } };
+    const client = {
+      uploadWorkspaceFile: vi.fn(async () => ({
+        kind: 'file_upload' as const,
+        path: 'a.pdf',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}` as const,
+      })),
+    };
+    const target = {
+      client,
+      targetKey: 'managed-workspace',
+      maxBytes: 8 * 1024 * 1024,
+      createReference: (path: string): WebShellComposerTag => ({
+        id: `file:${path}`,
+        kind: 'file',
+        value: path,
+        serialized: `@${path}`,
+        metadata,
+      }),
+    };
+    const container = renderChatEditor({
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: false,
+      fileUploadTarget: target,
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+    expect(input).not.toBeNull();
+    act(() => composerCoreState.onFileUploadRequest?.('.'));
+    Object.defineProperty(input, 'files', {
+      value: [new File(['pdf'], 'a.pdf')],
+    });
+    await act(async () =>
+      input.dispatchEvent(new Event('change', { bubbles: true })),
+    );
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ value: 'a.pdf', metadata })],
+      { placement: 'inline', position: 'end' },
+    );
+    rerenderChatEditor(container, {
+      workspaceFeaturesEnabled: false,
+      fileUploadTarget: target,
+      customization: { fileUploadEnabled: false },
+    });
+    expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
   });
 
   it('fileUploadEnabled={false} force-disables even with the capability', () => {
