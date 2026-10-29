@@ -88,7 +88,15 @@ const VOLATILE_KEYS = new Set([
   'endedAt',
   'executionId',
   'executionDurationMs',
+  'apiTimeMs',
+  // Holds only the plan's random id.
+  'qwenTodoPlan',
 ]);
+
+// The current loop runs a Stop-hook or Todo Stop Guard continuation under a
+// prompt id of its own; the shared loop's client keeps the turn's.
+const CONTINUATION_PROMPT_ID =
+  /(########\d+)_(?:stop_hook|todo_stop_guard)_\d+/g;
 
 const DATE_REMINDER = '<system-reminder>\nThe current date is:';
 
@@ -116,7 +124,8 @@ function withoutDateReminder(content: unknown): unknown {
 function normalize(value: unknown, dir: string, sessionId = ''): unknown {
   let text = JSON.stringify(value ?? null)
     .split(dir)
-    .join('<DIR>');
+    .join('<DIR>')
+    .replace(CONTINUATION_PROMPT_ID, '$1');
   if (sessionId) text = text.split(sessionId).join('<SESSION>');
   const replaced = JSON.parse(text);
   const strip = (node: unknown): unknown => {
@@ -345,6 +354,10 @@ const allowOnce = () => ({
           } catch (error) {
             send({ id, error: { code: -32000, message: String(error) } });
           }
+        } else if (method === 'craft/claimTodoStopGuardContinuation') {
+          send({ id, result: { claimed: true, hasQueuedPrompt: false } });
+        } else if (method === 'craft/drainMidTurnQueue') {
+          send({ id, result: { messages: [], hasQueuedPrompt: false } });
         } else if (method === 'fs/write_text_file') {
           writeFileSync(
             String(params?.['path']),
@@ -614,6 +627,34 @@ const allowOnce = () => ({
             ].join('\n'),
           ),
         reply: (messages) => ({ content: `Reply ${userTurns(messages)}.` }),
+      },
+      {
+        name: 'the Todo Stop Guard continuing past unfinished todos',
+        prompts: ['Plan it, then stop.'],
+        settings: {
+          experimental: { todoStopGuard: true },
+          tools: { todoWrite: { enabled: true } },
+        },
+        reply: (messages) =>
+          toolResults(messages) === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'todo_write',
+                    {
+                      todos: [
+                        {
+                          id: '1',
+                          content: 'finish the task',
+                          status: 'pending',
+                        },
+                      ],
+                    },
+                    'call_todo',
+                  ),
+                ],
+              }
+            : { content: `Reply ${userTurns(messages)}.` },
       },
       {
         name: 'a Stop hook that blocks up to the cap',
