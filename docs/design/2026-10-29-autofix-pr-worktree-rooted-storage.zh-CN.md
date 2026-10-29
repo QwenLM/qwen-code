@@ -228,7 +228,8 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
   （`watchRoot === repoRoot`）；按 clone 全量列表从任意 worktree 都能看到。
   helper 会发现 watch 实际所在的 worktree（`findWatchRoot`），所以 linked-worktree
   会话可以直接 `cleanup` 一个主 worktree 落盘的 watch——无需切到拥有它的
-  worktree。要把 watch 迁到另一个 worktree，`cleanup` 它（当它属于另一个会话
+  worktree——前提是其锚已确认（锚存储出现之前 prepare 的 watch 需先做下面的一次性
+  resume）。要把 watch 迁到另一个 worktree，`cleanup` 它（当它属于另一个会话
   时加 `--take-over`，否则 `assertOwnedBySession` 会拒绝），再在目标重新
   `prepare`。新建 prepare 时，`reconcileHistory` 跨 clone 的各 worktree 合并该
   PR 的 history，**含目标自身的副本**，所以返回曾经离开的主根不会丢掉后续跳
@@ -238,6 +239,13 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
   （否则会重跑一个已结算的检查）。已处理冲突标记是标量结算，同样取最新副本：
   陈旧的主根标记不能覆盖较新的 linked 根结算、把一个已留给人的冲突再修一遍。
   cleanup 会保留持有工作的 worktree；不会静默丢失数据。
+- **锚存储出现之前 prepare 的遗留 watch。** 旧版 prepare 的 watch 没有已确认的
+  锚。在本 head 下，daemon 列表仍照常服务它（`git: false` 不跑信任检查），但 CLI
+  `status` 把它归入 `unreadable`，`cleanup`（不带 `--force`）、`push`、`sync`
+  都 **fail-closed**——`trustAnchor` 抛错，而不是拿可被 round 改写的来源去校验。
+  错误消息自带补救：重新跑 `prepare`（resume）从当前 cwd 确认锚，之后 watch 即
+  正常运作；`cleanup --force` 则跳过检查直接丢弃。这是遗留 watch 的一次性迁移
+  步骤，不是静默破坏：不迁移、不删除任何东西，拒绝本身带着恢复路径。
 - **跨环境操作。** 在 daemon 下于 linked worktree prepare 的 watch 就落在
   那里；从该 worktree 操作它。plain-CLI 的 `status` 仍通过按 clone 全量扫描
   发现它。

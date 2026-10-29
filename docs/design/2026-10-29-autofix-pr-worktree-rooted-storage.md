@@ -269,7 +269,9 @@ defense-in-depth, **not** a sandbox against a same-user round.
   (`watchRoot === repoRoot`); the clone-wide listing shows them from any
   worktree. Helpers discover the watch wherever it lives (`findWatchRoot`), so
   a linked-worktree session can `cleanup` a main-rooted watch directly — no
-  need to change directory to the owning worktree. To move a watch to another
+  need to change directory to the owning worktree — provided its anchor is
+  confirmed (a watch prepared before the anchor store existed needs the one-time
+  resume below first). To move a watch to another
   worktree, `cleanup` it (adding `--take-over` when it belongs to another
   session, which `assertOwnedBySession` otherwise refuses) and re-`prepare` in
   the target. On a fresh prepare, `reconcileHistory` merges the PR's history
@@ -284,6 +286,16 @@ defense-in-depth, **not** a sandbox against a same-user round.
   too: a stale main-root marker cannot override a newer linked-root settlement
   and re-fix a conflict already left to a human. `cleanup` keeps a worktree
   that holds work; no silent data loss.
+- **Legacy watches prepared before the anchor store.** A watch prepared by an
+  older build has no confirmed anchor. At this head the daemon listing still
+  serves it (`git: false` runs no trust check), but CLI `status` reports it
+  `unreadable` and `cleanup` (without `--force`), `push` and `sync` **fail
+  closed** — `trustAnchor` throws rather than validating against a
+  round-writable source. The error names the remedy: re-run `prepare` (resume)
+  to confirm the anchor from the current cwd, after which the watch operates
+  normally; `cleanup --force` discards it without the check. This is a one-time
+  migration step for pre-anchor watches, not a silent break: nothing is
+  relocated or deleted, and the refusal carries its own recovery path.
 - **Cross-environment operation.** A watch prepared under the daemon in a
   linked worktree lives there; operate it from that worktree. Plain-CLI
   `status` still discovers it via the clone-wide scan.
