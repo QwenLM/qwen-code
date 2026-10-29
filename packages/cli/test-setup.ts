@@ -85,9 +85,26 @@ process.env['QWEN_HOME'] = fs.mkdtempSync(
 );
 
 import { configure } from '@testing-library/react';
-import { beforeEach } from 'vitest';
+import { afterEach, beforeEach } from 'vitest';
 
 import './src/test-utils/customMatchers.js';
+
+// The autofix trust anchor store lives outside the workspace by design (a round
+// must not be able to rewrite it). Give every test its own temp dir so anchors
+// never leak between tests or onto the host's real ~/.qwen; a test confirms an
+// anchor for its clone via writeAnchor in its own beforeEach.
+let autofixAnchorDir: string | undefined;
+beforeEach(() => {
+  autofixAnchorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-anchor-'));
+  process.env['QWEN_AUTOFIX_ANCHOR_DIR'] = autofixAnchorDir;
+});
+afterEach(() => {
+  if (autofixAnchorDir) {
+    fs.rmSync(autofixAnchorDir, { recursive: true, force: true });
+  }
+  autofixAnchorDir = undefined;
+  delete process.env['QWEN_AUTOFIX_ANCHOR_DIR'];
+});
 
 // Capture the real timer so sync-heavy suites can drain worker RPC replies.
 const realSetTimeout = setTimeout;

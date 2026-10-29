@@ -44,6 +44,7 @@ import {
   requireState,
   sameRepository,
   withWatchLock,
+  writeAnchor,
   writeState,
   type AutofixPrHistory,
   type AutofixPrState,
@@ -602,11 +603,11 @@ export function runPrepare(args: PrepareArgs): void {
           ...rest,
           sessionId: currentSessionId(),
           authorCanPush: canPush,
-          // A legacy watch predates the recorded anchor; populate it on resume
-          // so it stops relying on the cwd-derived fallback.
-          trustRoot: current.trustRoot ?? repoRoot(),
           ...remotes,
         };
+        // Re-confirm the anchor from this trusted cwd; this also migrates it
+        // after a legitimate clone move (`git worktree repair`).
+        writeAnchor(current, current.prNumber, repoRoot());
         if (JSON.stringify(next) !== JSON.stringify(current)) {
           writeState(paths.statePath, next);
         }
@@ -780,9 +781,6 @@ export function runPrepare(args: PrepareArgs): void {
       baseRefName: pr.baseRefName,
       branch: paths.branch,
       worktreePath: paths.worktreePath,
-      // The genuine clone, recorded while this session's cwd is still trusted;
-      // helpers validate gitfiles against it rather than a cwd-derived root.
-      trustRoot: existing?.trustRoot ?? repoRoot(),
       viewer,
       prAuthor: pr.author?.login ?? '',
       authorCanPush: canPush,
@@ -822,6 +820,9 @@ export function runPrepare(args: PrepareArgs): void {
           }
         : {}),
     };
+    // Confirm the genuine clone in the session-owned anchor store (outside the
+    // workspace, where a round cannot rewrite it) while this cwd is trusted.
+    writeAnchor({ host, owner, repo: repoName }, args.pr, repoRoot());
     writeState(paths.statePath, state);
     return state;
   });

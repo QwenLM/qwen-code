@@ -109,18 +109,26 @@ watch，但兄弟检出的 `.git` 是一个 gitfile，在其中运行过的代�
 指向一个替换仓库——所以绝不能把发现来的 worktree 当作信任根，否则它会为自己
 嵌套的 watch 担保，`status` 就会执行替换仓库的 `core.fsmonitor`。
 
-锚也不能只靠单一来源。`repoRoot()` 从 helper 的 cwd 跑 git，所以一个 `.git`
-被改指向替换仓库的 cwd 会让它失真；而 state 文件**并非** round 够不到——
-`working_dir` 只是 cwd pin、不是文件系统沙箱，修复 worktree 里的命令能写兄弟
-文件 `../autofix-pr-<n>-state.json`，所以单凭记录的 `trustRoot` 也可被篡改。
-`prepare` 在会话 cwd 还可信时把 genuine clone 记入 `state.trustRoot`（resume
-会为旧 watch 补填），但 `trustAnchor(state)` 要求记录的根与 cwd 推导的
-`repoRoot()` **一致**——按 realpath 比较，不在可能敌意的锚里跑 git。不一致即
-说明有一处被篡改，fail-closed 拒绝、两个都不信；没有记录根的旧 watch 回退到
-cwd 推导的 clone。列表把每个 watch 的信任检查（及 `unsavedWork`）锚定到
-`trustAnchor(state)`；写路径的 `requireWorktree` 接收独立的 `trustRoot`，与其
-`root`（watch 根，仍作为符号链接 walk 的停止点）分开，`push`/`sync` 传入
-`trustAnchor(state)`。任何单一的可被 round 改写的来源都不作锚。
+**会话工作目录之内**的任何来源都不能作锚。round 被限制在该目录（及会话的隔离
+worktree）内，但其中 `working_dir` 只是 cwd pin、不是文件系统沙箱：round 既能
+改写 watch state（`../autofix-pr-<n>-state.json`），也能改写会话检出自身的
+`.git`（`../../../.git`，即 `repoRoot()` 所读）。所以记录的 `state.trustRoot`
+与 cwd 推导的 `repoRoot()`——即便要求两者一致——都能被同一种能力一起伪造。
+
+因此 genuine clone 身份保存在**每个 workspace 之外的 session-owned 锚存储**：
+`~/.qwen/autofix-anchors/<host>+<owner>+<repo>/pr-<n>.json`
+（`QWEN_AUTOFIX_ANCHOR_DIR` 供测试覆盖根目录）。daemon guard 把 round 限制在
+其工作目录内，所以用户 home 下的文件超出其可达范围。`prepare`/resume 在**当时
+可信、任何 round 运行之前**的 cwd 写入锚（`writeAnchor`）；`trustAnchor(state)`
+按 watch 的仓库 + PR（跨 take-over 与 clone 移动稳定）读回，**没有已确认的锚就
+fail-closed**——绝不回退到可被 round 改写的来源，也不在可能敌意的锚里跑 git。
+resume 从当前可信 cwd 重新确认，顺带在合法 clone 移动（`git worktree repair`）
+后迁移锚，使移动后的 clone 能 resume 其 watch，而不是搁浅在陈旧的绝对路径上。
+列表把每个 watch 的信任检查（及 `unsavedWork`）锚定到 `trustAnchor(state)`；
+写路径的 `requireWorktree` 接收独立的 `trustRoot`，与其 `root`（watch 根，仍作
+符号链接 walk 的停止点）分开，`push`/`sync` 传入 `trustAnchor(state)`。两个
+clone watch 同一 PR 会共享键，失败者 fail-closed，这是安全的——round 造不出锚，
+只有 prepare/resume 能写。
 
 ### 3. 按 clone 全量列出 watch
 

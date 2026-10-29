@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import {
   closeSync,
   constants,
@@ -12,6 +13,7 @@ import {
   fstatSync,
   linkSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readFileSync,
   readlinkSync,
@@ -51,13 +53,6 @@ export interface AutofixPrState {
   baseRefName: string;
   branch: string;
   worktreePath: string;
-  /** The genuine clone (main worktree) recorded when the watch was prepared,
-   * while the session's working directory was still trusted. The trust anchor
-   * for gitfile validation: a helper must not re-derive it from its own cwd,
-   * whose `.git` a round's code can repoint at a replacement repository. The
-   * state file sits outside the fix agent's worktree, so under the daemon the
-   * agent cannot rewrite this field. Absent on a watch from before it existed. */
-  trustRoot?: string;
   viewer: string;
   prAuthor: string;
   lastKnownHeadSha: string;
@@ -365,35 +360,114 @@ export function resolveWatchRoot(prNumber: number): string {
 }
 
 /**
- * The genuine clone a watch's gitfile is validated against. Neither candidate
- * source is authoritative on its own: a round can rewrite the state file
- * (`working_dir` is a cwd pin, not a filesystem sandbox), and a cwd whose
- * `.git` was repointed at a replacement repository skews `repoRoot()`. So the
- * root recorded at prepare time and the clone the helper actually runs in must
- * **agree**; a disagreement means one of them was tampered with, and the anchor
- * fails closed rather than trusting either. A legacy watch with no recorded
- * root falls back to the cwd-derived clone. Resolving the paths is lexical
- * (realpath) — no git command runs in a possibly hostile anchor.
+ * The session-owned anchor store, outside every workspace. A round is confined
+ * to its session's working directory (and that session's isolation worktrees),
+ * so it can rewrite the watch state and even the session checkout's `.git` —
+ * but not a file under the user's home. The genuine clone identity is kept here,
+ * where the round cannot reach it. `QWEN_AUTOFIX_ANCHOR_DIR` overrides the root
+ * for tests.
  */
-export function trustAnchor(state: { trustRoot?: string }): string {
-  const cwdRoot = repoRoot();
-  if (state.trustRoot === undefined) return cwdRoot;
-  let recorded: string;
-  let cwdReal: string;
+export function anchorStoreRoot(): string {
+  return (
+    process.env['QWEN_AUTOFIX_ANCHOR_DIR'] ??
+    join(homedir(), '.qwen', 'autofix-anchors')
+  );
+}
+
+/**
+ * The anchor file for a PR of one repository, keyed by the repository (not the
+ * session or the clone path) so it survives take-overs and clone moves. Two
+ * clones watching the same PR share a key; the loser fails closed below, which
+ * is safe — a round cannot create an anchor, only prepare/resume can.
+ */
+export function anchorPath(
+  repository: { host: string; owner: string; repo: string },
+  prNumber: number,
+): string {
+  assertPositiveInteger(prNumber, 'PR number');
+  const slug = [
+    normalizeGhHostForUrl(repository.host).replace(/:/g, '@'),
+    normalizeSegment(repository.owner),
+    normalizeSegment(repository.repo),
+  ]
+    .join('+')
+    .replace(/[^a-z0-9._@+-]/g, '_');
+  return join(anchorStoreRoot(), slug, `pr-${prNumber}.json`);
+}
+
+export interface WatchAnchor {
+  trustRoot: string;
+  host: string;
+  owner: string;
+  repo: string;
+}
+
+/**
+ * Record the genuine clone for a watch, from a cwd trusted at prepare/resume
+ * time (before any round runs). Written atomically, replacing any link, outside
+ * the workspace so a round cannot forge it. A resume re-confirms from the
+ * current trusted cwd, which also migrates the anchor after a legitimate clone
+ * move (`git worktree repair`).
+ */
+export function writeAnchor(
+  repository: { host: string; owner: string; repo: string },
+  prNumber: number,
+  trustRoot: string,
+): void {
+  const path = anchorPath(repository, prNumber);
+  mkdirSync(dirname(path), { recursive: true });
+  const anchor: WatchAnchor = { trustRoot, ...repository };
+  atomicWriteFileSync(path, `${JSON.stringify(anchor, null, 2)}\n`, NO_FOLLOW);
+}
+
+/** Read a watch's confirmed anchor, or null when none was confirmed. */
+export function readAnchor(
+  repository: { host: string; owner: string; repo: string },
+  prNumber: number,
+): WatchAnchor | null {
+  const path = anchorPath(repository, prNumber);
+  if (!isRegularFile(path)) return null;
   try {
-    recorded = realpathSync(state.trustRoot);
-    cwdReal = realpathSync(cwdRoot);
+    const parsed = JSON.parse(
+      readRegularFile(path) ?? 'null',
+    ) as WatchAnchor | null;
+    if (
+      parsed &&
+      typeof parsed.trustRoot === 'string' &&
+      typeof parsed.host === 'string' &&
+      typeof parsed.owner === 'string' &&
+      typeof parsed.repo === 'string'
+    ) {
+      return parsed;
+    }
+    return null;
   } catch {
+    return null;
+  }
+}
+
+/**
+ * The genuine clone a watch's gitfile is validated against: the anchor confirmed
+ * at prepare/resume time and kept in the session-owned store outside the
+ * workspace. Neither the watch state nor the helper's cwd is an authority — a
+ * round can rewrite both (the state file, and the session checkout's `.git`
+ * that `repoRoot()` reads) — so the anchor is read only from the store, and a
+ * watch with no confirmed anchor fails closed rather than falling back to a
+ * round-writable source. No git command runs in a possibly hostile anchor.
+ */
+export function trustAnchor(state: {
+  prNumber: number;
+  host: string;
+  owner: string;
+  repo: string;
+}): string {
+  const anchor = readAnchor(state, state.prNumber);
+  if (!anchor) {
     throw new Error(
-      `cannot resolve the watch's trust anchor (recorded ${state.trustRoot}, cwd ${cwdRoot}); refusing to validate the worktree against an unresolved clone`,
+      `PR #${state.prNumber} has no confirmed trust anchor; re-run \`qwen autofix-pr prepare ${state.prNumber}\` (or resume it) to confirm the clone before its worktree can be validated`,
     );
   }
-  if (recorded !== cwdReal) {
-    throw new Error(
-      `the watch's recorded trust root (${state.trustRoot}) does not match the clone this helper runs in (${cwdRoot}); one of them was tampered with, so no git command runs in the watch worktree`,
-    );
-  }
-  return cwdRoot;
+  return anchor.trustRoot;
 }
 
 /**

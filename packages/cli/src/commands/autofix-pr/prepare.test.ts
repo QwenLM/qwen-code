@@ -80,14 +80,18 @@ import {
 } from './prepare.js';
 import { runCleanup } from './cleanup.js';
 import {
+  anchorPath,
   autofixPrPaths,
   historyPath,
+  readAnchor,
   readState,
   repoRoot,
   trustAnchor,
   withWatchLock,
+  writeAnchor,
   writeState,
 } from './state.js';
+import { requireWorktree } from './worktree.js';
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -434,29 +438,85 @@ describe('runPrepare (real git)', () => {
     }
   });
 
-  it('requires the recorded anchor and the cwd clone to agree, failing closed', () => {
+  it('reads the trust anchor only from the session-owned store, not round-writable state', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const state = readState(autofixPrPaths(clone, 7).statePath)!;
     const genuine = realpathSync(clone);
-    expect(state.trustRoot).toBe(genuine);
-    // Agreement: cwd in the genuine clone -> the anchor resolves.
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    // prepare confirmed the anchor in the external store.
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuine);
     expect(trustAnchor(state)).toBe(genuine);
     const other = join(dir, 'other-clone');
     run(dir, 'init', '-q', '-b', 'main', other);
-    // cwd repointed to a different clone: the recorded anchor and repoRoot()
-    // disagree, so the anchor fails closed rather than trusting either source.
+    // A round can repoint the cwd's gitfile and rewrite the state, but the
+    // anchor lives outside the workspace: trustAnchor still returns the
+    // confirmed clone, ignoring both round-writable sources.
     process.chdir(other);
     try {
       expect(realpathSync(repoRoot())).not.toBe(genuine);
-      expect(() => trustAnchor(state)).toThrow(/does not match the clone/);
+      expect(trustAnchor(state)).toBe(genuine);
+      // Tampering the state's repository only redirects to another, unconfirmed
+      // anchor key, which fails closed — it cannot forge the genuine anchor.
+      expect(() => trustAnchor({ ...state, repo: 'other' })).toThrow(
+        /no confirmed trust anchor/,
+      );
     } finally {
       process.chdir(clone);
     }
-    // State tampered to a foreign root while cwd stays genuine: disagreement
-    // again fails closed — the round-writable field is not an authority.
-    expect(() => trustAnchor({ ...state, trustRoot: other })).toThrow(
-      /does not match the clone/,
+  });
+
+  it('fails closed for a watch with no confirmed anchor', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const state = readState(autofixPrPaths(clone, 7).statePath)!;
+    rmSync(anchorPath({ host: 'github.com', owner: 'o', repo: 'r' }, 7), {
+      force: true,
+    });
+    expect(() => trustAnchor(state)).toThrow(/no confirmed trust anchor/);
+  });
+
+  it('rejects a compromised watch through the production trustAnchor path', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const state = readState(paths.statePath)!;
+    // A round builds a replacement repo and repoints the watch worktree's
+    // gitfile at a self-consistent entry of it, and tampers the state anchor.
+    const repl = join(dir, 'repl');
+    run(dir, 'init', '-q', '-b', 'main', repl);
+    run(
+      repl,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'r',
     );
+    const entry = join(repl, '.git', 'worktrees', 'autofix-pr-7');
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, 'gitdir'), `${paths.worktreePath}/.git\n`);
+    writeFileSync(join(entry, 'commondir'), '../../\n');
+    writeFileSync(join(paths.worktreePath, '.git'), `gitdir: ${entry}\n`);
+    // The production write path validates against trustAnchor(state), which
+    // reads the external store (the genuine clone), so the compromised watch is
+    // rejected even though the watch gitfile names the replacement.
+    expect(() =>
+      requireWorktree(paths, 7, clone, false, trustAnchor(state)),
+    ).toThrow(/not to this clone's own entry/);
+  });
+
+  it('re-confirms the anchor on resume, migrating it after a clone move', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const genuine = realpathSync(clone);
+    // A stale anchor, as a clone move leaves before the worktree is repaired.
+    writeAnchor(repository, 7, join(dir, 'old-location'));
+    expect(readAnchor(repository, 7)?.trustRoot).not.toBe(genuine);
+    // Resume re-confirms from the current trusted cwd, migrating the anchor.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuine);
   });
 
   it('keeps the latest handled conflict marker across a two-hop migration', () => {

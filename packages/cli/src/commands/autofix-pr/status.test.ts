@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { runStatus } from './status.js';
 import {
   autofixPrPaths,
+  writeAnchor,
   writeGateCursor,
   writeState,
   type AutofixPrState,
@@ -57,6 +58,7 @@ describe('runStatus', () => {
       postedCommentIds: [],
       ...patch,
     });
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, pr, repo);
     return paths;
   };
 
@@ -700,6 +702,7 @@ describe('runStatus', () => {
       postedCommentIds: [],
       ...patch,
     });
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, pr, repo);
   };
   const addWatchWorktree = (paths: ReturnType<typeof autofixPrPaths>) => {
     execFileSync('git', ['branch', paths.branch], { cwd: repo });

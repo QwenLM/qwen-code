@@ -123,22 +123,32 @@ rewrite to point at a replacement repository — so a discovered worktree must
 never be passed as the trust root, or it would vouch for its own nested
 watches and `status` would execute the replacement's `core.fsmonitor`.
 
-The anchor must not rest on a single source either. `repoRoot()` runs git
-from the helper's cwd, so a cwd whose `.git` was repointed at a replacement
-repository skews it; and the state file is **not** beyond the round's reach —
-`working_dir` is a cwd pin, not a filesystem sandbox, and a command in the fix
-worktree can write the sibling `../autofix-pr-<n>-state.json`, so a recorded
-`trustRoot` alone is tamperable too. `prepare` records the genuine clone in
-`state.trustRoot` while the session cwd is trusted (a resume populates it for a
-legacy watch), but `trustAnchor(state)` requires the recorded root and the
-cwd-derived `repoRoot()` to **agree** — compared by realpath, with no git
-command run in a possibly hostile anchor. A disagreement means one source was
-tampered with and fails closed rather than trusting either; a legacy watch
-with no recorded root falls back to the cwd-derived clone. The listing anchors
-each watch's trust check (and `unsavedWork`) to `trustAnchor(state)`; the write
-path's `requireWorktree` takes a separate `trustRoot` distinct from its `root`
-(the watch root, which stays the stop of the symlink walk), and `push`/`sync`
-pass `trustAnchor(state)`. No single round-writable source is the anchor.
+No source _inside the session's working directory_ can be the anchor. A round
+is confined to that directory (and the session's isolation worktrees), but
+within it `working_dir` is a cwd pin, not a filesystem sandbox: the round can
+rewrite the watch state (`../autofix-pr-<n>-state.json`) **and** the session
+checkout's own `.git` (`../../../.git`) that `repoRoot()` reads. So both a
+recorded `state.trustRoot` and a cwd-derived `repoRoot()` — even required to
+agree — are forgeable together with the same capability.
+
+The genuine clone identity is therefore kept in a **session-owned anchor store
+outside every workspace**: `~/.qwen/autofix-anchors/<host>+<owner>+<repo>/pr-<n>.json`
+(`QWEN_AUTOFIX_ANCHOR_DIR` overrides the root for tests). The daemon guard
+confines a round to its working directory, so a file under the user's home is
+beyond its reach. `prepare`/resume writes the anchor (`writeAnchor`) from the
+cwd that is trusted _at that moment, before any round runs_; `trustAnchor(state)`
+reads it back keyed by the watch's repository + PR (stable across take-overs and
+clone moves) and **fails closed when no anchor was confirmed** — it never falls
+back to a round-writable source, and runs no git command in a possibly hostile
+anchor. A resume re-confirms from the current trusted cwd, which also migrates
+the anchor after a legitimate clone move (`git worktree repair`), so a moved
+clone resumes its watches instead of stranding them on a stale absolute path.
+The listing anchors each watch's trust check (and `unsavedWork`) to
+`trustAnchor(state)`; the write path's `requireWorktree` takes a separate
+`trustRoot` distinct from its `root` (the watch root, the symlink-walk stop),
+and `push`/`sync` pass `trustAnchor(state)`. Two clones watching the same PR
+share a key; the loser fails closed, which is safe — a round cannot create an
+anchor, only prepare/resume can.
 
 ### 3. Clone-wide watch listing
 

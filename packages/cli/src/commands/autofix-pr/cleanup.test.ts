@@ -57,6 +57,7 @@ import {
   historyPath,
   readHistory,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -105,6 +106,7 @@ describe('runCleanup (real git)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, state);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     stdout.mockClear();
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
