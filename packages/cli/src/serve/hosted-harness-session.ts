@@ -3496,6 +3496,16 @@ async function startHostedRecoveredTurn(
   liftRecoveryBlock(session);
 }
 
+// E2E fault injection only (QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId>, set
+// by the packaged finished-before-commit arm on the generation that must crash):
+// once the main model stream's Finished marker is durable but before the assistant
+// output commits, hold the turn so the runner can SIGKILL this generation inside
+// that window. The next generation must reissue the saved request rather than
+// compensate an already-committed terminal. The flag is never set in production.
+const crashBeforeCommitSession =
+  process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT'];
+let crashBeforeCommitFired = false;
+
 async function executeHostedTurn(
   session: HostedSession,
   sessionId: string,
@@ -4001,6 +4011,20 @@ async function executeHostedTurn(
                     : {}),
                   ...(deltas ? { textDeltas: deltas } : {}),
                 });
+          if (
+            crashBeforeCommitSession === sessionId &&
+            !crashBeforeCommitFired
+          ) {
+            // The stream's Finished marker is already durable (the model layer's
+            // finally committed a usage-only output_committed); the assistant
+            // message.committed below is not. Hold here so the runner crashes this
+            // generation inside the B3a window and the next one must reissue.
+            crashBeforeCommitFired = true;
+            writeStderrLineSafe(
+              `qwen serve: E2E holding finished turn before assistant commit for Session ${sessionId} prompt ${promptId}`,
+            );
+            await new Promise<never>(() => {});
+          }
           await commit(
             'assistant',
             result.parts ?? [{ text: result.text }],

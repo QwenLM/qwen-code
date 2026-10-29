@@ -1811,6 +1811,19 @@ redrive restates the active attachment instead of wedging the Turn:
 npm run test:e2e:managed-harness-restart-approval-load-reply-lost
 ```
 
+A crash between the main stream's durable Finished marker and the assistant
+commit (B3a) holds the replacement inside that window via a test-gated Harness
+hook (`QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT`, never set in production), set
+only on the generation that must crash. Once its post-tool round records
+Finished, the hook holds before the assistant commit and the runner kills it
+there; the next generation must reissue the saved request deep-equal and
+project one terminal with the recovered answer, rather than compensate an
+already-committed output:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-finished-before-commit
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
 focused or integration tested for now: mixed calls and rewritten inputs

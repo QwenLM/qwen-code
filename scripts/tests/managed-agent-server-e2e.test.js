@@ -318,6 +318,7 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-decision',
       'test:e2e:managed-harness-restart-approval-after-prepare',
       'test:e2e:managed-harness-restart-approval-after-result',
+      'test:e2e:managed-harness-restart-approval-finished-before-commit',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
       'test:e2e:managed-harness-restart-approval-load-reply-lost',
@@ -450,6 +451,29 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
     expect(harnessSource).toContain('E2E dropping first load reply');
+    // B3a crashes the replacement inside the window after its post-tool stream
+    // Finished marker is durable but before the assistant commit, via a
+    // test-gated hook set only on that generation. The barrier proves the
+    // fault landed; the recovery parity proves the next generation reissued
+    // the saved request rather than compensating an already-committed terminal.
+    expect(source).toContain(
+      'QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id',
+    );
+    expect(source).toContain(
+      "'Finished turn held before the assistant commit'",
+    );
+    expect(source).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+    // The flag rides only the crashing generation, never the recovery one.
+    expect(source).toContain("approvalFault === 'finished-before-commit'");
+    expect(source).toContain('crashBeforeAssistantCommit');
+    expect(harnessSource).toContain(
+      "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
+    );
+    expect(harnessSource).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

@@ -78,6 +78,7 @@ const approvalFaults = [
   'after-decision',
   'after-prepare',
   'after-result',
+  'finished-before-commit',
   'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
@@ -124,7 +125,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -2466,7 +2467,10 @@ try {
     // Every replacement generation answers on the same port with a fresh
     // home: the Harness-only model-round arm starts a third one after the
     // second dies mid-round.
-    const startReplacementHarness = async (name: string): Promise<Child> => {
+    const startReplacementHarness = async (
+      name: string,
+      crashBeforeAssistantCommit = false,
+    ): Promise<Child> => {
       const next = start(
         process.execPath,
         [
@@ -2511,6 +2515,12 @@ try {
             ...(approvalFault === 'load-reply-lost'
               ? { QWEN_E2E_DROP_LOAD_REPLY: session.id }
               : {}),
+            // B3a: only the generation that must crash carries this flag; the
+            // post-fault recovery generation must not inherit it, or it would
+            // crash in the same window forever.
+            ...(crashBeforeAssistantCommit
+              ? { QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id }
+              : {}),
           },
         },
         name,
@@ -2531,6 +2541,7 @@ try {
     };
     let replacementHarness = await startReplacementHarness(
       'Replacement Hosted Harness',
+      approvalFault === 'finished-before-commit',
     );
 
     if (approvalRecovery) {
@@ -2673,6 +2684,7 @@ try {
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit' ||
         approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
@@ -2785,6 +2797,21 @@ try {
                   `SELECT state, IF(decision_receipt_id IS NULL, 0, 1), IF(decision_digest IS NULL, 0, 1) FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}`,
                 ),
               ),
+            120_000,
+            replacementHarness,
+          );
+        } else if (approvalFault === 'finished-before-commit') {
+          // B3a: the replacement hooked the window after its post-tool stream
+          // Finished marker is durable but before the assistant commit. The
+          // barrier line proves the fault landed inside that window; the
+          // recovery parity check below proves the next generation reissued
+          // the saved request rather than compensating a committed terminal.
+          await waitUntil(
+            'Finished turn held before the assistant commit',
+            () =>
+              replacementHarness
+                .log()
+                .includes('E2E holding finished turn before assistant commit'),
             120_000,
             replacementHarness,
           );
@@ -3087,7 +3114,8 @@ try {
         JSON.stringify(request.body.messages).includes('"role":"tool"'),
       );
       const expectedModelsAfterResults =
-        approvalFault === 'after-result'
+        approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit'
           ? 2
           : ['allow', 'deny'].includes(verificationMode)
             ? 1
@@ -3099,7 +3127,10 @@ try {
         throw new Error(
           `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
         );
-      if (approvalFault === 'after-result') {
+      if (
+        approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit'
+      ) {
         const parity = isDeepStrictEqual(
           modelAfterResults[0]?.body,
           modelAfterResults[1]?.body,
