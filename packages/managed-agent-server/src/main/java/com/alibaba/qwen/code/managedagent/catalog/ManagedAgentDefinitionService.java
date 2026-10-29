@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -43,7 +44,7 @@ public class ManagedAgentDefinitionService {
     private final ObjectMapper objectMapper;
 
     public ManagedAgentDefinitionService(ManagedAgentDefinitionStore store,
-            RequestDigests digests, ObjectMapper objectMapper) {
+            RequestDigests digests, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper) {
         this.store = store;
         this.digests = digests;
         this.objectMapper = objectMapper;

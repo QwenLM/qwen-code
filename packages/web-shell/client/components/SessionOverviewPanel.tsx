@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useDaemonAvailability } from '../daemon/availability-context.js';
 import {
   useCallback,
   useContext,
@@ -416,9 +417,10 @@ function SessionOverviewPanelInner({
   const statusReload = status.reload;
   const statusReport = status.report;
 
+  const available = useDaemonAvailability() === 'available';
   const statusInFlight = useRef(false);
   useEffect(() => {
-    if (liveStateActive) return;
+    if (!available || liveStateActive) return;
     const timer = window.setInterval(() => {
       if (document.hidden || statusInFlight.current) return;
       statusInFlight.current = true;
@@ -427,7 +429,7 @@ function SessionOverviewPanelInner({
       });
     }, STATUS_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [liveStateActive, statusReload]);
+  }, [available, liveStateActive, statusReload]);
 
   const cards = useMemo(
     () =>

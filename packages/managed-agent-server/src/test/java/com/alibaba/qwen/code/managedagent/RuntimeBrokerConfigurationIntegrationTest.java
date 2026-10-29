@@ -67,7 +67,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     void recoveryTickRunsOnADedicatedScheduler() throws Exception {
         assertThat(context.containsBean("runtimeRecoveryScheduler")).isTrue();
         assertThat(context.getBean("runtimeRecoveryScheduler"))
-                .isNotSameAs(context.getBean("taskScheduler"));
+                .isNotSameAs(context.getBean("managedAgentScheduler"));
         var scheduled = EmbeddedRuntimeBroker.class.getMethod("recoverSavedRuntimes")
                 .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler()).isEqualTo("runtimeRecoveryScheduler");

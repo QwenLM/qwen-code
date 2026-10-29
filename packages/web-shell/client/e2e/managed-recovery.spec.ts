@@ -103,6 +103,10 @@ async function installRecovery(page: Page, running = false) {
       return route.fulfill({ json: { paused: false, messages: [] } });
     if (path.endsWith('/workspace-extensions/query'))
       return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: { supported: true, currentBranch: 'main', branches: ['main'] },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query'))

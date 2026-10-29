@@ -1106,6 +1106,7 @@ describe('startOpenTuiUI fallback contract', () => {
     config.isInteractive = () => true;
     const warning = 'tool.call and tool.check are not supported.';
     let host!: ModTerminalHost;
+    const setRenderInput = vi.fn();
     const factory = vi
       .spyOn(ModSession, 'create')
       .mockImplementation((_config, _settings, output) => {
@@ -1118,6 +1119,7 @@ describe('startOpenTuiUI fallback contract', () => {
               config.getSessionId(),
             ),
           flushLogs: () => {},
+          setRenderInput,
           close: async () => {},
         } as unknown as ModSession;
       });
@@ -1166,6 +1168,39 @@ describe('startOpenTuiUI fallback contract', () => {
       const calls = mocks.state.root.render.mock.calls;
       view = render(calls[calls.length - 1]?.[0] as ReactElement);
       expect(mocks.state.replayOrder).toEqual(['reset', 'info']);
+      // The band's input, as Ink reports it; OpenTUI has no survey.
+      expect(setRenderInput).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          component: 'AbovePrompt',
+          viewport: { columns: 120, rows: 40, isFullscreen: false },
+          props: expect.objectContaining({
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 13,
+            bodyColumns: 115,
+          }),
+        }),
+      );
+      // A turn in flight is working.
+      mocks.state.streaming = true;
+      const tree = calls[calls.length - 1]?.[0] as ReactElement<{
+        children: ReactElement<{ children: ReactElement }>;
+      }>;
+      const vim = tree.props.children;
+      act(() =>
+        view!.rerender(
+          cloneElement(
+            tree,
+            {},
+            cloneElement(vim, {}, cloneElement(vim.props.children)),
+          ),
+        ),
+      );
+      expect(setRenderInput).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          props: expect.objectContaining({ isWorking: true }),
+        }),
+      );
       expect(mocks.state.appProps?.startupHistory).toEqual([
         expect.objectContaining({
           type: 'user',
