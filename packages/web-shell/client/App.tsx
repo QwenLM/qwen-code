@@ -10643,10 +10643,7 @@ export function App({
   // dropped at the next begin (see beginSplitClassification), so a re-open
   // never waits on the cancelled open's classification.
   const splitSessionClassificationRef = useRef<
-    Map<
-      string,
-      { promise: Promise<SplitSessionOutcome>; settled: boolean }
-    >
+    Map<string, { promise: Promise<SplitSessionOutcome>; settled: boolean }>
   >(new Map());
   useEffect(() => {
     splitSessionClassificationRef.current.clear();
