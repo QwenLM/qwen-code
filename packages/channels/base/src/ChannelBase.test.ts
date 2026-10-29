@@ -24840,6 +24840,76 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('parks a plain message behind an attachment instead of overtaking it', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-att-order-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // The attachment cannot be injected and parks as plain collect.
+        await ch.handleInbound(
+          envelope({
+            text: 'summarise',
+            attachments: [
+              {
+                type: 'file',
+                filePath: '/tmp/report.txt',
+                mimeType: 'text/plain',
+                fileName: 'report.txt',
+              },
+            ],
+            messageId: 'm-att-order-2',
+          }),
+        );
+        // The later plain text could be injected, but the parked attachment
+        // arrived first: handing it to the running turn would invert order.
+        await ch.handleInbound(
+          envelope({ text: 'plain follow-up', messageId: 'm-att-order-3' }),
+        );
+
+        expect(queueMidTurnMessage).not.toHaveBeenCalled();
+        const entries = collectBuffers(ch).get(sessionId) ?? [];
+        expect(
+          entries.map((entry) => (entry as { text: string }).text),
+        ).toEqual([
+          expect.stringContaining('/tmp/report.txt'),
+          'plain follow-up',
+        ]);
+        // Both stay plain collect entries: the follower must not be charged to
+        // the bounded fallback the bridge's queue capacity is shared with.
+        expect(
+          entries.map(
+            (entry) => (entry as { injectFallback?: boolean }).injectFallback,
+          ),
+        ).toEqual([undefined, undefined]);
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('inject: delivered');
+        expect(logged).toContain(
+          'inject: NOT delivered mid-turn (an earlier message of this turn is parked)',
+        );
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(replay.indexOf('/tmp/report.txt')).toBeLessThan(
+          replay.indexOf('plain follow-up'),
+        );
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('replays a collect-buffer drain as its own turn, never re-injecting it', async () => {
       const queueMidTurnMessage = enableInjection();
       queueMidTurnMessage.mockReturnValueOnce({

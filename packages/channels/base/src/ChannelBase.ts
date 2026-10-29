@@ -567,9 +567,18 @@ export abstract class ChannelBase {
   /**
    * Sessions whose current turn already routed a message to the bounded
    * inject→collect fallback: subsequent messages must follow it there, or a
-   * later injected instruction could overtake an earlier parked one.
+   * later injected instruction could overtake an earlier parked one. This gate
+   * also carries the fallback's capacity accounting.
    */
   private readonly injectDegradedSessions = new Set<string>();
+  /**
+   * Sessions whose current turn already parked a message in the collect buffer
+   * for any reason (media, a slash command, a foreign chat/thread, an
+   * unauthorized member, a rejected injection): later messages must park too
+   * to keep arrival order, but as plain `collect` entries, outside the bounded
+   * fallback's accounting.
+   */
+  private readonly injectOrderLockedSessions = new Set<string>();
   /** Sessions already told (once) that their bridge cannot inject at all. */
   private readonly injectUnsupportedNotified = new Set<string>();
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
@@ -2156,6 +2165,7 @@ export abstract class ChannelBase {
    */
   private settleUndrainedMidTurnInjections(sessionId: string): void {
     this.injectDegradedSessions.delete(sessionId);
+    this.injectOrderLockedSessions.delete(sessionId);
     const pending = this.midTurnInjections.get(sessionId);
     if (!pending || pending.length === 0) return;
     this.midTurnInjections.delete(sessionId);
@@ -2199,6 +2209,7 @@ export abstract class ChannelBase {
    */
   private dropMidTurnInjections(sessionId: string): void {
     this.injectDegradedSessions.delete(sessionId);
+    this.injectOrderLockedSessions.delete(sessionId);
     this.injectUnsupportedNotified.delete(sessionId);
     const pending = this.midTurnInjections.get(sessionId);
     this.midTurnInjections.delete(sessionId);
@@ -3196,6 +3207,7 @@ export abstract class ChannelBase {
     this.unattendedMemorySessions.delete(sessionId);
     this.midTurnInjections.delete(sessionId);
     this.injectDegradedSessions.delete(sessionId);
+    this.injectOrderLockedSessions.delete(sessionId);
     this.injectUnsupportedNotified.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
@@ -7375,6 +7387,13 @@ export abstract class ChannelBase {
                 // one overtake it into the running turn.
                 injectFallback = true;
                 injectRejectReason = 'ordered after a parked message';
+              } else if (this.injectOrderLockedSessions.has(sessionId)) {
+                // An earlier message of this turn is parked in the collect
+                // buffer for another reason; keep arrival order without
+                // charging the bounded fallback's accounting.
+                process.stderr.write(
+                  `[${this.name}] inject: NOT delivered mid-turn (an earlier message of this turn is parked); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
+                );
               } else {
                 // The injected text must carry the same group-history backfill
                 // a queued turn would get, or the agent answers a reference
@@ -7464,6 +7483,9 @@ export abstract class ChannelBase {
             };
             if (injectFallback) entry.injectFallback = true;
             buffer.push(entry);
+            // A parked message gates the rest of the turn: a later injection
+            // would overtake it, so every follower parks here too.
+            this.injectOrderLockedSessions.add(sessionId);
             try {
               this.onPromptBuffered(
                 envelope.chatId,
