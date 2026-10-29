@@ -1,4 +1,5 @@
 .card {
+  position: relative;
   margin: 6px 0 2px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -42,4 +43,34 @@
   color: var(--muted-foreground);
   font-size: 13px;
   white-space: pre-wrap;
+}
+
+.fallbackTitle {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.fallbackSummary {
+  margin-top: 4px;
+}
+
+.fallbackNote {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.builtInBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 0 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.loading {
+  padding: 16px 12px;
+  color: var(--muted-foreground);
+  font-size: 13px;
 }

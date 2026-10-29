@@ -169,6 +169,7 @@ export interface LivePromptOptions {
    */
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
+  workflowModeEligible?: boolean;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -652,14 +653,10 @@ async function resolveSteeredPromptParts(
 
 /**
  * Single shared `config.initialize()` flight for the OpenTUI app. Core joins
- * callers onto an in-flight initialize and only rejects once initialization
- * has settled ("Config was already initialized"), so plain awaits are safe
- * against a race but can neither own one boot flight nor preserve a failure:
- * the guard gives the entry one flight that command loading and every turn
- * await, and — because a settled failure is never retried by core and the
- * rejected promise stays cached — every later submit surfaces the real cause
- * instead of re-entering, swallowing the re-entry error and degrading into
- * "Chat not initialized".
+ * in-flight callers and reports a settled success as "Config was already
+ * initialized"; failures retain their original rejection. The guard gives
+ * startup, command loading and every turn the same flight and preserves its
+ * result, including Mod readiness, for later awaiters.
  */
 const initializationPromises = new WeakMap<Config, Promise<void>>();
 
@@ -670,13 +667,12 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
     .initialize()
     .catch((err) => {
       // A caller that initialized elsewhere already won: its settled success
-      // reports as core's re-entry error while the chat is ready to send. A
-      // settled failure does not — the real error must surface, and core has
+      // reports as core's re-entry error. A settled failure retains its
+      // original rejection — the real error must surface, and core has
       // no retry either way, so the rejected promise stays cached for awaiters.
       if (
-        config.getGeminiClient()?.isInitialized?.() ||
-        (err instanceof Error &&
-          err.message === 'Config was already initialized')
+        err instanceof Error &&
+        err.message === 'Config was already initialized'
       ) {
         return;
       }
@@ -684,7 +680,7 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize();
+      await getInteractiveModSession(config)?.initialize(['AbovePrompt']);
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -870,6 +866,9 @@ export async function* livePromptEvents(
           type: options?.retry
             ? SendMessageType.Retry
             : SendMessageType.UserQuery,
+          ...(!options?.retry && options?.workflowModeEligible === true
+            ? { workflowModeEligible: true }
+            : {}),
           ...(options?.onPromptAdmitted
             ? { onPromptAdmitted: options.onPromptAdmitted }
             : {}),

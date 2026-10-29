@@ -543,10 +543,9 @@ jobs:
                 done || true
           fi
 
-      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
-      # instant the branch is pushed) instead of github.ref. github.ref is the
-      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
-      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Pin PRs to the event head SHA: refs/pull/N/head can advance before a
+      # retry, while github.ref is the asynchronously rebuilt merge ref and
+      # can lag behind a push. Neither mutable ref identifies this run's head.
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
@@ -570,7 +569,7 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -1088,10 +1087,9 @@ jobs:
                 done || true
           fi
 
-      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
-      # instant the branch is pushed) instead of github.ref. github.ref is the
-      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
-      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Pin PRs to the event head SHA: refs/pull/N/head can advance before a
+      # retry, while github.ref is the asynchronously rebuilt merge ref and
+      # can lag behind a push. Neither mutable ref identifies this run's head.
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
@@ -1115,7 +1113,7 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -1166,7 +1164,7 @@ jobs:
         run: 'node .github/scripts/check-ci-budget.mjs'
 
       # A green lane proves the branch passes the gate AS THE BRANCH defines
-      # it — the checkout above is refs/pull/N/head by deliberate trade-off —
+      # it — the checkout above is the event PR head by deliberate trade-off —
       # not as the base defines it. #11117 flipped Prettier --write →
       # --check on main while #11216's branch still ran --write; it merged
       # green and reddened every later full-profile PR (#11378 cleaned up).
@@ -1671,7 +1669,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
@@ -1861,8 +1859,8 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # See the Ubuntu gate's checkout: PRs use the immutable refs/pull/N/head
-      # and merge queue uses the event head SHA.
+      # merge_group/schedule/dispatch only: this lane keeps
+      # refs/pull/N/head; the PR lanes pin the event head SHA.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -2293,7 +2291,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          ref: "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'

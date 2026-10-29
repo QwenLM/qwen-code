@@ -1043,7 +1043,7 @@ describe('createJavaManagedAgentProvider', () => {
     ).toThrow('productScope');
   });
 
-  it('sends a catalog model with the built-in Agent on both creation paths', async () => {
+  it('preserves model, worktree and extension pins on both creation paths', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementation(async () =>
@@ -1061,6 +1061,14 @@ describe('createJavaManagedAgentProvider', () => {
       workspaceId: 'ws',
       cwdRelative: '.',
       approvalMode: 'yolo' as const,
+      worktree: { baseRef: 'main' },
+      extensionPins: [
+        {
+          extensionId: 'ext_00000000-0000-0000-0000-000000000001',
+          packageRevision: 1,
+          packageDigest: 'a'.repeat(64),
+        },
+      ],
     };
     const command = { clientId: 'client', idempotencyKey: 'frozen-key' };
     await provider.workspaceBinding!.createEmpty(request, command);
@@ -1074,6 +1082,8 @@ describe('createJavaManagedAgentProvider', () => {
           agentId: 'qwen-code',
           modelId: 'model-b',
           approvalMode: 'yolo',
+          worktree: request.worktree,
+          extensionPins: request.extensionPins,
           idempotencyKey: 'frozen-key',
         }),
       );
