@@ -15,18 +15,10 @@ export const MCP_APP_MESSAGES_EN: Record<string, Message> = {
   'mcpApp.generatedUi.unavailable':
     'Interactive views are off for this session, so only the summary is shown.',
   'mcpApp.generatedUi.title': 'Interactive view',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) =>
+    `Interactive view values: ${title}`,
   'mcpApp.generatedUi.loading': 'Loading the interactive view…',
   'mcpApp.loading': 'Loading the MCP App…',
-  'mcpApp.generatedUi.reviewTitle': 'Continue with these parameters',
-  'mcpApp.generatedUi.reviewDescription': ({ title } = {}) =>
-    `The assistant will receive these values from “${title}” in this session and continue the analysis. Later edits in the view are not included.`,
-  'mcpApp.generatedUi.parameter': 'Parameter',
-  'mcpApp.generatedUi.value': 'Value',
-  'mcpApp.generatedUi.rejectedEvents': ({ count } = {}) =>
-    `${count} earlier interactions were not processed because the queue was full; these values include only the applied ones.`,
-  'mcpApp.generatedUi.noParameters': 'This view has no parameters to send.',
-  'mcpApp.generatedUi.fullMessage': 'Full message sent to the session',
-  'mcpApp.generatedUi.send': 'Continue analysis',
   'toolName.mcp__generated-ui__generated_ui_show': 'Interactive view',
   'mcpApp.message.title': 'Review App message',
   'mcpApp.message.description':
@@ -62,18 +54,9 @@ export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
     '重新打开将从原始内容开始，此前交互不会恢复。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
   'mcpApp.generatedUi.unavailable': '此会话未开启交互视图，仅显示摘要。',
   'mcpApp.generatedUi.title': '交互视图',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) => `交互视图参数：${title}`,
   'mcpApp.generatedUi.loading': '正在加载交互视图…',
   'mcpApp.loading': '正在加载 MCP App…',
-  'mcpApp.generatedUi.reviewTitle': '用这些参数继续分析',
-  'mcpApp.generatedUi.reviewDescription': ({ title } = {}) =>
-    `助手会在此会话中收到“${title}”里的这些参数并继续分析。之后在视图中的修改不会包含在内。`,
-  'mcpApp.generatedUi.parameter': '参数',
-  'mcpApp.generatedUi.value': '值',
-  'mcpApp.generatedUi.rejectedEvents': ({ count } = {}) =>
-    `队列已满，此前有 ${count} 次交互未处理；这些参数只包含已生效的部分。`,
-  'mcpApp.generatedUi.noParameters': '此视图没有可发送的参数。',
-  'mcpApp.generatedUi.fullMessage': '发送到会话的完整消息',
-  'mcpApp.generatedUi.send': '继续分析',
   'toolName.mcp__generated-ui__generated_ui_show': '交互视图',
   'mcpApp.message.title': '审阅 App 消息',
   'mcpApp.message.description':
