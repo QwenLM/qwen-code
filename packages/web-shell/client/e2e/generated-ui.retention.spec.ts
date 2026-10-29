@@ -821,7 +821,7 @@ test('New task parks the same App and Worker and revokes host authority @smoke',
   await view.locator('#rate').fill('9');
   const before = await probe.snapshot(app());
   await page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first()
     .click();
   await expect(cards).toBeHidden();
