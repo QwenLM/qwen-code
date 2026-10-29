@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { statSync, writeSync } from 'node:fs';
+import { statSync, writeFileSync, writeSync } from 'node:fs';
 import {
   chmod,
   cp,
@@ -836,6 +836,39 @@ test('check compares the new release with the installed one', async (t) => {
       ([command, verb]) => command !== 'systemctl' || verb === 'show',
     ),
   );
+});
+
+test('check does not tell a newer Harness to go back', async (t) => {
+  const host = await rig(t);
+  host.qwen = '1.2.10';
+  assert.equal(await host.check(), 0);
+  assert.match(
+    rowsOf(host.output)['qwen-code'],
+    /^WARN .* is 1\.2\.10, newer than the 1\.2\.3 this release is built for$/,
+  );
+  assert.ok(
+    host.output.some((line) =>
+      line.endsWith(
+        'Keep Qwen Code 1.2.10 for the Harness only if you have tested it with this release; otherwise, after stop, install 1.2.3 (manual).',
+      ),
+    ),
+  );
+  // An older one, or one that names no version, gets the release's.
+  for (const qwen of ['1.2.3-rc.1', 'a local build']) {
+    host.qwen = qwen;
+    assert.equal(await host.check(), 0);
+    assert.match(
+      rowsOf(host.output)['qwen-code'],
+      new RegExp(`^WARN .* is ${qwen}; this release is built for 1\\.2\\.3$`),
+    );
+    assert.ok(
+      host.output.some((line) =>
+        line.endsWith(
+          'After stop, install Qwen Code 1.2.3 for the Harness (manual).',
+        ),
+      ),
+    );
+  }
 });
 
 test('check refuses what the new release cannot replace', async (t) => {
@@ -1867,11 +1900,25 @@ test('install uses an existing release directory only when it is this build', as
   );
   assert.ok((await lstat(host.current)).isDirectory());
 
-  // The copy an interrupted install left is this build, and is used.
+  // The same build, but its operator file is not the installed one.
   await rm(release, { recursive: true });
   await cp(host.distribution, release, { recursive: true });
+  const config = path.join(release, 'config/application.yml');
+  await writeFile(config, 'key: y\n');
+  assert.equal(await host.upgrade('install', '--backup', target), 1);
+  // The paths as the command resolves them, which a symlinked TMPDIR changes.
+  assert.match(
+    host.output.at(-1),
+    /^install refused: \S+-releases\/0\.2\.0\/config\/application\.yml differs from \S+\/qwen-managed-agent\/config\/application\.yml; reconcile them and run install again\.$/,
+  );
+  assert.ok((await lstat(host.current)).isDirectory());
+  assert.equal(await readFile(config, 'utf8'), 'key: y\n');
+
+  // The copy an interrupted install left is this build, and is used.
+  await writeFile(config, 'key: x\n');
   assert.equal(await host.upgrade('install', '--backup', target), 0);
   assert.ok(host.output.includes(`Using ${release}`));
+  assert.ok(!host.output.includes('Copied config/application.yml'));
   assert.equal(await readlink(host.current), release);
 });
 
@@ -1915,6 +1962,29 @@ test('install leaves no partial copy, and an interrupted one is reported', async
     host.output.join('\n'),
     /install refused: .*finish the install with mv -T/,
   );
+});
+
+test('install refuses a copy that does not match SHA256SUMS', async (t) => {
+  const { host, target } = await backedUp(t);
+  const releases = `${host.current}-releases`;
+  // The extraction changes after check verified it, as on a failing disk.
+  const { out } = host.system;
+  host.system.out = (line) => {
+    out(line);
+    if (line.startsWith('Copying ')) {
+      writeFileSync(
+        path.join(host.distribution, 'bin/qwen-managed-agent-server'),
+        'damaged\n',
+      );
+    }
+  };
+  assert.equal(await host.upgrade('install', '--backup', target), 1);
+  assert.match(
+    host.output.at(-1),
+    /^install refused: The copy at \S+\/\.0\.2\.0\.partial-[0-9a-f]{8} does not match SHA256SUMS \(bin\/qwen-managed-agent-server\)\.$/,
+  );
+  assert.deepEqual(await readdir(releases), []);
+  assert.ok((await lstat(host.current)).isDirectory());
 });
 
 test('--runtime-state none backs up a deployment that keeps no state', async (t) => {

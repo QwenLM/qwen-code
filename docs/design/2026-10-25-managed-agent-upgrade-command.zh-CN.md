@@ -83,20 +83,20 @@
 
 ### check 的各行
 
-| 行              | FAIL                                                                                                       | WARN                                                              |
-| --------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `distribution`  | 有文件与 `SHA256SUMS` 不符                                                                                 |                                                                   |
-| `deployment`    | unit 未加载，服务端启动的不是分发产物中的启动脚本，新 manifest 无法读取，或 install 被中断                 |                                                                   |
-| `version`       | 版本相同或更旧                                                                                             |                                                                   |
-| `database`      | 已安装数据库执行过的脚本被修改或删除；可重复脚本被删除；新增的版本化脚本没有排在数据库执行过的最新脚本之后 | 有脚本要执行，包括有变化的可重复脚本；无法读取 jar                |
-| `java`、`node`  | 低于 manifest 的最低版本，或找不到                                                                         | 版本范围无法解析                                                  |
-| `qwen-code`     |                                                                                                            | Harness 运行的版本与 manifest 不同                                |
-| `harness-env`   |                                                                                                            | 存在 `QWEN_HOSTED_HARNESS_BROKER_ARGS`，或 Broker token 设了两份  |
-| `config`        | 已安装版本的 `config/` 中有非文件项                                                                        |                                                                   |
-| `unit-files`    |                                                                                                            | 两个版本之间 unit 模板有变化                                      |
-| `layout`        | 版本目录位于任一分发产物内部，或与 install 要移动的目录不在同一文件系统                                    |                                                                   |
-| `backup-tools`  | `--mysqldump` 指定的客户端未安装，或数据源不是单主机 MySQL URL                                             | （指定 `--skip-database` 时为 SKIP）                              |
-| `runtime-state` | 无法解析服务端的配置且未传 `--runtime-state`；`--runtime-state` 不是目录                                   | 解析出的目录不存在（未配置或传 `--runtime-state none` 时为 SKIP） |
+| 行              | FAIL                                                                                                       | WARN                                                                |
+| --------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `distribution`  | 有文件与 `SHA256SUMS` 不符                                                                                 |                                                                     |
+| `deployment`    | unit 未加载，服务端启动的不是分发产物中的启动脚本，新 manifest 无法读取，或 install 被中断                 |                                                                     |
+| `version`       | 版本相同或更旧                                                                                             |                                                                     |
+| `database`      | 已安装数据库执行过的脚本被修改或删除；可重复脚本被删除；新增的版本化脚本没有排在数据库执行过的最新脚本之后 | 有脚本要执行，包括有变化的可重复脚本；无法读取 jar                  |
+| `java`、`node`  | 低于 manifest 的最低版本，或找不到                                                                         | 版本范围无法解析                                                    |
+| `qwen-code`     |                                                                                                            | Harness 运行的版本与 manifest 不同;比它新的版本经运维测试过可以保留 |
+| `harness-env`   |                                                                                                            | 存在 `QWEN_HOSTED_HARNESS_BROKER_ARGS`，或 Broker token 设了两份    |
+| `config`        | 已安装版本的 `config/` 中有非文件项                                                                        |                                                                     |
+| `unit-files`    |                                                                                                            | 两个版本之间 unit 模板有变化                                        |
+| `layout`        | 版本目录位于任一分发产物内部，或与 install 要移动的目录不在同一文件系统                                    |                                                                     |
+| `backup-tools`  | `--mysqldump` 指定的客户端未安装，或数据源不是单主机 MySQL URL                                             | （指定 `--skip-database` 时为 SKIP）                                |
+| `runtime-state` | 无法解析服务端的配置且未传 `--runtime-state`；`--runtime-state` 不是目录                                   | 解析出的目录不存在（未配置或传 `--runtime-state none` 时为 SKIP）   |
 
 `check` 接受后续阶段的选项，并把它们写进打印的计划，因此这些行描述的正是运维将要执行的那次运行。`stop` 和 `install` 会重复 `backup-tools` 以上的所有行；`backup` 重复最后两行。
 

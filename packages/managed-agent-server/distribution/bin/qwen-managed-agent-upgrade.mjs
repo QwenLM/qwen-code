@@ -1244,16 +1244,37 @@ export async function compatibilityRows(system, deployment) {
       ['--version'],
       harnessPath,
     );
-  rows.push(
-    qwen === qwenWanted
-      ? row('qwen-code', 'PASS', `${deployment.harness.execPath} is ${qwen}`)
-      : row(
-          'qwen-code',
-          'WARN',
-          `${deployment.harness.execPath ?? 'the Harness'} is ${qwen ?? 'unknown'}; this release is built for ${qwenWanted}`,
-          `after stop, install Qwen Code ${qwenWanted} for the Harness`,
-        ),
-  );
+  let newer = false;
+  try {
+    newer = Boolean(qwen) && compareVersions(qwen, qwenWanted) > 0;
+  } catch {
+    // Not a version to order, such as a build's own string.
+  }
+  if (qwen === qwenWanted) {
+    rows.push(
+      row('qwen-code', 'PASS', `${deployment.harness.execPath} is ${qwen}`),
+    );
+  } else if (newer) {
+    // The manifest names the version the release was built and tested
+    // with; a later one may be the operator's own patched Harness.
+    rows.push(
+      row(
+        'qwen-code',
+        'WARN',
+        `${deployment.harness.execPath} is ${qwen}, newer than the ${qwenWanted} this release is built for`,
+        `keep Qwen Code ${qwen} for the Harness only if you have tested it with this release; otherwise, after stop, install ${qwenWanted}`,
+      ),
+    );
+  } else {
+    rows.push(
+      row(
+        'qwen-code',
+        'WARN',
+        `${deployment.harness.execPath ?? 'the Harness'} is ${qwen ?? 'unknown'}; this release is built for ${qwenWanted}`,
+        `after stop, install Qwen Code ${qwenWanted} for the Harness`,
+      ),
+    );
+  }
 
   rows.push(harnessEnvironmentRow(deployment));
 
@@ -2079,7 +2100,7 @@ async function phaseInstall(system, deployment, options) {
   system.out(`The previous release stays at ${previous}.`);
   const wanted = deployment.manifest.compatibility?.qwenCodeVersion;
   system.out(
-    `Install Qwen Code ${wanted} for the Harness now unless check passed its qwen-code row, then run start.`,
+    `Install Qwen Code ${wanted} for the Harness now if check's qwen-code row asked for it, then run start.`,
   );
   return 0;
 }
