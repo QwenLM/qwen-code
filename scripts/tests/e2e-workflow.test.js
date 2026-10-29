@@ -4,7 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
@@ -16,17 +26,36 @@ describe('TUI product evidence', () => {
   const classify = new (Object.getPrototypeOf(async () => {}).constructor)(
     'github',
     'context',
+    'core',
     workflow.jobs.changes.steps[0].with.script,
   );
   const serverFile = 'packages/managed-agent-server/src/main/java/Service.java';
-  async function required(
+  const companionFile =
+    'packages/vscode-ide-companion/src/services/settingsWriter.ts';
+  async function impact(
     files,
     count = files.length,
     eventName = 'pull_request',
+    apiError,
   ) {
     const github = {
       paginate: vi.fn().mockResolvedValue(files),
       rest: { pulls: { listFiles: vi.fn() } },
+    };
+    if (apiError) github.paginate.mockRejectedValue(apiError);
+    const outputs = {};
+    const summary = {
+      addHeading: vi.fn().mockReturnThis(),
+      addTable: vi.fn().mockReturnThis(),
+      addRaw: vi.fn().mockReturnThis(),
+      write: vi.fn().mockResolvedValue(),
+    };
+    const core = {
+      setOutput: (key, value) => {
+        outputs[key] = value;
+      },
+      setFailed: vi.fn(),
+      summary,
     };
     // A real dispatch payload carries no `pull_request` key. Handing the
     // dispatch case a populated one would keep this suite green if the
@@ -36,11 +65,15 @@ describe('TUI product evidence', () => {
       eventName === 'pull_request'
         ? { pull_request: { number: 15261, changed_files: count } }
         : {};
-    const result = await classify(github, {
-      eventName,
-      repo: { owner: 'QwenLM', repo: 'qwen-code' },
-      payload,
-    });
+    await classify(
+      github,
+      {
+        eventName,
+        repo: { owner: 'QwenLM', repo: 'qwen-code' },
+        payload,
+      },
+      core,
+    );
     if (eventName === 'pull_request') {
       expect(github.paginate).toHaveBeenCalledWith(
         github.rest.pulls.listFiles,
@@ -54,8 +87,469 @@ describe('TUI product evidence', () => {
     } else {
       expect(github.paginate).not.toHaveBeenCalled();
     }
-    return result;
+    expect(summary.write).toHaveBeenCalledOnce();
+    expect(summary.addRaw).toHaveBeenCalledWith(outputs.reason);
+    return { outputs, core };
   }
+  const required = async (...args) =>
+    (await impact(...args)).outputs.component === 'true';
+
+  const condition = (
+    expression,
+    outputs,
+    result = 'success',
+    cancelled = false,
+    event = 'pull_request',
+  ) => {
+    if (!expression) return true;
+    return new Function(
+      'needs',
+      'cancelled',
+      'github',
+      `return (${expression.slice(3, -2)});`,
+    )({ changes: { result, outputs } }, () => cancelled, { event_name: event });
+  };
+  const named = (job, prefix) =>
+    workflow.jobs[job].steps.find((step) => step.name?.startsWith(prefix));
+  const lanes = [
+    'component',
+    'render',
+    'input',
+    'recovery',
+    'integration',
+    'full',
+  ];
+  const flags = (selected) =>
+    Object.fromEntries(
+      lanes.map((lane) => [lane, String(selected.includes(lane))]),
+    );
+
+  it.each([
+    ['packages/cli/src/ui/components/LoadingIndicator.tsx', ['component']],
+    ['packages/core/src/utils/debugLogger.ts', ['component']],
+    ['packages/new-dependency/src/unknown.ts', ['component']],
+    [
+      'packages/cli/src/ui/opentui/status-line-text.ts',
+      ['component', 'render'],
+    ],
+    ['packages/core/src/telemetry/uiTelemetry.ts', ['component', 'render']],
+    ['packages/cli/src/ui/opentui/clipboard.ts', ['component', 'input']],
+    [
+      'packages/cli/src/ui/components/shared/text-buffer.ts',
+      ['component', 'input'],
+    ],
+    [
+      'packages/core/src/services/fileHistoryService.ts',
+      ['component', 'recovery'],
+    ],
+    [
+      'packages/core/src/services/visionBridge/vision-bridge-service.ts',
+      ['component', 'input', 'recovery'],
+    ],
+    [
+      'packages/cli/src/ui/contexts/SessionContext.tsx',
+      ['component', 'render', 'recovery'],
+    ],
+    ['packages/core/src/config/config.ts', lanes],
+    ['packages/cli/src/llm.tsx', lanes],
+    ['packages/cli/src/utils/tui-runtime.ts', lanes],
+    ['packages/cli/src/utils/npm-runtime.ts', lanes],
+    ['packages/cli/src/ui/opentui/opentui-assets.ts', lanes],
+    ['scripts/tests/unrelated.test.js', ['component']],
+    [
+      'packages/core/src/tools/write-file.ts',
+      ['component', 'recovery', 'integration'],
+    ],
+    [
+      'packages/core/src/services/shellExecutionService.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/config/extension-runtime-reload.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/cli/src/dualOutput/index.ts', ['component', 'integration']],
+    ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
+    ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
+    ['pnpm-lock.yaml', lanes],
+    ['packages/cli/package.json', lanes],
+    ['scripts/tui-parity/component-parity.sh', lanes],
+    ['integration-tests/test-helper.ts', lanes],
+    ['.github/workflows/tui-parity.yml', lanes],
+    ['docs/design/unrelated.md', []],
+    ['scripts/unrelated-maintenance.js', ['component']],
+  ])(
+    'selects mechanisms rather than blanket full acceptance for %s',
+    async (filename, selected) => {
+      if (!/unknown|unrelated|new-dependency/.test(filename)) {
+        expect(existsSync(filename), filename).toBe(true);
+      }
+      const { outputs, core } = await impact([{ filename }]);
+      expect(core.setFailed).not.toHaveBeenCalled();
+      expect(outputs).toMatchObject(flags(selected));
+      expect(condition(workflow.jobs.parity.if, outputs)).toBe(
+        selected.includes('component'),
+      );
+      expect(condition(workflow.jobs.noflicker.if, outputs)).toBe(
+        selected.some((lane) => ['render', 'recovery', 'full'].includes(lane)),
+      );
+      expect(condition(named('parity', 'Component parity').if, outputs)).toBe(
+        selected.includes('component'),
+      );
+      expect(condition(named('parity', 'Bundle the product').if, outputs)).toBe(
+        selected.some((lane) => lane !== 'component'),
+      );
+      expect(condition(named('parity', 'Three-leg product').if, outputs)).toBe(
+        selected.includes('full'),
+      );
+      expect(condition(named('parity', 'Targeted product').if, outputs)).toBe(
+        !selected.includes('full') &&
+          selected.some((lane) => lane !== 'component'),
+      );
+      expect(
+        condition(named('noflicker', 'OpenTUI no-flicker').if, outputs),
+      ).toBe(selected.includes('render'));
+      for (const prefix of ['Bundle the product', 'Cold checkpoint recovery']) {
+        expect(condition(named('noflicker', prefix).if, outputs)).toBe(
+          selected.includes('recovery'),
+        );
+      }
+      if (selected.length === 1)
+        expect(outputs.reason).toContain(
+          'maintainers should consider manual full',
+        );
+    },
+  );
+
+  it('unions both rename paths and reports only fixed reasons, never untrusted path text', async () => {
+    const filename = 'packages/unknown/$(touch injected)\n<script>.ts';
+    const files = [
+      {
+        filename: 'packages/cli/src/ui/opentui/clipboard.ts',
+        previous_filename: 'packages/core/src/services/sessionService.ts',
+      },
+      { filename },
+    ];
+    const { outputs, core } = await impact(files);
+    expect((await impact([...files].reverse())).outputs).toMatchObject(
+      flags(['component', 'input', 'recovery']),
+    );
+    expect(outputs).toMatchObject(flags(['component', 'input', 'recovery']));
+    expect(JSON.stringify(core.summary.addTable.mock.calls)).not.toContain(
+      filename,
+    );
+    expect(outputs.reason).not.toContain(filename);
+  });
+
+  it('fails the classifier on API errors but routes all downstream full steps even without outputs', async () => {
+    const { outputs, core } = await impact(
+      [],
+      0,
+      'pull_request',
+      new Error('API unavailable'),
+    );
+    expect(core.setFailed).toHaveBeenCalledOnce();
+    expect(outputs).toMatchObject(flags(lanes));
+    for (const values of [outputs, {}]) {
+      for (const [job, prefixes] of [
+        [
+          'parity',
+          ['Component parity', 'Bundle the product', 'Three-leg product'],
+        ],
+        [
+          'noflicker',
+          [
+            'OpenTUI no-flicker',
+            'Bundle the product',
+            'Cold checkpoint recovery',
+          ],
+        ],
+      ]) {
+        expect(condition(workflow.jobs[job].if, values, 'failure')).toBe(true);
+        for (const prefix of prefixes)
+          expect(condition(named(job, prefix).if, values, 'failure')).toBe(
+            true,
+          );
+      }
+      expect(
+        condition(named('parity', 'Targeted product').if, values, 'failure'),
+      ).toBe(false);
+    }
+  });
+
+  it.each(['schedule', 'workflow_dispatch'])(
+    'runs all original source and installed acceptance on %s',
+    async (event) => {
+      const { outputs } = await impact([], 0, event);
+      expect(outputs).toMatchObject(flags(lanes));
+      expect(workflow.jobs.changes.if).toBeUndefined();
+      for (const job of ['parity', 'noflicker', 'installed-npm']) {
+        expect(
+          condition(workflow.jobs[job].if, outputs, 'success', false, event),
+        ).toBe(true);
+      }
+      expect(workflow.jobs['installed-distribution'].needs).toBe(
+        'installed-npm',
+      );
+      for (const [job, prefix] of [
+        ['parity', 'Three-leg product'],
+        ['noflicker', 'Cold checkpoint recovery'],
+        ['noflicker', 'OpenTUI no-flicker'],
+      ]) {
+        expect(
+          condition(named(job, prefix).if, outputs, 'success', false, event),
+        ).toBe(true);
+      }
+      expect(
+        condition(
+          named('parity', 'Targeted product').if,
+          outputs,
+          'success',
+          false,
+          event,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  const runAcceptance = (step, outputs, failLeg = '') => {
+    const root = mkdtempSync(join(tmpdir(), 'tui-workflow-test-'));
+    mkdirSync(join(root, 'integration-tests'));
+    try {
+      const env = { ...process.env, RUNNER_TEMP: root, FAIL_LEG: failLeg };
+      delete env.QWEN_E2E_RUNTIME;
+      delete env.QWEN_E2E_RENDERER;
+      for (const [key, expression] of Object.entries(step.env ?? {})) {
+        const lane = expression.match(
+          /^\$\{\{ needs\.changes\.outputs\.(\w+) \}\}$/,
+        )?.[1];
+        if (lane) env[key] = outputs[lane];
+      }
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          `npx() { printf '%s\\t' "\${QWEN_E2E_RUNTIME:-unset}:\${QWEN_E2E_RENDERER:-unset}" "$@"; printf '\\n'; [ "\${QWEN_E2E_RUNTIME:-unset}:\${QWEN_E2E_RENDERER:-unset}" != "$FAIL_LEG" ]; }\n${step.run}`,
+        ],
+        { cwd: root, env, encoding: 'utf8' },
+      );
+      expect(result.error).toBeUndefined();
+      return {
+        status: result.status,
+        calls: result.stdout
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.trim().split('\t')),
+      };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const groupFiles = {
+    render: ['tui-migration', 'statusline-parity'],
+    input: ['tui-input-ownership', 'tui-editor-parity', 'tui-clipboard-source'],
+    recovery: ['tui-session-recovery'],
+    integration: [
+      'tui-foreground-shell',
+      'tui-extension-acquisition',
+      'tui-dual-output',
+    ],
+  };
+  it.each(
+    [
+      ['render'],
+      ['input'],
+      ['recovery'],
+      ['integration'],
+      Object.keys(groupFiles),
+    ].map((groups) => [groups]),
+  )(
+    'executes exactly the selected whole files for %j in all three serial legs',
+    async (groups) => {
+      const paths = {
+        render: 'statusline-parity',
+        input: 'tui-input-ownership',
+        recovery: 'tui-session-recovery',
+        integration: 'tui-dual-output',
+      };
+      const { outputs } = await impact(
+        groups.map((group) => ({
+          filename: `integration-tests/interactive/${paths[group]}.test.ts`,
+        })),
+      );
+      const step = named('parity', 'Targeted product');
+      expect(condition(step.if, outputs)).toBe(true);
+      const { status, calls } = runAcceptance(step, outputs);
+      expect(status).toBe(0);
+      const expected = groups.flatMap((group) =>
+        groupFiles[group].map((file) => `interactive/${file}.test.ts`),
+      );
+      for (const file of expected)
+        expect(existsSync(`integration-tests/${file}`)).toBe(true);
+      if (groups.includes('render')) {
+        expect(calls.shift()).toEqual([
+          'unset:unset',
+          'vitest',
+          'run',
+          'renderer-matrix.test.ts',
+          'interactive/interactive-session-viewport.test.ts',
+          '--retry=0',
+          '--maxWorkers=1',
+          '--minWorkers=1',
+          '--dangerouslyIgnoreUnhandledErrors=false',
+        ]);
+      }
+      expect(calls).toEqual(
+        ['node:ink', 'bun:ink', 'bun:opentui'].map((leg) => [
+          leg,
+          'vitest',
+          'run',
+          ...expected,
+          '--retry=0',
+          '--maxWorkers=1',
+          '--minWorkers=1',
+          '--dangerouslyIgnoreUnhandledErrors=false',
+        ]),
+      );
+      expect(step.env.QWEN_TUI_ACCEPTANCE_OUT).toBe(
+        named('parity', 'Three-leg product').env.QWEN_TUI_ACCEPTANCE_OUT,
+      );
+      expect(step['continue-on-error']).toBeUndefined();
+    },
+  );
+
+  it('keeps checkpoint separate and preserves failure after running the remaining serial legs', () => {
+    const outputs = flags(['component', 'recovery']);
+    const targeted = runAcceptance(
+      named('parity', 'Targeted product'),
+      outputs,
+      'node:ink',
+    );
+    expect(targeted.status).toBe(1);
+    expect(targeted.calls).toHaveLength(3);
+    const checkpoint = runAcceptance(
+      named('noflicker', 'Cold checkpoint recovery'),
+      outputs,
+      'bun:ink',
+    );
+    expect(checkpoint.status).toBe(1);
+    expect(checkpoint.calls).toEqual(
+      ['node:ink', 'bun:ink', 'bun:opentui'].map((leg) => [
+        leg,
+        'vitest',
+        'run',
+        'interactive/tui-checkpoint-restore.test.ts',
+        '--retry=0',
+        '--maxWorkers=1',
+        '--minWorkers=1',
+        '--dangerouslyIgnoreUnhandledErrors=false',
+      ]),
+    );
+  });
+
+  it('preserves the complete full matrix rather than replacing it with selected subsets', () => {
+    const { status, calls } = runAcceptance(
+      named('parity', 'Three-leg product'),
+      flags(lanes),
+    );
+    expect(status).toBe(0);
+    expect(calls).toHaveLength(4);
+    expect(calls[0].slice(0, 5)).toEqual([
+      'unset:unset',
+      'vitest',
+      'run',
+      'renderer-matrix.test.ts',
+      'interactive/interactive-session-viewport.test.ts',
+    ]);
+    const expectedFiles = Object.values(groupFiles)
+      .flat()
+      .map((file) => `interactive/${file}.test.ts`)
+      .sort();
+    expect(calls.slice(1).map((call) => call[0])).toEqual([
+      'node:ink',
+      'bun:ink',
+      'bun:opentui',
+    ]);
+    for (const call of calls.slice(1)) {
+      expect(call.filter((arg) => arg.endsWith('.test.ts')).sort()).toEqual(
+        expectedFiles,
+      );
+      expect(call.slice(-4)).toEqual([
+        '--retry=0',
+        '--maxWorkers=1',
+        '--minWorkers=1',
+        '--dangerouslyIgnoreUnhandledErrors=false',
+      ]);
+    }
+  });
+
+  it('preserves runner trust boundaries and the no-checkout classifier', () => {
+    for (const job of ['changes', 'parity', 'noflicker']) {
+      const routing = workflow.jobs[job]['runs-on'];
+      expect(routing).toBe(workflow.jobs.parity['runs-on']);
+      const evaluate = new Function(
+        'github',
+        'vars',
+        'contains',
+        'fromJSON',
+        `return (${routing.slice(3, -2)});`,
+      );
+      for (const [association, sameRepo, disabled, expected] of [
+        ['CONTRIBUTOR', false, 'false', ['ubuntu-latest']],
+        ['MEMBER', false, 'false', ['self-hosted', 'linux', 'x64', 'ecs-qwen']],
+        [
+          'CONTRIBUTOR',
+          true,
+          'false',
+          ['self-hosted', 'linux', 'x64', 'ecs-qwen'],
+        ],
+        ['OWNER', true, 'true', ['ubuntu-latest']],
+      ]) {
+        expect(
+          evaluate(
+            {
+              repository: 'QwenLM/qwen-code',
+              event_name: 'pull_request',
+              event: {
+                pull_request: {
+                  author_association: association,
+                  head: {
+                    repo: {
+                      full_name: sameRepo
+                        ? 'QwenLM/qwen-code'
+                        : 'fork/qwen-code',
+                    },
+                  },
+                },
+              },
+            },
+            { MAINTAINER_ECS_RUNNER_DISABLED: disabled },
+            (values, value) => values.includes(value),
+            JSON.parse,
+          ),
+        ).toEqual(expected);
+      }
+    }
+    expect(workflow.jobs.changes.steps[0].uses).toMatch(
+      /^actions\/github-script@/,
+    );
+    expect(workflow.jobs.changes.steps[0].run).toBeUndefined();
+    expect(workflow.jobs.changes['timeout-minutes']).toBe(5);
+    expect(workflow.jobs.noflicker['timeout-minutes']).toBe(30);
+    expect(workflow.jobs.noflicker.env.QWEN_API_KEY).toBe(
+      '${{ secrets.QWEN_API_KEY }}',
+    );
+    expect(Object.keys(workflow.jobs)).toEqual([
+      'changes',
+      'parity',
+      'noflicker',
+      'installed-npm',
+      'installed-distribution',
+    ]);
+  });
 
   it('runs the foreground shell wholefile in all three product legs without retries', () => {
     const step = steps.find(
@@ -87,8 +581,25 @@ describe('TUI product evidence', () => {
     ).toBe(false);
   });
 
+  it('skips Companion-only source changes and their tests', async () => {
+    expect(
+      await required([
+        { filename: companionFile },
+        {
+          filename:
+            'packages/vscode-ide-companion/src/services/settingsWriter.test.ts',
+        },
+      ]),
+    ).toBe(false);
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
+    'packages/vscode-ide-companion/package.json',
+    'packages/vscode-ide-companion/esbuild.js',
+    'packages/vscode-ide-companion/tsconfig.json',
+    'packages/vscode-ide-companion/src-extra/index.ts',
+    'packages/vscode-ide-companion/scripts/copy-bundled-cli.js',
     'packages/core/src/core/client.ts',
     'packages/channels/base/index.ts',
     'packages/web-templates/package.json',
@@ -104,47 +615,78 @@ describe('TUI product evidence', () => {
     '.nvmrc',
     '.github/workflows/tui-parity.yml',
   ])('runs mixed PRs touching %s', async (filename) => {
-    expect(await required([{ filename: serverFile }, { filename }])).toBe(true);
-  });
-
-  it('checks the source of a rename into an unrelated directory', async () => {
     expect(
       await required([
-        {
-          filename: serverFile,
-          previous_filename: 'packages/cli/src/index.ts',
-        },
+        { filename: serverFile },
+        { filename: companionFile },
+        { filename },
       ]),
     ).toBe(true);
   });
 
-  it('still skips a rename contained within the unrelated subtrees', async () => {
-    // Pins the negative arm: `previous_filename` present, but itself
-    // unrelated. Without it, weakening that arm to a presence check keeps the
-    // suite green while re-running both gates on any server-side restructure.
-    expect(
-      await required([
-        {
-          filename: serverFile,
-          previous_filename:
-            'packages/managed-agent-server/src/main/java/Old.java',
-        },
-      ]),
-    ).toBe(false);
-  });
+  it.each([serverFile, companionFile])(
+    'checks the source of a rename into %s',
+    async (filename) => {
+      expect(
+        await required([
+          {
+            filename,
+            previous_filename: 'packages/cli/src/index.ts',
+          },
+        ]),
+      ).toBe(true);
+    },
+  );
 
-  it('uses files beyond the first API page and runs on incomplete diffs', async () => {
+  it.each([
+    [
+      'both ends in the Java service',
+      serverFile,
+      'packages/managed-agent-server/src/main/java/Old.java',
+    ],
+    [
+      'both ends in a Companion source subtree',
+      companionFile,
+      'packages/vscode-ide-companion/src/services/oldWriter.ts',
+    ],
+    [
+      // Reachable only inside a mixed PR: `on.pull_request.paths` has no
+      // `docs/**` entry, so a docs-only PR never starts this workflow. The row
+      // still earns its place — the arm must keep skipping a docs rename that
+      // rides alongside package changes.
+      'both ends under docs/',
+      'docs/design/runtime.md',
+      'docs/design/old-runtime.md',
+    ],
+  ])(
+    'still skips a rename with %s',
+    async (_label, filename, previousFilename) => {
+      // Pins the negative arm: `previous_filename` present, but itself
+      // unrelated. Without it, weakening that arm to a presence check keeps
+      // the suite green while re-running both gates on any unrelated
+      // restructure. Every excluded subtree needs its own row: a mutation
+      // confined to the arm (narrowing it to one prefix) leaves the shared
+      // `unrelated()` predicate and every single-file case green.
+      expect(
+        await required([{ filename, previous_filename: previousFilename }]),
+      ).toBe(false);
+    },
+  );
+
+  it('uses files beyond the first API page and fails visibly on incomplete diffs', async () => {
     const files = Array.from({ length: 101 }, () => ({ filename: serverFile }));
     expect(
       await required([...files, { filename: 'packages/cli/src/index.ts' }]),
     ).toBe(true);
-    expect(await required(files, 102)).toBe(true);
-    expect(await required(files, null)).toBe(true);
-    expect(
-      await required(
-        Array.from({ length: 3000 }, () => ({ filename: serverFile })),
-      ),
-    ).toBe(true);
+    for (const [entries, count] of [
+      [files, 102],
+      [files, null],
+      [Array.from({ length: 3000 }, () => ({ filename: serverFile })), 3000],
+    ]) {
+      const result = await impact(entries, count);
+      expect(result.core.setFailed).toHaveBeenCalledOnce();
+      expect(result.outputs.full).toBe('true');
+    }
   });
 
   it('always runs manual dispatches without querying PR files', async () => {
@@ -155,14 +697,28 @@ describe('TUI product evidence', () => {
     expect(workflow.jobs.changes.permissions).toEqual({
       'pull-requests': 'read',
     });
-    expect(workflow.jobs.changes.outputs.required).toBe(
-      '${{ steps.changes.outputs.result }}',
-    );
+    for (const key of [
+      'component',
+      'render',
+      'input',
+      'recovery',
+      'integration',
+      'full',
+      'reason',
+    ]) {
+      expect(workflow.jobs.changes.outputs[key]).toBe(
+        '${{ steps.changes.outputs.' + key + ' }}',
+      );
+    }
+    expect(workflow.jobs.changes['continue-on-error']).toBeUndefined();
+    expect(workflow.jobs.changes.steps[0]['continue-on-error']).toBeUndefined();
+    expect(workflow.jobs.changes.steps).toHaveLength(1);
     for (const job of [workflow.jobs.parity, workflow.jobs.noflicker]) {
       expect(job.needs).toBe('changes');
-      expect(job.if).toBe(
-        "${{ !cancelled() && github.event_name != 'schedule' && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
-      );
+      for (const result of ['failure', 'skipped', 'cancelled']) {
+        expect(condition(job.if, {}, result)).toBe(true);
+      }
+      expect(condition(job.if, {}, 'success', true)).toBe(false);
       expect(job.steps.find((step) => step.name === 'Build cli').run).toBe(
         'npm run build -- --cli-only',
       );
@@ -968,9 +1524,7 @@ describe('installed npm acceptance workflow', () => {
       "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
     );
     expect(job.needs).toBeUndefined();
-    expect(workflow.jobs.changes.if).toBe(
-      "${{ github.event_name != 'schedule' }}",
-    );
+    expect(workflow.jobs.changes.if).toBeUndefined();
   });
   it('keeps installed setup independent of the original source parity budget', () => {
     expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
