@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
 
 use crate::protocol::{Content, ToolResult};
 use crate::tool::{DispatchSessionIdentity, Tool, ToolDef, ToolRegistry};
+
+const MAX_MODEL_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) struct Entry(ToolDef);
 
@@ -900,11 +903,43 @@ impl ComputerUseRuntime {
         };
         if name == "get_screenshot" {
             *frame = None;
-            let result = checked(
+            let mut result = checked(
                 Box::pin(registry.invoke_computer_use_native("get_desktop_state", session_args()))
                     .await,
                 false,
             )?;
+            // Keep native pixel coordinates while fitting the Node REPL image budget.
+            for part in &mut result.content {
+                if let Content::Image {
+                    data, mime_type, ..
+                } = part
+                {
+                    if mime_type == "image/png"
+                        && data.len() >= MAX_MODEL_IMAGE_BYTES.div_ceil(3) * 4
+                    {
+                        let png = BASE64
+                            .decode(data.as_bytes())
+                            .map_err(|e| error("screenshot_unavailable", e.to_string(), false))?;
+                        if png.len() <= MAX_MODEL_IMAGE_BYTES {
+                            continue;
+                        }
+                        let jpeg = crate::image_utils::png_bytes_to_jpeg(&png, 80)
+                            .map_err(|e| error("screenshot_unavailable", e.to_string(), false))?;
+                        if jpeg.len() > MAX_MODEL_IMAGE_BYTES {
+                            return Err(error(
+                                "screenshot_unavailable",
+                                "Desktop image exceeds the model image budget.",
+                                false,
+                            ));
+                        }
+                        *data = BASE64.encode(jpeg);
+                        *mime_type = "image/jpeg".into();
+                        if let Some(metadata) = &mut result.structured_content {
+                            metadata["screenshot_mime_type"] = json!("image/jpeg");
+                        }
+                    }
+                }
+            }
             let captured = result
                 .structured_content
                 .as_ref()
@@ -1020,6 +1055,7 @@ mod tests {
         off_space: Mutex<bool>,
         calls: Mutex<Vec<(String, Value)>>,
         readiness: Mutex<Vec<(String, Option<std::time::Instant>)>>,
+        desktop_image: Mutex<Option<String>>,
     }
     struct Native {
         def: ToolDef,
@@ -1044,7 +1080,7 @@ mod tests {
             match self.def.name.as_str() {
                 "get_desktop_state" => {
                     let mut result = ToolResult::text("desktop").with_structured(json!({"platform":"macos","display":"primary","screenshot_mime_type":"image/png","screenshot_width":2000,"screenshot_height":1000,"screen_width":1000,"screen_height":500,"scale_factor":2.0}));
-                    result.content.push(Content::image_png("AQ==".into())); result
+                    result.content.push(Content::image_png(self.fixture.desktop_image.lock().unwrap().clone().unwrap_or_else(|| "AQ==".into()))); result
                 },
                 "get_screen_size" => ToolResult::text("geometry").with_structured(json!({"width":*self.fixture.screen_width.lock().unwrap(),"height":500,"scale_factor":2.0})),
                 "list_apps" => ToolResult::text("").with_structured(json!({"apps":[{
@@ -1124,6 +1160,62 @@ mod tests {
         registry
             .invoke_with_context_and_evidence(name, args, context, evidence)
             .await
+    }
+    #[tokio::test]
+    async fn large_desktop_image_fits_model_budget_without_changing_coordinates() {
+        let (registry, fixture, context) = setup();
+        let mut seed = 1u32;
+        let rgba: Vec<u8> = (0..2000 * 1000)
+            .flat_map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let [r, g, b, _] = seed.to_le_bytes();
+                [r, g, b, 255]
+            })
+            .collect();
+        let png = crate::image_utils::encode_rgba_to_png(&rgba, 2000, 1000).unwrap();
+        assert!(png.len() > 4 * 1024 * 1024);
+        *fixture.desktop_image.lock().unwrap() = Some(BASE64.encode(png));
+        let result = call(
+            &registry,
+            context.clone(),
+            "get_screenshot",
+            json!({"scope":"desktop"}),
+            "large-image",
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let Content::Image {
+            data, mime_type, ..
+        } = result
+            .content
+            .iter()
+            .find(|part| matches!(part, Content::Image { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(mime_type, "image/jpeg");
+        let jpeg = BASE64.decode(data).unwrap();
+        assert!(jpeg.len() < 4 * 1024 * 1024);
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2000, 1000));
+        let result = call(
+            &registry,
+            context,
+            "click",
+            json!({"scope":"desktop","x":1500,"y":600}),
+            "large-image",
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let calls = fixture.calls.lock().unwrap();
+        let (_, click) = calls.iter().find(|(name, _)| name == "click").unwrap();
+        assert_eq!(
+            (click["x"].as_f64(), click["y"].as_f64()),
+            (Some(750.0), Some(300.0))
+        );
     }
     #[tokio::test]
     async fn ax_observation_shares_one_readiness_deadline_but_input_and_screenshot_do_not_wait() {

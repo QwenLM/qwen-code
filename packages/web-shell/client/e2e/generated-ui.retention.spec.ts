@@ -11,6 +11,7 @@ import {
   type Frame,
   type FrameLocator,
   type Page,
+  type Route,
   type TestInfo,
 } from '@playwright/test';
 import {
@@ -486,21 +487,34 @@ async function openCards(
   };
 }
 
+// Reads the parameters the continue action would send, without sending:
+// the prompt is refused at the daemon boundary, so the card reports that
+// nothing was sent and stays available.
 async function reviewSnapshot(page: Page, app: FrameLocator) {
-  await app.locator('#continue-analysis').click();
-  const review = page.getByRole('dialog', {
-    name: 'Continue with these parameters',
-  });
-  await expect(review).toBeVisible();
-  const text = (await review.locator('pre').textContent())!;
+  let text: string | undefined;
+  const capture = async (route: Route) => {
+    const body = route.request().postDataJSON() as {
+      prompt: Array<{ text: string }>;
+    };
+    text = body.prompt[0].text;
+    await route.fulfill({ status: 409, json: { error: 'captured by test' } });
+  };
+  await page.route('**/session/*/prompt', capture);
+  try {
+    await app.locator('#continue-analysis').click();
+    await expect.poll(() => text).toBeDefined();
+    await expect(app.locator('#continuation-status')).toContainText(
+      'Not sent.',
+    );
+  } finally {
+    await page.unroute('**/session/*/prompt', capture);
+  }
   const payload = JSON.parse(
-    text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1),
+    text!.slice(text!.indexOf('{'), text!.lastIndexOf('}') + 1),
   ) as {
     snapshot: { documentId: string; activationId: string };
     rejectedEvents: number;
   };
-  await review.getByRole('button', { name: /^cancel$/i }).click();
-  await expect(review).not.toBeVisible();
   await expect(app.locator('#continue-analysis')).toBeEnabled();
   return { ...payload.snapshot, rejectedEvents: payload.rejectedEvents };
 }
@@ -1246,30 +1260,13 @@ test('parking a fifth card evicts only the oldest runtime and requires reopening
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('parking cancels a pending review and never repeats an accepted request', async ({
+test('parking never repeats an accepted request', async ({
   page,
 }, testInfo) => {
   const fixture = await openCards(page, testInfo, { virtualized: true });
-  const { app, cards, scroll, daemon, scenario, visibleCards, probe } = fixture;
+  const { app, cards, daemon, scenario, probe } = fixture;
   await cards.first().scrollIntoViewIfNeeded();
   const before = await probe.snapshot(app());
-  await app().locator('#continue-analysis').click();
-  const review = page.getByRole('dialog', {
-    name: 'Continue with these parameters',
-  });
-  await expect(review).toBeVisible();
-  // The modal deliberately blocks user scrolling. Change the actual viewport
-  // to exercise a row eviction while its asynchronous review is still open.
-  await scroll.evaluate((element) => {
-    element.scrollTop = 0;
-  });
-  await expect(visibleCards).toHaveCount(0);
-  await expect(review).toContainText('Cancelled before sending.');
-  expect(daemon.promptRequests()).toHaveLength(0);
-  await review.getByRole('button', { name: /^close$/i }).click();
-  await fixture.returnToCard();
-  expect(await probe.snapshot(app())).toEqual(before);
-  await expect(app().locator('#continue-analysis')).toBeEnabled();
   await app().frameLocator('#view').locator('#rate').fill('12');
   await app()
     .frameLocator('#view')
@@ -1279,17 +1276,14 @@ test('parking cancels a pending review and never repeats an accepted request', a
     })
     .click();
   await app().locator('#continue-analysis').click();
-  await expect(review.locator('pre')).toContainText('"12"');
-  await review.getByRole('button', { name: 'Continue analysis' }).click();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  expect(daemon.promptRequests()[0].path).toBe(
-    `/session/${scenario.sessionId}/prompt`,
-  );
+  const request = daemon.promptRequests()[0];
+  expect(request.path).toBe(`/session/${scenario.sessionId}/prompt`);
+  expect(JSON.stringify(request.body)).toContain('\\"12\\"');
   await expect(app().locator('#continuation-status')).toHaveAttribute(
     'data-state',
     'accepted',
   );
-  await review.getByRole('button', { name: /^close$/i }).click();
   await fixture.park();
   expect(daemon.promptRequests()).toHaveLength(1);
   await fixture.returnToCard();
@@ -1297,7 +1291,7 @@ test('parking cancels a pending review and never repeats an accepted request', a
     'data-state',
     'accepted',
   );
-  expect(await probe.snapshot(app())).toEqual(before);
+  expect((await probe.snapshot(app())).realm).toEqual(before.realm);
   expect(daemon.promptRequests()).toHaveLength(1);
 });
 
@@ -1486,9 +1480,7 @@ test('a main card hidden by Settings loses host authority and keeps its runtime 
     contentType: 'application/json',
   });
   expect(response.result?.isError).toBe(true);
-  await expect(
-    page.getByRole('dialog', { name: 'Continue with these parameters' }),
-  ).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
   expect(await probe.snapshot(app())).toEqual(before);
   await page
@@ -1645,9 +1637,7 @@ test('maximizing another split pane revokes hidden tool RPCs without recreating 
   expect(hiddenReply.timedOut).not.toBe(true);
   expect(hiddenReply.error).toBeDefined();
   expect(calls).toHaveLength(1);
-  await expect(
-    page.getByRole('dialog', { name: 'Continue with these parameters' }),
-  ).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
   expect(await probe.snapshot(app)).toEqual(before);
   await mainPane

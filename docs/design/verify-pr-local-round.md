@@ -2,8 +2,8 @@
 
 [English](verify-pr-local-round.md) | [简体中文](verify-pr-local-round.zh-CN.md)
 
-Status: implemented; extended with the counting, guard and coverage rules
-below.
+Status: implemented; extended with the counting, guard, coverage and
+attribution-footer rules below.
 
 ## Problem
 
@@ -97,6 +97,46 @@ Each prepared artifact directory keeps `context.json` containing only its
 `headRefOid`. The checker prefers that round's snapshot and names the source it
 uses. Older directories fall back to the shared per-PR snapshot; an unreadable
 or invalid round snapshot warns instead of using a later round's shared head.
+
+## Attribution footer
+
+A published verification comment ends with the same attribution shape
+`/review` posts:
+
+`_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_`
+
+- The model is the identity the round ran under, the CLI version is
+  `qwen --version`, and the skill version is the first 12 characters of
+  `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md`. A content
+  hash, not a commit: the lane's tree is depth-2 and its `.qwen` arrives by
+  `git archive`, so no history is reachable, and the hash names exactly the
+  instructions the round loaded — including uncommitted edits on a
+  workstation. `--no-filters` because prepare leaves `.git` node-owned,
+  and a planted clean filter would otherwise choose what gets hashed — or
+  run as root.
+- In the lane, all three values are workflow-owned outputs of the run step
+  — the configured model, the runner's CLI, the re-pinned skill file —
+  never read from the agent-writable artifact tree. They are collected
+  right after the base re-pin and BEFORE the agent starts: the workspace
+  parent directory stays node-owned, so during the agent era PR code can
+  replace the whole `.qwen` directory (mv + mkdir) without touching the
+  root-owned files inside it, and a post-agent hash could name instructions
+  the round never loaded. A meta-test pins that ordering, not just the
+  strings. The publisher stamps the footer only on a body that carries a
+  report and only when all three values arrived; otherwise the comment
+  keeps the generic `— _Qwen Code · sandboxed verification_` signature,
+  which every weak notice (cancelled / infra / skipped / results
+  unavailable / downloaded artifact with no report) also keeps: they report
+  the lane, not a round.
+- A local round resolves the model from `$QWEN_CODE_MODEL_IDENTITY` (else
+  `$QWEN_CODE_MODEL`) and omits the footer when neither is set — an empty
+  identity is worse than none, and a workstation round never claims the
+  lane's `sandboxed verification` signature.
+- `report.md` itself carries no footer: both publish paths append it at
+  comment time, so a footer written into the report would appear twice.
+- A workflow meta-test pins the same template on both surfaces (publisher
+  and skill), so a wording edit to one cannot leave the other posting a
+  different shape.
 
 ## Design decisions
 
@@ -227,6 +267,11 @@ or invalid round snapshot warns instead of using a later round's shared head.
 - For the guard, a `gh` stand-in on `PATH` drives the real CLI down both
   paths, so "writes no file when a call fails" is observed rather than inferred
   from the pure function.
+- The publish step is executed with and without the three attribution
+  outputs, asserting the exact last line of the posted body in each case —
+  including a downloaded artifact with no report — and structural pins
+  hold the collection ordering (re-pin, then collect, then agent start)
+  and the skill's footer template to the publisher's.
 - A vacuity matrix over every guard this change adds: revert one clause in
   place, run the suite that should catch it, restore. A row counts as killed
   only when the named assertion goes red, not merely some assertion. Measured:
@@ -306,6 +351,14 @@ or invalid round snapshot warns instead of using a later round's shared head.
 - `guard --compare` reports dirty when an item's body changed and its timestamp
   did not, and when a review's state changed, and `guard --snapshot` refuses a
   list whose items carry no body or, for reviews, no state.
+- A published report comment ends with the attribution footer when the
+  model, CLI version and skill hash all resolved, and with the generic
+  signature otherwise; weak notices — including a downloaded artifact with
+  no report — always keep the generic signature. The lane collects the
+  three values after the base re-pin and before the agent starts, and a
+  meta-test pins that ordering. The skill and the publisher carry the same
+  footer template, pinned by a meta-test, and `report.md` carries no footer
+  of its own.
 - No script executes PR code.
 - A report with its own round snapshot keeps the same checked head after a
   later preparation into a different artifact directory. Publishable round
