@@ -588,7 +588,7 @@ jobs:
     # ecs-qwen-hk4-host pool is dual-labelled onto PR CI instances, so publish
     # only rides ecs-qwen-release-host: a dedicated, release-only machine set
     # opted into via ECS_RELEASE_HOST_RUNNER_ENABLED once ops provisions it.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     needs:
       - 'prepare'
       - 'quality'
