@@ -392,8 +392,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   // stdin, so it still runs under CI=true, where the input-driven case above is
   // skipped and would otherwise leave the row budget unexercised.
   // The shape contentGenerator validation actually produces: several failures
-  // joined with newlines, then wrapped by useAuth. Ink splits on source newlines
-  // before it truncates, so a 3-line error costs three rows, not one.
+  // joined with newlines, then wrapped by useAuth.
   const multiLineAuthError = [
     'Failed to authenticate. Message: Missing API key for anthropic auth.',
     "Missing baseUrl for modelProviders model '(unknown)'.",
@@ -402,14 +401,33 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
   it.each([
     // Enough room for every error line plus a menu row.
-    { height: 14, errorVisible: true },
+    {
+      width: 80,
+      height: 14,
+      error: multiLineAuthError,
+      expectedError: multiLineAuthError,
+    },
     // No room: the error is dropped rather than pushing the dialog past its
     // budget, and the menu must survive instead of vanishing on a NaN viewport.
-    { height: 3, errorVisible: false },
+    { width: 80, height: 2, error: multiLineAuthError, expectedError: '' },
+    {
+      width: 36,
+      height: 14,
+      error:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+      expectedError:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+    },
+    {
+      width: 36,
+      height: 5,
+      error:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+      expectedError: 'You must connect',
+    },
   ])(
-    'keeps a 3-line auth error inside a $height-row dialog budget',
-    async ({ height, errorVisible }) => {
-      const width = 80;
+    'keeps an auth error inside a $width-column, $height-row dialog budget',
+    async ({ width, height, error, expectedError }) => {
       const empty = { path: '', settings: {}, originalSettings: {} };
       const settings = new LoadedSettings(
         empty,
@@ -426,7 +444,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const actions = createMockUIActions();
       const state = createMockUIState({
         mainAreaWidth: width,
-        authError: multiLineAuthError,
+        authError: error,
       });
       const { lastFrame, unmount } = renderWithProviders(
         <UIStateContext.Provider value={state}>
@@ -446,9 +464,14 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       // An empty frame also satisfies a bare rows<=budget assertion, so pin that
       // the dialog really painted its menu, and that the error is shown exactly
       // when it fits.
-      expect(painted).toBeGreaterThan(2);
+      expect(painted).toBeGreaterThan(0);
       expect(frame).toContain('QwenCloud');
-      expect(frame.includes('ANTHROPIC_MODEL')).toBe(errorVisible);
+      const normalizedFrame = frame.replace(/[│\s]/g, '');
+      if (expectedError) {
+        expect(normalizedFrame).toContain(expectedError.replace(/\s/g, ''));
+      } else {
+        expect(normalizedFrame).not.toContain('Failedtoauthenticate');
+      }
       expect(painted).toBeLessThanOrEqual(height);
       unmount();
     },

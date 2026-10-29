@@ -179,13 +179,10 @@ function ProviderMenu<T>({
   const compact = !framed || fullHeight > height;
   const showTitle = height >= (framed ? 4 : 2);
   const chromeRows = (framed ? 2 : 0) + (showTitle ? 1 : 0);
-  // Ink splits text on source newlines before it applies wrap="truncate", so a
-  // multi-line error paints one row per source line, not one row in total.
-  const errorRows = error ? error.split('\n').length : 0;
-  // The pre-existing "no room, no error" rule, now charged at the rows the error
-  // actually paints and still leaving one row for the menu. Without the +1 the
-  // list budget can reach 0, which divides by a 0 itemHeight and yields a NaN
-  // maxItemsToShow.
+  // Keep a menu row, and show at least the start of errors that cannot fit.
+  const wrappedErrorRows = error ? rows(error) : 0;
+  const truncateError = height <= chromeRows + wrappedErrorRows;
+  const errorRows = error ? (truncateError ? 1 : wrappedErrorRows) : 0;
   const showError = !!error && height > chromeRows + errorRows;
   const errorBudget = showError ? errorRows : 0;
   const compactFooterRows = showTerms ? rows(TERMS_URL) : 1;
@@ -249,8 +246,11 @@ function ProviderMenu<T>({
       </Box>
       {showError && (
         <Box marginTop={compact ? 0 : 1} flexShrink={0}>
-          <Text color={theme.status.error} wrap={compact ? 'truncate' : 'wrap'}>
-            {error}
+          <Text
+            color={theme.status.error}
+            wrap={truncateError ? 'truncate' : 'wrap'}
+          >
+            {truncateError ? error?.split('\n')[0] : error}
           </Text>
         </Box>
       )}
