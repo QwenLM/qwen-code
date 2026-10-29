@@ -275,10 +275,11 @@ describe('Hosted real-process gates', () => {
 
   it.each([
     {
-      name: 'test_macos',
+      name: 'test_macos_shards',
       step: 'Hosted portable process smoke',
       after: /Install dependencies/i,
-      condition: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
+      condition:
+        "${{ needs.classify_pr.outputs.skip_ci != 'true' && matrix.group == 'scripts' }}",
       run: `npm run ${focused} -- -t 'portable startup'`,
       minutes: 5,
     },
