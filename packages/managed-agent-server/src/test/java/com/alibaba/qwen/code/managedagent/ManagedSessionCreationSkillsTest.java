@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -44,12 +45,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class ManagedSessionCreationSkillsTest {
     @Autowired private MockMvc mvc;
+    @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedAgentStore store;
     @Autowired private ManagedSessionSkills snapshots;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
     @TempDir private Path archiveDirectory;
     @TestBean(methodName = "createHarness") private HarnessConnector harness;

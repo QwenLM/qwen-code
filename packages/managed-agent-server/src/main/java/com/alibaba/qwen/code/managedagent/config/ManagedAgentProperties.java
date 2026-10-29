@@ -1315,10 +1315,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     public static class Dispatch {
         // No typed scan-delay field. The deployed default comes from
         // application.yml (`dispatch.scan-delay: '1s'`); the same
-        // "${...scan-delay:1s}" fallback is repeated by three @Scheduled
+        // "${...scan-delay:1s}" fallback is repeated by four @Scheduled
         // methods — ActionResponseCoordinator.recover,
-        // HarnessCoordinator.recoverExpiredTurns and
-        // SessionLifecycleCoordinator.recoverOperations — and @Scheduled
+        // HarnessCoordinator.recoverExpiredTurns,
+        // SessionLifecycleCoordinator.recoverOperations and
+        // HostedCleanupRetryCoordinator.retryOwedCleanup — and @Scheduled
         // reads a bare number as milliseconds, not seconds.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseDuration = Duration.ofSeconds(60);
@@ -1542,6 +1543,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean sessionWorktreesEnabled;
         private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
@@ -1774,6 +1776,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public boolean isChildWorkspacesEnabled() {
             return childWorkspacesEnabled;
+        }
+
+        public boolean isSessionWorktreesEnabled() {
+            return sessionWorktreesEnabled;
+        }
+
+        public void setSessionWorktreesEnabled(boolean sessionWorktreesEnabled) {
+            this.sessionWorktreesEnabled = sessionWorktreesEnabled;
         }
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {

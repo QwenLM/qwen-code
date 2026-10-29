@@ -161,7 +161,7 @@ describe('TUI product evidence', () => {
     for (const job of [workflow.jobs.parity, workflow.jobs.noflicker]) {
       expect(job.needs).toBe('changes');
       expect(job.if).toBe(
-        "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
+        "${{ !cancelled() && github.event_name != 'schedule' && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
       );
       expect(job.steps.find((step) => step.name === 'Build cli').run).toBe(
         'npm run build -- --cli-only',
@@ -957,6 +957,21 @@ describe('installed npm acceptance workflow', () => {
     readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
   );
   const job = workflow.jobs['installed-npm'];
+  it('runs installed acceptance nightly and manually, never for PR updates', () => {
+    expect(Object.keys(workflow.on).sort()).toEqual([
+      'pull_request',
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(workflow.on.schedule).toEqual([{ cron: '17 19 * * *' }]);
+    expect(job.if).toBe(
+      "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+    );
+    expect(job.needs).toBeUndefined();
+    expect(workflow.jobs.changes.if).toBe(
+      "${{ github.event_name != 'schedule' }}",
+    );
+  });
   it('keeps installed setup independent of the original source parity budget', () => {
     expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
     expect(job['timeout-minutes']).toBe(60);

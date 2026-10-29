@@ -2908,6 +2908,9 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private readonly bundledGeneratedUi: Readonly<BundledGeneratedUiConfig>;
   private bundledGeneratedUiActive = false;
+  // Set by the owning client before initialize(); only a client that renders
+  // MCP Apps can show Generated UI, so the provider stays off elsewhere.
+  private mcpAppHostSupported = false;
   private bundledGeneratedUiStatus: BundledGeneratedUiStatus = {
     version: 1,
     enabled: false,
@@ -8729,8 +8732,15 @@ export class Config {
     return mcpServers;
   }
 
+  // A channel session the daemon creates for an IM bot comes through the
+  // daemon bridge too, but its user reads the reply in the IM client.
+  private rendersMcpApps(): boolean {
+    return this.mcpAppHostSupported && this.sessionSourceType !== 'channel';
+  }
+
   private generatedUiUnavailableReason(): BundledGeneratedUiStatus['reason'] {
     if (!this.bundledGeneratedUi.enabled) return 'setting-disabled';
+    if (!this.rendersMcpApps()) return 'unsupported-client';
     if (
       this.getBareMode() ||
       this.isSafeMode() ||
@@ -8781,10 +8791,10 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): void {
     const reason =
-      options?.disableBundledGeneratedUi || options?.skipSkillManager
-        ? this.bundledGeneratedUi.enabled
-          ? 'unsupported-runtime'
-          : 'setting-disabled'
+      this.bundledGeneratedUi.enabled &&
+      this.rendersMcpApps() &&
+      (options?.disableBundledGeneratedUi || options?.skipSkillManager)
+        ? 'unsupported-runtime'
         : this.generatedUiUnavailableReason();
     this.bundledGeneratedUiActive = reason === undefined;
     this.bundledGeneratedUiStatus = {
@@ -8792,7 +8802,14 @@ export class Config {
       enabled: this.bundledGeneratedUiActive,
       ...(reason ? { reason } : {}),
     };
-    if (reason && reason !== 'setting-disabled') {
+    // A disabled setting or a client without MCP Apps is an expected state,
+    // and so is any reason while the feature is only on by default.
+    if (
+      reason &&
+      reason !== 'setting-disabled' &&
+      reason !== 'unsupported-client' &&
+      this.bundledGeneratedUi.explicit
+    ) {
       const warning = `Bundled Generated UI is unavailable (${reason}). Restart the owning session after resolving it.`;
       this.warnings.push(warning);
       this.debugLogger.warn(warning);
@@ -11180,6 +11197,15 @@ export class Config {
    */
   getModelProposedGoals(): ModelProposedGoalsMode {
     return this.modelProposedGoals;
+  }
+
+  /**
+   * Declares that the owning client renders MCP Apps (Web Shell through the
+   * daemon). Call before initialize(); it decides whether the bundled
+   * Generated UI provider can activate for this session.
+   */
+  setMcpAppHostSupported(supported: boolean): void {
+    this.mcpAppHostSupported = supported;
   }
 
   setGoalProposalHostSupported(supported: boolean): void {

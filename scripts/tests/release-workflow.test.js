@@ -295,12 +295,12 @@ describe('CUA release workflow', () => {
 // The canonical workspace restoration script shared by all nine
 // 'Restore workspace ownership' copies in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
-// checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
-// repo state may survive into them. Pin the WHOLE body by equality, the way
-// review-worktree-cleanup-workflow.test.js pins its sweep copies: a
-// commented-out find, an inserted early exit, or a uniformly dropped
-// ownership ladder all ship green under substring pins, and each of those
-// mutants reopens the incident class this step exists for.
+// checkouts persist credentials and the publish job can mint the npm OIDC
+// id-token, so no pre-existing repo state may survive into them. Pin the
+// WHOLE body by equality, the way review-worktree-cleanup-workflow.test.js
+// pins its sweep copies: a commented-out find, an inserted early exit, or a
+// uniformly dropped ownership ladder all ship green under substring pins,
+// and each of those mutants reopens the incident class this step exists for.
 const canonicalWipe = `set -uo pipefail
 # Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
@@ -3474,6 +3474,24 @@ exit 0`,
     expect(releaseStepScript).toMatch(
       /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
+  });
+
+  it('reads the release tree with the run-scoped token, not the bot PAT', () => {
+    // The publish checkout is read-only and the repository is public, so
+    // authenticating it with the long-lived bot PAT adds an auth dependency
+    // without adding access: a transient PAT rejection failed the release at
+    // Checkout (#15726). The PAT stays exported to the steps that write.
+    const steps = releaseYaml.jobs.publish.steps;
+    const checkout = steps.find((step) => step.name === 'Checkout');
+    expect(checkout.with.token).toBeUndefined();
+    expect(checkout.with['persist-credentials']).toBe(false);
+    expect(
+      steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(
+      steps.find((step) => step.name === 'Create GitHub Release and Tag').env
+        .GITHUB_TOKEN,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
   it('serializes publish jobs per release tag', () => {

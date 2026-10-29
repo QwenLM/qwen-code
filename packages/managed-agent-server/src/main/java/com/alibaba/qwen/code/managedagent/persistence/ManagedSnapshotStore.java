@@ -336,6 +336,18 @@ final class ManagedSnapshotStore {
     }
 
     Page page(String tenant, String session, String cursor, long afterSequence, int limit) {
+        return page(tenant, session, cursor, afterSequence, limit, false);
+    }
+
+    Page recentPage(String tenant, String session, String cursor, int limit) {
+        return page(tenant, session, cursor, 0, limit, true);
+    }
+
+    private Page page(String tenant, String session, String cursor, long afterSequence, int limit,
+            boolean backward) {
+        if (backward && (limit < 1 || limit > 100)) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_limit", "Limit must be between 1 and 100.");
+        }
         try (var lease = new SnapshotReadLease(tenant, session)) {
             Start start =
                     publish.execute(
@@ -352,7 +364,7 @@ final class ManagedSnapshotStore {
                                     long expires = protect(root, tenant, session);
                                     position =
                                             new Cursor(
-                                                    1,
+                                                    backward ? 2 : 1,
                                                     ManagedSessionStore.sessionScopeKey(
                                                             tenant, session),
                                                     root.id(),
@@ -364,7 +376,7 @@ final class ManagedSnapshotStore {
                                                     afterSequence);
                                 } else {
                                     position = decode(cursor);
-                                    if (position.version() != 1
+                                    if (position.version() != (backward ? 2 : 1)
                                             || position.scope() == null
                                             || !position.scope()
                                                     .equals(
@@ -407,6 +419,9 @@ final class ManagedSnapshotStore {
                         Manifest manifest = manifest(root, tenant, session);
                         if (StringUtils.isNotBlank(cursor)) {
                             verifyCursor(cursor, manifest);
+                        }
+                        if (backward) {
+                            return recentItems(tenant, session, start, manifest, cursor, limit, lease);
                         }
                         if (position.page() < 0
                                 || position.page() > manifest.pages()
@@ -492,6 +507,47 @@ final class ManagedSnapshotStore {
             lease.check();
             return result;
         }
+    }
+
+    private Page recentItems(String tenant, String session, Start start, Manifest manifest,
+            String cursor, int limit, SnapshotReadLease lease) {
+        Root root = start.root();
+        Cursor position = start.cursor();
+        int page = StringUtils.isBlank(cursor) ? manifest.pages() - 1 : position.page();
+        int offset = StringUtils.isBlank(cursor) ? -1 : position.offset();
+        if (page < -1 || page >= manifest.pages() || offset < -1
+                || StringUtils.isNotBlank(cursor) && (page < 0 || offset < 0)) {
+            throw invalidCursor();
+        }
+        List<ItemRecord> selected = new ArrayList<>();
+        String next = null;
+        while (page >= 0) {
+            lease.check();
+            List<ItemRecord> rows = readPage(tenant, session, root.id(), page);
+            if (offset == -1) {
+                offset = rows.size();
+            }
+            if (offset > rows.size()) {
+                throw invalidCursor();
+            }
+            while (offset > 0) {
+                ItemRecord item = rows.get(--offset);
+                if (selected.size() == limit) {
+                    next = encode(new Cursor(2, position.scope(), root.id(), root.version(), root.projection(),
+                            page, offset + 1, position.expires(), 0), manifest);
+                    break;
+                }
+                selected.add(item);
+            }
+            if (next != null) {
+                break;
+            }
+            page--;
+            offset = -1;
+        }
+        java.util.Collections.reverse(selected);
+        lease.check();
+        return new Page(List.copyOf(selected), next != null, next, root.sequence());
     }
 
     @FunctionalInterface

@@ -30,6 +30,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -113,12 +114,14 @@ class ManagedAgentServerIntegrationTest {
     private ManagedAgentStore store;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
     private SessionEventHub eventHub;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @AfterEach
@@ -3165,7 +3168,7 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+        FixtureHarness fixtureHarness(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
             return new FixtureHarness(jdbc);
         }
     }

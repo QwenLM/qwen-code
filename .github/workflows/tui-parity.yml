@@ -19,6 +19,9 @@ on:
       - '.npmrc'
       - '.nvmrc'
   workflow_dispatch:
+  schedule:
+    # 03:17 Asia/Shanghai; avoid the top-of-hour hosted runner burst.
+    - cron: '17 19 * * *'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}'
@@ -27,6 +30,7 @@ concurrency:
 jobs:
   changes:
     name: 'Check TUI impact'
+    if: "${{ github.event_name != 'schedule' }}"
     # Door for the parity/noflicker lanes below: route it like them (#13245) so
     # a starved hosted queue cannot hold their gate — it sat 40+ minutes there
     # while the pool stood idle. Untrusted fork PRs stay hosted: for
@@ -59,7 +63,7 @@ jobs:
   parity:
     name: 'TUI parity snapshots (ink vs opentui)'
     needs: 'changes'
-    if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
+    if: "${{ !cancelled() && github.event_name != 'schedule' && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
     # Same-repo PRs, write-access authors and dispatches run on the ECS pool
     # (#13245: both jobs sat 26+ minutes in the hosted queue); other fork PRs
     # stay hosted because these jobs build the PR's code. Kill-switch:
@@ -161,7 +165,7 @@ jobs:
   noflicker:
     name: 'OpenTUI no-flicker gate'
     needs: 'changes'
-    if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
+    if: "${{ !cancelled() && github.event_name != 'schedule' && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}"
     # With secrets.QWEN_API_KEY it drives a
     # real model conversation; without it (fork PRs never receive secrets)
     # accept-noflicker.sh falls back to the offline scripted-stream gate.
@@ -243,6 +247,7 @@ jobs:
 
   installed-npm:
     name: 'Installed npm Node26 private Bun acceptance'
+    if: "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 60
     outputs:

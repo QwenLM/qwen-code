@@ -2594,6 +2594,13 @@ export interface DaemonWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /** Sanitized Skill and MCP snapshots built from one live session's Config. */
@@ -3762,7 +3769,7 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose output arrived in more than one chunk.
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
