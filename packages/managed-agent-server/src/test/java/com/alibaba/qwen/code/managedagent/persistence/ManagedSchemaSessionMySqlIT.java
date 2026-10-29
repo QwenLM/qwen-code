@@ -75,6 +75,11 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
         assertThat(scanned(body, resource).scannedRows()).isEqualTo(reads.scannedRows());
         assertThat(store.deliverableRenames(Long.MAX_VALUE)).hasSize(1);
         assertThat(store.findSnapshotPage(tenant, id, null, 0, 10).items()).hasSize(1);
+        var recent = store.findRecentSnapshotPage(tenant, id, null, 1);
+        assertThat(recent.items()).hasSize(1);
+        assertThat(recent.items().getFirst().itemId()).isEqualTo("item");
+        assertThat(recent.hasMore()).isFalse();
+        assertThat(recent.nextCursor()).isNull();
     }
 
     private ExecutedQueryPlan.Plan scanned(String sql, Object argument) {

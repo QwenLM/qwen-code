@@ -273,8 +273,8 @@ Design and client migration contract:
 The independent Hosted Java reference distribution packages the runnable
 server, operator-recovery entry point, embedded Broker component, a
 configuration template, systemd unit templates, a credential bootstrap,
-provenance manifest, checksums,
-and deployment/upgrade instructions. Pull requests and manual dry runs build
+a phased upgrade command for the systemd layout, provenance manifest,
+checksums, and deployment/upgrade instructions. Pull requests and manual dry runs build
 and boot the same Linux archive; only a protected-main production dispatch
 publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
