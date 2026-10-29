@@ -1524,6 +1524,9 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    env:
+      # Chromium profiles and shared memory must avoid the pool's shared /tmp tmpfs.
+      TMPDIR: '${{ runner.temp }}'
     # Gate on the classifier's own profile output instead of the copy `test`
     # re-derives: it is the same value (the classifier already forces an
     # unknown one to `full`), and dropping the `test` edge lets this
