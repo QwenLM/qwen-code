@@ -37,7 +37,7 @@ concurrency:
 jobs:
   # First job: Determine version and run tests once
   prepare:
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # The release-event (sync-with-CLI) path can be paused by setting the
     # repository variable RELEASE_VSCODE_SYNC_PUBLISH=false; manual
     # workflow_dispatch releases keep working either way.
@@ -238,7 +238,7 @@ jobs:
     # dependencies for the host it builds on and stays hosted until that
     # selection is explicitly cross-target. The release-only runners are ARM64,
     # so the label carries no architecture component.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'' && matrix.universal) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || matrix.os }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true && matrix.universal) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || matrix.os }}'
     permissions:
       contents: 'read'
 
@@ -323,7 +323,7 @@ jobs:
     needs:
       - 'prepare'
       - 'build'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/vscode-companion-${{ needs.prepare.outputs.release_tag }}'

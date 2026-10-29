@@ -21,7 +21,7 @@ env:
 
 jobs:
   build-and-push-to-ghcr:
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       packages: 'write'

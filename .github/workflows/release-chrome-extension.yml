@@ -38,7 +38,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # The release-event path can be paused by setting the repository variable
     # RELEASE_CHROME_SYNC_PUBLISH=false; manual dispatch keeps working.
     if: |-
@@ -160,7 +160,7 @@ jobs:
   publish:
     needs: 'build'
     if: "${{ needs.build.outputs.is_dry_run == 'false' }}"
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && true) && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
