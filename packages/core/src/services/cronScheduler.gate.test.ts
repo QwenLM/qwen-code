@@ -376,6 +376,13 @@ describe('CronScheduler gate', () => {
   describe('durable tasks', () => {
     let tmpDir: string;
 
+    // The chain every background write is appended to. Dereferenced per call:
+    // the field is reassigned on each tracked write, so a value captured once
+    // would await a chain that has already resolved.
+    const persisted = (): Promise<unknown> =>
+      (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+
     beforeEach(async () => {
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-gate-test-'));
       Storage.setRuntimeBaseDir(tmpDir);
@@ -388,8 +395,7 @@ describe('CronScheduler gate', () => {
 
     afterEach(async () => {
       scheduler.destroy();
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
       Storage.setRuntimeBaseDir(null);
       await fs.rm(tmpDir, {
         recursive: true,
@@ -465,15 +471,13 @@ describe('CronScheduler gate', () => {
         // The stamp lands before the gate decides, so a restart cannot
         // replay the catch-up; the run does not.
         let task: DurableCronTask | undefined;
-        await vi.waitFor(async () => {
-          [task] = await readCronTasks(tmpDir);
-          expect(task?.lastFiredAt).toBe(at(10, 29).getTime());
-        });
+        await persisted();
+        [task] = await readCronTasks(tmpDir);
+        expect(task?.lastFiredAt).toBe(at(10, 29).getTime());
         expect(task?.runs ?? []).toHaveLength(0);
         await script.release(result);
         expect(fired).toHaveLength(runs);
-        await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-          .pendingPersist;
+        await persisted();
         [task] = await readCronTasks(tmpDir);
         expect(task?.runs ?? []).toHaveLength(runs);
         if (runs > 0) {
@@ -509,10 +513,10 @@ describe('CronScheduler gate', () => {
       scheduler.tick(at(10, 30, 59));
       await script.release(quiet);
       scheduler.tick(at(10, 31, 59));
-      await vi.waitFor(async () => {
-        [task] = await readCronTasks(tmpDir);
-        expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
-      });
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
       expect(task?.runs ?? []).toHaveLength(0);
       expect(task?.gateStatus).toMatchObject({
         lastOutcome: 'quiet',
@@ -521,10 +525,10 @@ describe('CronScheduler gate', () => {
 
       await script.release(output('event: comment\n'));
       expect(fired).toHaveLength(1);
-      await vi.waitFor(async () => {
-        [task] = await readCronTasks(tmpDir);
-        expect(task?.runs).toHaveLength(1);
-      });
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toHaveLength(1);
       expect(task?.runs?.[0]).toMatchObject({
         at: at(10, 31).getTime(),
         kind: 'scheduled',
@@ -611,8 +615,7 @@ describe('CronScheduler gate', () => {
       // Before the next slot's tick persist: the file already has the
       // streak ended, so a scheduler that reloads it reports its next
       // failure.
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
       const [task] = await readCronTasks(tmpDir);
       expect(task?.gateStatus).toMatchObject({
         lastOutcome: 'quiet',
@@ -639,8 +642,7 @@ describe('CronScheduler gate', () => {
       live.lastFiredAt = at(10, 45).getTime();
       await script.release(output('event: comment\n'));
       expect(fired[0]!.lastFiredAt).toBe(at(10, 30).getTime());
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
       const [task] = await readCronTasks(tmpDir);
       expect(task?.runs).toEqual([
         expect.objectContaining({
@@ -672,8 +674,7 @@ describe('CronScheduler gate', () => {
       );
       await script.release(failed); // the old command's late failure
       expect(fired).toHaveLength(1);
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
       let [task] = await readCronTasks(tmpDir);
       expect(task?.gate).toBe('./new.sh');
       expect(task?.gateStatus).toBeUndefined();
@@ -685,8 +686,7 @@ describe('CronScheduler gate', () => {
       await script.release(failed); // the new command's first failure
       expect(fired).toHaveLength(2);
       expect(fired[1]!.prompt).toContain('./new.sh');
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
       [task] = await readCronTasks(tmpDir);
       expect(task?.gateStatus?.consecutiveFailures).toBe(1);
     });
@@ -695,9 +695,6 @@ describe('CronScheduler gate', () => {
       // The old command already failed once; the PATCH swaps the command and
       // drops the status; a tick lands before the watcher reloads the task.
       // Its persist must not put the old streak back on the new gate.
-      const persisted = () =>
-        (scheduler as unknown as { pendingPersist: Promise<unknown> })
-          .pendingPersist;
       const job = await scheduler.createDurable(
         '* * * * *',
         'p',
@@ -758,8 +755,7 @@ describe('CronScheduler gate', () => {
       expect(fired).toHaveLength(1);
       const current = () => scheduler.list().find((j) => j.id === job.id);
       expect(current()?.gateStatus?.consecutiveFailures).toBe(2);
-      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
-        .pendingPersist;
+      await persisted();
 
       await updateCronTasks(tmpDir, (tasks) =>
         tasks.map(({ gateStatus: _dropped, ...t }) =>

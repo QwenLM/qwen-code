@@ -36,6 +36,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+@org.springframework.beans.factory.annotation.Qualifier("managedAgentTransactionManager")
 @RestController
 @ConditionalOnProperty(prefix = "qwen.managed-agent.session-store",
         name = "enabled", havingValue = "true")

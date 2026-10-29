@@ -143,7 +143,7 @@ public enum ManagedSchemaProjection {
                     + "last_sequence, event_count, events_digest, previous_commit_digest, commit_digest, "
                     + "writer_generation, writer_id, writer_token_hash, activation_epoch, "
                     + "latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, "
-                    + "record_digest, gmt_create"),
+                    + "record_digest, activation_lease_until, activation_renewal_seq, gmt_create"),
     SESSION_RECORD(
             "session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, "
                     + "record_id, operation_hash, revision, record_resource_id, task_kind, task_state, "

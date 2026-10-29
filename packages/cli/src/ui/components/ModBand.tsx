@@ -15,195 +15,68 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.j
 import type { ModBand as ModBandAnswer } from '../../services/interactive-mod-session.js';
 import { theme } from '../semantic-colors.js';
 import {
-  getCachedStringWidth,
-  sanitizeTerminalText,
-  stripUnsafeCharacters,
-} from '../utils/textUtils.js';
+  MOD_BAND_BORDERS,
+  MOD_BAND_RESERVED_COLUMNS,
+  cleanModBandText,
+  modBandBold,
+  modBandChildKeys,
+  modBandColor,
+  modBandLayout,
+  modBandWrap,
+  type ModBandPalette,
+} from '../utils/mod-band-tree.js';
 import { ErrorBoundary } from './shared/ErrorBoundary.js';
 
 const logger = createDebugLogger('MODS');
 
-/** The columns Claude Code keeps beside the band for its collapse mark. */
-export const MOD_BAND_RESERVED_COLUMNS = 5;
+// Ink's border styles by name, and Claude Code's own beside them.
+const BORDERS: Record<string, BoxProps['borderStyle']> = MOD_BAND_BORDERS;
 
-/** The rows the band may take: a third of the terminal's, at least one. */
-export function modBandMaxRows(rows: number): number {
-  return Math.max(1, Math.floor(rows / 3));
-}
-
-// Spacing steps as cells across and down.
-const STEPS: Record<string, [number, number]> = {
-  xs: [1, 0],
-  sm: [1, 0],
-  md: [2, 1],
-  lg: [3, 1],
-  xl: [4, 2],
-};
-const ACROSS = new Set([
-  'columnGap',
-  'marginX',
-  'marginLeft',
-  'marginRight',
-  'paddingX',
-  'paddingLeft',
-  'paddingRight',
-]);
-// A step on every side splits into its two axes.
-const BOTH: Record<string, [string, string]> = {
-  gap: ['columnGap', 'rowGap'],
-  margin: ['marginX', 'marginY'],
-  padding: ['paddingX', 'paddingY'],
-};
-
-// Claude Code's own border styles, beside the ones Ink draws by name.
-const BORDERS: Record<string, BoxProps['borderStyle']> = {
-  dashed: {
-    topLeft: ' ',
-    top: '╌',
-    topRight: ' ',
-    right: '╎',
-    bottomRight: ' ',
-    bottom: '╌',
-    bottomLeft: ' ',
-    left: '╎',
-  },
-  quote: {
-    topLeft: ' ',
-    top: ' ',
-    topRight: ' ',
-    right: ' ',
-    bottomRight: ' ',
-    bottom: ' ',
-    bottomLeft: ' ',
-    left: '▎',
-  },
-};
-
-// Claude Code's theme keys that have no counterpart here yet.
-const UNMAPPED_KEYS = new Set([
-  'inverseText',
-  'remember',
-  'merged',
-  'permission',
-  'planMode',
-  'autoAccept',
-  'promptBorder',
-  'bashBorder',
-  'ide',
-  'diffAdded',
-  'diffRemoved',
-  'diffAddedDimmed',
-  'diffRemovedDimmed',
-  'diffAddedWord',
-  'diffRemovedWord',
-]);
-// Ink calls any name chalk holds, so only its colors pass by name. chalk has
-// gray and grey but no bright form of either.
-const NAMED = new Set([
-  'gray',
-  'grey',
-  ...[
-    'black',
-    'red',
-    'green',
-    'yellow',
-    'blue',
-    'magenta',
-    'cyan',
-    'white',
-  ].flatMap((name) => [name, `${name}Bright`]),
-]);
-const CODED = [
-  /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i,
-  /^rgb\(\s?\d+,\s?\d+,\s?\d+\s?\)$/,
-  /^ansi256\(\s?\d+\s?\)$/,
-];
-
-function color(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  switch (value) {
-    case 'text':
-      return theme.text.primary;
-    case 'subtle':
-    case 'inactive':
-      return theme.text.secondary;
-    case 'success':
-      return theme.status.success;
-    case 'error':
-      return theme.status.error;
-    case 'warning':
-      return theme.status.warning;
-    case 'claude':
-    case 'suggestion':
-      return theme.text.accent;
-    default:
-      return !UNMAPPED_KEYS.has(value) &&
-        (NAMED.has(value) || CODED.some((pattern) => pattern.test(value)))
-        ? value
-        : undefined;
-  }
-}
+// The theme keys follow Ink's active theme.
+const palette = (): ModBandPalette => ({
+  text: theme.text.primary,
+  subtle: theme.text.secondary,
+  success: theme.status.success,
+  error: theme.status.error,
+  warning: theme.status.warning,
+  accent: theme.text.accent,
+});
 
 function boxProps(props: ModRenderProps): BoxProps {
-  const out: Record<string, unknown> = {};
-  for (const [name, value] of Object.entries(props)) {
-    const step = typeof value === 'string' ? STEPS[value] : undefined;
-    if (name === 'key') continue;
-    if (name === 'borderStyle') out[name] = BORDERS[value as string] ?? value;
-    else if (name === 'borderColor' || name === 'backgroundColor')
-      out[name] = color(value);
-    else if (step && BOTH[name]) {
-      // An axis the tree also sets keeps its own value.
-      const [across, down] = BOTH[name];
-      out[across] ??= step[0];
-      out[down] ??= step[1];
-    } else if (step) out[name] = ACROSS.has(name) ? step[0] : step[1];
-    else out[name] = value;
-  }
-  return out as BoxProps;
+  const colors = palette();
+  const style = props['borderStyle'];
+  return {
+    ...modBandLayout(props),
+    ...(typeof style === 'string' && {
+      borderStyle: BORDERS[style] ?? (style as BoxProps['borderStyle']),
+    }),
+    ...(props['borderColor'] !== undefined && {
+      borderColor: modBandColor(props['borderColor'], colors),
+    }),
+    ...(props['borderDimColor'] !== undefined && {
+      borderDimColor: props['borderDimColor'] === true,
+    }),
+    ...(props['backgroundColor'] !== undefined && {
+      backgroundColor: modBandColor(props['backgroundColor'], colors),
+    }),
+  } as BoxProps;
 }
 
 function textProps(props: ModRenderProps): TextProps {
-  const weight = props['weight'];
-  const wrap = props['wrap'];
+  const colors = palette();
+  const wrap = modBandWrap(props);
   return {
-    color: color(props['color']),
-    backgroundColor: color(props['backgroundColor']),
+    color: modBandColor(props['color'], colors),
+    backgroundColor: modBandColor(props['backgroundColor'], colors),
     dimColor: props['dimColor'] === true,
-    bold: props['bold'] === true || weight === 'semibold' || weight === 'bold',
+    bold: modBandBold(props),
     italic: props['italic'] === true,
     underline: props['underline'] === true,
     strikethrough: props['strikethrough'] === true,
     inverse: props['inverse'] === true,
-    ...(typeof wrap === 'string' && {
-      wrap: (wrap === 'end' || wrap === 'middle'
-        ? `truncate-${wrap}`
-        : wrap) as TextProps['wrap'],
-    }),
+    ...(wrap !== undefined && { wrap: wrap as TextProps['wrap'] }),
   };
 }
-
-// Ink measures a tab as no columns while the terminal moves to the next
-// stop, so tabs become spaces to 8-column stops, as Claude Code's Ink does.
-function expandTabs(text: string): string {
-  if (!text.includes('\t')) return text;
-  let column = 0;
-  return text
-    .split(/(\t|\n)/)
-    .map((part) => {
-      if (part === '\t') {
-        const spaces = 8 - (column % 8);
-        column += spaces;
-        return ' '.repeat(spaces);
-      }
-      column = part === '\n' ? 0 : column + getCachedStringWidth(part);
-      return part;
-    })
-    .join('');
-}
-
-const clean = (text: string) =>
-  expandTabs(sanitizeTerminalText(stripUnsafeCharacters(text)));
 
 function drawNode(
   node: ModRenderNode,
@@ -211,24 +84,18 @@ function drawNode(
   inText: boolean,
 ): ReactNode {
   if (typeof node === 'string')
-    return inText ? clean(node) : <Text key={key}>{clean(node)}</Text>;
+    return inText ? (
+      cleanModBandText(node)
+    ) : (
+      <Text key={key}>{cleanModBandText(node)}</Text>
+    );
   if (node.type === 'engine') return null;
   const props = node.props ?? {};
-  // A Box keeps its own key; a repeated one falls back to the position.
-  const seen = new Set<string>();
-  const children = (node.children ?? []).map((child, index) => {
-    const own =
-      typeof child !== 'string' && child.type === 'Box'
-        ? child.props?.['key']
-        : undefined;
-    const fresh = typeof own === 'string' && !seen.has(own);
-    if (fresh) seen.add(own);
-    return drawNode(
-      child,
-      fresh ? `k${own}` : String(index),
-      node.type === 'Text',
-    );
-  });
+  const kids = node.children ?? [];
+  const keys = modBandChildKeys(kids);
+  const children = kids.map((child, index) =>
+    drawNode(child, keys[index], node.type === 'Text'),
+  );
   return node.type === 'Text' ? (
     <Text key={key} {...textProps(props)}>
       {children}

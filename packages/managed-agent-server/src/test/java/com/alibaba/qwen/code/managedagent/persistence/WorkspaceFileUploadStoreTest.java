@@ -79,6 +79,7 @@ class WorkspaceFileUploadStoreTest {
                 .create("tenant", "actor", "Uploads", "create").workspaceId();
         ssh = mock(SshWorkspaceService.class);
         files = new WorkspaceFileStore(registry, guard, ssh, properties, jdbc, manager, mapper);
+        Files.createDirectory(Path.of(guard.fileRoot(files.scope("tenant", "actor", workspace, ".").binding()).get("root")).resolve("src"));
         uploads = store();
     }
 
@@ -93,6 +94,47 @@ class WorkspaceFileUploadStoreTest {
     WorkspaceFileUploadStore.UploadResult upload(String id, String path, String revision, byte[] bytes) {
         return uploads.upload("tenant", "actor", workspace, ".", path, revision, id,
                 new ByteArrayInputStream(bytes), bytes.length);
+    }
+
+    @Test
+    void sessionUploadFreezesItsOriginalBindingForReconciliationAndRejectsDeletedSessions() {
+        var binding = files.scope("tenant", "actor", workspace, ".").binding();
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified, workspace_id, workspace_generation,"
+                + " workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, owner_actor_key)"
+                + " SELECT tenant_id, ?, ?, 0, 0, workspace_id, workspace_generation, storage_id, 'src', ?, 7, config_ref, policy_ref, ?"
+                + " FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?", "session", "agent", binding.getContextConfigRef(),
+                ManagedWorkspaceRegistry.actorKey("tenant", "other"), "tenant", workspace);
+        var locator = new WorkspaceFileStore.Locator("session", null, null);
+        String revision = files.scope("tenant", "actor", locator).revision();
+        String id = UUID.randomUUID().toString();
+        AtomicInteger calls = new AtomicInteger();
+        try (var process = mockStatic(WorkspaceFileProcess.class)) {
+            process.when(() -> WorkspaceFileProcess.upload(anyString(), anyString(), any())).thenAnswer(call -> {
+                Map<String, Object> request = call.getArgument(2);
+                assertThat(request.get("cwdRelative")).isEqualTo("src");
+                if (calls.getAndIncrement() == 0) {
+                    throw new RuntimeBrokerException(503, "ssh_runtime_unavailable", "unknown", true);
+                }
+                Map<?, ?> file = (Map<?, ?>) request.get("files");
+                assertThat(file.get("operation")).isEqualTo("upload-status");
+                assertThat(file.containsKey("data")).isFalse();
+                return response(request, "completed", null);
+            });
+            assertThatThrownBy(() -> uploads.upload("tenant", "actor", locator, "file.bin", revision, id, InputStream.nullInputStream(), 0))
+                    .isInstanceOf(ManagedAgentException.class);
+            assertThat(jdbc.queryForObject("SELECT request_json FROM ma_operation WHERE operation_kind = 'WORKSPACE_UPLOAD'", String.class))
+                    .contains("\"session\":\"session\"");
+            assertThat(jdbc.queryForObject("SELECT session_id FROM ma_operation WHERE operation_kind = 'WORKSPACE_UPLOAD'", String.class)).isEqualTo("session");
+            jdbc.update("UPDATE ma_session SET cwd_relative = 'replacement', context_revision = 8 WHERE session_id = ?", "session");
+            jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind = 'WORKSPACE_UPLOAD'");
+            uploads = store();
+            uploads.reconcile();
+            assertThat(uploads.query("tenant", "actor", id).state()).isEqualTo("completed");
+            assertThat(calls).hasValue(2);
+            jdbc.update("UPDATE ma_session SET status = 'DELETED' WHERE tenant_id = ? AND session_id = ?", "tenant", "session");
+            assertThatThrownBy(() -> uploads.query("tenant", "actor", id))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_upload_not_found"));
+        }
     }
 
     @SuppressWarnings("unchecked")

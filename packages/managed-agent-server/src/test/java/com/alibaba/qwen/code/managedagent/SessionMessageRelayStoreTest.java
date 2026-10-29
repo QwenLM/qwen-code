@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.persistence.SessionMessageRelayStore.P
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -42,6 +43,7 @@ class SessionMessageRelayStoreTest {
     private ChildResultRelayStore records;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     private void message(String sessionId, String messageId, String state,

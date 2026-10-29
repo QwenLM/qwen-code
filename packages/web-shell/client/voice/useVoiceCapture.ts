@@ -11,6 +11,8 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import {
   bearerSubprotocol,
   describeMicError,
@@ -108,6 +110,7 @@ export function useVoiceCapture({
   const [interimText, setInterimText] = useState('');
   const [audioLevel, setAudioLevel] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string>();
+  const availability = useDaemonAvailabilityController();
 
   const resourcesRef = useRef<CaptureResources>({});
   const mountedRef = useRef(true);
@@ -183,8 +186,13 @@ export function useVoiceCapture({
   );
 
   const fail = useCallback(
-    (message: string, snapshot: CaptureSnapshot) => {
+    (error: unknown, snapshot: CaptureSnapshot) => {
       if (!snapshotIsCurrent(snapshot)) return;
+      const message = isDaemonUnavailableError(error)
+        ? 'Cannot reach the service.'
+        : error instanceof Error
+          ? error.message
+          : String(error);
       cleanup();
       if (!mountedRef.current) return;
       applyStatus('error');
@@ -291,6 +299,12 @@ export function useVoiceCapture({
       ...(onUnexpectedClose ? { onUnexpectedClose } : {}),
     };
     snapshotRef.current = snapshot;
+    try {
+      availability?.assertAvailable();
+    } catch (error) {
+      fail(error, snapshot);
+      return;
+    }
 
     if (!navigator.mediaDevices?.getUserMedia) {
       fail(
@@ -315,7 +329,7 @@ export function useVoiceCapture({
       contextReady =
         context.state === 'suspended' ? context.resume() : Promise.resolve();
     } catch (error) {
-      fail(error instanceof Error ? error.message : String(error), snapshot);
+      fail(error, snapshot);
       return;
     }
 
@@ -362,6 +376,7 @@ export function useVoiceCapture({
         resourcesRef.current.processor = processor;
         resourcesRef.current.sink = sink;
 
+        availability?.assertAvailable();
         const ws = new WebSocket(
           toVoiceWebSocketUrl(baseUrl, snapshot.streamPath),
           token ? [WS_AUTH_SUBPROTOCOL, bearerSubprotocol(token)] : undefined,
@@ -473,6 +488,8 @@ export function useVoiceCapture({
           ) {
             return;
           }
+          if (event.code < 4000 && event.code !== 1013)
+            void availability?.check();
           const code = event.code || 1006;
           const reason = event.reason || 'none';
           try {
@@ -490,11 +507,12 @@ export function useVoiceCapture({
           );
         };
       } catch (error) {
-        fail(error instanceof Error ? error.message : String(error), snapshot);
+        fail(error, snapshot);
       }
     })();
   }, [
     applyStatus,
+    availability,
     baseUrl,
     clearTranscribeTimeout,
     fail,
@@ -524,6 +542,19 @@ export function useVoiceCapture({
     if (statusRef.current === 'transcribing') return;
     finalize(ws, snapshot);
   }, [abort, clearTranscribeTimeout, finalize, teardownAudio]);
+
+  useEffect(() => {
+    const unsubscribe = availability?.subscribe(() => {
+      const snapshot = snapshotRef.current;
+      if (snapshot && availability.getSnapshot() !== 'available') {
+        fail('Cannot reach the service.', snapshot);
+      }
+    });
+    return () => {
+      unsubscribe?.();
+      if (snapshotRef.current) abort();
+    };
+  }, [availability, abort, fail]);
 
   useEffect(() => {
     mountedRef.current = true;

@@ -177,6 +177,16 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly errorMessage?: string;
   readonly artifacts?: readonly unknown[];
   readonly contentPrefix?: readonly ToolCallContent[];
+  /**
+   * Producer identity for the AgentTool call this result closes. Rebuilt by
+   * replay from the `task_execution` display so a reloaded session carries
+   * the same `_meta.agent` the live wire had.
+   */
+  readonly agent?: {
+    agentName: string;
+    depth: number;
+    kind: 'subagent';
+  };
 }
 
 export interface TranscriptTodoItem {
@@ -310,6 +320,9 @@ const AGENT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'cancelled',
   'offline',
 ] satisfies SessionAgentTerminalStatus[]);
+
+/** `SubagentValidator`'s name constraint, re-checked on the replay side. */
+const SUBAGENT_NAME_PATTERN = /^[\p{L}\p{N}_-]+$/u;
 
 function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
   if (
@@ -1008,6 +1021,7 @@ export function createTranscriptToolCallResultUpdate(
         ...(options.artifacts && options.artifacts.length > 0
           ? { artifacts: options.artifacts }
           : {}),
+        ...(options.agent ? { agent: options.agent } : {}),
         ...(options.extra ?? {}),
       },
     }),
@@ -1669,6 +1683,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           resultDisplay,
           record.uuid,
         ),
+        // The live wire stamps `_meta.agent` on the AgentTool call from
+        // `SubAgentTracker`; persistence keeps only the `subagentName` in the
+        // `task_execution` display, so rebuild the root-parented identity
+        // here to keep a reloaded session attributable.
+        ...(isTaskExecutionDisplay(resultDisplay)
+          ? { agent: agentIdentityFromTaskExecution(resultDisplay) }
+          : {}),
         ...meta,
       }),
     );
@@ -2656,6 +2677,44 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
   });
 }
 
+function agentIdentityFromTaskExecution(
+  display: Record<string, unknown>,
+): { agentName: string; depth: number; kind: 'subagent' } | undefined {
+  const subagentName = display['subagentName'];
+  if (typeof subagentName !== 'string' || subagentName.length === 0) {
+    return undefined;
+  }
+  // `executionMode` separates a validated name from the raw model-supplied
+  // `subagent_type` (`buildSpawnBlockedResult` sets neither), but it is written
+  // by rejection paths too — worktree-provisioning failure and the foreground
+  // model-slot cancel both persist it for a subagent whose session never
+  // registered. `subagentSessionReady` is the positive evidence that a session
+  // existed, so a mode-shaped display without it stays unattributed rather
+  // than minting an identity the live wire never stamped.
+  const executionMode = display['executionMode'];
+  if (executionMode === 'foreground' || executionMode === 'background') {
+    if (display['subagentSessionReady'] !== true) return undefined;
+  } else {
+    // Positive allowlist. A persisted record may come from a truncated or
+    // older writer, so an absent or non-string status is not evidence that
+    // anything ran; a negative allowlist would mint on exactly that input.
+    const status = display['status'];
+    if (
+      typeof status !== 'string' ||
+      (status !== 'completed' &&
+        status !== 'running' &&
+        status !== 'background' &&
+        status !== 'cancelled')
+    ) {
+      return undefined;
+    }
+  }
+  if (!SUBAGENT_NAME_PATTERN.test(subagentName)) return undefined;
+  // A persisted `task_execution` carries no lineage beyond its own type name,
+  // so replay can only ever rebuild the root-parented form; nested identity
+  // still requires the live wire.
+  return { agentName: `/root/${subagentName}`, depth: 1, kind: 'subagent' };
+}
 function isTaskExecutionDisplay(
   value: unknown,
 ): value is Record<string, unknown> {
