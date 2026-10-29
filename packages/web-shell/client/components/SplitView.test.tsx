@@ -1143,6 +1143,11 @@ describe('SplitView', () => {
     );
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
+    // The empty row is `role="presentation"`, so only a text read sees it: a
+    // populated picker must not keep advertising "No other sessions".
+    expect(
+      container!.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('No other sessions');
   });
 
   it('mirrors the live pane set up to the parent as panes change', () => {
