@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -30,6 +31,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -47,6 +49,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * H5b/H5c: the control plane's channel service against the real stores on
@@ -82,7 +85,7 @@ class ManagedChannelServiceTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     private RecordingHarness harness;
     private AtomicLong clock;
@@ -574,7 +577,7 @@ class ManagedChannelServiceTest {
                 new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch bound =
                 new java.util.concurrent.CountDownLatch(1);
-        JdbcTemplate latching = new JdbcTemplate(jdbc.getDataSource()) {
+        JdbcTemplate latching = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override
             public <T> T queryForObject(String sql, Class<T> requiredType,
                     Object... args) {
@@ -602,21 +605,24 @@ class ManagedChannelServiceTest {
                         null, "alice@example.com", "thread-1",
                         instances.databaseNow()));
             } catch (InterruptedException error) {
-                throw new RuntimeException(error);
+                Thread.currentThread().interrupt();
             } finally {
                 bound.countDown();
             }
         });
         binder.start();
-        assertThatThrownBy(() -> racingStore.register(
-                        new ChannelInstanceStore.ChannelInstance(TENANT,
-                                channel, "email", "agent@example.com", 1,
-                                "connected", "other-actor", WORKSPACE, ".",
-                                snapshot.policyJson(), 0, 0)))
-                .isInstanceOfSatisfying(IllegalStateException.class, error ->
-                        assertThat(error.getMessage()).isEqualTo(
-                                "channel_ownership_conflict"));
-        binder.join(10_000);
+        try {
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> racingStore.register(
+                            new ChannelInstanceStore.ChannelInstance(TENANT,
+                                    channel, "email", "agent@example.com", 1,
+                                    "connected", "other-actor", WORKSPACE, ".",
+                                    snapshot.policyJson(), 0, 0)));
+            assertThat(error.getMessage()).isEqualTo("channel_ownership_conflict");
+        } finally {
+            binder.interrupt();
+            binder.join(10_000);
+        }
         // The bind raced in mid-check, and the stored connection still
         // names its original owner.
         assertThat(instances.findInstance(TENANT, channel)).get()

@@ -559,12 +559,13 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
   it('parks reads at the per-pty hold cap: the child stays alive and the stream resumes byte-exact', async () => {
     const LIMIT = 128 * 1024;
     const LINES = 200_000;
+    // Control terminal conversion while checking both literal CRLF and LF.
     const pty = track(
       spawn(
         '/bin/sh',
         [
           '-c',
-          `awk 'BEGIN{for(i=0;i<${LINES};i++)print "P" i}'; echo FLOOD_DONE; read x; echo GOT_$x`,
+          `stty -onlcr && printf 'RAW_CRLF\\r\\n' && awk 'BEGIN{for(i=0;i<${LINES};i++)print "P" i}' && echo FLOOD_DONE && read x && echo GOT_$x`,
         ],
         { limits: { pausedHoldBytes: LIMIT } },
       ),
@@ -608,8 +609,9 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       true,
     );
     const expected =
-      Array.from({ length: LINES }, (_, i) => `P${i}`).join('\r\n') +
-      '\r\nFLOOD_DONE\r\n';
+      'RAW_CRLF\r\n' +
+      Array.from({ length: LINES }, (_, i) => `P${i}`).join('\n') +
+      '\nFLOOD_DONE\n';
     expect(output).toBe(expected);
     pty.write('ok\n');
     expect(await waitFor(() => output.includes('GOT_ok'))).toBe(true);

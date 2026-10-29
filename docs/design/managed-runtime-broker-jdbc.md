@@ -75,7 +75,36 @@ The repository contract covers:
 - settled result reconstruction through a new repository instance; and
 - repeatable schema initialization.
 
-The default test suite runs the contract on H2 in MySQL compatibility mode. CI also runs the `mysql-integration` Maven profile against MariaDB through MySQL Connector/J so session-time-zone handling and persisted lease round trips are exercised on a real MySQL-compatible protocol. The same profile can be run locally against a caller-supplied MySQL database.
+The default test suite runs the contract on H2 in MySQL compatibility mode. CI runs the complete `mysql-integration` Maven profile against MySQL 8.4 through MySQL Connector/J. The same profile can be run locally against a caller-supplied MySQL database.
+
+### Database verification scope
+
+MySQL is the supported database family and the full integration CI target.
+MariaDB was introduced as a real-server regression fixture for the lease-clock
+change and later gained its own full CI leg. That additional engine is no longer
+an ongoing compatibility target. Historical MariaDB measurements remain valid
+records of those runs; retained dialect handling is not a compatibility guarantee.
+No production SQL, engine admission, schema or catalog migration changes here.
+
+The database job now has one MySQL 8.4 configuration. Its two Maven forks retain
+separate disposable instances because server-wide deadlock counters cannot be
+isolated by database name. Native AIO and binary logging stay disabled, and each
+instance retains the large-packet budget. The complete unfiltered Maven profile,
+non-Hosted report guard, cancellation cleanup and full-tier trigger remain.
+Hosted/failover and EventTransport gates keep their existing jobs and coverage.
+
+The MySQL contract retains UTC, +08:00 and -04:00 clock checks and verifies both
+precise and whole-second readings. Shared repository fixtures use nonzero epoch
+milliseconds to pin binding/session/activity and persisted CAS equality on H2 and
+MySQL. Current V1 timestamps are integer epoch milliseconds; the historical
+DATETIME/Connector-J fractional-second failure is not claimed as reproduced by
+these numeric-path tests.
+
+Validation must show that the single-engine policy rejects the previous matrix,
+then exercise the actual startup/configure/verify/cleanup shell bodies with ready,
+dead and timed-out instances, including failure of the second fork. Existing
+workflow consumers, full-profile guards and selected real-MySQL JDBC contracts
+must continue to pass. Full CI acceptance remains required after submission.
 
 ## Acceptance criteria
 

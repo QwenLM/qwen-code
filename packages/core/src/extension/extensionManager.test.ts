@@ -1690,20 +1690,28 @@ describe('extension tests', () => {
     it('signals the durable commit before deferred settings finish', async () => {
       const { manager, prepared } = await readyPrepared('settings-deferred');
       const settings = deferred();
+      const settingsStarted = deferred();
       const commitSettings = stubCommitSettings(
         prepared,
-        vi.fn(async () => await settings.promise),
+        vi.fn(async () => {
+          settingsStarted.resolve();
+          await settings.promise;
+        }),
       );
       const onCommitted = vi.fn();
 
       const committing = manager.commitPreparedExtension(prepared, onCommitted);
-      await vi.waitFor(() => expect(commitSettings).toHaveBeenCalledOnce());
-
-      expect(onCommitted).toHaveBeenCalledOnce();
-      expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
-        commitSettings.mock.invocationCallOrder[0]!,
-      );
-      settings.resolve();
+      try {
+        await Promise.race([settingsStarted.promise, committing]);
+        expect(commitSettings).toHaveBeenCalledOnce();
+        expect(onCommitted).toHaveBeenCalledOnce();
+        expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
+          commitSettings.mock.invocationCallOrder[0]!,
+        );
+      } finally {
+        settings.resolve();
+        await committing;
+      }
       await expect(committing).resolves.toMatchObject({
         identity: { name: 'settings-deferred' },
       });
@@ -3226,9 +3234,9 @@ describe('extension tests', () => {
 
       // Non-archive probe failures must keep the marketplace-specific
       // guidance rather than surfacing the raw install-source error.
-      await expect(
-        manager.addSource('invalid-format-no-slash'),
-      ).rejects.toThrow(/No marketplace found at/);
+      await expect(manager.addSource('invalid package name')).rejects.toThrow(
+        /No marketplace found at/,
+      );
 
       expect(events).toEqual([]);
     });
@@ -4124,6 +4132,117 @@ describe('extension tests', () => {
         'PreToolUse',
         `${dirOf('hooks-var-from-config-path')}/scripts/setup.sh`,
       );
+    });
+  });
+
+  describe('captured marketplace cwd', () => {
+    const writeMarket = (root: string, name: string) =>
+      writeTree(path.join(root, 'nested', 'same-market'), {
+        '.claude-plugin/marketplace.json': {
+          name,
+          owner: { name: 'Owned' },
+          plugins: [{ name: `${name}-plugin`, source: './plugin' }],
+        },
+      });
+
+    it('parses the explicit root and plugin suffix without borrowing the ambient root', async () => {
+      const rootA = path.join(tempWorkspaceDir, 'a');
+      const rootB = path.join(tempWorkspaceDir, 'b');
+      const marketA = writeMarket(rootA, 'from-a');
+      const marketB = writeMarket(rootB, 'from-b');
+      vi.mocked(process.cwd).mockReturnValue(rootA);
+      const manager = createExtensionManager({ workspaceDir: rootA });
+
+      const ambientControl = await manager.parseInstallSource(
+        `${marketA}:from-a-plugin`,
+      );
+      const captured = await manager.parseInstallSource(
+        './nested/same-market:from-b-plugin',
+        rootB,
+      );
+
+      expect(ambientControl.marketplaceConfig?.name).toBe('from-a');
+      expect(captured).toMatchObject({
+        source: marketB,
+        type: 'local',
+        pluginName: 'from-b-plugin',
+        originSource: 'Claude',
+        marketplaceConfig: { name: 'from-b' },
+      });
+      expect(captured.marketplaceConfig).not.toEqual(
+        ambientControl.marketplaceConfig,
+      );
+    });
+
+    it('persists a captured local source absolutely and reopens it from a different root', async () => {
+      const rootB = path.join(tempWorkspaceDir, 'b');
+      const rootC = path.join(tempWorkspaceDir, 'c');
+      const marketB = writeMarket(rootB, 'from-b');
+      writeMarket(rootC, 'from-c');
+      const manager = createExtensionManager();
+
+      const added = await manager.addSource('./nested/same-market', {
+        cwd: rootB,
+      });
+      expect(added.source).toBe(marketB);
+      expect(added.type).toBe('local');
+      const persisted = readText(userExtensionsDir, 'marketplaces.json');
+      const reopened = createExtensionManager({ workspaceDir: rootC });
+      expect(reopened.getSources()).toEqual([added]);
+      await expect(
+        reopened.loadSource(added.source, { cwd: rootC }),
+      ).resolves.toMatchObject({ name: 'from-b' });
+      await expect(
+        reopened.discoverPlugins({ cwd: rootC }),
+      ).resolves.toMatchObject([
+        { name: 'from-b-plugin', installSource: `${marketB}:from-b-plugin` },
+      ]);
+      expect(readText(userExtensionsDir, 'marketplaces.json')).toBe(persisted);
+    });
+
+    it('loads legacy relative sources per captured root and invalidates the discovery root key', async () => {
+      const rootA = path.join(tempWorkspaceDir, 'a');
+      const rootB = path.join(tempWorkspaceDir, 'b');
+      const marketA = writeMarket(rootA, 'from-a');
+      const marketB = writeMarket(rootB, 'from-b');
+      writeTree(userExtensionsDir, {
+        'marketplaces.json': [
+          { name: 'legacy', source: './nested/same-market', type: 'local' },
+        ],
+      });
+      const raw = readText(userExtensionsDir, 'marketplaces.json');
+      const manager = createExtensionManager();
+      await expect(
+        manager.loadSource('./nested/same-market', { cwd: rootB }),
+      ).resolves.toMatchObject({ name: 'from-b' });
+      for (const [cwd, name, source] of [
+        [rootA, 'from-a-plugin', marketA],
+        [rootB, 'from-b-plugin', marketB],
+        [rootA, 'from-a-plugin', marketA],
+      ]) {
+        const plugins = await manager.discoverPlugins({ cwd });
+        expect(plugins).toHaveLength(1);
+        expect(plugins[0].name).toBe(name);
+        expect(plugins[0].installSource).toBe(`${source}:${name}`);
+      }
+      expect(readText(userExtensionsDir, 'marketplaces.json')).toBe(raw);
+    });
+
+    it('keeps the manager policy on parsed metadata and leaves no-cwd remote syntax intact', async () => {
+      const source = 'git@owned.invalid:owner/repo.git:chosen';
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      const expected = {
+        source: 'git@owned.invalid:owner/repo.git',
+        type: 'git',
+        pluginName: 'chosen',
+        networkPolicy: 'public',
+      };
+      await expect(manager.parseInstallSource(source)).resolves.toEqual(
+        expected,
+      );
+      await expect(
+        manager.parseInstallSource(source, tempWorkspaceDir),
+      ).resolves.toEqual(expected);
     });
   });
 });

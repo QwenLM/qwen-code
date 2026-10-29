@@ -25,6 +25,10 @@ import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
+import {
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
 import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
@@ -49,7 +53,10 @@ interface StandaloneRecentsProps {
       onDelete: () => void;
     },
   ) => ReactNode;
-  onLoadSession: (sessionId: string) => Promise<void> | void;
+  onLoadSession: (
+    sessionId: string,
+    displayName?: string,
+  ) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
   onStatusChange?: (status: {
@@ -135,7 +142,10 @@ export function StandaloneRecents({
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [cursor, setCursor] = useState<string>();
-  const [expanded, setExpanded] = useState(true);
+  const expansionId = `standalone:${archiveState}`;
+  const [expanded, setExpanded] = useState(() =>
+    readWorkspaceExpanded(expansionId),
+  );
   const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -407,7 +417,11 @@ export function StandaloneRecents({
       openingSessionIdRef.current = sessionId;
       setSessionError(undefined);
       try {
-        await onLoadSession(sessionId);
+        await onLoadSession(
+          sessionId,
+          sessionsRef.current.find((session) => session.sessionId === sessionId)
+            ?.displayName,
+        );
       } catch (error) {
         if (generation !== openGenerationRef.current) return;
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) return;
@@ -468,8 +482,11 @@ export function StandaloneRecents({
             type="button"
             className={workspaceStyles.header}
             aria-expanded={expanded}
+            disabled={Boolean(query)}
             onClick={(event) => {
-              setExpanded((value) => !value);
+              const nextExpanded = !expanded;
+              writeWorkspaceExpanded(expansionId, nextExpanded);
+              setExpanded(nextExpanded);
               if (event.detail > 0) event.currentTarget.blur();
             }}
           >
