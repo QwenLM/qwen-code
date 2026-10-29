@@ -317,6 +317,24 @@ async function worker(root, node, bun, expectedHost) {
         path.join(payload, runtime, 'bin', runtime),
       );
       fs.chmodSync(path.join(payload, runtime, 'bin', runtime), 0o755);
+      // The updater validates the archive's executable layout before
+      // activation, so the payload must carry the launcher and the classic
+      // node/bin/node path that create-standalone-package.js ships (the bun
+      // flavor writes that path as a mirror shim).
+      fs.mkdirSync(path.join(payload, 'bin'));
+      fs.writeFileSync(
+        path.join(payload, 'bin', 'qwen'),
+        '#!/usr/bin/env sh\n',
+        { mode: 0o755 },
+      );
+      if (runtime === 'bun') {
+        fs.mkdirSync(path.join(payload, 'node', 'bin'), { recursive: true });
+        fs.writeFileSync(
+          path.join(payload, 'node', 'bin', 'node'),
+          '#!/usr/bin/env sh\nexec "$(dirname "$0")/../../bun/bin/bun" "$@"\n',
+          { mode: 0o755 },
+        );
+      }
       fs.mkdirSync(path.join(payload, 'lib'));
       const archiveMarker = path.join(root, `archive-preload-${runtime}`);
       fs.writeFileSync(
