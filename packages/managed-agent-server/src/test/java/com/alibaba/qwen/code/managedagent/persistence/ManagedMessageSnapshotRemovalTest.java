@@ -122,6 +122,7 @@ class ManagedMessageSnapshotRemovalTest {
                         + " VALUES (?, 'NATIVE_SNAPSHOT', ?, 1, ?, ?, ?, ?, 0)",
                 scope, ManagedSchemaKeys.key(scope, nativeId), nativeKey, TENANT, session, nativeId);
         jdbc.update("UPDATE ma_resource SET retention_until = 0 WHERE resource_key = ?", oldBody);
+        jdbc.update("UPDATE ma_resource SET retention_until = 0 WHERE resource_key = ?", currentBody);
 
         assertThat(new ManagedProjectionResourceCollector(jdbc, manager).runOnce()).isTrue();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
@@ -130,6 +131,10 @@ class ManagedMessageSnapshotRemovalTest {
                 byte[].class, oldBody)).isNull();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
                 String.class, currentBody)).isEqualTo("REFERENCED");
+        assertThat(jdbc.queryForObject("SELECT retention_until FROM ma_resource WHERE resource_key = ?",
+                Long.class, currentBody)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
+                Long.class, currentBody)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key = ?",
                 byte[].class, nativeKey)).containsExactly(nativeBytes);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref"

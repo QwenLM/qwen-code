@@ -260,6 +260,18 @@ class ManagedSchemaMySqlIT {
                             "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind ENFORCED");
                 }
             }
+            String operationCheck = ManagedSchema.ddl().lines()
+                    .filter(line -> line.contains("CONSTRAINT ck_ma_operation_kind CHECK"))
+                    .findFirst().orElseThrow().trim().replaceFirst(",$", "");
+            statement.execute("ALTER TABLE ma_operation " + dropCheck + "ck_ma_operation_kind");
+            statement.execute("ALTER TABLE ma_operation ADD "
+                    + operationCheck.replace("'CLOSE'", "'BROKE'"));
+            try {
+                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+            } finally {
+                statement.execute("ALTER TABLE ma_operation " + dropCheck + "ck_ma_operation_kind");
+                statement.execute("ALTER TABLE ma_operation ADD " + operationCheck);
+            }
             String resourceCheck =
                     ManagedSchema.ddl()
                             .lines()

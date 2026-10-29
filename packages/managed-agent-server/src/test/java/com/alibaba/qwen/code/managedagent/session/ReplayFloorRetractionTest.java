@@ -294,6 +294,16 @@ class ReplayFloorRetractionTest {
         assertThat(reloaded.lastSequence()).isEqualTo(window.snapshotThroughSequence());
         assertThat(reloaded.coveredSequence()).isEqualTo(reloaded.lastSequence());
         assertThat(reloaded.items()).extracting(item -> item.itemId()).contains("latest");
+        store.appendPublicEventIfAbsent(tenant, session, "turn",
+                "item.output_text.delta", Map.of("itemId", "newer", "text", "newer"),
+                false, "race-newer");
+        store.materializeNextBatch(tenant, session, 100);
+        long currentCoverage = store.findMessageCoveredSequences(tenant, List.of(session)).get(session);
+        var older = service.transcript(tenant, null, session, reloaded.olderCursor(), 2);
+        assertThat(currentCoverage).isGreaterThan(reloaded.coveredSequence());
+        assertThat(older.coveredSequence()).isEqualTo(currentCoverage);
+        assertThat(older.lastSequence()).isEqualTo(currentCoverage);
+        assertThat(older.items()).extracting(item -> item.itemId()).doesNotContain("newer");
     }
 
     private String session(String tenant) {

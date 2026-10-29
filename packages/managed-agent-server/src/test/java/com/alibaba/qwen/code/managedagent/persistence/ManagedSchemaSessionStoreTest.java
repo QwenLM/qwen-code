@@ -404,6 +404,15 @@ public class ManagedSchemaSessionStoreTest {
 
     @Test
     void repeatableReadPagePairsWatermarkAndMessagesWhileAnotherTransactionCommits() throws Exception {
+        var readers = java.util.Arrays.stream(ManagedAgentStore.class.getMethods())
+                .filter(method -> method.getName().equals("findMessagePage")).toList();
+        assertThat(readers).hasSize(2).allSatisfy(method -> {
+            var annotation = method.getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+            assertThat(annotation).isNotNull();
+            assertThat(annotation.transactionManager()).isEqualTo("managedAgentTransactionManager");
+            assertThat(annotation.readOnly()).isTrue();
+            assertThat(annotation.isolation()).isEqualTo(org.springframework.transaction.annotation.Isolation.REPEATABLE_READ);
+        });
         event("a", "before");
         materialize();
         long original = messages().coveredSequence();

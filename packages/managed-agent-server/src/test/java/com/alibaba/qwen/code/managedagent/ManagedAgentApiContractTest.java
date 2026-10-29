@@ -1240,6 +1240,15 @@ class ManagedAgentApiContractTest {
             String liveRead = "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId);
             exchange(drift, operation.getKey(), 200,
                     post(WEB_SHELL + operation.getValue()).header(TENANT, tenant), liveRead);
+            // The removed selector is tolerated by MVC, outside the current request schema.
+            var legacy = mvc.perform(post(WEB_SHELL + operation.getValue()).header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(liveRead.replace("\"limit\":1", "\"view\":\"messages\",\"limit\":1")))
+                    .andReturn().getResponse();
+            assertThat(legacy.getStatus()).isEqualTo(200);
+            collect(drift, "legacy view response " + operation.getKey(), CONTRACT.validate(
+                    CONTRACT.responsePointer(CONTRACT.operation(operation.getKey()), 200),
+                    objectMapper.readTree(legacy.getContentAsString(StandardCharsets.UTF_8))));
             exchange(drift, operation.getKey(), 404,
                     post(WEB_SHELL + operation.getValue()).header(TENANT, otherTenant), liveRead);
             exchange(drift, operation.getKey(), 400,

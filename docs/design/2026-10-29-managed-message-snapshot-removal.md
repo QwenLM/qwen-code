@@ -61,6 +61,10 @@ Development catalogs require recreation; this change supplies no V2 migration, `
 
 ## Validation and acceptance
 
+Message-page errors retain their exact recovery meanings: `400 invalid_message_cursor` rejects invalid cursor bounds/scope/direction, `409 message_projection_changed` requires discarding the cursor after a projection rebuild, `503 message_projection_pending` is retryable projection lag, and `413 message_page_too_large` is a response budget failure. A single oversized Item remains unavailable through message paging even at limit 1. Signed POST request-body failures retain the separate `payload_too_large` code.
+
+Review follow-up strengthens the body-read, write-free read, live-reference, coverage/control-event, transaction-annotation, unknown-selector and MySQL literal-drift witnesses; the CSI body-window negative keeps a valid internal range, and the fixture exporter preserves WebShell milliseconds directly from original events. These Java test edits have source review only until CI executes the new revision. The local Java allocation stays closed; earlier successful CI remains evidence only for its recorded inputs.
+
 Use the direct-message regression cases for no-snapshot sessions, projection lag, duplicate first-sequences, bounded forward/backward paging, evolving content, scope and version errors, and finite export during continued writes. Exercise reconnect before and after replay-floor advancement and projection rebuild. Cover Session summaries, collector runs, retirement, strict schema admission and CSI inventories on the schema without `ma_snapshot`. Native journal snapshot publication, readback, restore and collection must retain their original behavior.
 
 Run affected Java unit/H2 and disposable MySQL cases, API/surface contracts, and affected WebShell checks under applicable repository budgets; full required profiles remain CI gates. Reuse upstream evidence only for identical tested inputs. The upstream chat's closed Java and preview-startup allocations cannot be reused or reset by this follow-up. Record unavailable execution explicitly rather than treating source inspection as runtime acceptance.

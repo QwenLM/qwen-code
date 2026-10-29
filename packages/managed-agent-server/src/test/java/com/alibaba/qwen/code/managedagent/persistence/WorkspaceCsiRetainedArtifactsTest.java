@@ -165,7 +165,8 @@ class WorkspaceCsiRetainedArtifactsTest {
             case "wrong-ref-scope" -> jdbc.update("UPDATE ma_resource_ref SET workspace_id='borrowed' WHERE owner_kind='MESSAGE'");
             case "body-owner" -> jdbc.update("UPDATE ma_resource SET tenant_id='borrowed' WHERE kind=?", "managed-message-parts");
             case "body-extra" -> editBody(value -> ((ObjectNode) value.get(0)).put("extra", true));
-            case "body-order" -> editBody(value -> ((ObjectNode) value.get(0)).put("firstSequence", 9999));
+            case "body-order" -> editBody(value -> ((ObjectNode) value.get(0))
+                    .put("firstSequence", 9999).put("lastSequence", 9999));
             case "body-original-reference" -> jdbc.update("UPDATE ma_message SET attributes_json=? WHERE tenant_id=?",
                     JSON.writeValueAsString(Map.of("bindingId", expected.table("ma_runtime_binding").rows().getFirst().text("binding_id"))), "foreign");
             case "body-inline-content" -> jdbc.update("UPDATE ma_message SET parts_json='[{}]' WHERE body_resource_key IS NOT NULL");

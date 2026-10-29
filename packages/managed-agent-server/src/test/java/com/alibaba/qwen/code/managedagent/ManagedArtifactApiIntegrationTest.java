@@ -581,11 +581,11 @@ class ManagedArtifactApiIntegrationTest {
         fixtureJson.set("toolResult", JSON.readTree(result));
         fixtureJson.set("artifactList", JSON.readTree(list));
         fixtureJson.set("transcript", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", null, 100)));
-        var events = sessions.publicEvents("tenant-1", "reader", "session-1", 0, 100).data();
+        var events = fixture.sessions().findEvents("tenant-1", "session-1", 0, 100);
         fixtureJson.set("events", JSON.valueToTree(events.stream().map(event -> new WebShellEvent(
                 event.schemaVersion(), event.projectionVersion(), event.sequence(), event.eventId(),
                 event.sessionId(), event.turnId(), event.itemId(), event.contentPartId(), event.type(),
-                event.createdAt() * 1000, event.data(), event.terminal())).toList()));
+                event.createdAt(), event.data(), event.terminal())).toList()));
         String output = System.getProperty("qwen.o3.fixture-output");
         if (output != null) {
             Files.writeString(Path.of(output), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(fixtureJson));

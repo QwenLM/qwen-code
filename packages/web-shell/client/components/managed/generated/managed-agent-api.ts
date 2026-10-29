@@ -806,7 +806,7 @@ export interface paths {
         put?: never;
         /**
          * Read one current Session message page for exports
-         * @description Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned.
+         * @description Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned. A projection-generation change returns 409 message_projection_changed; discard the cursor and restart this read.
          */
         post: operations["webShellExportSession"];
         delete?: never;
@@ -2735,15 +2735,6 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Replay cursor is older than the retained replay floor. */
-        CursorExpired: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["ErrorEnvelope"];
-            };
-        };
         /** @description Task event cursor is strictly below the task's durable retention floor, which survives an empty retained set; equality is valid. The envelope's replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. */
         TaskCursorExpired: {
             headers: {
@@ -2755,6 +2746,42 @@ export interface components {
         };
         /** @description A dependency such as the Hosted Harness is unavailable; retry later. */
         Unavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 409 message_projection_changed: the message projection generation changed. Discard the message cursor and restart this read; this is not replay-floor cursor expiration. */
+        MessageProjectionChanged: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 413 message_page_too_large: selected message bodies or Turn control events exceed the response byte budget. Reducing limit can help a multi-Item page, but a single oversized Item cannot be returned even with limit=1. Signed POST requests may also return payload_too_large when their request body exceeds the configured signed-body limit. */
+        MessagePageTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 400 invalid_message_cursor for malformed, wrong-scope, wrong-direction or out-of-range message cursors; invalid_limit outside 1..100; invalid_event_cursor for a negative numeric after. */
+        InvalidMessagePage: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 503 message_projection_pending: projection coverage is below the replay floor, or the initial forward read is behind committed events. Retry after message projection catches up. */
+        MessageProjectionPending: {
             headers: {
                 [name: string]: unknown;
             };
@@ -2889,21 +2916,13 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellTranscript"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidMessagePage"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            413: components["responses"]["PayloadTooLarge"];
-            /** @description Message projection is not ready for a complete stream handoff; retry the read. */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
+            409: components["responses"]["MessageProjectionChanged"];
+            413: components["responses"]["MessagePageTooLarge"];
+            503: components["responses"]["MessageProjectionPending"];
         };
     };
     webShellStreamEvents: {
@@ -4394,21 +4413,13 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellExportPage"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidMessagePage"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["CursorExpired"];
-            413: components["responses"]["PayloadTooLarge"];
-            /** @description Message projection has not caught up; retry the export. */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
+            409: components["responses"]["MessageProjectionChanged"];
+            413: components["responses"]["MessagePageTooLarge"];
+            503: components["responses"]["MessageProjectionPending"];
         };
     };
     webShellQueryUserMessages: {
@@ -5031,7 +5042,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Bounded recent published Item page. Items are chronological within each page. */
+            /** @description Bounded recent current message Item page. Items are chronological within each page. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5040,21 +5051,13 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellExportPage"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidMessagePage"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["CursorExpired"];
-            413: components["responses"]["PayloadTooLarge"];
-            /** @description Message projection is not ready for a complete stream handoff; retry the read. */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
+            409: components["responses"]["MessageProjectionChanged"];
+            413: components["responses"]["MessagePageTooLarge"];
+            503: components["responses"]["MessageProjectionPending"];
         };
     };
 }

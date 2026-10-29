@@ -712,7 +712,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -724,20 +724,13 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "503": {
-            "description": "Message projection is not ready for a complete stream handoff; retry the read.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
         "description": "Requires current Session read authorization on every page. Read bounded current message-table pages in chronological order. The first request fixes a sequence membership upper bound; later pages retain that range but read current bodies and statuses. Numeric after excludes every Item with first_sequence at or below that value. Explicit cursor takes precedence; nonnumeric after is an existing cursor alias. Continuation uses the complete (first_sequence,item_id) position. Cursors bind tenant, Session, direction and projection generation, and are rejected after a projection rebuild. Old signed snapshot cursors are invalid. snapshot_through_sequence retains its wire name and denotes the initial membership bound, not immutable content. A lagging initial projection returns retryable message_projection_pending; canonical history and writer ownership are unchanged."
@@ -1245,7 +1238,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1257,20 +1250,13 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/MessageProjectionChanged"
           },
           "503": {
-            "description": "Message projection is not ready for a complete stream handoff; retry the read.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
         "description": "Requires current Session read authorization. Read the most recent limit current message Items and selected bounded Turn control events; olderCursor pages toward older Items. Bodies and statuses remain live. The response coveredSequence and lastSequence both identify actual message projection coverage for SSE continuation, never an unmaterialized event tail. No persisted conversation snapshot or whole-history replay is read. Projection rebuild invalidates cursors. If projection coverage is below the replay floor, return retryable message_projection_pending."
@@ -5272,7 +5258,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -5284,23 +5270,16 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
           },
           "503": {
-            "description": "Message projection has not caught up; retry the export.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned.",
+        "description": "Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned. A projection-generation change returns 409 message_projection_changed; discard the cursor and restart this read.",
         "summary": "Read one current Session message page for exports"
       }
     },
@@ -7513,7 +7492,7 @@
         },
         "responses": {
           "200": {
-            "description": "Bounded recent published Item page. Items are chronological within each page.",
+            "description": "Bounded recent current message Item page. Items are chronological within each page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7523,7 +7502,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -7535,20 +7514,13 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
           },
           "503": {
-            "description": "Message projection is not ready for a complete stream handoff; retry the read.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
         "description": "Requires current Session read authorization on every page. Read at most limit recent current message Items in chronological order; nextCursor continues toward older Items in the initial sequence membership range. snapshotThroughSequence names that fixed membership upper bound, while bodies and statuses remain live. Cursors bind scope, backward direction and projection generation. Rebuild invalidates the cursor. No snapshot copies are generated and no live tail is scanned; transcript reads provide actual projection coverage for SSE handoff. Projection coverage below the replay floor returns retryable message_projection_pending.",
@@ -7791,6 +7763,46 @@
       },
       "Unavailable": {
         "description": "A dependency such as the Hosted Harness is unavailable; retry later.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessageProjectionChanged": {
+        "description": "409 message_projection_changed: the message projection generation changed. Discard the message cursor and restart this read; this is not replay-floor cursor expiration.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessagePageTooLarge": {
+        "description": "413 message_page_too_large: selected message bodies or Turn control events exceed the response byte budget. Reducing limit can help a multi-Item page, but a single oversized Item cannot be returned even with limit=1. Signed POST requests may also return payload_too_large when their request body exceeds the configured signed-body limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "InvalidMessagePage": {
+        "description": "400 invalid_message_cursor for malformed, wrong-scope, wrong-direction or out-of-range message cursors; invalid_limit outside 1..100; invalid_event_cursor for a negative numeric after.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessageProjectionPending": {
+        "description": "503 message_projection_pending: projection coverage is below the replay floor, or the initial forward read is behind committed events. Retry after message projection catches up.",
         "content": {
           "application/json": {
             "schema": {

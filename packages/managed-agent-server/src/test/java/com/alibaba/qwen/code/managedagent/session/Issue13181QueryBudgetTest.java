@@ -783,6 +783,8 @@ class Issue13181QueryBudgetTest {
                     Map.of("callId", "call-" + index, "status", "completed"),
                     false, "tail-" + index);
         }
+        fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
+                "turn.started", Map.of(), false, "tail-start");
         fixture.tx.executeWithoutResult(status -> fixture.store
                 .materializeNextBatch(tenant, sessionId, 100));
         for (int index = 0; index < 150; index++) {
@@ -794,6 +796,8 @@ class Issue13181QueryBudgetTest {
         }
         fixture.tx.executeWithoutResult(status -> fixture.store
                 .materializeNextBatch(tenant, sessionId, 100));
+        fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
+                "turn.completed", Map.of(), true, "tail-complete");
         long covered = fixture.store
                 .findMessageCoveredSequences(tenant, List.of(sessionId))
                 .getOrDefault(sessionId, 0L);
@@ -807,6 +811,7 @@ class Issue13181QueryBudgetTest {
         assertThat(transcript.olderCursor()).isNotNull();
         assertThat(transcript.coveredSequence()).isEqualTo(covered);
         assertThat(transcript.lastSequence()).isEqualTo(covered);
+        assertThat(transcript.events()).extracting(event -> event.type()).containsExactly("turn.started");
         assertThat(transcript.events()).allSatisfy(event ->
                 assertThat(event.sequence()).isLessThanOrEqualTo(covered));
         assertThat(fixture.ledger.count("from ma_public_event", "sequence_id >")).isZero();
@@ -831,6 +836,8 @@ class Issue13181QueryBudgetTest {
                     Map.of("callId", "call-" + index, "status", "completed"),
                     false, "lag-" + index);
         }
+        fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
+                "turn.started", Map.of(), false, "lag-start");
         fixture.tx.executeWithoutResult(status -> fixture.store
                 .materializeNextBatch(tenant, sessionId, 100));
         long covered = fixture.store.findMessageCoveredSequences(tenant, List.of(sessionId))
@@ -841,10 +848,13 @@ class Issue13181QueryBudgetTest {
                     Map.of("callId", "call-b-" + index, "status", "completed"),
                     false, "lag-b-" + index);
         }
+        fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
+                "turn.completed", Map.of(), true, "lag-complete");
         fixture.ledger.reset();
         var transcript = fixture.tx.execute(status ->
                 fixture.service.transcript(tenant, null, sessionId, null, 10));
         assertThat(transcript.items()).hasSize(5);
+        assertThat(transcript.events()).extracting(event -> event.type()).containsExactly("turn.started");
         assertThat(transcript.coveredSequence()).isEqualTo(covered);
         assertThat(transcript.lastSequence()).isEqualTo(covered);
         assertThat(transcript.events()).allSatisfy(event ->
@@ -862,6 +872,7 @@ class Issue13181QueryBudgetTest {
         var longer = fixture.tx.execute(status ->
                 fixture.service.transcript(tenant, null, sessionId, null, 10));
         assertThat(longer.items()).isEqualTo(transcript.items());
+        assertThat(longer.events()).isEqualTo(transcript.events());
         assertThat(longer.coveredSequence()).isEqualTo(covered);
         assertThat(longer.lastSequence()).isEqualTo(covered);
         assertThat(longer.hasMore()).isFalse();

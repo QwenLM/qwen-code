@@ -61,6 +61,10 @@ transcript 响应的续接序号为消息投影实际完成的 `covered_sequence
 
 ## 验证与验收
 
+消息分页错误保留各自恢复语义：`400 invalid_message_cursor` 拒绝非法游标边界、scope 或方向；`409 message_projection_changed` 要求在投影重建后丢弃游标；`503 message_projection_pending` 表示可重试的投影落后；`413 message_page_too_large` 表示响应字节预算不足。单个超大 Item 即使 limit 为 1 也不能通过消息分页取得。签名 POST 请求体过大仍使用独立的 `payload_too_large` 错误码。
+
+评审后续加强正文读取、无写入读取、存活引用、水位/控制事件、事务注解、旧选择参数兼容及 MySQL 字面量漂移见证；CSI 正文窗口负例保持内部区间合法，夹具导出直接从原始事件保留 WebShell 毫秒值。这些 Java 测试改动在新修订 CI 执行前仅有源码审阅。本地 Java 额度保持关闭；此前成功 CI 只证明其已记录的输入。
+
 复用直接消息回归场景：无快照会话、投影滞后、相同 first-sequence、有界双向分页、正文变化、scope 和版本错误，以及持续写入下有限导出。覆盖 replay floor 推进及投影重建前后的重连。在不含 `ma_snapshot` 的 schema 上覆盖 Session 摘要、回收器运行、退役、严格 schema 准入及 CSI 清单。原生 journal 快照发布、读回、恢复和回收保持原有行为。
 
 按适用仓库预算运行受影响 Java 单元/H2、独立 MySQL、API/surface 契约及 WebShell 检查；完整必需 profile 仍是 CI 门禁。仅在测试输入相同时复用上游证据。不得复用另一会话已关闭的 Java 及预览启动额度，也不得通过本次后续工作重置。无法执行的验收明确记录，不能将源码检查当作运行验收。

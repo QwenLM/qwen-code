@@ -30,11 +30,12 @@ class ManagedSnapshotNumericPagingTest {
                 assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId)
                         .containsExactly(id(count - 1), id(count));
                 assertThat(page.hasMore()).isTrue();
-                assertThat(fixture.jdbc.bodyReads).isZero();
+                assertThat(fixture.jdbc.bodyReads).isEqualTo(2);
                 var older = fixture.backward(page.nextCursor(), 2);
                 assertThat(older.items()).extracting(StoreModels.ItemRecord::itemId)
                         .containsExactly(id(count - 3), id(count - 2));
                 assertThat(older.coveredSequence()).isEqualTo(page.coveredSequence());
+                assertThat(fixture.jdbc.bodyReads).isEqualTo(4);
             }
         }
     }
@@ -102,7 +103,7 @@ class ManagedSnapshotNumericPagingTest {
                 fixture.verifyDirectoryPlan();
             }
         }
-        assertThat(reads).containsExactly(0, 0);
+        assertThat(reads).containsExactly(1, 1);
     }
 
     @Test
@@ -234,6 +235,17 @@ class ManagedSnapshotNumericPagingTest {
                         + "first_sequence,last_sequence,gmt_create,gmt_modified,revision,parts_json)"
                         + " VALUES(?,?,?,?,'message','assistant','completed','{}',?,?,0,0,1,'[]')",
                     rows);
+            String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
+            byte[] bytes = {91, 93};
+            for (int index = Math.max(1, count - 3); index <= count; index++) {
+                String resourceId = "numeric-parts-" + index;
+                String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
+                jdbc.update("INSERT INTO ma_resource(resource_key,session_scope_key,tenant_id,session_id,"
+                                + "resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
+                                + " VALUES(?,?,'tenant','session',?,'managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0)",
+                        resourceKey, scope, resourceId, WorkspaceEvidenceResources.digest(bytes), bytes);
+                jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", resourceKey, id(index));
+            }
             project();
         }
 
