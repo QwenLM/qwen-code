@@ -121,6 +121,8 @@ describe('useProviderUpdates', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     userSettingsFile = undefined;
+    mockSettings.workspace.settings = {};
+    mockSettings.workspace.originalSettings = {};
     mockSettings.setValue.mockImplementation(
       (scope: SettingScope, key: string, value: unknown) => {
         const settingsFile = mockSettings.forScope(scope);
@@ -139,6 +141,48 @@ describe('useProviderUpdates', () => {
     mockModelsConfig.syncAfterAuthRefresh.mockReset();
     delete process.env[CODING_PLAN_ENV_KEY];
   });
+
+  it.each(['update', 'skip', 'later'] as const)(
+    'keeps global provider updates in User when the workspace owns a subscription selection (%s)',
+    async (choice) => {
+      mockSettings.workspace.settings = {
+        security: { auth: { selectedType: 'qwen-subscription' } },
+        model: { name: 'subscription-model' },
+      };
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: chinaTemplate,
+      };
+      mockSettings.merged[PROVIDER_METADATA_NS] = {
+        [METADATA_KEY]: {
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          version: 'old-version-hash',
+        },
+      };
+      const { result } = renderHook(() =>
+        useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+      await waitFor(() =>
+        expect(result.current.providerUpdateRequest).toBeDefined(),
+      );
+      await result.current.providerUpdateRequest!.onConfirm(choice);
+      expect(mockSettings.workspace.settings).toEqual({
+        security: { auth: { selectedType: 'qwen-subscription' } },
+        model: { name: 'subscription-model' },
+      });
+      for (const [scope] of mockSettings.setValue.mock.calls)
+        expect(scope).toBe(SettingScope.User);
+      for (const [writes] of mockSettings.setValues.mock.calls)
+        for (const write of writes) expect(write.scope).toBe(SettingScope.User);
+      expect(
+        mockSettings.setValue.mock.calls.length +
+          mockSettings.setValues.mock.calls.length,
+      ).toBeGreaterThan(0);
+    },
+  );
 
   it('does not show update prompt when no version is stored', () => {
     const { result } = renderHook(() =>

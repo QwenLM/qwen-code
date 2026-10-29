@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   resolveModelConfig,
   validateModelConfig,
@@ -15,6 +15,11 @@ import type { ModelGenerationConfig } from './types.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import {
+  QWEN_SUBSCRIPTION_BASE_URL,
+  QWEN_SUBSCRIPTION_MODEL,
+  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+} from '../qwen/oauth-config.js';
 
 const TIMEOUT_ENV = 'QWEN_CODE_API_TIMEOUT_MS';
 // Every original input spells out cli/settings/env; they default to {} here.
@@ -771,5 +776,96 @@ describe('modelConfigResolver', () => {
       expect(result.config.contextWindowSize).toBe(32_000);
       expect(result.sources['contextWindowSize'].kind).toBe('settings');
     });
+  });
+});
+
+describe('Qwen Subscription model resolution', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('disables preproduction inference outside development mode', () => {
+    vi.stubEnv('DEV', false);
+    process.env['DEV'] = 'false';
+    expect(() => resolve({ authType: AuthType.QWEN_SUBSCRIPTION })).toThrow(
+      'only available in development mode',
+    );
+  });
+
+  it('uses only the subscription credential source and gateway after another provider', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    const result = resolve({
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      cli: { apiKey: 'previous-cli-key' },
+      settings: {
+        model: 'server-returned-model',
+        apiKey: 'previous-settings-key',
+        baseUrl: 'https://previous-provider.example/v1',
+        generationConfig: {
+          timeout: 12345,
+          maxRetries: 1,
+          streamIdleTimeoutMs: 9000,
+          reasoning: { effort: 'high' },
+          customHeaders: { Authorization: 'Bearer previous-key' },
+          extra_body: { previous_field: true },
+          samplingParams: { max_tokens: 42 },
+          modalities: { image: true },
+        },
+      },
+      env: {
+        OPENAI_API_KEY: 'environment-key',
+        OPENAI_BASE_URL: 'https://environment.example/v1',
+        OPENAI_MODEL: 'environment-model',
+      },
+      proxy: 'http://proxy.example:8080',
+    });
+    expect(result.config).toEqual({
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      model: 'server-returned-model',
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+      modalities: {},
+      proxy: 'http://proxy.example:8080',
+      timeout: 12345,
+      maxRetries: 1,
+      streamIdleTimeoutMs: 9000,
+    });
+    expect(result.sources['apiKey'].kind).toBe('computed');
+  });
+
+  it.each([{ baseUrl: 'https://another-gateway.example/v1' }])(
+    'rejects an explicit CLI route override %o',
+    (cli) => {
+      vi.stubEnv('DEV', true);
+      process.env['DEV'] = 'true';
+      expect(() =>
+        resolve({ authType: AuthType.QWEN_SUBSCRIPTION, cli }),
+      ).toThrow('does not support gateway overrides');
+    },
+  );
+
+  it('rejects a configured provider attempting to redirect the subscription token', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    expect(() =>
+      resolve({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        modelProvider: {
+          id: QWEN_SUBSCRIPTION_MODEL,
+          baseUrl: 'https://another-gateway.example/v1',
+        },
+      }),
+    ).toThrow('does not support gateway overrides');
+  });
+
+  it('retains the existing environment timeout override', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    const result = resolve({
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      settings: { generationConfig: { timeout: 12345 } },
+      env: { QWEN_CODE_API_TIMEOUT_MS: '45000' },
+    });
+    expect(result.config.timeout).toBe(45000);
+    expect(result.sources['timeout'].envKey).toBe('QWEN_CODE_API_TIMEOUT_MS');
   });
 });

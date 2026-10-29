@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Text } from 'ink';
+import { createRequire } from 'node:module';
+import type chalk from 'chalk';
+import stripAnsi from 'strip-ansi';
+import { theme } from '../semantic-colors.js';
+import { subscriptionSuccessMessage } from '../auth/subscription-success.js';
+import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
@@ -824,4 +830,98 @@ describe('<HistoryItemDisplay />', () => {
       expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
     });
   });
+});
+
+it.each([true, false])(
+  'renders subscription styling only with an explicit presentation flag (%s)',
+  async (subscriptionPresentation) => {
+    const inkRequire = createRequire(
+      createRequire(import.meta.url).resolve('ink'),
+    );
+    const inkChalk: typeof chalk = (await import(inkRequire.resolve('chalk')))
+      .default;
+    const previousLevel = inkChalk.level;
+    inkChalk.level = 3;
+    const text = subscriptionSuccessMessage(
+      {
+        sub: 'synthetic',
+        name: 'Builder',
+        email: 'builder@example.com',
+        member_type: 'pro',
+      },
+      'qwen3.8-max',
+    );
+    const ui = renderWithProviders(
+      <HistoryItemDisplay
+        item={{
+          id: 1,
+          type: 'info',
+          text,
+          ...(subscriptionPresentation
+            ? { presentation: 'subscription-success' as const }
+            : {}),
+        }}
+        terminalWidth={100}
+        isPending={false}
+      />,
+    );
+    try {
+      const frame = ui.lastFrame() ?? '';
+      const check = inkChalk.hex(theme.status.success)('✓');
+      if (subscriptionPresentation) {
+        expect(stripAnsi(frame)).not.toMatch(/[●•]/u);
+        expect(frame).toContain(`${check} Signed in as builder@example.com`);
+        expect(frame).toContain(
+          `${check} Qwen Pro is active · usage is included with your plan`,
+        );
+        expect(frame).toContain(
+          inkChalk.hex(theme.text.secondary)(
+            'Model: qwen3.8-max · Run /usage to see your plan usage',
+          ),
+        );
+      } else {
+        expect(stripAnsi(frame)).toMatch(/[●•]/u);
+        expect(frame).not.toContain(check);
+      }
+    } finally {
+      ui.unmount();
+      inkChalk.level = previousLevel;
+    }
+  },
+);
+
+it('keeps both checks and all subscription summary text at a narrow width', () => {
+  const text = subscriptionSuccessMessage(
+    {
+      sub: 'synthetic',
+      name: 'Builder',
+      email: 'builder@example.com',
+      member_type: 'pro',
+    },
+    'qwen3.8-max',
+  );
+  const ui = renderWithProviders(
+    <Box width={45}>
+      <HistoryItemDisplay
+        item={{
+          id: 1,
+          type: 'info',
+          text,
+          presentation: 'subscription-success',
+        }}
+        terminalWidth={45}
+        isPending={false}
+      />
+    </Box>,
+  );
+  try {
+    const frame = stripAnsi(ui.lastFrame() ?? '');
+    expect(frame.match(/✓/gu)).toHaveLength(2);
+    for (const line of frame.split('\n')) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(45);
+    }
+    expect(frame.replace(/\s/gu, '')).toBe(text.replace(/\s/gu, ''));
+  } finally {
+    ui.unmount();
+  }
 });

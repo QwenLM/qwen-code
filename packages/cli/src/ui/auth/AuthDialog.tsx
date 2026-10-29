@@ -5,6 +5,8 @@
  */
 
 import type React from 'react';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { subscriptionModelUnavailable } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
@@ -29,12 +31,15 @@ import { findExistingProviderModels } from '@qwen-code/qwen-code-core/providers/
 import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
+import { SubscriptionDialog } from './SubscriptionDialog.js';
+import { isSubscriptionEntryEnabled } from './use-subscription.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
+  | 'subscription'
   | 'main'
   | 'qwencloud-select'
   | 'alibaba-select'
@@ -42,6 +47,7 @@ type ViewLevel =
   | 'provider-setup';
 
 type MainOption =
+  | 'QWEN_SUBSCRIPTION'
   | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
@@ -136,10 +142,35 @@ export function AuthDialog(): React.JSX.Element {
     auth: { authError },
   } = useUIState();
   const {
-    auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
+    auth: {
+      closeAuthDialog,
+      handleProviderSubmit,
+      handleSubscriptionSubmit,
+      onAuthError,
+    },
   } = useUIActions();
   const config = useConfig();
   const settings = useSettings();
+  const subscriptionEnabled = isSubscriptionEntryEnabled();
+  const mainItems = subscriptionEnabled
+    ? [
+        {
+          key: 'QWEN_SUBSCRIPTION',
+          title: (
+            <Text>
+              {t('Qwen Account with Subscription')}{' '}
+              <Text color={theme.text.accent}>New</Text>
+            </Text>
+          ),
+          label: t('Qwen Account with Subscription'),
+          description: t(
+            'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+          ),
+          value: 'QWEN_SUBSCRIPTION' as MainOption,
+        },
+        ...MAIN_ITEMS,
+      ]
+    : MAIN_ITEMS;
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
@@ -271,17 +302,21 @@ export function AuthDialog(): React.JSX.Element {
   // (resolveMetadataKey returns config.id for *any* provider with a static
   // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 2;
-    if (matchedProvider?.uiGroup === 'custom') return 3;
-    if (matchedProvider?.uiGroup === 'alibaba') return 1;
+    const offset = subscriptionEnabled ? 1 : 0;
+    if (matchedProvider?.uiGroup === 'third-party') return 2 + offset;
+    if (matchedProvider?.uiGroup === 'custom') return 3 + offset;
+    if (matchedProvider?.uiGroup === 'alibaba') return 1 + offset;
     return 0;
-  }, [matchedProvider]);
+  }, [matchedProvider, subscriptionEnabled]);
 
   // -- Handlers -------------------------------------------------------------
 
   const handleMainSelect = (value: MainOption) => {
     clearErrors();
     switch (value) {
+      case 'QWEN_SUBSCRIPTION':
+        pushView('subscription');
+        break;
       case 'QWENCLOUD':
         pushView('qwencloud-select');
         break;
@@ -314,6 +349,14 @@ export function AuthDialog(): React.JSX.Element {
           goBack();
           return;
         }
+        if (
+          settings.merged.security?.auth?.selectedType ===
+            AuthType.QWEN_SUBSCRIPTION &&
+          authError?.includes(subscriptionModelUnavailable(config.getModel()))
+        ) {
+          closeAuthDialog();
+          return;
+        }
         if (errorMessage) return;
         if (config.getAuthType() === undefined) {
           setErrorMessage(
@@ -326,7 +369,9 @@ export function AuthDialog(): React.JSX.Element {
         closeAuthDialog();
       }
     },
-    { isActive: true },
+    {
+      isActive: viewLevel !== 'subscription',
+    },
   );
 
   // -- View title -----------------------------------------------------------
@@ -349,6 +394,18 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- Render ---------------------------------------------------------------
 
+  if (viewLevel === 'subscription' && subscriptionEnabled) {
+    return (
+      <SubscriptionDialog
+        onBack={goBack}
+        onModelSelectionRequired={closeAuthDialog}
+        onConnect={handleSubscriptionSubmit}
+        onModelStudio={() => setViewLevel('alibaba-select')}
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed?.()}
+      />
+    );
+  }
+
   return (
     <Box
       borderStyle="single"
@@ -362,13 +419,11 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'main' && (
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
-            items={MAIN_ITEMS}
+            items={mainItems}
             initialIndex={mainIndex != null ? mainIndex : defaultMainIndex}
             onSelect={handleMainSelect}
             onHighlight={(value) => {
-              setMainIndex(
-                MAIN_ITEMS.findIndex((item) => item.value === value),
-              );
+              setMainIndex(mainItems.findIndex((item) => item.value === value));
             }}
             itemGap={1}
           />

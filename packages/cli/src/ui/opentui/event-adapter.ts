@@ -34,7 +34,11 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { ArenaAgentCardData, CompressionProps } from '../types.js';
+import type {
+  ArenaAgentCardData,
+  CompressionProps,
+  HistoryItemInfo,
+} from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
@@ -109,7 +113,11 @@ export type OpenTuiStreamEvent =
   | { type: 'compaction'; compression: CompressionProps }
   /** Info notice row (ink `addItem({type: INFO})` → InfoMessage): `●` prefix
    * + primary-colored text, e.g. the auto-compact `chat_compressed` notice. */
-  | { type: 'info'; text: string }
+  | {
+      type: 'info';
+      text: string;
+      presentation?: HistoryItemInfo['presentation'];
+    }
   /** Error notice row (ink `type: 'error'` → ErrorMessage): `✕` prefix +
    * error-colored text with an optional inline hint. */
   | { type: 'error'; text: string; hint?: string }

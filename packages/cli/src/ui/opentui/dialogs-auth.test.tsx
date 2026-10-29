@@ -23,11 +23,12 @@
  *  - a rejected install plan surfaces the error and keeps the dialog open.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { C } from './theme.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -54,10 +55,10 @@ const mocks = vi.hoisted(() => {
     ) => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
-      if (type === 'box' || type === 'text') {
-        // `bg` is the one style prop carried through: the dialog gives a
-        // background colour to exactly one cell, the software cursor.
+      if (type === 'box' || type === 'text' || type === 'span') {
+        // Preserve colors for software-cursor and inline-tag assertions.
         const bg = (config as { bg?: string }).bg;
+        const fg = (config as { fg?: string }).fg;
         // `flexShrink` comes through too so the frame's shrink behaviour is
         // assertable without booting the native renderer.
         const flexShrink = (config as { flexShrink?: number }).flexShrink;
@@ -66,6 +67,7 @@ const mocks = vi.hoisted(() => {
           {
             ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
+            ...(fg === undefined ? null : { 'data-fg': fg }),
             ...(flexShrink === undefined
               ? null
               : { 'data-flex-shrink': flexShrink }),
@@ -83,6 +85,31 @@ const mocks = vi.hoisted(() => {
   }
   return { state, renderer, buildJsxRuntime };
 });
+
+const subscription = vi.hoisted(() => ({
+  state: {
+    status: 'waiting',
+  } as import('../auth/use-subscription.js').SubscriptionState,
+  email: 'real@example.com',
+  deviceAuth: {
+    verification_uri_complete:
+      'https://pre4-chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
+  },
+  checking: false,
+  connecting: false,
+  connectionError: undefined as string | undefined,
+  modelSelectionRequired: false,
+  connect: vi.fn(),
+  canCheckAgain: false,
+  openPlans: vi.fn(),
+  checkAgain: vi.fn(),
+  signOut: vi.fn(),
+  cancel: vi.fn(),
+}));
+vi.mock('../auth/use-subscription.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../auth/use-subscription.js')>()),
+  useSubscription: () => subscription,
+}));
 
 const core = vi.hoisted(() => ({
   applyProviderInstallPlan: vi.fn(),
@@ -121,7 +148,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 import { AuthType } from '@qwen-code/qwen-code-core';
 import * as coreRuntime from '@qwen-code/qwen-code-core';
-import { ICON } from '../constants.js';
+import { ICON, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
@@ -190,11 +217,11 @@ async function typeBatched(text: string): Promise<void> {
 }
 
 async function pressEsc(): Promise<boolean> {
-  const handler = mocks.state.inputHandlers.at(-1);
-  if (!handler) throw new Error('no raw input handler registered');
+  const handlers = [...mocks.state.inputHandlers].reverse();
+  if (!handlers.length) throw new Error('no raw input handler registered');
   let consumed = false;
   await act(async () => {
-    consumed = handler('\x1b');
+    consumed = handlers.some((handler) => handler('\x1b'));
   });
   return consumed;
 }
@@ -1568,5 +1595,174 @@ describe('wire-API step cursor out of one read (#207)', () => {
       expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
       expect.anything(),
     );
+  });
+});
+
+describe('real subscription entry', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.width = 100;
+    vi.clearAllMocks();
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
+    subscription.state = { status: 'waiting' };
+    subscription.canCheckAgain = false;
+    subscription.checking = false;
+    subscription.connecting = false;
+    subscription.connectionError = undefined;
+    subscription.modelSelectionRequired = false;
+    subscription.signOut.mockResolvedValue(true);
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('opens the real view from the menu and exposes the real URL', async () => {
+    const { config } = renderDialog();
+    await press('return');
+    expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
+    expect(document.body.textContent).toContain(
+      'user_code=REAL-CODE&client=qwen-code',
+    );
+    expect(document.body.textContent).not.toContain('Local Mock');
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    await pressEsc();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(subscription.signOut).not.toHaveBeenCalled();
+  });
+
+  it('animates the waiting indicator and stops it when the panel closes', async () => {
+    vi.useFakeTimers();
+    renderDialog();
+    try {
+      await press('return');
+      const waiting = screen.getByText('Waiting for sign-in…');
+      expect(waiting.textContent).toContain(SPINNER_FRAMES[0]);
+      expect(
+        screen
+          .getByText("If the browser didn't open, visit:")
+          .getAttribute('data-fg'),
+      ).toBe(C.dim);
+      expect(
+        screen
+          .getByText('c to copy link · Esc to cancel')
+          .getAttribute('data-fg'),
+      ).toBe(C.dim);
+      act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
+      expect(waiting.textContent).toContain(SPINNER_FRAMES[1]);
+      await pressEsc();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses real purchase actions and waits for sign-out before returning', async () => {
+    subscription.state = { status: 'purchase-required', plan: 'Free' };
+    renderDialog();
+    await press('return');
+    expect(document.body.textContent).toContain('real@example.com');
+    expect(screen.queryByText('Check again')).toBeNull();
+    await press('return');
+    expect(subscription.openPlans).toHaveBeenCalledTimes(1);
+    await press('down');
+    await press('down');
+    await press('return');
+    expect(subscription.signOut).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+  });
+
+  it('replaces plans with Check again after the automatic wait', async () => {
+    subscription.state = { status: 'purchase-required', plan: 'Free' };
+    subscription.canCheckAgain = true;
+    renderDialog();
+    await press('return');
+    expect(screen.queryByText('Open plans again')).not.toBeNull();
+    expect(screen.getByText('Check again')).toBeTruthy();
+    await press('return');
+    expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the development entry before configuring OAuth', () => {
+    delete process.env['QWEN_OAUTH_BASE_URL'];
+    renderDialog();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
+  });
+
+  it('waits for activation without a second Connect step', async () => {
+    subscription.state = { status: 'ready', plan: 'Pro' };
+    renderDialog();
+    await press('return');
+    expect(document.body.textContent).toContain(
+      'Loading models from provider…',
+    );
+    expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByText('Sign out')).toBeNull();
+  });
+
+  it('returns to input for /model instead of offering inline model choices', async () => {
+    subscription.state = { status: 'ready', plan: 'Pro' };
+    subscription.connectionError =
+      'The selected model, removed, is no longer available. Run /model to choose another model.';
+    subscription.modelSelectionRequired = true;
+    const { onClose } = renderDialog();
+    await press('return');
+    expect(document.body.textContent).toContain('Run /model');
+    expect(screen.queryByText('Retry')).toBeNull();
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(subscription.signOut).not.toHaveBeenCalled();
+    expect(subscription.connect).not.toHaveBeenCalled();
+  });
+
+  it('offers activation Retry only after failure and preserves cancellation', async () => {
+    subscription.state = { status: 'ready', plan: 'Pro' };
+    subscription.connectionError =
+      'Could not connect Qwen Subscription. Please try again.';
+    renderDialog();
+    await press('return');
+    expect(screen.getByText('Retry')).toBeTruthy();
+    expect(screen.queryByText('Connect')).toBeNull();
+    await press('return');
+    expect(subscription.connect).toHaveBeenCalledOnce();
+    await pressEsc();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('Retry')).toBeNull();
+  });
+
+  it('returns from the timeout message without signing out', async () => {
+    subscription.state = {
+      status: 'timeout',
+      message: 'Authentication timed out.',
+    };
+    renderDialog();
+    await press('return');
+    expect(screen.getByText('Authentication timed out.')).toBeTruthy();
+    await press('x');
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(subscription.cancel).toHaveBeenCalledTimes(1);
+    expect(subscription.signOut).not.toHaveBeenCalled();
+  });
+
+  it('keeps a first membership query failure open and retries the query', async () => {
+    subscription.state = {
+      status: 'query-error',
+      message: 'Subscription query failed.',
+    };
+    renderDialog();
+    await press('return');
+    expect(screen.getByText('Subscription query failed.')).toBeTruthy();
+    expect(
+      screen.queryByText(
+        'Press any key to return to authentication type selection.',
+      ),
+    ).toBeNull();
+    await press('x');
+    expect(screen.getByText('Check again')).toBeTruthy();
+    await press('return');
+    expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
+    expect(subscription.cancel).not.toHaveBeenCalled();
   });
 });

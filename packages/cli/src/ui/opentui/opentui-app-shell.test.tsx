@@ -288,6 +288,7 @@ vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
 }));
 
 const CONFIG = {
+  getAuthType: () => 'openai',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
 } as unknown as Config;
@@ -400,6 +401,7 @@ describe('OpenTuiApp shell wiring', () => {
   // waiting row under a parked confirmation.
   function phraseConfig(enableLoadingPhrases: boolean): Config {
     return {
+      getAuthType: () => 'openai',
       getContextFilePaths: () => [],
       getAccessibility: () => ({ enableLoadingPhrases }),
     } as unknown as Config;
@@ -2205,4 +2207,71 @@ describe('OpenTuiApp transcript scroll region', () => {
     );
     expect(region?.textContent).not.toContain('QUEUE_ROW_MARKER');
   });
+});
+
+it('shows subscription hints and keeps /usage on the normal command dispatcher', async () => {
+  renderApp({
+    config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
+  });
+  await settle();
+  expect(mocks.state.inputProps?.['placeholder']).toBe(
+    '  Type your request, or /usage',
+  );
+  expect(document.body.textContent).toContain(
+    '/usage  /status  /upgrade  /auth',
+  );
+  await submit('/usage');
+  expect(mocks.state.handledTexts).toEqual(['/usage']);
+  expect(document.body.textContent).not.toContain(
+    '/usage  /status  /upgrade  /auth',
+  );
+});
+
+it('keeps subscription hints dismissed after input activity and response completion', async () => {
+  const config = {
+    ...CONFIG,
+    getAuthType: () => 'qwen-subscription',
+  } as Config;
+  const props = {
+    config,
+    settings: SETTINGS,
+    logger: null,
+    commands: [] as readonly SlashCommand[],
+    getSessionStats,
+  };
+  const ui = render(<OpenTuiApp {...props} />);
+  await settle();
+  expect(document.body.textContent).toContain(
+    '/usage  /status  /upgrade  /auth',
+  );
+  act(() => (mocks.state.inputProps?.['onInputActivity'] as () => void)());
+  await settle();
+  expect(document.body.textContent).not.toContain(
+    '/usage  /status  /upgrade  /auth',
+  );
+  ui.rerender(<OpenTuiApp {...props} streaming />);
+  await settle();
+  ui.rerender(<OpenTuiApp {...props} streaming={false} />);
+  await settle();
+  expect(document.body.textContent).not.toContain(
+    '/usage  /status  /upgrade  /auth',
+  );
+});
+
+it('does not show subscription hints when startup resumes a saved conversation', async () => {
+  renderApp({
+    config: {
+      ...CONFIG,
+      getAuthType: () => 'qwen-subscription',
+      getResumedSessionData: () => ({
+        conversation: {
+          messages: [{ type: 'user', content: 'previous prompt' }],
+        },
+      }),
+    } as unknown as Config,
+  });
+  await settle();
+  expect(document.body.textContent).not.toContain(
+    '/usage  /status  /upgrade  /auth',
+  );
 });

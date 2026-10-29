@@ -27,6 +27,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   discoverProviderModels: discoverProviderModelsMock,
 }));
 
+vi.mock('./SubscriptionDialog.js', async () => {
+  const { Text } = await import('ink');
+  const React = await import('react');
+  return {
+    SubscriptionDialog: () =>
+      React.createElement(Text, null, 'Real subscription session'),
+  };
+});
+
 type UIStateOverrides = Partial<UIState> & Partial<UIState['auth']>;
 
 type UIActionsOverrides = Partial<UIActions> & Partial<UIActions['auth']>;
@@ -102,6 +111,7 @@ const renderAuthDialog = (
 
   const mockConfig = {
     getAuthType: vi.fn(() => configAuthType),
+    getModel: vi.fn(() => settings.merged.model?.name),
     getContentGeneratorConfig: vi.fn(() => ({ apiKey: configApiKey })),
   } as unknown as Config;
 
@@ -297,6 +307,39 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('allows Escape to reach /model when the saved subscription model cannot initialize', async () => {
+    const empty = { settings: {}, originalSettings: {}, path: '' };
+    const saved = {
+      security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+      model: { name: 'removed' },
+    };
+    const settings = new LoadedSettings(
+      empty,
+      empty,
+      { settings: saved, originalSettings: saved, path: '' },
+      empty,
+      true,
+      new Set(),
+    );
+    const closeAuthDialog = vi.fn();
+    const ui = renderAuthDialog(
+      settings,
+      {
+        authError:
+          'Failed to login. Message: The selected model, removed, is no longer available. Run /model to choose another model.',
+      },
+      { closeAuthDialog },
+    );
+    try {
+      await settleInput(150);
+      ui.stdin.write('\u001b');
+      await vi.waitFor(() => expect(closeAuthDialog).toHaveBeenCalledOnce());
+      expect(ui.lastFrame()).not.toContain('You must connect a provider');
+    } finally {
+      ui.unmount();
+    }
   });
 
   it('should show an error if the initial auth type is invalid', () => {
@@ -2112,4 +2155,64 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       unmount();
     },
   );
+});
+
+describe('development subscription entry', () => {
+  let originalEnv: NodeJS.ProcessEnv;
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    process.env['DEV'] = 'true';
+    process.env['QWEN_OAUTH_BASE_URL'] = 'https://pre-auth.qwen.ai';
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  const settings = () => {
+    const empty = () => ({ settings: {}, originalSettings: {}, path: '' });
+    return new LoadedSettings(
+      empty(),
+      empty(),
+      empty(),
+      empty(),
+      true,
+      new Set(),
+    );
+  };
+
+  it('uses the real subscription view when an OAuth origin is configured', async () => {
+    process.env['QWEN_OAUTH_BASE_URL'] = 'https://pre-auth.qwen.ai';
+    const handleProviderSubmit = vi.fn();
+    const ui = renderAuthDialog(settings(), {}, { handleProviderSubmit });
+    try {
+      await waitForSelectedOption(
+        ui.lastFrame,
+        'Qwen Account with Subscription',
+      );
+      await pressEnterAndWaitFor(
+        ui.stdin,
+        ui.lastFrame,
+        'Real subscription session',
+      );
+      expect(ui.lastFrame()).not.toContain('Local Mock');
+      expect(handleProviderSubmit).not.toHaveBeenCalled();
+    } finally {
+      ui.unmount();
+    }
+  });
+
+  it('shows the entry in plain development without OAuth configuration', () => {
+    delete process.env['QWEN_OAUTH_BASE_URL'];
+    const { lastFrame, unmount } = renderAuthDialog(settings());
+    expect(lastFrame()).toContain('Qwen Account with Subscription');
+    unmount();
+  });
+
+  it('hides the subscription entry outside development', () => {
+    delete process.env['DEV'];
+    const { lastFrame, unmount } = renderAuthDialog(settings());
+    expect(lastFrame()).not.toContain('Qwen Account with Subscription');
+    unmount();
+  });
 });

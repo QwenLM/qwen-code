@@ -10,6 +10,7 @@ export type GenAiAuthType =
   | 'openai'
   | 'openai-responses'
   | 'qwen-oauth'
+  | 'qwen-subscription'
   | 'gemini'
   | 'vertex-ai'
   | 'anthropic';

@@ -1852,6 +1852,19 @@ export function createDaemonSessionActions({
         current.workspaceCwd === before.workspaceCwd &&
         current.status === 'connected' &&
         (session ? session.client === client : getClient?.() === client);
+      const checkSubscriptionSelection = (models: typeof before.models) => {
+        const selected = before.models?.find(
+          (model) => model.id === before.currentModel,
+        );
+        if (
+          selected?.authType === 'qwen-subscription' &&
+          !models?.some((model) => model.id === before.currentModel)
+        ) {
+          throw new Error(
+            `The selected model, ${selected.baseModelId ?? selected.label}, is no longer available. Run /model to choose another model.`,
+          );
+        }
+      };
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
       const workspace = client.workspaceByCwd(workspaceCwd);
@@ -1896,6 +1909,7 @@ export function createDaemonSessionActions({
               }
             : current,
         );
+        checkSubscriptionSelection(models.models);
       } else {
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
@@ -1909,6 +1923,7 @@ export function createDaemonSessionActions({
         setConnection((current) =>
           isCurrent(current) ? { ...current, providers, models } : current,
         );
+        checkSubscriptionSelection(models);
       }
     },
 

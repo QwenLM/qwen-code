@@ -21,6 +21,11 @@
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import {
+  QWEN_SUBSCRIPTION_BASE_URL,
+  QWEN_SUBSCRIPTION_MODEL,
+  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+} from '../qwen/oauth-config.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
@@ -153,6 +158,61 @@ export function resolveModelConfig(
   const { authType, cli, settings, env, modelProvider, proxy } = input;
   const warnings: string[] = [];
   const sources: ConfigSources = {};
+
+  if (authType === AuthType.QWEN_SUBSCRIPTION) {
+    if (process.env['DEV'] !== 'true') {
+      throw new Error(
+        'Qwen Subscription is only available in development mode.',
+      );
+    }
+    if (
+      (cli?.baseUrl && cli.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL) ||
+      (modelProvider &&
+        modelProvider.baseUrl &&
+        modelProvider.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL)
+    ) {
+      throw new Error('Qwen Subscription does not support gateway overrides.');
+    }
+    const config: ContentGeneratorConfig = {
+      authType,
+      model:
+        modelProvider?.id ??
+        cli?.model ??
+        settings?.model ??
+        QWEN_SUBSCRIPTION_MODEL,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+      modalities: {},
+      proxy,
+    };
+    for (const field of [
+      'timeout',
+      'streamIdleTimeoutMs',
+      'streamMaxLifetimeMs',
+      'maxRetries',
+      'retryInitialDelayMs',
+      'retryMaxDelayMs',
+      'retryErrorCodes',
+    ] as const) {
+      const value = settings?.generationConfig?.[field];
+      if (value !== undefined) {
+        Object.assign(config, { [field]: value });
+        sources[field] = settingsSource(`model.generationConfig.${field}`);
+      }
+    }
+    applyTimeoutEnvOverride(env, config, sources);
+    for (const field of [
+      'authType',
+      'model',
+      'baseUrl',
+      'apiKey',
+      'modalities',
+    ]) {
+      sources[field] = computedSource('Qwen Subscription fixed configuration');
+    }
+    if (proxy) sources['proxy'] = computedSource('Config.getProxy()');
+    return { config, sources, warnings };
+  }
 
   // Special handling for Qwen OAuth
   if (authType === AuthType.QWEN_OAUTH) {

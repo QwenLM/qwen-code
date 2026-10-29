@@ -119,6 +119,8 @@ vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
+import { foldLiveEvent } from './live-session-model.js';
+import { projectItemToStreamEvent } from './item-projection.js';
 import type {
   LiveAssistantItem,
   LiveHistoryItem,
@@ -1376,4 +1378,34 @@ describe('OpenTuiTranscriptView scroll host', () => {
     expect(mocks.renderer.count('frame')).toBe(0);
     expect(view.scrollListeners()).toBe(0);
   });
+});
+
+it('preserves subscription success styles through history projection and folding', () => {
+  const event = projectItemToStreamEvent(
+    {
+      type: 'info',
+      presentation: 'subscription-success',
+      text: '✓ Signed in as builder@example.com\n✓ Qwen Pro is active · usage is included with your plan\n  Model: qwen3.8-max · Run /usage to see your plan usage',
+    },
+    {},
+  );
+  expect(event).not.toBeNull();
+  const { container, getByText } = render(
+    <OpenTuiTranscriptView items={foldLiveEvent([], event!)} />,
+  );
+  expect(container.textContent).not.toContain('●');
+  expect(container.querySelectorAll(`[data-fg="${C.green}"]`)).toHaveLength(2);
+  expect(
+    getByText('Signed in as builder@example.com').getAttribute('data-fg'),
+  ).toBe(C.text);
+  expect(
+    getByText(
+      'Qwen Pro is active · usage is included with your plan',
+    ).getAttribute('data-fg'),
+  ).toBe(C.text);
+  expect(
+    getByText(
+      'Model: qwen3.8-max · Run /usage to see your plan usage',
+    ).getAttribute('data-fg'),
+  ).toBe(C.dim);
 });

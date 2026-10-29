@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
 import type { ModelsConfigOptions } from './modelsConfig.js';
 import { AuthType } from '../core/contentGenerator.js';
+import {
+  QWEN_SUBSCRIPTION_BASE_URL,
+  QWEN_SUBSCRIPTION_MODEL,
+  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+} from '../qwen/oauth-config.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
@@ -2171,3 +2176,62 @@ describe('ModelsConfig', () => {
     });
   });
 });
+
+describe('Qwen Subscription model selection', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('switches from an API key provider without retaining its credentials or extras', async () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    const changed = vi.fn();
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'previous-model',
+        apiKey: 'previous-provider-key',
+        apiKeyEnvKey: 'OLD_KEY',
+        baseUrl: 'https://old.example/v1',
+        customHeaders: { Authorization: 'Bearer old-key' },
+        extra_body: { old_field: true },
+        modalities: { image: true },
+      },
+      onModelChange: changed,
+    });
+    await config.switchModel(
+      AuthType.QWEN_SUBSCRIPTION,
+      QWEN_SUBSCRIPTION_MODEL,
+    );
+    expect(config.getGenerationConfig()).toMatchObject({
+      model: QWEN_SUBSCRIPTION_MODEL,
+      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      apiKeyEnvKey: undefined,
+      customHeaders: undefined,
+      extra_body: undefined,
+      modalities: {},
+    });
+    expect(changed).toHaveBeenCalledWith(AuthType.QWEN_SUBSCRIPTION, true);
+  });
+
+  it('restores the subscription selection with a placeholder token', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+    });
+    config.syncAfterAuthRefresh(
+      AuthType.QWEN_SUBSCRIPTION,
+      QWEN_SUBSCRIPTION_MODEL,
+    );
+    expect(config.getGenerationConfig()).toMatchObject({
+      model: QWEN_SUBSCRIPTION_MODEL,
+      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+    });
+  });
+});
+
+vi.mock('../qwen/subscription-models.js', async (original) => ({
+  ...(await original<typeof import('../qwen/subscription-models.js')>()),
+  readCachedSubscriptionModels: vi.fn(() => ['qwen3.8-max']),
+}));

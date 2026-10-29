@@ -8,6 +8,14 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  Retry: 'Retry',
+  'Connecting…': 'Connecting…',
+  'Could not connect Qwen Subscription. Please try again.':
+    'Could not connect Qwen Subscription. Please try again.',
+  'Loading models from provider…': 'Loading models from provider…',
+  'Recommended models · provider list unavailable, showing built-ins':
+    'Recommended models · provider list unavailable, showing built-ins',
+
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
@@ -1810,6 +1818,44 @@ export default {
     'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
+  'Qwen Subscription': 'Qwen Subscription',
+  'Qwen Account with Subscription': 'Qwen Account with Subscription',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
+  "If the browser didn't open, visit:": "If the browser didn't open, visit:",
+  'Waiting for sign-in…': 'Waiting for sign-in…',
+  'c to copy link · Esc to cancel': 'c to copy link · Esc to cancel',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    'Authentication timed out. Please try again or select a different authentication method.',
+  'Signed in as {{email}}': 'Signed in as {{email}}',
+  'Signed in as {{email}} (Qwen {{plan}})':
+    'Signed in as {{email}} (Qwen {{plan}})',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} is active · usage is included with your plan',
+  'Model: {{model}}': 'Model: {{model}}',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Code is included with Qwen Plus and Pro',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.",
+  'Waiting for your subscription to become active…':
+    'Waiting for your subscription to become active…',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    'Your Qwen session has expired. Run /auth to sign in again.',
+  'Checking your subscription…': 'Checking your subscription…',
+  'Check again': 'Check again',
+  'Open plans again': 'Open plans again',
+  'Opens the Qwen Code plans page in your browser':
+    'Opens the Qwen Code plans page in your browser',
+  'Use Alibaba ModelStudio instead': 'Use Alibaba ModelStudio instead',
+  'Coding Plan, Token Plan, or Standard API Key':
+    'Coding Plan, Token Plan, or Standard API Key',
+  'Sign out': 'Sign out',
+  'Disconnect this device from your Qwen account':
+    'Disconnect this device from your Qwen account',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    'Enter to select, ↑↓ to navigate · Esc to close',
   'Qwen OAuth Authentication': 'Qwen OAuth Authentication',
   'Please visit this URL to authorize:': 'Please visit this URL to authorize:',
   'Waiting for authorization': 'Waiting for authorization',
@@ -2958,4 +3004,31 @@ export default {
     'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
   'Create a git commit with an AI-drafted message':
     'Create a git commit with an AI-drafted message',
+  'Could not request an authorization link. Please try signing in again.':
+    'Could not request an authorization link. Please try signing in again.',
+  'Could not complete authorization. Please try signing in again.':
+    'Could not complete authorization. Please try signing in again.',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    'Could not read or save Qwen credentials. Check local file permissions and disk space.',
+  'Could not refresh your Qwen session. Please try again.':
+    'Could not refresh your Qwen session. Please try again.',
+  'You are signed out locally, but the remote session could not be revoked.':
+    'You are signed out locally, but the remote session could not be revoked.',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    'Could not remove local Qwen credentials. Check local file permissions.',
+  'Authorization or access was denied.': 'Authorization or access was denied.',
+  'Too many requests. Please try again later.':
+    'Too many requests. Please try again later.',
+  'The network request failed or timed out.':
+    'The network request failed or timed out.',
+  'The service returned an invalid response.':
+    'The service returned an invalid response.',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    'Model: {{model}} · Run /usage to see your plan usage',
+  'Type your request, or /usage': 'Type your request, or /usage',
+  'Try:': 'Try:',
+  'Open Qwen subscription plans': 'Open Qwen subscription plans',
+  'Could not open your browser. Visit {{url}}':
+    'Could not open your browser. Visit {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen subscription plans: {{url}}',
 };

@@ -34454,6 +34454,10 @@ describe('sessionLanguage multi-session propagation', () => {
           protocols = mapping ?? protocols;
         },
       ),
+      refreshSubscriptionModels: vi
+        .fn()
+        .mockResolvedValue({ models: ['qwen3.8-max'], cached: false }),
+      syncModelSelection: vi.fn<Config['syncModelSelection']>(),
       setImageModel: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       switchModel: vi.fn().mockResolvedValue(undefined),
@@ -34906,6 +34910,63 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfg2.refreshAuth).not.toHaveBeenCalled();
     expect(cfg1.switchModel).not.toHaveBeenCalled();
     expect(cfg2.switchModel).not.toHaveBeenCalled();
+
+    const previousDev = process.env['DEV'];
+    process.env['DEV'] = 'true';
+    mergedSettings = {
+      modelProviders: providerConfig,
+      providerProtocol: { idealab: 'openai' },
+      security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+      model: {
+        name: 'qwen3.8-max',
+        baseUrl: 'https://pre-api.qwen.ai/compatible-mode/v1',
+      },
+    };
+    vi.mocked(settings.reloadScopesFromDiskAtomically).mockImplementation(
+      () => true,
+    );
+    try {
+      await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+        { cwd: '/provider-1' },
+      );
+      expect(bootConfig.syncModelSelection).toHaveBeenCalledWith(
+        AuthType.QWEN_SUBSCRIPTION,
+        'qwen3.8-max',
+        'https://pre-api.qwen.ai/compatible-mode/v1',
+      );
+      expect(bootConfig.refreshAuth).toHaveBeenCalledWith(
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+      expect(cfg1.refreshAuth).not.toHaveBeenCalled();
+      expect(cfg2.refreshAuth).not.toHaveBeenCalled();
+      mergedSettings = {
+        modelProviders: providerConfig,
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      };
+      vi.spyOn(cfg1.getModelsConfig(), 'getCurrentAuthType').mockReturnValue(
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+      vi.mocked(bootConfig.refreshSubscriptionModels).mockClear();
+      await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+        { cwd: '/provider-1' },
+      );
+      expect(bootConfig.refreshSubscriptionModels).toHaveBeenCalledOnce();
+      vi.mocked(bootConfig.refreshSubscriptionModels).mockResolvedValueOnce({
+        models: ['qwen3.8-max'],
+        cached: true,
+      });
+      reload1.mockClear();
+      await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+        { cwd: '/provider-1' },
+      );
+      expect(reload1).toHaveBeenCalledOnce();
+    } finally {
+      if (previousDev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = previousDev;
+    }
 
     vi.mocked(settings.reloadScopesFromDiskAtomically)
       .mockReset()

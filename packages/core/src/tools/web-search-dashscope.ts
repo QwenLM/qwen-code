@@ -14,7 +14,7 @@ import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   WebSearchBackend,
-  WebSearchBackendConfig,
+  DashScopeWebSearchBackendConfig,
   WebSearchBackendRequest,
   WebSearchBackendResult,
   WebSearchOutcome,
@@ -225,7 +225,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
 
   constructor(
     private readonly config: Config,
-    private readonly backend: WebSearchBackendConfig,
+    private readonly backend: DashScopeWebSearchBackendConfig,
   ) {
     this.debugLogger = createDebugLogger('WEB_SEARCH');
   }

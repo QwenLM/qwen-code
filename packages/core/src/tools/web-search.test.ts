@@ -166,6 +166,7 @@ function passedBackend(config: Config) {
   const gate = evaluateWebSearchGate(config);
   expect(gate.ok).toBe(true);
   if (!gate.ok) throw new Error(gate.notice);
+  if (gate.backend.kind !== 'dashscope') throw new Error('Expected DashScope');
   return gate.backend;
 }
 
@@ -549,6 +550,55 @@ describe('evaluateWebSearchGate', () => {
       const gate = rejectedFor({ models: [dsModel({ baseUrl })] });
       expect(gate.notice).toContain('non-DashScope');
     }
+  });
+});
+
+describe('subscription web search gate', () => {
+  it('uses membership credentials in development without a separate search key', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    expect(
+      evaluateWebSearchGate(
+        makeConfig({
+          settings: undefined,
+          primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+        }),
+      ),
+    ).toEqual({
+      ok: true,
+      backend: {
+        kind: 'qwen-subscription',
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+      },
+    });
+  });
+
+  it('does not enable the staging backend outside development', () => {
+    vi.stubEnv('DEV', false);
+    expect(
+      rejectedFor({
+        settings: undefined,
+        primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+      }).silent,
+    ).toBe(true);
+  });
+
+  it('respects explicit disabling and a separate DashScope search configuration', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    vi.stubEnv(TEST_ENV_KEY, 'sk-search');
+    expect(
+      rejectedFor({
+        settings: { enabled: false },
+        primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+      }).silent,
+    ).toBe(true);
+    expect(
+      passedFor({
+        settings: envSettings(),
+        primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+      }).kind,
+    ).toBe('dashscope');
   });
 });
 

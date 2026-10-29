@@ -30,6 +30,7 @@ import type {
 } from './web-search-backend.js';
 import { sliceAtCharBoundary } from './web-search-backend.js';
 import { DashScopeWebSearchBackend } from './web-search-dashscope.js';
+import { SubscriptionWebSearchBackend } from './web-search-subscription.js';
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
@@ -404,6 +405,18 @@ function resolveAutoBackend(
   config: Config,
   settings: WebSearchSettings | undefined,
 ): WebSearchGateResult {
+  if (
+    process.env['DEV'] === 'true' &&
+    config.getCurrentAuthType() === AuthType.QWEN_SUBSCRIPTION
+  ) {
+    return {
+      ok: true,
+      backend: {
+        kind: 'qwen-subscription',
+        timeoutMs: resolveWebSearchTimeoutMs(settings?.timeoutMs),
+      },
+    };
+  }
   const unavailable = (reason: string): WebSearchGateResult => {
     gateDebugLogger.debug(`[WebSearch] auto backend unavailable: ${reason}`);
     return {
@@ -796,9 +809,11 @@ function createWebSearchBackend(
   switch (backend.kind) {
     case 'dashscope':
       return new DashScopeWebSearchBackend(config, backend);
+    case 'qwen-subscription':
+      return new SubscriptionWebSearchBackend(config, backend.timeoutMs);
     default: {
       // Exhaustive today; keeps a future `kind` from silently doing nothing.
-      const unknown: never = backend.kind;
+      const unknown: never = backend;
       throw new Error(`Unknown web search backend: ${String(unknown)}`);
     }
   }

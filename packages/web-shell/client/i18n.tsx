@@ -68,6 +68,38 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'subscription.title': 'Qwen Subscription',
+  'subscription.waiting':
+    'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
+  'subscription.browserFallback': "If the browser didn't open, visit:",
+  'subscription.pending': 'Waiting for sign-in…',
+  'subscription.checking': 'Checking your subscription…',
+  'subscription.waitingForPurchase':
+    'Waiting for your subscription to become active…',
+  'subscription.included': 'Qwen Code is included with Qwen Plus and Pro',
+  'subscription.openAuthorization': 'Open authorization page',
+  'subscription.openPlans': 'Open plans again',
+  'subscription.checkAgain': 'Check again',
+  'subscription.signInAgain': 'Sign in again',
+  'subscription.switchProvider': 'Use Alibaba ModelStudio instead',
+  'subscription.signOut': 'Sign out',
+  'subscription.cancel': 'Cancel',
+  'subscription.connecting': 'Loading models from provider…',
+  'subscription.modelUnavailable': (vars) =>
+    `The selected model, ${vars?.model}, is no longer available. Run /model to choose another model.`,
+  'subscription.modelsUnavailable':
+    'Could not load models. Your account is still signed in. Please try again.',
+  'subscription.connectFailed':
+    'Could not connect Qwen Subscription. Please try again.',
+  'subscription.connected':
+    'Qwen Subscription configured. You can start chatting.',
+  'subscription.signedIn': (v) => `Signed in as ${v?.email ?? ''}`,
+  'subscription.signedInWithPlan': (v) =>
+    `Signed in as ${v?.email ?? ''} (Qwen ${v?.plan ?? ''})`,
+  'subscription.ready': (v) =>
+    `Qwen ${v?.plan ?? ''} is active · usage is included with your plan`,
+  'subscription.purchase-required': (v) =>
+    `You're signed in with a ${v?.plan ?? ''} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; Qwen Code continues automatically after you subscribe.`,
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
   'capacityChoice.title': 'Choose a workspace to stop',
@@ -4503,6 +4535,34 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'subscription.title': 'Qwen Subscription',
+  'subscription.waiting':
+    '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
+  'subscription.browserFallback': '如果浏览器未打开，请访问：',
+  'subscription.pending': '正在等待登录…',
+  'subscription.checking': '正在检查你的订阅…',
+  'subscription.waitingForPurchase': '正在等待你的订阅生效…',
+  'subscription.included': 'Qwen Plus 和 Pro 包含 Qwen Code',
+  'subscription.openAuthorization': '打开授权页',
+  'subscription.openPlans': '重新打开套餐页',
+  'subscription.checkAgain': '再次检查',
+  'subscription.signInAgain': '重新登录',
+  'subscription.switchProvider': '改用阿里云百炼',
+  'subscription.signOut': '退出登录',
+  'subscription.cancel': '取消',
+  'subscription.connecting': '正在加载模型…',
+  'subscription.modelUnavailable': (vars) =>
+    `已选模型 ${vars?.model} 已不可用，请通过 /model 重新选择。`,
+  'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
+  'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
+  'subscription.connected': '已配置 Qwen 订阅，可以开始对话。',
+  'subscription.signedIn': (v) => `已登录为 ${v?.email ?? ''}`,
+  'subscription.signedInWithPlan': (v) =>
+    `已登录为 ${v?.email ?? ''}（Qwen ${v?.plan ?? ''}）`,
+  'subscription.ready': (v) =>
+    `Qwen ${v?.plan ?? ''} 已生效 · 用量包含在你的套餐中`,
+  'subscription.purchase-required': (v) =>
+    `你已使用 ${v?.plan ?? ''} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后 Qwen Code 将自动继续。`,
   'capacityChoice.persistenceUnconfirmed':
     '无法确认最后一轮被中断内容是否已保存。',
   'capacityChoice.title': '选择要停止的工作区',

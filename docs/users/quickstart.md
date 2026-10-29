@@ -1,5 +1,7 @@
 # Quickstart
 
+**Development preview:** [Qwen Account with Subscription](./configuration/auth.md#qwen-account-with-subscription-development-preview) adds browser sign-in for Plus/Pro members in enabled development builds. Normal releases continue to use the providers below.
+
 > 👏 Welcome to Qwen Code!
 
 This quickstart guide will have you using AI-powered coding assistance in just a few minutes. By the end, you'll understand how to use Qwen Code for common development tasks.

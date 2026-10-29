@@ -46,6 +46,9 @@ import {
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { t } from '../../i18n/index.js';
+import { C } from './theme.js';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -295,6 +298,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // ink's Composer hides the footer while the completion list is open; the
   // list lives inside the composer, so its visibility is lifted here.
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const subscriptionActive =
+    config?.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
+  const [subscriptionHintsDismissed, setSubscriptionHintsDismissed] = useState(
+    () => Boolean(config?.getResumedSessionData?.()),
+  );
+  const dismissSubscriptionHints = useCallback(() => {
+    if (subscriptionActive) setSubscriptionHintsDismissed(true);
+  }, [subscriptionActive]);
   const onSuggestionsVisibilityChange = useCallback(
     (visible: boolean) => setShowSuggestions(visible),
     [],
@@ -935,6 +946,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     [host, host.getVersion()],
   );
 
+  const hasPriorInput = userMessages.some((text) => text.trim() !== '/auth');
+  useEffect(() => {
+    if (hasPriorInput || streaming) dismissSubscriptionHints();
+  }, [hasPriorInput, streaming, dismissSubscriptionHints]);
+
   // ink's Composer drops the phrase (not the row) when this setting is off.
   const showLoadingPhrases =
     config.getAccessibility()?.enableLoadingPhrases !== false;
@@ -1081,9 +1097,16 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               />
               <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
               <OpenTuiInputPrompt
+                placeholder={
+                  subscriptionActive
+                    ? '  ' + t('Type your request, or /usage')
+                    : undefined
+                }
                 onSubmit={(text, imagePaths) => {
+                  dismissSubscriptionHints();
                   void onSubmit(text, imagePaths);
                 }}
+                onInputActivity={dismissSubscriptionHints}
                 userMessages={userMessages}
                 config={config}
                 focus
@@ -1106,6 +1129,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
                 onCycleApprovalMode={cycleApprovalMode}
               />
+              {subscriptionActive &&
+                !subscriptionHintsDismissed &&
+                !hasPriorInput &&
+                !streaming &&
+                !showSuggestions && (
+                  <text marginTop={1} fg={C.dim}>
+                    {t('Try:')}
+                    {'  '}
+                    <span attributes={8} fg={C.purple}>
+                      {'/usage  /status  /upgrade  /auth'}
+                    </span>
+                  </text>
+                )}
             </box>
           )}
           {/* An armed quit warning forces the footer to mount: a dialog unmounts

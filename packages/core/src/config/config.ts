@@ -13,6 +13,10 @@ import type { SessionSourceService } from '../services/session-sources.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  subscriptionModelUnavailable,
+} from '../qwen/subscription-models.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
@@ -5882,6 +5886,15 @@ export class Config {
     this.initialResolvedAuthType = undefined;
   }
 
+  async refreshSubscriptionModels(signal?: AbortSignal) {
+    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
+    if (previous !== -1) this.warnings.splice(previous, 1);
+    if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
+    this.notifyModelChangeListeners();
+    return result;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
@@ -5909,6 +5922,14 @@ export class Config {
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
+
+    if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
+      const { models } = await this.refreshSubscriptionModels();
+      const selected = this.modelsConfig.getModel();
+      if (selected && !models.includes(selected)) {
+        throw new Error(subscriptionModelUnavailable(selected));
+      }
+    }
 
     // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
@@ -5988,6 +6009,16 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    if (
+      this.initialized &&
+      this.toolRegistry &&
+      !this.shellExecutionSandbox &&
+      this.sessionExecutionEngine !== 'managed'
+    ) {
+      await this.syncWebSearchToolRegistration(this.toolRegistry);
+      await this.llmClient?.setTools();
+    }
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
@@ -7452,6 +7483,8 @@ export class Config {
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
+      if (authType === AuthType.QWEN_SUBSCRIPTION)
+        await this.refreshAuth(authType);
       return;
     }
 
@@ -12525,6 +12558,36 @@ export class Config {
     }
   }
 
+  private async syncWebSearchToolRegistration(
+    registry: ToolRegistry,
+    forSubAgent = false,
+  ): Promise<void> {
+    registry.unregisterTool(ToolNames.WEB_SEARCH);
+    const hasExplicitBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      this.getDisabledTools().has(ToolNames.WEB_SEARCH) ||
+      this.webSearchSettings?.enabled === false ||
+      (hasExplicitBackend && this.webSearchSettings?.enabled !== true)
+    )
+      return;
+    const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+    const gate = evaluateWebSearchGate(this);
+    if (gate.ok) {
+      await this.registerLazyTool(registry, ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search.js');
+        return new WebSearchTool(this);
+      });
+      await registry.ensureTool(ToolNames.WEB_SEARCH);
+    } else if (!gate.silent && !this.webSearchNoticeEmitted && !forSubAgent) {
+      this.webSearchNoticeEmitted = true;
+      this.warnings.push(gate.notice);
+    }
+  }
+
   private async syncAdvisorToolRegistration(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -12687,34 +12750,7 @@ export class Config {
       // only when the tool was actually asked for; a provider with no search
       // backend fails silently (`gate.silent`), since warning about a feature
       // the user never configured is noise.
-      const hasExplicitWebSearchBackend =
-        !!this.webSearchSettings?.model?.trim() ||
-        !!this.webSearchSettings?.baseUrl;
-      if (
-        !this.getBareMode() &&
-        !this.isSafeMode() &&
-        this.webSearchSettings?.enabled !== false &&
-        (this.webSearchSettings?.enabled === true ||
-          !hasExplicitWebSearchBackend)
-      ) {
-        const { evaluateWebSearchGate } = await import(
-          '../tools/web-search.js'
-        );
-        const gate = evaluateWebSearchGate(this);
-        if (gate.ok) {
-          await registerLazy(ToolNames.WEB_SEARCH, async () => {
-            const { WebSearchTool } = await import('../tools/web-search.js');
-            return new WebSearchTool(this);
-          });
-        } else if (
-          !gate.silent &&
-          !this.webSearchNoticeEmitted &&
-          !options?.forSubAgent
-        ) {
-          this.webSearchNoticeEmitted = true;
-          this.warnings.push(gate.notice);
-        }
-      }
+      await this.syncWebSearchToolRegistration(registry, options?.forSubAgent);
     };
 
     const environment = this.getExecutionEnvironment();

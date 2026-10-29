@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 
 // Helper function to create a mock config
 function createMockConfig(
@@ -3278,5 +3279,52 @@ describe('isPickerOnlyModelInvocation', () => {
     'qwen-max write a one-off prompt',
   ])('treats %j as not picker-only', (args) => {
     expect(isPickerOnlyModelInvocation(args)).toBe(false);
+  });
+});
+
+it('opens subscription model selection after startup failed before generator initialization', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockResolvedValue({ models: ['replacement'], cached: false }),
+        getModel: vi.fn().mockReturnValue('removed'),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  const result = await modelCommand.action!(context, '');
+  expect(result).toMatchObject({ type: 'dialog', dialog: 'model' });
+});
+
+it('directs an invalid subscription session to auth without claiming it is still signed in', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockRejectedValue(new SubscriptionOAuthError('session_changed')),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  expect(await modelCommand.action!(context, '')).toMatchObject({
+    type: 'message',
+    messageType: 'error',
+    content:
+      'Could not load Qwen Subscription models. Check your account in /auth and retry.',
   });
 });

@@ -1572,6 +1572,67 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it('keeps subscription welcome dismissal at AppContainer scope across rerenders', async () => {
+      const initialize = vi
+        .spyOn(mockConfig, 'initialize')
+        .mockResolvedValue(undefined);
+      let updateVersion!: (value: string) => void;
+      function Wrapper() {
+        const [version, setVersion] = useState('1.0.0');
+        updateVersion = setVersion;
+        return (
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version={version}
+            initializationResult={mockInitResult}
+          />
+        );
+      }
+      const view = render(<Wrapper />);
+      try {
+        expect(capturedUIState.subscriptionHintsDismissed).toBe(false);
+        const dismiss = capturedUIActions.dismissSubscriptionHints;
+        await act(async () => capturedUIActions.dismissSubscriptionHints());
+        expect(capturedUIState.subscriptionHintsDismissed).toBe(true);
+        await act(async () => updateVersion('1.0.1'));
+        expect(capturedUIState.subscriptionHintsDismissed).toBe(true);
+        expect(capturedUIActions.dismissSubscriptionHints).toBe(dismiss);
+        expect(initialize).toHaveBeenCalledTimes(1);
+      } finally {
+        view.unmount();
+      }
+    });
+
+    it('starts resumed sessions with subscription welcome hints dismissed', () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        expect(capturedUIState.subscriptionHintsDismissed).toBe(true);
+      } finally {
+        view.unmount();
+      }
+    });
+
     it('refreshStatic clears the terminal before remounting history', () => {
       render(
         <AppContainer
@@ -7725,6 +7786,51 @@ describe('AppContainer State Management', () => {
 
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
+
+    it.each(['qwen3.8-max', 'another-provider-model'])(
+      'updates the displayed model on auth completion without a model notification (%s)',
+      async (model) => {
+        const getModel = vi
+          .spyOn(mockConfig, 'getModel')
+          .mockReturnValue('coder-model');
+        const trigger = captureModelChangeListener(mockConfig);
+        const view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await act(async () => {
+          await flushEffects();
+        });
+        const baselineRemountKey = capturedUIState.historyRemountKey;
+        expect(capturedUIState.currentModel).toBe('coder-model');
+        const onAuthChange = mockedUseAuthCommand.mock.lastCall?.[3] as
+          | (() => void)
+          | undefined;
+        expect(onAuthChange).toBeTypeOf('function');
+        getModel.mockReturnValue(model);
+        mockStdout.write.mockClear();
+        await act(async () => {
+          onAuthChange!();
+        });
+        expect(capturedUIState.currentModel).toBe(model);
+        expect(capturedUIState.historyRemountKey).toBeGreaterThan(
+          baselineRemountKey,
+        );
+        expect(mockStdout.write).toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+        mockStdout.write.mockClear();
+        trigger.notify(model);
+        expect(mockStdout.write).not.toHaveBeenCalledWith(
+          ansiEscapes.clearTerminal,
+        );
+        view.unmount();
+      },
+    );
 
     it('skips refreshStatic when the notified model matches the current one', async () => {
       vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');

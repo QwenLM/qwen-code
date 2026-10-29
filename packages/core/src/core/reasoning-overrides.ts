@@ -227,7 +227,9 @@ export function validateReasoningCapabilities(
       protocol !==
         (auth === 'vertex-ai'
           ? 'gemini'
-          : auth === 'qwen-oauth' || auth === 'openai-responses'
+          : auth === 'qwen-oauth' ||
+              auth === 'qwen-subscription' ||
+              auth === 'openai-responses'
             ? 'openai'
             : auth))
   )

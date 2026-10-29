@@ -252,6 +252,7 @@ export type HistoryItemLlmThoughtContent = HistoryItemBase & {
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  presentation?: 'subscription-success';
   linkUrl?: string;
   linkText?: string;
 };

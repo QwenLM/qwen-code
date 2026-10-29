@@ -25,6 +25,7 @@ import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
 
 export interface UIActions {
+  dismissSubscriptionHints: () => void;
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openMemoryDialog: () => void;

@@ -354,7 +354,10 @@ export function validateModelConfig(
   const errors: Error[] = [];
 
   // Qwen OAuth doesn't need validation - it uses dynamic tokens
-  if (config.authType === AuthType.QWEN_OAUTH) {
+  if (
+    config.authType === AuthType.QWEN_OAUTH ||
+    config.authType === AuthType.QWEN_SUBSCRIPTION
+  ) {
     return { valid: true, errors: [] };
   }
 
@@ -563,6 +566,13 @@ export async function createContentGenerator(
           './openaiResponsesContentGenerator/index.js'
         );
         return createOpenAIResponsesContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.QWEN_SUBSCRIPTION) {
+      loadBaseGenerator = async () => {
+        const { createSubscriptionContentGenerator } = await import(
+          '../qwen/subscription-content-generator.js'
+        );
+        return createSubscriptionContentGenerator(generatorConfig, config);
       };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(

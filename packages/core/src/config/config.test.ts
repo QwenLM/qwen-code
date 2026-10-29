@@ -9835,6 +9835,62 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it.each([
+      [{}, true],
+      [{ safeMode: true }, false],
+      [{ bareMode: true }, false],
+      [{ webSearch: { enabled: false } }, false],
+      [{ disabledTools: [ToolNames.WEB_SEARCH] }, false],
+    ] satisfies Array<[Partial<ConfigParameters>, boolean]>)(
+      'registers subscription search while respecting restrictions %j',
+      async (overrides, expected) => {
+        vi.stubEnv('DEV', true);
+        process.env['DEV'] = 'true';
+        try {
+          await initConfig({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            ...overrides,
+          });
+          expect(registeredToolNames().includes(ToolNames.WEB_SEARCH)).toBe(
+            expected,
+          );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('activates search immediately after login and removes it when switching away', async () => {
+      vi.stubEnv('DEV', true);
+      process.env['DEV'] = 'true';
+      try {
+        const config = await initConfig({
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+        });
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+        vi.spyOn(config, 'refreshSubscriptionModels').mockResolvedValue({
+          models: ['qwen3.8-max'],
+          cached: false,
+        });
+        stubContentGenerator();
+        await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+        expect(registeredToolNames()).toContain(ToolNames.WEB_SEARCH);
+        expect(config.getGeminiClient().setTools).toHaveBeenCalled();
+
+        registerFactory().mockClear();
+        vi.mocked(ToolRegistry.prototype.unregisterTool).mockClear();
+        await config.refreshAuth(AuthType.USE_GEMINI);
+        expect(ToolRegistry.prototype.unregisterTool).toHaveBeenCalledWith(
+          ToolNames.WEB_SEARCH,
+        );
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('does not activate a legacy model-only web search configuration', async () => {
       vi.stubEnv('DASHSCOPE_API_KEY', 'sk-test');
       try {

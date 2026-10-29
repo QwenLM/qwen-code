@@ -1,6 +1,6 @@
 # Authentication
 
-Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
+In normal releases, Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
 
 - **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
 - **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
@@ -9,7 +9,19 @@ Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that
 
 > [!note]
 >
-> **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
+> **Legacy free Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
+
+## Qwen Account with Subscription (development preview)
+
+This integration is currently available in development builds connected to the preproduction service. It is not yet enabled in normal releases. In a source checkout, `npm run dev` sets the existing `DEV=true` development flag automatically; it is not an OAuth parameter. VS Code and Desktop development hosts must use a rebuilt local daemon with the same development environment.
+
+Choose **Qwen Account with Subscription** in `/auth`, or in the graphical authentication dialog. Qwen Code opens your browser to sign in and authorize the device. If the browser does not open, use the displayed link. An active **Plus or Pro** membership is required; the discontinued free Qwen OAuth allowance is not restored.
+
+Free and Go accounts are directed to the dedicated Qwen Code plans page. Qwen Code waits up to 120 seconds for membership activation and then keeps the account signed in. Use **Check again** to recheck, **Open plans again** to revisit plans, or **Sign out** to switch accounts. A failed membership query does not mean payment failed. Once membership is active, Qwen Code continues to model setup.
+
+Available models come from the subscription service without a client model allowlist. Use `/model` in the CLI or the model selector and refresh action in VS Code/Desktop. Discovery failures preserve your login and the last successfully loaded model list. If there is no cached list, retry loading; no model list is fabricated. If your selected model is no longer available, choose another model rather than expecting an automatic switch.
+
+Local clients using the same effective Qwen configuration directory can reuse saved credentials. Remote or isolated daemons may use a different directory. Credentials refresh automatically where possible; sign in again if the session can no longer be refreshed. Development subscription sessions also enable built-in `web_search` through the staging MCP service using the current login token. No separate search key is needed; explicit search settings and permissions still apply. See [Web Search](../../developers/tools/web-search.md).
 
 ## ☁️ Option 1: QwenCloud
 
@@ -90,7 +102,7 @@ As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOK
 >
 > QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
 
-## Option 2: Qwen OAuth (Discontinued)
+## Option 2: Legacy free Qwen OAuth (discontinued)
 
 > [!warning]
 >
@@ -107,7 +119,7 @@ Start the CLI and follow the browser flow:
 qwen
 ```
 
-Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
+Legacy free Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
 
 > [!note]
 >

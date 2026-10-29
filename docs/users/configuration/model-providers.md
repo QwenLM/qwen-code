@@ -1,5 +1,9 @@
 # Model Providers
 
+## Qwen Subscription models (development preview)
+
+[Qwen Account with Subscription](./auth.md#qwen-account-with-subscription-development-preview) loads its model list from the membership service. These models do not require API keys or manual `modelProviders` entries. `/model` refreshes the list in the CLI; VS Code/Desktop reuse their model selector and refresh action. A failed or empty response retains the last successful list and login. An unavailable selected model must be reselected, without silent fallback. The legacy OAuth catalog described below is separate.
+
 Qwen Code allows you to configure multiple model providers through the `modelProviders` setting in your `settings.json`. This enables you to switch between different AI models and providers using the `/model` command.
 
 ## Overview

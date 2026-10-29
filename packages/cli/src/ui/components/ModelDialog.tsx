@@ -283,13 +283,15 @@ function handleModelSwitchSuccess({
   const feedbackItem = {
     type: 'info' as const,
     text:
-      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-      `\n` +
-      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-      `\n` +
-      `Base URL: ${baseUrl}` +
-      `\n` +
-      `API key: ${maskedKey}`,
+      effectiveAuthType === AuthType.QWEN_SUBSCRIPTION
+        ? t('Model: {{model}}', { model: effectiveModelId }) + scopeSuffix
+        : `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+          `\n` +
+          `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+          `\n` +
+          `Base URL: ${baseUrl}` +
+          `\n` +
+          `API key: ${maskedKey}`,
   };
   uiState?.historyManager.addItem(feedbackItem, Date.now());
   config.getChatRecordingService?.()?.recordSlashCommand({
@@ -417,6 +419,7 @@ export function ModelDialog({
     // Fixed order: qwen-oauth first, then others in a stable order
     const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
+      AuthType.QWEN_SUBSCRIPTION,
       AuthType.USE_OPENAI,
       AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,

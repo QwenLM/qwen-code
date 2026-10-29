@@ -23,6 +23,8 @@ import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { subscriptionSuccessMessage } from './subscription-success.js';
+import { activateSubscription } from './activate-subscription.js';
 
 /**
  * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
@@ -74,6 +76,7 @@ export type AuthController = {
       providerConfig: ProviderConfig,
       inputs: ProviderSetupInputs,
     ) => Promise<void>;
+    handleSubscriptionSubmit: (signal: AbortSignal) => Promise<void>;
     openAuthDialog: () => void;
     cancelAuthentication: () => void;
   };
@@ -246,6 +249,28 @@ export const useAuthCommand = (
     ],
   );
 
+  const handleSubscriptionSubmit = useCallback(
+    async (signal: AbortSignal, modelId?: string) => {
+      const info = await activateSubscription(
+        settings,
+        config,
+        signal,
+        modelId,
+      );
+      signal.throwIfAborted();
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: subscriptionSuccessMessage(info, config.getModel()),
+          presentation: 'subscription-success',
+        },
+        Date.now(),
+      );
+      completeAuthentication();
+    },
+    [settings, config, completeAuthentication, addItem],
+  );
+
   // -- Dialog open / close / cancel ----------------------------------------
 
   const openAuthDialog = useCallback(() => {
@@ -278,6 +303,7 @@ export const useAuthCommand = (
     const val = process.env['QWEN_DEFAULT_AUTH_TYPE'];
     const valid = [
       AuthType.QWEN_OAUTH,
+      AuthType.QWEN_SUBSCRIPTION,
       AuthType.USE_OPENAI,
       AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
@@ -321,6 +347,7 @@ export const useAuthCommand = (
       onAuthError,
       closeAuthDialog,
       handleProviderSubmit,
+      handleSubscriptionSubmit,
       openAuthDialog,
       cancelAuthentication,
     }),
@@ -329,6 +356,7 @@ export const useAuthCommand = (
       onAuthError,
       closeAuthDialog,
       handleProviderSubmit,
+      handleSubscriptionSubmit,
       openAuthDialog,
       cancelAuthentication,
     ],
@@ -346,6 +374,7 @@ export const useAuthCommand = (
     qwenAuthState,
     closeAuthDialog,
     handleProviderSubmit,
+    handleSubscriptionSubmit,
     openAuthDialog,
     cancelAuthentication,
     state,

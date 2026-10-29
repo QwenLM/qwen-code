@@ -40,6 +40,8 @@ function getAuthDisplayType(
   }
 
   switch (authType) {
+    case AuthType.QWEN_SUBSCRIPTION:
+      return 'Qwen Subscription';
     case AuthType.QWEN_OAUTH:
       return AuthDisplayType.QWEN_OAUTH;
     default:

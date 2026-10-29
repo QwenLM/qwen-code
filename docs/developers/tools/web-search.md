@@ -1,13 +1,15 @@
 # Web Search
 
+> Development builds (`npm run dev`) also support built-in search after Qwen Plus/Pro subscription login. They use the staging MCP service at `https://pre-api.qwen.ai/api/v1/mcp/web_search` with the current device access token; no separate search key or `mcpServers` configuration is needed. CLI, VS Code and Desktop share this Core implementation.
+
 Qwen Code provides web search two ways:
 
-1. **Built-in `web_search` tool** — backed by the DashScope Responses API server-side search. On by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
+1. **Built-in `web_search` tool** — backed by DashScope Responses search or, in development subscription sessions, the Qwen MCP search service. On by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
 2. **MCP (Model Context Protocol) integrations** — connect any external search service (Tavily, GLM, and others). Use this when your provider cannot back the built-in tool.
 
 ## Built-in `web_search`
 
-The built-in tool issues a self-contained search request to a small auxiliary model with DashScope's server-side `web_search` (and `web_extractor`) tools, and returns the narrated findings plus source URLs.
+For DashScope, the built-in tool issues a self-contained search request to a small auxiliary model with server-side `web_search` (and `web_extractor`) tools. For development subscription sessions, it calls the MCP `web_search` tool with the query, preserves the service default result count, and returns result text with source URLs. Subscription queries have a 500-character limit; `webExtractor` applies only to DashScope.
 
 ### When it turns on by itself
 
@@ -15,6 +17,7 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 
 | How you signed in                                                                                                          | Built-in search                                 |
 | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Qwen Plus/Pro subscription in development                                                                                  | on — staging MCP service                        |
 | Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
 | Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
 | Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
@@ -23,7 +26,7 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 | An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
 | Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
 
-Searches bill the same key as your main model. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
+DashScope searches bill the same key as your main model; subscription searches use the current membership access token, refreshed through the existing login session. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
 
 To turn it off:
 
@@ -87,7 +90,7 @@ model id. The API key is read from `WEB_SEARCH_API_KEY` if set, otherwise from
 Notes:
 
 - The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
-- Which providers can activate the tool is decided at startup. Once active, the search backend follows the currently selected model on the next search; switching to an unsupported provider makes that invocation fail, while switching from a session where the tool was absent still requires a restart to register it.
+- Search registration is re-evaluated after successful authentication changes. Subscription login activates it in the current session without restarting. Explicit disabling, bare/safe mode and tool permission rules still apply. An explicit alternate search model or endpoint retains precedence over subscription search.
 - Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.

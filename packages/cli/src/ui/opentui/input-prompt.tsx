@@ -185,6 +185,7 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
 
 export interface InputPromptProps {
   onSubmit: (text: string, imagePaths?: string[]) => void;
+  onInputActivity?: () => void;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
@@ -239,6 +240,7 @@ export interface InputPromptProps {
 export function OpenTuiInputPrompt(props: InputPromptProps) {
   const {
     onSubmit,
+    onInputActivity,
     userMessages,
     config,
     streaming = false,
@@ -320,6 +322,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const [attachments, setAttachments] = useState<
     Array<{ id: string; path: string; filename: string }>
   >([]);
+  useEffect(() => {
+    if (editorRef.current?.plainText || attachments.length > 0) {
+      onInputActivity?.();
+    }
+  }, [textVersion, attachments.length, onInputActivity]);
   const completionModeRef = useRef<CompletionMode>(CompletionMode.IDLE);
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.

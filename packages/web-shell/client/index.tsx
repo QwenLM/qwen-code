@@ -375,3 +375,8 @@ export type {
 } from './hooks/useMessageNavigation';
 export { highlightCode } from './components/messages/codeHighlighter';
 export type { CodeHighlightRequest } from './components/messages/codeHighlighter';
+
+export {
+  QwenSubscriptionPanel,
+  QwenSubscriptionFlow,
+} from './components/messages/QwenSubscriptionPanel';

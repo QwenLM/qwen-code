@@ -8,6 +8,8 @@ import {
 } from 'react';
 import {
   useDaemonSessionOwnerGuard,
+  useActions,
+  useConnection,
   useWorkspaceActions,
   type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
@@ -16,6 +18,8 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
+import { QwenSubscriptionFlow } from './QwenSubscriptionPanel';
 import { Checkbox } from '../ui/checkbox';
 import {
   Field,
@@ -35,6 +39,7 @@ import {
 import { isVoiceModelId } from '../../voice/voiceModels';
 import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
+import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
 
 const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
@@ -56,6 +61,7 @@ type AuthStep =
 interface AuthMessageProps {
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
+  onModelActivated?: (modelId: string) => void;
   onClose: () => void;
 }
 
@@ -146,6 +152,7 @@ function normalizeModelIds(value: string): string[] {
 
 export function AuthMessage({
   onMessage,
+  onModelActivated,
   onClose,
   allowAdd = true,
 }: AuthMessageProps) {
@@ -155,11 +162,28 @@ export function AuthMessage({
   const fieldId = useId();
   const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
+  const sessionActions = useActions();
+  const connection = useConnection();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(sessionOwnerGuard.capture());
   const ownerChanged = !ownerRef.current.isCurrent();
   if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
   const saveOperationRef = useRef(0);
+  const [subscriptionReal, setSubscriptionReal] = useState(false);
+  const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
+  useEffect(() => {
+    const abort = new AbortController();
+    const owner = sessionOwnerGuard.capture();
+    setSubscriptionEnabled(false);
+    void workspaceActions
+      .getSubscriptionConfig({ signal: abort.signal })
+      .then((config) => {
+        if (!abort.signal.aborted && owner.isCurrent())
+          setSubscriptionEnabled(config.enabled);
+      })
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [workspaceActions, sessionOwnerGuard, ownerChanged]);
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
   const [providerIndex, setProviderIndex] = useState(0);
@@ -257,6 +281,7 @@ export function AuthMessage({
   useEffect(() => {
     if (!ownerChanged) return;
     saveOperationRef.current += 1;
+    setSubscriptionReal(false);
     setSaving(false);
     setError(null);
   }, [ownerChanged]);
@@ -1134,6 +1159,9 @@ export function AuthMessage({
     if (view === 'groups') {
       return (
         <>
+          {allowAdd && subscriptionEnabled && (
+            <QwenSubscriptionEntry onClick={() => setSubscriptionReal(true)} />
+          )}
           {renderOptions(
             groups.map((group: AuthGroup) => ({
               value: group.id,
@@ -1204,6 +1232,70 @@ export function AuthMessage({
     }
     activate();
   };
+
+  if (subscriptionReal)
+    return (
+      <QwenSubscriptionFlow
+        transport={workspaceActions}
+        onActivate={async (signal, modelId) => {
+          const owner = sessionOwnerGuard.capture();
+          const result = await workspaceActions.activateSubscription({
+            signal,
+            ...(modelId ? { modelId } : {}),
+          });
+          signal.throwIfAborted();
+          if (!owner.isCurrent()) throw new Error('Session changed.');
+          if (result.runtimeSync.status === 'failed')
+            throw new Error('Subscription runtime activation failed.');
+          if (connection.sessionId) {
+            await sessionActions.setModel(
+              `${result.modelId}(qwen-subscription)`,
+            );
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+          } else {
+            onModelActivated?.(`${result.modelId}(qwen-subscription)`);
+          }
+        }}
+        onActivated={() => {
+          onMessage(t('subscription.connected'));
+          onClose();
+        }}
+        onModelSelectionRequired={async (message, signal) => {
+          const owner = sessionOwnerGuard.capture();
+          try {
+            await sessionActions.refreshModels();
+          } catch (error) {
+            if (
+              !signal.aborted &&
+              owner.isCurrent() &&
+              error instanceof Error &&
+              error.message !== message
+            )
+              onMessage(error.message, 'error');
+          }
+          if (signal.aborted || !owner.isCurrent()) return;
+          onMessage(message);
+          onClose();
+        }}
+        onClose={() => setSubscriptionReal(false)}
+        onOtherProviders={() => {
+          setSubscriptionReal(false);
+          const group = groups.find((item) => item.id === 'alibaba');
+          if (group) {
+            setGroupId(group.id);
+            setView('providers');
+          }
+        }}
+        onOpenExternal={(url) => {
+          if (isDesktopShell()) {
+            return openExternalUrl(url);
+          } else {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }
+        }}
+      />
+    );
 
   return (
     <div className={styles.panel}>

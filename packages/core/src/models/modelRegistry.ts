@@ -8,6 +8,8 @@ import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
+import { readCachedSubscriptionModels } from '../qwen/subscription-models.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
@@ -225,6 +227,9 @@ export class ModelRegistry {
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    if (process.env['DEV'] === 'true') {
+      this.setSubscriptionModels(readCachedSubscriptionModels());
+    }
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
@@ -266,7 +271,10 @@ export class ModelRegistry {
       }
 
       // qwen-oauth uses hard-coded models and cannot be overridden
-      if (protocol === AuthType.QWEN_OAUTH) {
+      if (
+        protocol === AuthType.QWEN_OAUTH ||
+        protocol === AuthType.QWEN_SUBSCRIPTION
+      ) {
         if (Array.isArray(models)) {
           for (const model of models) {
             resolveModelProtocol(
@@ -492,6 +500,18 @@ export class ModelRegistry {
         `Model "${config.id}" in authType "${authType}" has multiple selector-only flags. It will be unreachable in at least one model selector.`,
       );
     }
+  }
+
+  setSubscriptionModels(ids: string[]): void {
+    this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
+    this.registerAuthTypeModels(
+      AuthType.QWEN_SUBSCRIPTION,
+      ids.map((id) => ({
+        id,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        generationConfig: { modalities: {} },
+      })),
+    );
   }
 
   /**

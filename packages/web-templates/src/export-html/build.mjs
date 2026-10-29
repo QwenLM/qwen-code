@@ -76,7 +76,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
 // 158ff26aeb without and with the change, leaving 3,278 below this ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_050_000;
+// Subscription model recovery and its shared locale strings measure 2,050,373
+// bytes locally; keep a narrow allowance for this first-party growth.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_051_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

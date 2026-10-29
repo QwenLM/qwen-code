@@ -21,7 +21,11 @@ import type {
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { GoalLegacyCardData } from '../utils/goal-card-view.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import type { ArenaAgentCardData, CompressionProps } from '../types.js';
+import type {
+  ArenaAgentCardData,
+  CompressionProps,
+  HistoryItemInfo,
+} from '../types.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
@@ -82,6 +86,7 @@ export type LiveInfoItem = {
   kind: 'info';
   id: string;
   text: string;
+  presentation?: HistoryItemInfo['presentation'];
 };
 
 /** Error notice row (ink HistoryItemError + ErrorMessage: `✕` + error color,
@@ -459,7 +464,12 @@ export function foldLiveEvent(
       // content before addItem — settle a still-streaming assistant block.
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
-      items.push({ kind: 'info', id: nid('info'), text: ev.text });
+      items.push({
+        kind: 'info',
+        id: nid('info'),
+        text: ev.text,
+        ...(ev.presentation ? { presentation: ev.presentation } : {}),
+      });
       return items;
     }
     case 'error': {

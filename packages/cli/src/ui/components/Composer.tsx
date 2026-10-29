@@ -5,7 +5,13 @@
  */
 
 import { Box, Text, useIsScreenReaderEnabled, type DOMElement } from 'ink';
-import { useCallback, useRef, useState, type RefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
@@ -18,6 +24,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { t } from '../../i18n/index.js';
 
 interface ComposerProps {
@@ -28,6 +35,8 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
+  const subscriptionActive =
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const uiActions = useUIActions();
   const { vimEnabled } = useVimModeState();
 
@@ -53,6 +62,24 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const suppressBottomLoadingIndicator =
     uiState.streamingState === StreamingState.Responding &&
     uiState.terminalWidth <= 30;
+
+  const { subscriptionHintsDismissed } = uiState;
+  const { dismissSubscriptionHints } = uiActions;
+  const hasPriorInput = uiState.history.some(
+    (item) => item.type === 'user' && item.text.trim() !== '/auth',
+  );
+  const hasInput = uiState.buffer.text.length > 0;
+  useEffect(() => {
+    if (subscriptionActive && (hasInput || hasPriorInput || isStreaming)) {
+      dismissSubscriptionHints();
+    }
+  }, [
+    subscriptionActive,
+    hasInput,
+    hasPriorInput,
+    isStreaming,
+    dismissSubscriptionHints,
+  ]);
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -120,7 +147,10 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           buffer={uiState.buffer}
           inputWidth={uiState.inputWidth}
           suggestionsWidth={uiState.suggestionsWidth}
-          onSubmit={uiActions.handleFinalSubmit}
+          onSubmit={(text, options) => {
+            if (subscriptionActive) dismissSubscriptionHints();
+            uiActions.handleFinalSubmit(text, options);
+          }}
           userMessages={uiState.userMessages}
           onClearScreen={uiActions.handleClearScreen}
           config={config}
@@ -141,7 +171,12 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' + t('Type your message or @path/to/file')
+              : '  ' +
+                t(
+                  subscriptionActive
+                    ? 'Type your request, or /usage'
+                    : 'Type your message or @path/to/file',
+                )
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
@@ -149,6 +184,24 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
+
+      {uiState.isInputActive &&
+        subscriptionActive &&
+        !subscriptionHintsDismissed &&
+        !hasPriorInput &&
+        !hasInput &&
+        !showSuggestions &&
+        !isStreaming && (
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Try:')}
+              {'  '}
+            </Text>
+            <Text color={theme.text.link} underline>
+              {'/usage  /status  /upgrade  /auth'}
+            </Text>
+          </Box>
+        )}
 
       {/* Exclusive area: only one component visible at a time */}
       {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}

@@ -7,6 +7,14 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  Retry: '重试',
+  'Connecting…': '正在连接…',
+  'Could not connect Qwen Subscription. Please try again.':
+    '无法连接 Qwen 订阅，请重试。',
+  'Loading models from provider…': '正在加载服务商模型…',
+  'Recommended models · provider list unavailable, showing built-ins':
+    '推荐模型 · 无法获取服务商列表，显示内置模型',
+
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
@@ -1726,6 +1734,43 @@ export default {
     '基于浏览器的第三方提供商认证（例如 OpenRouter、ModelScope）',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     '认证方式被强制设置为 {{enforcedType}}，但您当前使用的是 {{currentType}}',
+  'Qwen Subscription': 'Qwen Subscription',
+  'Qwen Account with Subscription': 'Qwen 会员账号',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    '在 chat.qwen.ai 订阅 Plus/Pro 套餐，解锁 Qwen Code + Agent',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
+  "If the browser didn't open, visit:": '如果浏览器未打开，请访问：',
+  'Waiting for sign-in…': '正在等待登录…',
+  'c to copy link · Esc to cancel': '按 c 复制链接 · 按 Esc 取消',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    '身份验证超时。请重试或选择其他身份验证方式。',
+  'Signed in as {{email}}': '已登录为 {{email}}',
+  'Signed in as {{email}} (Qwen {{plan}})':
+    '已登录为 {{email}}（Qwen {{plan}}）',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} 已生效 · 用量包含在你的套餐中',
+  'Model: {{model}}': '模型：{{model}}',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Plus 和 Pro 包含 Qwen Code',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    '你已使用 {{plan}} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后此终端将自动继续。',
+  'Waiting for your subscription to become active…': '正在等待你的订阅生效…',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    '你的 Qwen 登录已过期，请运行 /auth 重新登录。',
+  'Checking your subscription…': '正在检查你的订阅…',
+  'Check again': '再次检查',
+  'Open plans again': '重新打开套餐页',
+  'Opens the Qwen Code plans page in your browser':
+    '在浏览器中打开 Qwen Code 套餐页',
+  'Use Alibaba ModelStudio instead': '改用阿里云百炼',
+  'Coding Plan, Token Plan, or Standard API Key':
+    'Coding Plan、Token Plan 或标准 API Key',
+  'Sign out': '退出登录',
+  'Disconnect this device from your Qwen account':
+    '断开此设备与你的 Qwen 账号的连接',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    '按 Enter 选择，↑↓ 切换 · 按 Esc 关闭',
   'Qwen OAuth Authentication': 'Qwen OAuth 认证',
   'Please visit this URL to authorize:': '请访问此 URL 进行授权：',
   'Waiting for authorization': '等待授权中',
@@ -2734,4 +2779,28 @@ export default {
     '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
   'Create a git commit with an AI-drafted message':
     '使用 AI 起草的提交信息创建 git 提交',
+  'Could not request an authorization link. Please try signing in again.':
+    '无法申请授权链接，请重新登录。',
+  'Could not complete authorization. Please try signing in again.':
+    '无法完成授权，请重新登录。',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    '无法读取或保存 Qwen 凭证，请检查本地文件权限和磁盘空间。',
+  'Could not refresh your Qwen session. Please try again.':
+    '无法刷新 Qwen 登录凭证，请重试。',
+  'You are signed out locally, but the remote session could not be revoked.':
+    '本地已退出登录，但未能撤销远端会话。',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    '无法清除本地 Qwen 凭证，请检查本地文件权限。',
+  'Authorization or access was denied.': '授权或访问被拒绝。',
+  'Too many requests. Please try again later.': '请求过多，请稍后重试。',
+  'The network request failed or timed out.': '网络请求失败或超时。',
+  'The service returned an invalid response.': '服务返回的数据格式无效。',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    '模型：{{model}} · 运行 /usage 查看套餐用量',
+  'Type your request, or /usage': '输入你的请求，或 /usage',
+  'Try:': '试试：',
+  'Open Qwen subscription plans': '打开 Qwen 订阅套餐页',
+  'Could not open your browser. Visit {{url}}':
+    '无法打开浏览器，请访问 {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen 订阅套餐：{{url}}',
 };

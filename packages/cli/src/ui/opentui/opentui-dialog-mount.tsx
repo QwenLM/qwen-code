@@ -160,11 +160,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     rawCommand: string | null,
     text: string,
     level: 'info' | 'error' = 'info',
+    presentation?: HistoryItemInfo['presentation'],
   ) => {
     const item: HistoryItemInfo | HistoryItemError =
       level === 'error'
         ? { type: MessageType.ERROR, text }
-        : { type: MessageType.INFO, text };
+        : {
+            type: MessageType.INFO,
+            text,
+            ...(presentation ? { presentation } : {}),
+          };
     host.addItem(item, Date.now());
     if (!rawCommand) return;
     config.getChatRecordingService?.()?.recordSlashCommand({
@@ -428,8 +433,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           initialError={request.initialError}
           onClose={onClose}
-          notify={(text) =>
-            reportResult(request.openedViaCommand ? '/auth' : null, text)
+          notify={(text, presentation) =>
+            reportResult(
+              request.openedViaCommand ? '/auth' : null,
+              text,
+              'info',
+              presentation,
+            )
           }
           availableTerminalHeight={props.availableTerminalHeight}
         />

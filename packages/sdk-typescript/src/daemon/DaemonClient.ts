@@ -33,6 +33,10 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
+  DaemonSubscriptionConfig,
+  DaemonSubscriptionUserInfo,
+  DaemonSubscriptionFlow,
   DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
@@ -6846,6 +6850,99 @@ export class DaemonClient {
 
   // -- Auth device-flow ---------------------------------------------------
 
+  async getSubscriptionConfig(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionConfig> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/subscription');
+        return (await res.json()) as DaemonSubscriptionConfig;
+      },
+    );
+  }
+
+  async startSubscriptionLogin(): Promise<DaemonSubscriptionFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/flows');
+        return (await res.json()) as DaemonSubscriptionFlow;
+      },
+    );
+  }
+
+  async getSubscriptionLogin(
+    id: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows/${urlEncode(id)}`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/subscription/flows/:id');
+        return (await res.json()) as DaemonSubscriptionFlow;
+      },
+    );
+  }
+
+  async cancelSubscriptionLogin(id: string): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/flows/${urlEncode(id)}`,
+      { method: 'DELETE', headers: this.headers({}) },
+      async (res) => {
+        if (res.status !== 204 && res.status !== 404)
+          throw await this.failOnError(
+            res,
+            'DELETE /auth/subscription/flows/:id',
+          );
+      },
+    );
+  }
+
+  async getSubscriptionUserInfo(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<DaemonSubscriptionUserInfo | null> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/userinfo`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/userinfo');
+        return (await res.json()) as DaemonSubscriptionUserInfo | null;
+      },
+    );
+  }
+
+  async signOutSubscription(): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/auth/subscription/revoke`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/subscription/revoke');
+      },
+    );
+  }
+
   /**
    * Start an OAuth device-flow login for the given provider. The daemon
    * polls the IdP in the background and emits typed `auth_device_flow_*`
@@ -8838,6 +8935,24 @@ export class WorkspaceDaemonClient {
       {},
       opts?.clientId,
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  activateSubscription(
+    opts: { clientId?: string; signal?: AbortSignal; modelId?: string } = {},
+  ): Promise<DaemonSubscriptionActivation> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/auth/subscription',
+      'POST /workspaces/:workspace/auth/subscription',
+      {
+        method: 'POST',
+        body: opts.modelId === undefined ? {} : { modelId: opts.modelId },
+        clientId: opts.clientId,
+        signal: opts.signal,
+        mode: 'rest',
+        timeoutMs: 65000,
+      },
     );
   }
 

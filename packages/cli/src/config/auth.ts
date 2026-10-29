@@ -280,6 +280,12 @@ export function validateAuthMethod(
   const settings = loadSettings(process.cwd(), false);
   loadEnvironment(settings.merged);
 
+  if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
+    return process.env['DEV'] === 'true'
+      ? null
+      : 'Qwen Subscription is only available in development mode.';
+  }
+
   if (
     authMethod === AuthType.USE_OPENAI ||
     authMethod === AuthType.USE_OPENAI_RESPONSES

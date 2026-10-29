@@ -13,6 +13,13 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+  subscriptionModelUnavailable,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   AuthType,
@@ -1099,7 +1106,46 @@ export const modelCommand: SlashCommand = {
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();
-    if (!contentGeneratorConfig) {
+    const authType =
+      contentGeneratorConfig?.authType ??
+      (settings.merged.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+        ? AuthType.QWEN_SUBSCRIPTION
+        : undefined);
+    if (authType === AuthType.QWEN_SUBSCRIPTION) {
+      context.ui.addItem(
+        { type: MessageType.INFO, text: t('Loading models from provider…') },
+        Date.now(),
+      );
+      try {
+        const result = await config.refreshSubscriptionModels(
+          context.abortSignal,
+        );
+        if (result.cached)
+          context.ui.addItem(
+            { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
+            Date.now(),
+          );
+        if (!result.models.includes(config.getModel()))
+          context.ui.addItem(
+            {
+              type: MessageType.WARNING,
+              text: subscriptionModelUnavailable(config.getModel()),
+            },
+            Date.now(),
+          );
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            error instanceof SubscriptionOAuthError
+              ? 'Could not load Qwen Subscription models. Check your account in /auth and retry.'
+              : SUBSCRIPTION_MODELS_UNAVAILABLE,
+        };
+      }
+    }
+    if (!contentGeneratorConfig && authType !== AuthType.QWEN_SUBSCRIPTION) {
       return {
         type: 'message',
         messageType: 'error',
@@ -1107,7 +1153,6 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const authType = contentGeneratorConfig.authType;
     if (!authType) {
       return {
         type: 'message',

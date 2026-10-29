@@ -11,7 +11,7 @@ import type { ToolErrorType } from './tool-error.js';
  * by the gate in `web-search.ts` and consumed by a backend implementation.
  * `kind` selects that implementation.
  */
-export interface WebSearchBackendConfig {
+export interface DashScopeWebSearchBackendConfig {
   kind: 'dashscope';
   modelId: string;
   /** Environment variable name holding the API key. */
@@ -32,6 +32,10 @@ export interface WebSearchBackendConfig {
    */
   customHeaders?: Record<string, string>;
 }
+
+export type WebSearchBackendConfig =
+  | DashScopeWebSearchBackendConfig
+  | { kind: 'qwen-subscription'; timeoutMs: number };
 
 /** One page the search produced. */
 export interface WebSearchSource {

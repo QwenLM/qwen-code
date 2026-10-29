@@ -595,6 +595,30 @@ function TranscriptItem({
     case 'compaction':
       return <CompactionRow compression={item.compression} />;
     case 'info':
+      if (item.presentation === 'subscription-success') {
+        return (
+          <box flexDirection="column">
+            {item.text.split('\n').map((line, index) =>
+              index < 2 ? (
+                <box key={index} flexDirection="row">
+                  <text fg={C.green} flexShrink={0}>
+                    {'✓ '}
+                  </text>
+                  <text fg={C.text} {...selectionProps()}>
+                    {sanitizeTerminalText(line.slice(2))}
+                  </text>
+                </box>
+              ) : (
+                <box key={index} paddingLeft={2}>
+                  <text fg={C.dim} {...selectionProps()}>
+                    {sanitizeTerminalText(line.trimStart())}
+                  </text>
+                </box>
+              ),
+            )}
+          </box>
+        );
+      }
       return (
         <box flexDirection="row">
           {/* A wrapped message would otherwise shrink the prefix and drop its

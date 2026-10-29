@@ -7565,6 +7565,27 @@ describe('model catalog refresh', () => {
     return { ...h, session, workspace, context };
   }
 
+  it('keeps a removed subscription selection and publishes the new catalog for reselection', async () => {
+    const h = setup();
+    h.replaceConnection({
+      ...h.getConnection(),
+      models: [
+        { id: 'old-model', label: 'Old', authType: 'qwen-subscription' },
+      ],
+    });
+    h.context.state.models!.availableModels = [
+      { modelId: 'new-model', name: 'New' },
+    ];
+    await expect(h.actions.refreshModels()).rejects.toThrow(
+      'Run /model to choose another model',
+    );
+    expect(h.getConnection().currentModel).toBe('old-model');
+    expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+      'new-model',
+    ]);
+    expect(h.session.setModel).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'refreshes with an absent or void callback (callback=%s)',
     async (withCallback) => {

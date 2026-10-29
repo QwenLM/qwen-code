@@ -21355,6 +21355,7 @@ export function App({
             >
               <AuthMessage
                 allowAdd={modelManagementPolicy.allowAdd}
+                onModelActivated={selectWelcomeModel}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([
                     type === 'error'

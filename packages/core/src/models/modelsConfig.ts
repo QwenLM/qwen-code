@@ -10,6 +10,8 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
@@ -276,6 +278,14 @@ export class ModelsConfig {
    */
   wasAuthTypeExplicitlyProvided(): boolean {
     return this.authTypeWasExplicitlyProvided;
+  }
+
+  async refreshSubscriptionModels(
+    signal?: AbortSignal,
+  ): Promise<{ models: string[]; cached: boolean }> {
+    const result = await new QwenSubscriptionSession().getModels(signal);
+    this.modelRegistry.setSubscriptionModels(result.models);
+    return result;
   }
 
   /**
@@ -897,17 +907,26 @@ export class ModelsConfig {
 
     // Clear credentials to avoid reusing previous model's API key
 
-    // For Qwen OAuth, apiKey must always be a placeholder. It will be dynamically
+    // For Qwen authentication, apiKey must be a placeholder. It will be dynamically
     // replaced when building requests. Do not preserve any previous key or read
     // from envKey.
     //
     // (OpenAI client instantiation requires an apiKey even though it will be
     // replaced later.)
-    if (this.currentAuthType === AuthType.QWEN_OAUTH) {
-      this._generationConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
+    if (
+      this.currentAuthType === AuthType.QWEN_OAUTH ||
+      this.currentAuthType === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      this._generationConfig.apiKey =
+        this.currentAuthType === AuthType.QWEN_SUBSCRIPTION
+          ? QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER
+          : 'QWEN_OAUTH_DYNAMIC_TOKEN';
       this.generationConfigSources['apiKey'] = {
         kind: 'computed',
-        detail: 'Qwen OAuth placeholder token',
+        detail:
+          this.currentAuthType === AuthType.QWEN_SUBSCRIPTION
+            ? 'Qwen Subscription placeholder token'
+            : 'Qwen OAuth placeholder token',
       };
       this._generationConfig.apiKeyEnvKey = undefined;
       delete this.generationConfigSources['apiKeyEnvKey'];

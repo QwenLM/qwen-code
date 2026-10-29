@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   findSessionAgentBinding,
@@ -15174,6 +15175,26 @@ class QwenAgent implements Agent {
         }
         const reloadRevision = ++this.modelProviderReloadRevision;
         const merged = this.settings.merged;
+        let subscriptionModels: string[] | undefined;
+        if (
+          merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION ||
+          [
+            this.config,
+            ...this.initializingConfigs,
+            ...Array.from(this.sessions.values(), (session) =>
+              session.getConfig(),
+            ),
+          ].some(
+            (config) =>
+              config.getModelsConfig().getCurrentAuthType() ===
+              AuthType.QWEN_SUBSCRIPTION,
+          )
+        ) {
+          const catalog = await this.config.refreshSubscriptionModels();
+          subscriptionModels = catalog.models;
+          if (reloadRevision !== this.modelProviderReloadRevision)
+            return { configsRefreshed: 0, configsFailed: 0 };
+        }
         reloadEnvironment(merged, cwd);
         const providerProtocol = merged.providerProtocol ?? {};
         let configsRefreshed = 0;
@@ -15195,6 +15216,28 @@ class QwenAgent implements Agent {
         };
 
         await reloadConfig(this.config, 'bootstrap');
+        if (
+          reloadRevision === this.modelProviderReloadRevision &&
+          process.env['DEV'] === 'true' &&
+          merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION &&
+          subscriptionModels?.includes(
+            merged.model?.name ?? this.config.getModel(),
+          ) &&
+          (!merged.security.auth.enforcedType ||
+            merged.security.auth.enforcedType === AuthType.QWEN_SUBSCRIPTION)
+        ) {
+          try {
+            this.config.syncModelSelection(
+              AuthType.QWEN_SUBSCRIPTION,
+              merged.model?.name ?? this.config.getModel(),
+              QWEN_SUBSCRIPTION_BASE_URL,
+            );
+            await this.config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn('Subscription bootstrap activation failed');
+          }
+        }
         for (const config of this.initializingConfigs) {
           if (config !== this.config) {
             await reloadConfig(config, `initializing:${config.getSessionId()}`);

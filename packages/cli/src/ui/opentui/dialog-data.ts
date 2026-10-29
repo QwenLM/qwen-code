@@ -662,13 +662,15 @@ export async function applyModelSelection(
   return {
     ok: true,
     message:
-      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-      `\n` +
-      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-      `\n` +
-      `Base URL: ${baseUrl}` +
-      `\n` +
-      `API key: ${maskedKey}`,
+      effectiveAuthType === AuthType.QWEN_SUBSCRIPTION
+        ? t('Model: {{model}}', { model: effectiveModelId }) + scopeSuffix
+        : `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+          `\n` +
+          `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+          `\n` +
+          `Base URL: ${baseUrl}` +
+          `\n` +
+          `API key: ${maskedKey}`,
   };
 }
 

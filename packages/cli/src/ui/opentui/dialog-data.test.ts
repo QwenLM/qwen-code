@@ -345,6 +345,55 @@ describe('applyModelSelection', () => {
   }
 
   describe('primary mode (default selection)', () => {
+    it.each([undefined, 'workspace', 'user'] as const)(
+      'shows only the subscription model selection with scope %s',
+      async (persistScope) => {
+        const switchModel = vi.fn(async () => {});
+        const config = resolvedConfig({
+          switchModel,
+          getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            baseUrl: 'https://gateway.example/v1',
+            apiKey: 'SUBSCRIPTION_TOKEN',
+          }),
+        });
+        const { settings, written } = createFakeSettings({ isTrusted: true });
+        const entry = modelRow({
+          id: 'qwen3.8-max',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        });
+        const outcome = await applyModelSelection({
+          config,
+          settings,
+          entries: [entry],
+          mode: 'primary',
+          selectionKey: entry.key,
+          persistScope,
+        });
+        const suffix =
+          persistScope === 'workspace'
+            ? ' (this project)'
+            : persistScope === 'user'
+              ? ' (global)'
+              : '';
+        expect(outcome).toEqual({
+          ok: true,
+          message: `Model: qwen3.8-max${suffix}`,
+        });
+        expect(switchModel).toHaveBeenCalled();
+        expect(written).toContainEqual({
+          scope:
+            persistScope === 'workspace'
+              ? SettingScope.Workspace
+              : SettingScope.User,
+          key: 'model.name',
+          value: 'qwen3.8-max',
+        });
+      },
+    );
+
     it('switches the runtime model before persisting model.name', async () => {
       const switchModel = vi.fn(async () => {});
       const config = resolvedConfig({

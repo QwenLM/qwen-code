@@ -145,6 +145,61 @@ describe('<ModelDialog />', () => {
     expect(getByText('Select Model')).toBeDefined();
   });
 
+  it('confirms subscription model selection without exposing API configuration', async () => {
+    const model = 'qwen3.8-max';
+    const baseUrl = 'https://pre-api.qwen.ai/compatible-mode/v1';
+    const { mockConfig, mockHistoryManager, recordSlashCommand, props } =
+      renderComponent(
+        {},
+        {
+          getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+          getModel: () => model,
+          getAllConfiguredModels: () => [
+            {
+              id: model,
+              label: model,
+              authType: AuthType.QWEN_SUBSCRIPTION,
+              baseUrl,
+            },
+          ],
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model,
+            baseUrl,
+            apiKey: 'qwen-subscription-placeholder',
+          }),
+        },
+      );
+    const select = mockedSelect.mock.calls.at(-1)![0];
+    const option = select.items.find(
+      (item) =>
+        typeof item.value === 'string' &&
+        item.value.startsWith(`${AuthType.QWEN_SUBSCRIPTION}::`),
+    );
+    expect(option).toBeDefined();
+    await act(async () => {
+      await select.onSelect(option!.value);
+    });
+    expect(mockConfig.switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_SUBSCRIPTION,
+      model,
+      { baseUrl },
+    );
+    const feedback = vi
+      .mocked(mockHistoryManager.addItem)
+      .mock.calls.at(-1)![0];
+    expect.soft(feedback).toEqual({ type: 'info', text: 'Model: qwen3.8-max' });
+    expect
+      .soft(JSON.stringify(feedback))
+      .not.toMatch(/authType|Base URL|API key|compatible-mode|placeholder/);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [{ type: 'info', text: 'Model: qwen3.8-max' }],
+    });
+    expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
     renderComponent();
     expect(mockedSelect).toHaveBeenCalledTimes(1);
@@ -608,6 +663,38 @@ describe('<ModelDialog />', () => {
     // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
     // max(1, floor((20 - 14 - 5) / 1)) = 1.
     expect(propsAfterError.maxItemsToShow).toBe(1);
+  });
+
+  it('shows every discovered subscription model in the selector', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    renderComponent(
+      {},
+      {
+        getAuthType: vi.fn(() => AuthType.QWEN_SUBSCRIPTION),
+        getModel: vi.fn(() => 'independent-alpha'),
+        getAllConfiguredModels: vi.fn(() =>
+          ['independent-alpha', 'independent-beta'].map((id) => ({
+            id,
+            label: id,
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          })),
+        ),
+        switchModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    expect(select.items.map((item) => item.value)).toEqual([
+      'qwen-subscription::independent-alpha',
+      'qwen-subscription::independent-beta',
+    ]);
+    await act(async () => {
+      await select.onSelect('qwen-subscription::independent-beta');
+    });
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_SUBSCRIPTION,
+      'independent-beta',
+      expect.any(Object),
+    );
   });
 
   it('hides discontinued qwen-oauth models for other auth types', () => {

@@ -1134,8 +1134,16 @@ export function projectItemToStreamEvent(
         sentToModel: item.sentToModel ?? false,
         ...(item.promptId ? { promptId: item.promptId } : {}),
       };
-    case 'info':
-      return viaSpecialText();
+    case 'info': {
+      const text = projectSpecialItemText(item, ctx);
+      return text === null
+        ? null
+        : {
+            type: 'info',
+            text,
+            ...(item.presentation ? { presentation: item.presentation } : {}),
+          };
+    }
     case 'warning':
       return { type: 'warning', text: item.text };
     // No success row in the live model yet; ink's green SuccessMessage

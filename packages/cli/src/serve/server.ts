@@ -125,6 +125,8 @@ import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
+import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
+import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -3443,6 +3445,15 @@ export function createServeApp(
     },
   });
 
+  registerWorkspaceSubscriptionRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    persistSettings: deps.persistSettings,
+    sendBridgeError,
+  });
+  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(app, mutate);
+  app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -4233,6 +4244,7 @@ export function createServeApp(
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
+      stopAppResource(stopSubscriptionAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

@@ -9,6 +9,10 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  Retry: '重試',
+  'Connecting…': '正在連線…',
+  'Could not connect Qwen Subscription. Please try again.':
+    '無法連線 Qwen 訂閱，請重試。',
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
@@ -2532,4 +2536,67 @@ export default {
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
   'Create a git commit with an AI-drafted message':
     '使用 AI 起草的提交訊息建立 git 提交',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    '驗證逾時，請重試或選擇其他驗證方式。',
+  'Authorization or access was denied.': '授權或存取遭拒。',
+  'Check again': '再次檢查',
+  'Checking your subscription…': '正在檢查你的訂閱…',
+  'Coding Plan, Token Plan, or Standard API Key':
+    'Coding Plan、Token Plan 或標準 API 金鑰',
+  'Could not complete authorization. Please try signing in again.':
+    '無法完成授權，請重新登入。',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    '無法讀取或儲存 Qwen 憑證，請檢查本機檔案權限和磁碟空間。',
+  'Could not refresh your Qwen session. Please try again.':
+    '無法更新 Qwen 登入憑證，請重試。',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    '無法清除本機 Qwen 憑證，請檢查檔案權限。',
+  'Could not request an authorization link. Please try signing in again.':
+    '無法申請授權連結，請重新登入。',
+  'Disconnect this device from your Qwen account':
+    '中斷此裝置與你的 Qwen 帳號的連線',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    '按 Enter 選取，↑↓ 切換 · Esc 關閉',
+  "If the browser didn't open, visit:": '如果瀏覽器未開啟，請前往：',
+  'Loading models from provider…': '正在從服務供應商載入模型…',
+  'Model: {{model}}': '模型：{{model}}',
+  'Open plans again': '重新開啟方案頁面',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    '正在瀏覽器中開啟 chat.qwen.ai… 請登入以連接 Qwen Code。',
+  'Opens the Qwen Code plans page in your browser':
+    '在瀏覽器中開啟 Qwen Code 方案頁面',
+  'Qwen Account with Subscription': '使用 Qwen 訂閱帳號',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Plus 和 Pro 包含 Qwen Code',
+  'Qwen Subscription': 'Qwen 訂閱',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} 已啟用 · 用量包含在你的方案中',
+  'Recommended models · provider list unavailable, showing built-ins':
+    '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
+  'Sign out': '登出',
+  'Signed in as {{email}}': '已登入 {{email}}',
+  'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
+  'The network request failed or timed out.': '網路請求失敗或逾時。',
+  'The service returned an invalid response.': '服務回傳的資料格式無效。',
+  'Too many requests. Please try again later.': '請求過多，請稍後重試。',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    '在 chat.qwen.ai 訂閱 Plus／Pro 方案以使用 Qwen Code + Agent',
+  'Use Alibaba ModelStudio instead': '改用 Alibaba ModelStudio',
+  'Waiting for sign-in…': '正在等待登入…',
+  'Waiting for your subscription to become active…': '正在等待你的訂閱生效…',
+  'You are signed out locally, but the remote session could not be revoked.':
+    '本機已登出，但未能撤銷遠端工作階段。',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    '你目前登入的 {{plan}} 帳號未包含 Qwen Code。請在瀏覽器中選擇 Plus 或 Pro；訂閱後此終端機將自動繼續。',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    '你的 Qwen 登入已過期，請執行 /auth 重新登入。',
+  'c to copy link · Esc to cancel': '按 c 複製連結 · Esc 取消',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    '模型：{{model}} · 執行 /usage 查看方案用量',
+  'Type your request, or /usage': '輸入你的請求，或 /usage',
+  'Try:': '試試：',
+  'Open Qwen subscription plans': '開啟 Qwen 訂閱方案頁',
+  'Could not open your browser. Visit {{url}}':
+    '無法開啟瀏覽器，請造訪 {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen 訂閱方案：{{url}}',
 };

@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readCachedSubscriptionModels } from '../qwen/subscription-models.js';
+
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
@@ -12,6 +14,10 @@ import {
   resolveProviderProtocol,
 } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
+import {
+  QWEN_SUBSCRIPTION_BASE_URL,
+  QWEN_SUBSCRIPTION_MODEL,
+} from '../qwen/oauth-config.js';
 import type {
   ModelConfig,
   ModelProvidersConfig,
@@ -1084,3 +1090,79 @@ describe('providerProtocol mapping (custom provider ids)', () => {
     expect(models[0].label).toBe('From A');
   });
 });
+
+describe('Qwen Subscription model registry', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each(['false', ''])('hides the fixed model when DEV=%s', (dev) => {
+    vi.stubEnv('DEV', false);
+    process.env['DEV'] = dev;
+    const registry = new ModelRegistry({
+      'qwen-subscription': [{ id: QWEN_SUBSCRIPTION_MODEL }],
+    });
+    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
+      [],
+    );
+  });
+
+  it('loads cached development models without assumed gateway capabilities', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    vi.mocked(readCachedSubscriptionModels).mockReturnValueOnce([
+      'qwen3.8-max',
+      'future-model',
+    ]);
+    const registry = new ModelRegistry();
+    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual([
+      expect.objectContaining({
+        id: QWEN_SUBSCRIPTION_MODEL,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        modalities: {},
+        capabilities: {},
+      }),
+      expect.objectContaining({ id: 'future-model' }),
+    ]);
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION)?.id,
+    ).toBe(QWEN_SUBSCRIPTION_MODEL);
+  });
+
+  it('ignores direct and aliased configured overrides, including after a reload', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    const malicious = {
+      id: QWEN_SUBSCRIPTION_MODEL,
+      baseUrl: 'https://other.example/v1',
+      envKey: 'OTHER_KEY',
+    };
+    const registry = new ModelRegistry(
+      {
+        'qwen-subscription': [malicious],
+        alias: [malicious, { id: 'unsupported-model' }],
+      },
+      { alias: 'qwen-subscription' },
+    );
+    registry.reloadModels({ 'qwen-subscription': [malicious] });
+    expect(
+      registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+    ).toHaveLength(1);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL),
+    ).toMatchObject({
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      generationConfig: { modalities: {} },
+    });
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL)
+        ?.envKey,
+    ).toBeUndefined();
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'unsupported-model'),
+    ).toBeUndefined();
+  });
+});
+
+vi.mock('../qwen/subscription-models.js', async (original) => ({
+  ...(await original<typeof import('../qwen/subscription-models.js')>()),
+  readCachedSubscriptionModels: vi.fn(() => ['qwen3.8-max']),
+}));
