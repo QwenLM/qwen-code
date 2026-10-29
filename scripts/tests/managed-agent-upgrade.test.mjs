@@ -7,8 +7,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { statSync, writeFileSync, writeSync } from 'node:fs';
-import {
+import { existsSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import fsPromises, {
   chmod,
   cp,
   lstat,
@@ -24,6 +24,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -524,6 +525,7 @@ async function rig(t, overrides = {}) {
     if (verb === 'stop') {
       unit.ActiveState =
         host.stopFails && name === SERVER ? 'failed' : 'inactive';
+      unit.SubState = unit.ActiveState === 'failed' ? 'failed' : 'dead';
       if (host.stopFails && name === SERVER) {
         Object.assign(unit, { Result: 'exit-code', ExecMainStatus: '143' });
       }
@@ -534,8 +536,12 @@ async function rig(t, overrides = {}) {
       if (!host.workersIgnoreTerm) {
         unit.procs = [];
       }
-    } else if (verb === 'start') {
-      unit.ActiveState = 'active';
+    } else if (verb === 'start' || verb === 'restart') {
+      Object.assign(unit, {
+        ActiveState: 'active',
+        SubState: 'running',
+        NRestarts: '0',
+      });
       unit.ActiveEnterTimestampMonotonic = String(1000 + host.clock);
       unit.procs = ['30'];
     }
@@ -543,6 +549,7 @@ async function rig(t, overrides = {}) {
   };
   const system = {
     uid: () => 0,
+    euid: () => host.euid ?? process.geteuid(),
     distribution,
     cgroupRoot: cgroups,
     readCgroup: async (file) => {
@@ -611,7 +618,9 @@ async function rig(t, overrides = {}) {
         }
         host.dumpCredentialsFile = args[0].split('=')[1];
         host.dumpCredentials = readFileSyncText(host.dumpCredentialsFile);
+        host.dumpEnvironment = options.env;
         writeSync(options.stdio[1], '-- dump\n');
+        host.onDump?.();
         return host.mysqldumpStatus === 0
           ? { status: 0, stdout: '', stderr: '' }
           : { status: host.mysqldumpStatus, stdout: '', stderr: 'denied' };
@@ -635,6 +644,7 @@ async function rig(t, overrides = {}) {
         }
         const service = { args, environment, files };
         host.services.push(service);
+        host.onService?.(service);
         if (!args.includes(RESOLVER)) {
           return { status: host.preflightStatus };
         }
@@ -670,6 +680,13 @@ async function rig(t, overrides = {}) {
     },
     out: (line) => host.output.push(line),
     err: (line) => host.output.push(line),
+    // The handler the real system runs on SIGINT, SIGTERM or SIGHUP.
+    onSignal: (cleanup) => {
+      host.signal = cleanup;
+      return () => {
+        host.signal = undefined;
+      };
+    },
   };
   host.system = system;
   host.upgrade = async (...argv) => {
@@ -692,6 +709,13 @@ async function rig(t, overrides = {}) {
     await writeCgroups();
   };
   return host;
+}
+
+function readdirSyncSorted(directory) {
+  return spawnSync('ls', ['-A', directory], { encoding: 'utf8' })
+    .stdout.split('\n')
+    .filter(Boolean)
+    .sort();
 }
 
 function readFileSyncText(file) {
@@ -1124,7 +1148,13 @@ test('backup records the database, Runtime state and configuration', async (t) =
   const dump = host.calls.find(
     ([command, first]) => command === 'mysqldump' && first !== '--version',
   );
-  assert.ok(dump[1].startsWith('--defaults-extra-file='));
+  // Only the option file it wrote: root's ~/.my.cnf would come after it.
+  assert.ok(dump[1].startsWith('--defaults-file='));
+  assert.equal(
+    path.dirname(host.dumpEnvironment.MYSQL_TEST_LOGIN_FILE),
+    path.dirname(host.dumpCredentialsFile),
+  );
+  assert.equal(host.dumpEnvironment.PATH, process.env.PATH);
   assert.deepEqual(dump.slice(-2), ['--databases', 'qwen_managed_agent']);
   assert.ok(dump.includes('--set-gtid-purged=OFF'));
   const record = JSON.parse(
@@ -1202,6 +1232,156 @@ test('backup records the database, Runtime state and configuration', async (t) =
   assert.match(host.output.join('\n'), /is not empty/);
 });
 
+test('a signal during backup removes what a failure would', async (t) => {
+  const host = await rig(t);
+  await host.stop();
+  const backup = (to) =>
+    host.upgrade(
+      'backup',
+      '--to',
+      to,
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+    );
+  for (const made of [false, true]) {
+    const to = path.join(host.root, made ? 'made' : 'fresh');
+    if (made) {
+      await mkdir(to);
+    }
+    let seen;
+    // What the real handler does before the process exits as the signal
+    // would have, skipping every finally block.
+    host.onDump = () => {
+      host.signal('SIGTERM');
+      seen = {
+        credentials: existsSync(path.dirname(host.dumpCredentialsFile)),
+        to: existsSync(to) && readdirSyncSorted(to),
+      };
+      host.mysqldumpStatus = 1;
+    };
+    t.after(() => {
+      host.onDump = undefined;
+      host.mysqldumpStatus = 0;
+    });
+    assert.equal(await backup(to), 1);
+    assert.ok(host.output.includes('backup stopped by SIGTERM'));
+    assert.deepEqual(seen, {
+      credentials: false,
+      // A directory the backup made goes; one it was given stays, empty.
+      to: made ? [] : false,
+    });
+    assert.equal(host.signal, undefined);
+    host.onDump = undefined;
+    host.mysqldumpStatus = 0;
+  }
+});
+
+test('a signal removes the scratch files and the partial copy', async (t) => {
+  const { host, target } = await backedUp(t);
+  // The environment files a resolver run reads, Environment= secrets among them.
+  // Checked before the throw, since the real process exits without running
+  // the finally blocks that would remove it too.
+  let scratch;
+  let left;
+  host.onService = (service) => {
+    scratch = path.dirname(service.files[0].file);
+    host.onService = undefined;
+    host.signal('SIGINT');
+    left = existsSync(scratch);
+    throw new Error('the process has exited');
+  };
+  await assert.rejects(host.check(), { message: 'the process has exited' });
+  assert.ok(host.output.includes('check stopped by SIGINT'));
+  assert.equal(left, false, scratch);
+
+  // A copy of the release that a signal ends halfway.
+  const { cp: original } = fsPromises;
+  t.after(() => {
+    fsPromises.cp = original;
+    syncBuiltinESMExports();
+  });
+  let partial;
+  let copied;
+  fsPromises.cp = async (from, to, options) => {
+    await original(from, to, options);
+    partial = to;
+    host.signal('SIGTERM');
+    copied = existsSync(partial);
+    throw new Error('the process has exited');
+  };
+  syncBuiltinESMExports();
+  await assert.rejects(host.upgrade('install', '--backup', target), {
+    message: 'the process has exited',
+  });
+  assert.ok(host.output.includes('install stopped by SIGTERM'));
+  assert.match(path.basename(partial), /^\.0\.2\.0\.partial-[0-9a-f]{8}$/);
+  assert.equal(copied, false);
+});
+
+test('backup refuses a directory another account owns', async (t) => {
+  const host = await rig(t);
+  await host.stop();
+  const to = path.join(host.root, 'shared');
+  await mkdir(to);
+  const backup = () =>
+    host.upgrade(
+      'backup',
+      '--to',
+      to,
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+    );
+  const owner = (await stat(to)).uid;
+  host.euid = owner + 1;
+  assert.equal(await backup(), 1);
+  assert.equal(
+    host.output.at(-1),
+    `backup refused: ${to} belongs to uid ${owner}, not to this account; choose a new directory.`,
+  );
+  assert.deepEqual(await readdir(to), []);
+  host.euid = undefined;
+  assert.equal(await backup(), 0);
+});
+
+test('backup archives what a linked configuration file names', async (t) => {
+  const host = await rig(t);
+  await host.stop();
+  const env = path.join(host.root, 'etc/server.env');
+  const secrets = path.join(host.root, 'secrets');
+  await mkdir(secrets);
+  await rename(env, path.join(secrets, 'server.env'));
+  await symlink(path.join(secrets, 'server.env'), env);
+  const to = path.join(host.root, 'backup');
+  assert.equal(
+    await host.upgrade(
+      'backup',
+      '--to',
+      to,
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+    ),
+    0,
+  );
+  const listed = spawnSync(
+    'tar',
+    ['-tvf', path.join(to, 'configuration.tar')],
+    {
+      encoding: 'utf8',
+    },
+  ).stdout;
+  const named = (file) =>
+    listed
+      .split('\n')
+      .find(
+        (line) =>
+          line.endsWith(` ${file.slice(1)}`) ||
+          line.includes(` ${file.slice(1)} -> `),
+      );
+  assert.match(named(env), /^l/);
+  const real = path.join(await realpath(secrets), 'server.env');
+  assert.match(named(real), /^-/);
+});
+
 test('backup leaves no partial backup when the dump fails', async (t) => {
   const host = await rig(t);
   await host.stop();
@@ -1252,6 +1432,16 @@ async function backedUp(t, overrides) {
 
 test('install switches the distribution link and keeps the old release', async (t) => {
   const { host, target } = await backedUp(t);
+  // A directory only root reads, and a file no release lists, such as one an
+  // operator put there, which keeps its mode.
+  await chmod(path.join(host.distribution, 'lib'), 0o700);
+  await chmod(
+    path.join(host.distribution, 'bin/qwen-managed-agent-server'),
+    0o700,
+  );
+  await writeFile(path.join(host.distribution, 'config/extra.yml'), 'k: v\n', {
+    mode: 0o600,
+  });
   assert.equal(await host.upgrade('install'), 1);
   assert.match(host.output.join('\n'), /install needs --backup/);
   // A backup of another installed release.
@@ -1281,6 +1471,24 @@ test('install switches the distribution link and keeps the old release', async (
   assert.equal(await readFile(copied, 'utf8'), 'key: x\n');
   assert.equal((await stat(copied)).mode & 0o777, 0o600);
   assert.deepEqual((await readdir(releases)).sort(), ['0.1.0', '0.2.0']);
+  // The service account reads the copy of what root extracted 0600.
+  assert.equal(
+    (await stat(path.join(releases, '0.2.0/lib/server.jar'))).mode & 0o777,
+    0o644,
+  );
+  assert.equal(
+    (await stat(path.join(releases, '0.2.0/lib'))).mode & 0o777,
+    0o755,
+  );
+  assert.equal(
+    (await stat(path.join(releases, '0.2.0/bin/qwen-managed-agent-server')))
+      .mode & 0o777,
+    0o755,
+  );
+  assert.equal(
+    (await stat(path.join(releases, '0.2.0/config/extra.yml'))).mode & 0o777,
+    0o600,
+  );
 
   // A second run, as after an interrupted session, finds the release
   // installed and points at start, not at another backup.
@@ -1289,6 +1497,23 @@ test('install switches the distribution link and keeps the old release', async (
     host.output.at(-1),
     `install refused: 0.2.0 is already installed at ${host.current}; run start or verify for this release.`,
   );
+  // Nor would a backup now be of the release to roll back to.
+  const late = path.join(host.root, 'late');
+  assert.equal(
+    await host.upgrade(
+      'backup',
+      '--to',
+      late,
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+    ),
+    1,
+  );
+  assert.equal(
+    host.output.at(-1),
+    `backup refused: 0.2.0 is already installed at ${host.current}; roll back with the backup install was given.`,
+  );
+  await assert.rejects(stat(late), { code: 'ENOENT' });
 });
 
 test('install refuses a backup the control plane has run past', async (t) => {
@@ -1442,8 +1667,24 @@ test('start runs the preflight between the Harness and the control plane', async
 
   host.preflightStatus = 0;
   host.responses['GET /actuator/health'] = { status: 'UP' };
+  host.calls = [];
   assert.equal(await host.upgrade('start'), 0);
   assert.equal(host.units[SERVER].ActiveState, 'active');
+  // The Harness the failed preflight left running reads what was fixed.
+  assert.deepEqual(
+    host.calls.filter(
+      ([command, verb]) => command === 'systemctl' && verb !== 'show',
+    ),
+    [
+      ['systemctl', 'restart', HARNESS],
+      ['systemctl', 'start', SERVER],
+    ],
+  );
+  assert.ok(
+    host.output.includes(
+      `Restarting ${HARNESS}, which an earlier start left running`,
+    ),
+  );
   assert.ok(
     host.requests.some(
       ({ url }) => url === 'http://127.0.0.1:18080/actuator/health',
@@ -1491,8 +1732,35 @@ test('start gives up when the control plane never reports UP', async (t) => {
   assert.equal(await host.upgrade('start', '--timeout', '5'), 1);
   assert.match(
     host.output.join('\n'),
-    /qwen-managed-agent-server failed before it reported UP at .*; see journalctl -u qwen-managed-agent-server, then run start again/,
+    /qwen-managed-agent-server exited before it reported UP at .*, and is stopped now; see journalctl -u qwen-managed-agent-server, then run start again/,
   );
+
+  // The shipped units restart a server that exits, so it never shows as
+  // failed: waiting to run again, or already run again.
+  for (const exited of [
+    { ActiveState: 'activating', SubState: 'auto-restart' },
+    { ActiveState: 'active', SubState: 'running', NRestarts: '1' },
+  ]) {
+    host.responses['GET /actuator/health'] = () => {
+      Object.assign(host.units[SERVER], exited);
+      return { status: 'DOWN' };
+    };
+    const before = host.clock;
+    host.calls = [];
+    assert.equal(await host.upgrade('start', '--timeout', '300'), 1);
+    assert.match(
+      host.output.at(-1),
+      /exited before it reported UP at .*, and is stopped now/,
+    );
+    assert.ok(host.clock - before < 60, `${host.clock - before}s`);
+    assert.ok(
+      host.calls.some(
+        ([command, verb, unit]) =>
+          command === 'systemctl' && verb === 'stop' && unit === SERVER,
+      ),
+    );
+    assert.equal(host.units[SERVER].ActiveState, 'inactive');
+  }
 });
 
 test('a health probe that never answers ends at the timeout', async (t) => {
@@ -1582,6 +1850,12 @@ test('verify leaves signed APIs to the ingress', async (t) => {
     /^SKIP the API takes signed requests only/,
   );
   assert.ok(!host.requests.some(({ url }) => url.includes('/v1/')));
+  // --turn says it ran no Turn, rather than leaving the row out.
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 0);
+  assert.equal(
+    rowsOf(host.output).turn,
+    'SKIP no Turn without the Session read above',
+  );
 });
 
 test('check reads the options the later phases are given', async (t) => {
@@ -1987,6 +2261,93 @@ test('install refuses a copy that does not match SHA256SUMS', async (t) => {
   assert.ok((await lstat(host.current)).isDirectory());
 });
 
+test('install removes what an interrupted install left', async (t) => {
+  const { host, target } = await backedUp(t);
+  const releases = `${host.current}-releases`;
+  const release = path.join(releases, '0.2.0');
+  // Copies killed halfway, of this release and of another.
+  await mkdir(path.join(releases, '.0.2.0.partial-0000abcd/lib'), {
+    recursive: true,
+  });
+  await mkdir(path.join(releases, '.0.1.9.partial-1111abcd'));
+  // A link made before anything moved, beside an operator's file named alike.
+  await symlink(release, `${host.current}.upgrade-2222abcd`);
+  await writeFile(`${host.current}.upgrade-notes`, 'mine\n');
+  // The release, with a configuration file killed before its rename.
+  await cp(host.distribution, release, { recursive: true });
+  await writeFile(
+    path.join(release, 'config/application.yml.tmp-3333abcd'),
+    'key: x\n',
+  );
+  const left = [
+    path.join(releases, '.0.1.9.partial-1111abcd'),
+    path.join(releases, '.0.2.0.partial-0000abcd'),
+    `${host.current}.upgrade-2222abcd`,
+    path.join(release, 'config/application.yml.tmp-3333abcd'),
+  ];
+  assert.equal(await host.check(), 0);
+  assert.ok(
+    rowsOf(host.output).layout.endsWith(
+      `, after removing what an interrupted install left: ${left.join(', ')}`,
+    ),
+    rowsOf(host.output).layout,
+  );
+
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  for (const each of left) {
+    assert.ok(
+      host.output.includes(
+        `Removed ${each}, which an interrupted install left`,
+      ),
+      each,
+    );
+    await assert.rejects(lstat(each), { code: 'ENOENT' });
+  }
+  // The link went, not the release it named; the operator's file stays.
+  assert.equal(await readlink(host.current), release);
+  assert.equal(
+    await readFile(`${host.current}.upgrade-notes`, 'utf8'),
+    'mine\n',
+  );
+  assert.deepEqual((await readdir(path.join(release, 'config'))).sort(), [
+    'application.example.yml',
+    'application.yml',
+  ]);
+});
+
+test('install keeps the link when it can neither switch nor undo', async (t) => {
+  const { host, target } = await backedUp(t);
+  const { rename: original } = fsPromises;
+  t.after(() => {
+    fsPromises.rename = original;
+    syncBuiltinESMExports();
+  });
+  // Moving the directory away works; nothing then renames onto its path.
+  fsPromises.rename = async (from, to) => {
+    if (to === host.current) {
+      throw Object.assign(new Error('EIO: injected'), { code: 'EIO' });
+    }
+    return original(from, to);
+  };
+  syncBuiltinESMExports();
+  assert.equal(await host.upgrade('install', '--backup', target), 1);
+  const [, link] = /mv -T (\S+) /.exec(host.output.at(-1));
+  assert.match(
+    host.output.at(-1),
+    /^install refused: \S+\.upgrade-[0-9a-f]{8} did not replace \S+ \(EIO: injected\), and \S+\/0\.1\.0 did not move back \(EIO: injected\); finish the install with mv -T \S+ \S+, or undo it with mv -T \S+ \S+\.$/,
+  );
+  assert.equal(await readlink(link), `${host.current}-releases/0.2.0`);
+  fsPromises.rename = original;
+  syncBuiltinESMExports();
+
+  // check finds the link the install left and says the same.
+  assert.equal(await host.check(), 1);
+  assert.equal(
+    rowsOf(host.output).deployment,
+    `FAIL ${host.current} is missing and ${link} is left from an interrupted install`,
+  );
+});
+
 test('--runtime-state none backs up a deployment that keeps no state', async (t) => {
   // The jar cannot resolve the configuration, and the operator knows better.
   const host = await rig(t, { state: null });
@@ -2117,6 +2478,23 @@ test('stop says why the control plane shows as failed', async (t) => {
   assert.equal(
     other.output.at(-1),
     `${SERVER} shows as failed (exit-code, status 1); see journalctl -u ${SERVER}. start runs it again.`,
+  );
+  // A stop that ended an ExecStartPost= command fails with the signal even
+  // when the JVM exited 143, as measured on systemd 257.
+  const post = await rig(t);
+  post.stopFails = true;
+  const stopPost = post.system.run;
+  post.system.run = (command, args, options) => {
+    const result = stopPost(command, args, options);
+    if (command === 'systemctl' && args[0] === 'stop') {
+      post.units[SERVER].Result = 'signal';
+    }
+    return result;
+  };
+  assert.equal(await post.upgrade('stop'), 0);
+  assert.equal(
+    post.output.at(-1),
+    `${SERVER} shows as failed (signal, status 143); see journalctl -u ${SERVER}. start runs it again.`,
   );
 });
 

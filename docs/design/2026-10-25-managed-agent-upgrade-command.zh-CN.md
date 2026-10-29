@@ -51,24 +51,25 @@
     3. 停止 Harness。
     4. 控制面显示为 `failed` 时说明原因：在 `SuccessExitStatus=143` 之前安装的 unit 每次停止后都会这样。
 - **`backup`**
-  - 前置条件：两个 unit 都已停止，服务端 cgroup 为空；`backup-tools` 和 `runtime-state` 两行没有 FAIL。
+  - 前置条件：两个 unit 都已停止，服务端 cgroup 为空；新版本尚未安装；`backup-tools` 和 `runtime-state` 两行没有 FAIL；`--to` 是新目录，或是属于 root 的空目录。
   - 执行：
-    - 用 `mysqldump` 写出 `database.sql`，凭据放在备份目录之外某个临时目录里的选项文件中传入；
-    - 写出 `runtime-state.tar`、包含版本目录之外配置的 `configuration.tar`，以及按版本目录内路径记录其中配置的 `release-config.tar`；
+    - 用 `mysqldump` 写出 `database.sql`，凭据放在备份目录之外某个临时目录里的选项文件中传入。`--defaults-file` 让它成为唯一的选项文件，之后读取的选项文件（如 `~/.my.cnf`）无法替换凭据；
+    - 写出 `runtime-state.tar`、包含版本目录之外配置的 `configuration.tar`，以及按版本目录内路径记录其中配置的 `release-config.tar`。链接形式的配置文件连同它指向的文件一起归档；
     - 最后写入 `backup.json`，记录前面这些文件；
-    - 任一步失败时删除已写出的内容。
+    - 任一步失败或被信号中止时删除已写出的内容。
 - **`install`**
   - 前置条件：两个 unit 都已停止；备份仍与当前部署相符；`check` 没有 FAIL。
   - 执行：
-    1. 把新版本复制到 `<分发路径>-releases/<version>` 并校验副本，任一步失败时删除副本。该位置已有目录时，只有其 `SHA256SUMS` 与新分发产物相同、且文件与之相符时才会使用。
-    2. 复制已安装版本 `config/` 中的运维文件。
-    3. 用一次 `rename` 替换分发链接。第一次运行改为把已安装的目录移入版本目录，再在原位置放一个链接；第二次 `rename` 失败时把目录移回原处。
+    1. 删除之前被杀掉的 install 留下的内容：部分副本、分发路径旁的 `.upgrade-` 链接，以及将要使用的版本目录中的 `.tmp-` 运维文件。`check` 在 `layout` 行列出它们。
+    2. 把新版本复制到 `<分发路径>-releases/<version>`，校验副本，并把 `SHA256SUMS` 列出的文件设为所有账号可读；任一步失败时删除副本。该位置已有目录时，只有其 `SHA256SUMS` 与新分发产物相同、且文件与之相符时才会使用。
+    3. 复制已安装版本 `config/` 中的运维文件。
+    4. 用一次 `rename` 替换分发链接。第一次运行改为把已安装的目录移入版本目录，再在原位置放一个链接；第二次 `rename` 失败时把目录移回原处。移回也失败时保留链接，并给出两条 `mv -T` 命令。
 - **`start`**
   - 前置条件：新版本已安装；服务端 unit 已停止；Broker 配置已修改。
   - 执行：
-    1. 启动 Harness 并等待其端口就绪。
+    1. 启动 Harness（之前某次 `start` 留下正在运行的 Harness 时改为重启），并等待其端口就绪。
     2. 通过 `systemd-run`，按 unit 的用户、工作目录和环境运行已安装版本的 `--check`。unit 的 `Environment=` 赋值写进一个 `0600` 的环境文件传入，而不是放在 `systemd-run` 的命令行上，因为每个本地用户都能读到命令行。
-    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 失败时报告为失败；到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
+    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 退出时会被停止并报告：显示 `failed`、处于 `auto-restart` 等待，或 `NRestarts` 不为零，都算退出，因为分发的 unit 使用 `Restart=on-failure`，进程退出后 systemd 会重新运行它，而不是让它停在失败状态。到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
 - **`verify`**
   - 前置条件：两个 unit 都在运行。
   - 执行：
@@ -76,10 +77,10 @@
     - 读取 actuator，只探测一次，这次探测可以用满 `--timeout`；
     - 指定 `--tenant` 时，在 `--turn` 创建 Session 之前读取最近的 Session 及其 Item，指定 `--actor` 时通过服务端的可信 actor 请求头以该 actor 的身份读取；
     - 指定 `--turn` 时，在新 Session 中运行一个 Turn，这会调用模型；轮询遇到 `5xx` 应答或连接中断时会继续；
-    - 服务端解析出的配置为签名认证时，跳过两项 API 读取。
+    - 服务端解析出的配置为签名认证时，跳过两项 API 读取；指定了 `--turn` 时，用一行 `turn` 说明这一点。
     - 任何请求都不会超过 `--timeout`。
 
-各阶段不保存状态文件，而是每次重新读取 unit、文件和链接，因此因崩溃中断的阶段可以直接重新运行。再次运行 `stop` 不会重复已经完成的操作；`install` 会复用同一构建的副本。rename 完成、版本已经安装之后再次运行 `install`，它会在读取备份之前说明已经安装并指明下一步是 `start`：此时再做的备份会把新版本记录为要退回的版本。重新运行无法弥补的只有一个窗口：第一次 install 的两次 rename 之间发生崩溃。此时分发路径缺失，新链接以 `<分发路径>.upgrade-<后缀>` 留在旁边；每个阶段都会报告这一状态，并给出完成安装所需的 `mv -T` 命令。
+各阶段不保存状态文件，而是每次重新读取 unit、文件和链接，因此因崩溃中断的阶段可以直接重新运行。`SIGINT`、`SIGTERM` 和 `SIGHUP` 会删除阶段失败时本会删除的临时文件、部分备份或副本；否则 Node 收到这些信号会直接退出，不执行 `finally` 块。再次运行 `stop` 不会重复已经完成的操作；`install` 会复用同一构建的副本。rename 完成、版本已经安装之后再次运行 `install`，它会在读取备份之前说明已经安装并指明下一步是 `start`：此时再做的备份会把新版本记录为要退回的版本。重新运行无法弥补的只有一个窗口：第一次 install 的两次 rename 之间发生崩溃。此时分发路径缺失，新链接以 `<分发路径>.upgrade-<后缀>` 留在旁边；每个阶段都会报告这一状态，并给出完成安装所需的 `mv -T` 命令。
 
 ### check 的各行
 
@@ -154,7 +155,7 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
   - check 的每一行；
   - 每个阶段的拒绝条件与执行步骤。
 - **环境文件。** 通过 systemd 257 的 `systemd-run` 读回 1579 个随机文件，与命令的读取结果没有任何差异。
-- **变异测试。** 脚本中的判断 87 个变异，预检改动 5 个变异，`ResolvedConfiguration` 及其读取的认证模式 8 个变异。
+- **变异测试。** 脚本中的判断 87 个变异，预检改动 5 个变异，`ResolvedConfiguration` 及其读取的认证模式 8 个变异；后续改动又为自身增加了 33 个。
 - **预检单元测试：**
   - Flyway 顺序；
   - 校验钩子；
@@ -173,6 +174,10 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
     - `verify` 期间用 `ps` 采样，确认 `Environment=` 不出现在 `systemd-run` 的命令行上；
     - unit 停止后显示为 `failed` 时 `stop` 打印的说明，以及第二次 `install`。
   - **基线被原地重写：** `check` 报 FAIL，`stop` 拒绝执行。
+  - **首次 install 中断：** 从复制到最后一次 `rename`，在十个文件系统步骤处分别 `SIGKILL`。之后再运行 `install`（`check` 给出 `mv -T` 时先执行它），留下的目录布局都与未中断的安装相同，控制面随后能启动并通过 `verify`。
+  - **信号：** 导出期间向命令发送 `SIGTERM`、向其进程组发送 `SIGINT`，以及复制期间发送 `SIGTERM`，都不会留下选项文件、备份目录或部分副本。
+  - **选项文件：** root 的 `~/.my.cnf` 指定另一个账号时，`--defaults-extra-file` 会以该账号连接并被拒绝；`--defaults-file` 以服务账号连接。
+  - **启动后被杀掉的控制面：** 之前的模块会等满 `--timeout`，在 systemd 反复重启 unit 期间报告启动较慢；本模块在几秒内停止它。下一次 `start` 会重启前一次留下的 Harness。
   - **同一主机状态下的预检 A/B：**
     - 本改动之前的版本放过服务端会拒绝的数据库；
     - 本版本让该数据库报 FAIL。

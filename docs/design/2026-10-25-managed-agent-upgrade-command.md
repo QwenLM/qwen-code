@@ -51,24 +51,25 @@ Three other problems show up only on a real host:
     3. Stops the Harness.
     4. Says why the control plane shows as `failed` when it does, as a unit installed before `SuccessExitStatus=143` does after every stop.
 - **`backup`**
-  - Requires: both units stopped and the server cgroup empty; the `backup-tools` and `runtime-state` rows have no FAIL.
+  - Requires: both units stopped and the server cgroup empty; the new release not yet installed; the `backup-tools` and `runtime-state` rows have no FAIL; `--to` new, or empty and root's own.
   - Does:
-    - writes `database.sql` from `mysqldump`, with the credentials in an option file in a temporary directory outside the backup;
-    - writes `runtime-state.tar`, `configuration.tar` of the configuration outside the release, and `release-config.tar` of the configuration in the release by its path there;
+    - writes `database.sql` from `mysqldump`, with the credentials in an option file in a temporary directory outside the backup. `--defaults-file` makes it the only option file, so a later one such as `~/.my.cnf` cannot replace them;
+    - writes `runtime-state.tar`, `configuration.tar` of the configuration outside the release, and `release-config.tar` of the configuration in the release by its path there. A configuration file that is a link goes in with the file it names;
     - writes `backup.json` last, recording the other files;
-    - removes what it wrote when a step fails.
+    - removes what it wrote when a step fails or a signal ends it.
 - **`install`**
   - Requires: both units stopped; a backup that still describes the deployment; `check` has no FAIL.
   - Does:
-    1. Copies the release to `<distribution>-releases/<version>` and verifies the copy, removing it when either step fails. An existing directory there is used only when its `SHA256SUMS` is the new distribution's and its files match it.
-    2. Copies operator files from the installed `config/`.
-    3. Replaces the distribution link with one `rename`. The first run instead moves the installed directory into the releases directory and puts a link in its place, and moves the directory back when the second `rename` fails.
+    1. Removes what an install killed earlier left: partial copies, `.upgrade-` links beside the distribution path, and `.tmp-` operator files in the release it will use. `check` lists them in the `layout` row.
+    2. Copies the release to `<distribution>-releases/<version>`, verifies the copy and makes the files `SHA256SUMS` lists readable by every account, removing the copy when a step fails. An existing directory there is used only when its `SHA256SUMS` is the new distribution's and its files match it.
+    3. Copies operator files from the installed `config/`.
+    4. Replaces the distribution link with one `rename`. The first run instead moves the installed directory into the releases directory and puts a link in its place, and moves the directory back when the second `rename` fails. When that move back fails too, it keeps the link and names both `mv -T` commands.
 - **`start`**
   - Requires: the new release installed; the server unit stopped; the Broker settings edited.
   - Does:
-    1. Starts the Harness and waits for its port.
+    1. Starts the Harness, or restarts one an earlier `start` left running, and waits for its port.
     2. Runs the installed launcher's `--check` through `systemd-run`, with the unit's user, working directory and environment. The unit's `Environment=` assignments go in a `0600` environment file rather than on the `systemd-run` command line, which every local user can read.
-    3. Only when that passes, starts the control plane and waits for `/actuator/health` to report `UP`. One probe waits at most 5 seconds. A unit that fails is reported as failed; one still not healthy at `--timeout` keeps running, and the refusal names `verify` and `stop`.
+    3. Only when that passes, starts the control plane and waits for `/actuator/health` to report `UP`. One probe waits at most 5 seconds. A unit that exits is stopped and reported: one that shows `failed`, waits in `auto-restart`, or has a non-zero `NRestarts`, since the shipped units' `Restart=on-failure` restarts an exited process rather than leaving it failed. One still not healthy at `--timeout` keeps running, and the refusal names `verify` and `stop`.
 - **`verify`**
   - Requires: both units running.
   - Does:
@@ -76,10 +77,10 @@ Three other problems show up only on a real host:
     - reads the actuator, with one probe that may take all of `--timeout`;
     - with `--tenant`, reads the most recent Session and its Items, before `--turn` creates one, as the `--actor` it is given through the server's trusted actor header;
     - with `--turn`, runs one Turn in a new Session, which calls the model, polling past `5xx` answers and dropped connections;
-    - skips both API reads when the configuration the server resolves sets signed authentication.
+    - skips both API reads when the configuration the server resolves sets signed authentication, with a `turn` row that says so when `--turn` was given.
     - No request outlasts `--timeout`.
 
-The phases keep no state file. Each re-reads the units, files and links, so a phase interrupted by a crash is simply run again. Running `stop` again changes nothing it already did, and `install` reuses a copy of the same build. Once the rename has installed the release, `install` run again says so and names `start`, before it reads the backup: a new backup taken then would record the new release as the one to return to. The one window a re-run cannot close is a crash between the first install's two renames. The distribution path is then missing and the new link sits beside it as `<distribution>.upgrade-<suffix>`. Every phase reports that state and names the `mv -T` that finishes the install.
+The phases keep no state file. Each re-reads the units, files and links, so a phase interrupted by a crash is simply run again. `SIGINT`, `SIGTERM` and `SIGHUP` remove the temporary files and the partial backup or copy a phase would remove on failure, which Node otherwise skips by exiting without running `finally` blocks. Running `stop` again changes nothing it already did, and `install` reuses a copy of the same build. Once the rename has installed the release, `install` run again says so and names `start`, before it reads the backup: a new backup taken then would record the new release as the one to return to. The one window a re-run cannot close is a crash between the first install's two renames. The distribution path is then missing and the new link sits beside it as `<distribution>.upgrade-<suffix>`. Every phase reports that state and names the `mv -T` that finishes the install.
 
 ### Check rows
 
@@ -154,7 +155,7 @@ The control-plane unit adds `SuccessExitStatus=143`. `check` reports the changed
   - each check row;
   - every phase's refusals and its steps.
 - **Environment files.** 1579 random files read back through `systemd-run` on systemd 257, with no difference from the command's reader.
-- **Mutation testing.** 87 mutants of the script's decisions, 5 of the preflight changes and 8 of `ResolvedConfiguration` and the auth mode it reads.
+- **Mutation testing.** 87 mutants of the script's decisions, 5 of the preflight changes and 8 of `ResolvedConfiguration` and the auth mode it reads; the follow-up added 33 for its own changes.
 - **Preflight unit tests:**
   - Flyway ordering;
   - the validation hook;
@@ -173,6 +174,10 @@ The control-plane unit adds `SuccessExitStatus=143`. `check` reports the changed
     - `Environment=` kept off the `systemd-run` command line, sampled with `ps` during `verify`;
     - the notice `stop` prints for a unit that ends `failed`, and a second `install`.
   - **Baseline rewritten in place:** `check` fails and `stop` refuses.
+  - **Interrupted first install:** `SIGKILL` at each of ten filesystem steps, from the copy to the last `rename`. Each run of `install` that follows, after the `mv -T` that `check` names where it names one, leaves the layout of an install that was not interrupted, and the control plane then starts and passes `verify`.
+  - **Signals:** `SIGTERM` to the command and `SIGINT` to its process group during the dump, and `SIGTERM` during the copy, leave no option file, backup directory or partial copy.
+  - **Option files:** with root's `~/.my.cnf` naming another account, `--defaults-extra-file` connects as that account and is refused; `--defaults-file` connects as the service account.
+  - **A control plane killed after it starts:** the previous module waits the whole `--timeout` and reports a slow start while systemd restarts the unit; this one stops it within seconds. The next `start` restarts the Harness the first one left running.
   - **Preflight A/B on the same host state:**
     - the release before this change passes a database the server refuses;
     - this release fails it.

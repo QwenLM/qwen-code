@@ -14,7 +14,13 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { accessSync, constants, createReadStream, realpathSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  createReadStream,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import {
   access,
   chmod,
@@ -60,6 +66,8 @@ const DEFAULT_TIMEOUT_SECONDS = { stop: 60, start: 300, verify: 300 };
 const SHOW_PROPERTIES = [
   'LoadState',
   'ActiveState',
+  'SubState',
+  'NRestarts',
   'ExecStart',
   'EnvironmentFiles',
   'Environment',
@@ -492,6 +500,8 @@ export function serverBaseUrl(environment) {
 export function createSystem() {
   return {
     uid: () => process.getuid?.(),
+    // Who owns what this process creates.
+    euid: () => process.geteuid?.(),
     run: (command, args, options = {}) =>
       spawnSync(command, args, {
         encoding: 'utf8',
@@ -526,8 +536,34 @@ export function createSystem() {
     ),
     out: (line) => console.log(line),
     err: (line) => console.error(line),
+    // Runs `cleanup` on SIGHUP, SIGINT or SIGTERM and exits as the signal
+    // would have; returns what removes the handlers.
+    onSignal: (cleanup) => {
+      const handlers = Object.entries(SIGNALS).map(([name, number]) => {
+        const handler = () => {
+          cleanup(name);
+          process.exit(128 + number);
+        };
+        process.on(name, handler);
+        return [name, handler];
+      });
+      return () => {
+        for (const [name, handler] of handlers) {
+          process.off(name, handler);
+        }
+      };
+    },
   };
 }
+
+const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
+
+/**
+ * What a phase removes when it fails: credential files and what a backup or
+ * install has half written. Node ends on these signals without running
+ * finally blocks, so the signal handler removes them too.
+ */
+const removeOnSignal = new Set();
 
 function runChecked(system, command, args, options) {
   const result = system.run(command, args, options);
@@ -615,6 +651,36 @@ export async function verifyChecksums(root) {
   return { listed, failed };
 }
 
+/**
+ * Lets every account read the release's own files and enter its
+ * directories, whatever umask they were extracted with: the service account
+ * runs them, and they hold no secrets. Files SHA256SUMS does not list, such as
+ * an operator's, keep their modes.
+ */
+async function grantRead(root, files) {
+  const directories = new Set([root]);
+  for (const name of files) {
+    const file = path.join(root, name);
+    const stats = await lstat(file);
+    if (!stats.isFile()) {
+      continue;
+    }
+    const { mode } = stats;
+    await chmod(file, (mode & 0o7777) | (mode & 0o100 ? 0o555 : 0o444));
+    for (
+      let parent = path.dirname(file);
+      parent !== root;
+      parent = path.dirname(parent)
+    ) {
+      directories.add(parent);
+    }
+  }
+  for (const directory of directories) {
+    const { mode } = await stat(directory);
+    await chmod(directory, (mode & 0o7777) | 0o555);
+  }
+}
+
 // Mirrors the owner and mode, so a 0600 file stays the account's own.
 async function copyPreserving(source, destination) {
   const temporary = `${destination}.tmp-${randomBytes(4).toString('hex')}`;
@@ -645,6 +711,8 @@ async function showUnit(system, name) {
     name,
     loaded: first('LoadState') === 'loaded',
     activeState: first('ActiveState'),
+    subState: first('SubState'),
+    restarts: Number(first('NRestarts')) || 0,
     execStart: first('ExecStart'),
     execPath: execStartPath(first('ExecStart')),
     environmentFiles: (properties.get('EnvironmentFiles') ?? [])
@@ -750,6 +818,48 @@ async function interruptedInstall(current) {
   return links.length === 1
     ? path.join(path.dirname(current), links[0].name)
     : undefined;
+}
+
+// The names install gives a copy and a configuration file before the rename
+// that puts each in place.
+const PARTIAL_COPY = /^\..+\.partial-[0-9a-f]{8}$/;
+const PARTIAL_FILE = /\.tmp-[0-9a-f]{8}$/;
+
+/**
+ * What an install that was killed left behind once the distribution path
+ * exists again: partial copies, links it made, and half-copied operator
+ * files in the release it will use. A later install removes them; a stray
+ * link would otherwise hide the one a later interruption leaves.
+ */
+async function interruptedInstallLeftovers(deployment) {
+  const found = [];
+  const collect = async (directory, matches) => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (matches(entry)) {
+        found.push(path.join(directory, entry.name));
+      }
+    }
+  };
+  await collect(
+    deployment.releases,
+    (entry) => entry.isDirectory() && PARTIAL_COPY.test(entry.name),
+  );
+  const prefix = `${path.basename(deployment.current)}.upgrade-`;
+  await collect(
+    path.dirname(deployment.current),
+    (entry) => entry.isSymbolicLink() && entry.name.startsWith(prefix),
+  );
+  await collect(
+    path.join(deployment.releases, deployment.manifest.version, 'config'),
+    (entry) => entry.isFile() && PARTIAL_FILE.test(entry.name),
+  );
+  return found;
 }
 
 /** Everything a phase reads about the running deployment, read afresh. */
@@ -1364,12 +1474,16 @@ async function layoutRow(deployment) {
       'create it or pass --releases',
     );
   }
+  const plan = deployment.currentIsLink
+    ? `install adds ${target} and switches ${deployment.current} to it`
+    : `install moves ${deployment.current} to ${path.join(deployment.releases, deployment.installed.version)} and links it to ${target}`;
+  const leftovers = await interruptedInstallLeftovers(deployment);
   return row(
     'layout',
     'PASS',
-    deployment.currentIsLink
-      ? `install adds ${target} and switches ${deployment.current} to it`
-      : `install moves ${deployment.current} to ${path.join(deployment.releases, deployment.installed.version)} and links it to ${target}`,
+    leftovers.length > 0
+      ? `${plan}, after removing what an interrupted install left: ${leftovers.join(', ')}`
+      : plan,
   );
 }
 
@@ -1671,9 +1785,10 @@ async function phaseStop(system, deployment, options) {
   );
   if (stopped.activeState === 'failed') {
     // A JVM stopped by SIGTERM exits 143, which a unit installed before
-    // SuccessExitStatus=143 counts as a failure.
+    // SuccessExitStatus=143 counts as a failed exit code. A stop that ends
+    // a start command instead fails with the signal, whatever the status.
     system.out(
-      stopped.execMainStatus === '143'
+      stopped.result === 'exit-code' && stopped.execMainStatus === '143'
         ? `${server.name} shows as failed: its unit counts the exit status 143 of a stopped JVM as a failure. This release's unit template adds SuccessExitStatus=143; carry it over before start, then systemctl reset-failed ${server.name} clears the state.`
         : `${server.name} shows as failed (${stopped.result || 'no result'}, status ${stopped.execMainStatus || 'unknown'}); see journalctl -u ${server.name}. start runs it again.`,
     );
@@ -1691,6 +1806,7 @@ async function dumpDatabase(system, deployment, options, directory) {
   );
   const credentials = path.join(scratch, 'mysqldump.cnf');
   let handle;
+  removeOnSignal.add(scratch);
   try {
     await writeFile(
       credentials,
@@ -1713,8 +1829,10 @@ async function dumpDatabase(system, deployment, options, directory) {
       system,
       options.mysqldump,
       [
-        // mysqldump reads this option only in the first position.
-        `--defaults-extra-file=${credentials}`,
+        // mysqldump reads this option only in the first position. Only this
+        // file: one read after it, such as root's ~/.my.cnf, would otherwise
+        // replace the service's account, password or host.
+        `--defaults-file=${credentials}`,
         '--protocol=TCP',
         '--single-transaction',
         '--routines',
@@ -1729,11 +1847,19 @@ async function dumpDatabase(system, deployment, options, directory) {
         '--databases',
         database.database,
       ],
-      { stdio: ['ignore', handle.fd, 'pipe'] },
+      {
+        stdio: ['ignore', handle.fd, 'pipe'],
+        // MySQL reads ~/.mylogin.cnf even then, from this variable's path.
+        env: {
+          ...process.env,
+          MYSQL_TEST_LOGIN_FILE: path.join(scratch, 'no-login-path'),
+        },
+      },
     );
   } finally {
     await handle?.close();
     await rm(scratch, { recursive: true, force: true });
+    removeOnSignal.delete(scratch);
   }
   return 'database.sql';
 }
@@ -1773,6 +1899,13 @@ function releasePath(deployment, file) {
 
 async function phaseBackup(system, deployment, options) {
   refuseUnless(deployment);
+  // It would record this release as the one to roll back to, and the
+  // database as start may have migrated it.
+  if (deployment.installed?.version === deployment.manifest.version) {
+    throw new Refusal(
+      `${deployment.manifest.version} is already installed at ${deployment.current}; roll back with the backup install was given.`,
+    );
+  }
   await requireStopped(system, deployment, 'backup');
   if (!options.to) {
     throw new Refusal('backup needs --to <new empty directory>.');
@@ -1790,8 +1923,29 @@ async function phaseBackup(system, deployment, options) {
   if (!created && (await readdir(directory)).length > 0) {
     throw new Refusal(`${directory} is not empty; choose a new directory.`);
   }
+  // Its owner could read the archives while they are written and replace
+  // them before the rollback extracts them as root.
+  const owner = !created && (await stat(directory)).uid;
+  if (!created && owner !== system.euid()) {
+    throw new Refusal(
+      `${directory} belongs to uid ${owner}, not to this account; choose a new directory.`,
+    );
+  }
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
+  // What the catch below removes, should a signal end the backup instead.
+  const pending = created
+    ? [directory]
+    : [
+        'database.sql',
+        'runtime-state.tar',
+        'configuration.tar',
+        'release-config.tar',
+        BACKUP_FILE,
+      ].map((name) => path.join(directory, name));
+  for (const each of pending) {
+    removeOnSignal.add(each);
+  }
   const files = [];
   const previous = previousRelease(deployment);
   try {
@@ -1831,8 +1985,16 @@ async function phaseBackup(system, deployment, options) {
     const outside = [];
     const inside = [];
     for (const file of configuration) {
-      if (await exists(file)) {
-        const resolved = path.resolve(file);
+      if (!(await exists(file))) {
+        continue;
+      }
+      // tar stores a link as a link, so what it names goes in as well: the
+      // rollback then restores the content, not only the link.
+      const paths = [path.resolve(file)];
+      if ((await lstat(file)).isSymbolicLink()) {
+        paths.push(await realpath(file));
+      }
+      for (const resolved of paths) {
         const relative = releasePath(deployment, resolved);
         if (relative === undefined) {
           outside.push(resolved.slice(1));
@@ -1847,11 +2009,12 @@ async function phaseBackup(system, deployment, options) {
           other !== relative && relative.startsWith(`${other}${path.sep}`),
       );
     const release = [...new Set(inside)].filter((each) => !covered(each));
+    const absolute = [...new Set(outside)];
     system.out(
-      `Archiving ${outside.length + release.length} configuration path(s)`,
+      `Archiving ${absolute.length + release.length} configuration path(s)`,
     );
     for (const [name, root, members] of [
-      ['configuration.tar', '/', outside],
+      ['configuration.tar', '/', absolute],
       ['release-config.tar', deployment.currentTarget, release],
     ]) {
       if (members.length === 0) {
@@ -1913,6 +2076,10 @@ async function phaseBackup(system, deployment, options) {
       await rmdir(directory).catch(() => {});
     }
     throw error;
+  } finally {
+    for (const each of pending) {
+      removeOnSignal.delete(each);
+    }
   }
   system.out(`Backed up ${files.join(', ')} to ${directory}.`);
   if (stateRow.status !== 'PASS') {
@@ -2002,6 +2169,10 @@ async function phaseInstall(system, deployment, options) {
   }
   const { version } = deployment.manifest;
   const target = path.join(deployment.releases, version);
+  for (const leftover of await interruptedInstallLeftovers(deployment)) {
+    await rm(leftover, { recursive: true, force: true });
+    system.out(`Removed ${leftover}, which an interrupted install left`);
+  }
   await mkdir(deployment.releases, { recursive: true, mode: 0o755 });
 
   if (await exists(target)) {
@@ -2031,6 +2202,7 @@ async function phaseInstall(system, deployment, options) {
       `.${version}.partial-${randomBytes(4).toString('hex')}`,
     );
     system.out(`Copying ${deployment.distribution} to ${target}`);
+    removeOnSignal.add(partial);
     try {
       await cp(deployment.distribution, partial, {
         recursive: true,
@@ -2045,10 +2217,13 @@ async function phaseInstall(system, deployment, options) {
           `The copy at ${partial} does not match SHA256SUMS (${sums.failed.join(', ')}).`,
         );
       }
+      await grantRead(partial, sums.listed);
       await rename(partial, target);
     } catch (error) {
       await rm(partial, { recursive: true, force: true });
       throw error;
+    } finally {
+      removeOnSignal.delete(partial);
     }
   }
 
@@ -2080,6 +2255,7 @@ async function phaseInstall(system, deployment, options) {
   // A crash between them leaves the link behind, which inspect reports.
   const link = `${deployment.current}.upgrade-${randomBytes(4).toString('hex')}`;
   await symlink(target, link);
+  let stranded = false;
   try {
     if (!deployment.currentIsLink) {
       system.out(`Moving ${deployment.current} to ${previous}`);
@@ -2089,12 +2265,22 @@ async function phaseInstall(system, deployment, options) {
       await rename(link, deployment.current);
     } catch (error) {
       if (!deployment.currentIsLink) {
-        await rename(previous, deployment.current);
+        try {
+          await rename(previous, deployment.current);
+        } catch (undo) {
+          // The link is then all that says where the release went.
+          stranded = true;
+          throw new Refusal(
+            `${link} did not replace ${deployment.current} (${error.message}), and ${previous} did not move back (${undo.message}); finish the install with mv -T ${link} ${deployment.current}, or undo it with mv -T ${previous} ${deployment.current}.`,
+          );
+        }
       }
       throw error;
     }
   } finally {
-    await rm(link, { force: true });
+    if (!stranded) {
+      await rm(link, { force: true });
+    }
   }
   system.out(`${deployment.current} -> ${await readlink(deployment.current)}`);
   system.out(`The previous release stays at ${previous}.`);
@@ -2110,12 +2296,14 @@ async function withScratch(task) {
   const scratch = await mkdtemp(
     path.join(os.tmpdir(), 'qwen-managed-agent-upgrade-'),
   );
+  removeOnSignal.add(scratch);
   try {
     // The service account opens a file in it by name; it lists nothing.
     await chmod(scratch, 0o711);
     return await task(scratch);
   } finally {
     await rm(scratch, { recursive: true, force: true });
+    removeOnSignal.delete(scratch);
   }
 }
 
@@ -2254,6 +2442,19 @@ async function resolveConfiguration(system, deployment) {
   });
 }
 
+/**
+ * Whether a unit start started has exited: it failed, or it waits to be run
+ * again, which the shipped units' Restart=on-failure does instead of failing.
+ * A start from inactive begins with no restarts.
+ */
+function exitedSinceStart(unit) {
+  return (
+    unit.activeState === 'failed' ||
+    unit.subState === 'auto-restart' ||
+    unit.restarts > 0
+  );
+}
+
 // The probe's own answer, or undefined once the deadline passes.
 async function waitFor(system, deadline, probe) {
   for (;;) {
@@ -2307,8 +2508,18 @@ async function phaseStart(system, deployment, options) {
     );
   }
 
-  system.out(`Starting ${harness.name}`);
-  runChecked(system, 'systemctl', ['start', harness.name]);
+  // An earlier start that the preflight stopped left the Harness running,
+  // and systemctl start would leave it as it was: restart it, so it reads
+  // what was fixed since.
+  if (['inactive', 'failed'].includes(harness.activeState)) {
+    system.out(`Starting ${harness.name}`);
+    runChecked(system, 'systemctl', ['start', harness.name]);
+  } else {
+    system.out(
+      `Restarting ${harness.name}, which an earlier start left running`,
+    );
+    runChecked(system, 'systemctl', ['restart', harness.name]);
+  }
   const harnessUrl = new URL(
     deployment.serverEnvironment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
       'http://127.0.0.1:4170',
@@ -2320,7 +2531,7 @@ async function phaseStart(system, deployment, options) {
     system,
     system.now() + options.timeout * 1000,
     async () => {
-      if ((await showUnit(system, harness.name)).activeState === 'failed') {
+      if (exitedSinceStart(await showUnit(system, harness.name))) {
         return false;
       }
       return (await system.connect(harnessHost, harnessPort))
@@ -2330,7 +2541,7 @@ async function phaseStart(system, deployment, options) {
   );
   if (listening === false) {
     throw new Refusal(
-      `${harness.name} failed before it listened on ${harnessUrl.host}; see journalctl -u ${harness.name}.`,
+      `${harness.name} exited before it listened on ${harnessUrl.host}; see journalctl -u ${harness.name}, then run start again.`,
     );
   }
   if (!listening) {
@@ -2354,15 +2565,17 @@ async function phaseStart(system, deployment, options) {
     system,
     system.now() + options.timeout * 1000,
     async (budget) => {
-      if ((await showUnit(system, server.name)).activeState === 'failed') {
+      if (exitedSinceStart(await showUnit(system, server.name))) {
         return false;
       }
       return (await health(system, baseUrl, budget)) ? true : undefined;
     },
   );
   if (healthy === false) {
+    // Ends the restarts systemd would go on with, so start can run again.
+    runChecked(system, 'systemctl', ['stop', server.name]);
     throw new Refusal(
-      `${server.name} failed before it reported UP at ${baseUrl}/actuator/health; see journalctl -u ${server.name}, then run start again.`,
+      `${server.name} exited before it reported UP at ${baseUrl}/actuator/health, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
     );
   }
   if (!healthy) {
@@ -2629,6 +2842,16 @@ async function phaseVerify(system, deployment, options) {
       rows.push(await turnRow(system, client, options.timeout));
     }
   }
+  if (options.turn && !rows.some((each) => each.name === 'turn')) {
+    rows.push(
+      row(
+        'turn',
+        'SKIP',
+        'no Turn without the Session read above',
+        'run a Turn through the ingress',
+      ),
+    );
+  }
   printRows(
     system,
     `Managed Agent upgrade verify: ${deployment.manifest.version}`,
@@ -2712,6 +2935,16 @@ export async function runUpgrade(argv, system = createSystem()) {
     actor: values.actor,
     turn: values.turn,
   };
+  const stopHandling = system.onSignal((name) => {
+    for (const file of removeOnSignal) {
+      rmSync(file, { recursive: true, force: true });
+    }
+    try {
+      system.err(`${phase} stopped by ${name}`);
+    } catch {
+      // A hung-up terminal.
+    }
+  });
   try {
     requireRoot(system);
     const deployment = await inspect(system, options);
@@ -2722,6 +2955,8 @@ export async function runUpgrade(argv, system = createSystem()) {
       return 1;
     }
     throw error;
+  } finally {
+    stopHandling();
   }
 }
 
