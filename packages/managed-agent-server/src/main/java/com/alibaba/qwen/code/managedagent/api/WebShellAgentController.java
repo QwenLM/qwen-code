@@ -9,6 +9,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeModelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
@@ -177,6 +179,13 @@ public class WebShellAgentController {
                 request.sessionId(),
                 request.cursor(),
                 request.limit() == null ? 100 : request.limit());
+    }
+
+    @PostMapping("/transcript/items/query")
+    public WebShellExportPage recentTranscriptItems(TenantContext tenant,
+            @Valid @RequestBody WebShellExportRequest request) {
+        return service.recentTranscriptItems(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.cursor(), request.limit() == null ? 100 : request.limit());
     }
 
     @PostMapping(value = "/events/stream",
