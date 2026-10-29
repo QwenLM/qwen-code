@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * Copyright 2025 Qwen team
  * SPDX-License-Identifier: Apache-2.0
@@ -104,6 +104,9 @@ function splitShellWords(command: string): ShellWord[] {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
+  // Whether a word has begun, tracked apart from `current`: `''#x` starts a
+  // word whose de-quoted value is still empty, and bash reads its `#` as data.
+  let started = false;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -117,38 +120,51 @@ function splitShellWords(command: string): ShellWord[] {
     if (ch === '\\' && !inSingle) {
       escaped = true;
       raw += ch;
+      started = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       raw += ch;
+      started = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       raw += ch;
+      started = true;
       continue;
     }
     // `#` starts a comment only at the start of a word, so `cd # note` must
     // not read `#` as the target, while `cd dir#part` keeps it.
-    if (ch === '#' && !inSingle && !inDouble && current === '') break;
+    if (ch === '#' && !inSingle && !inDouble && !started) break;
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (current) {
-        pushWord(words, current, raw);
-        current = '';
-        raw = '';
-      }
+      if (started) pushWord(words, current, raw);
+      current = '';
+      raw = '';
+      started = false;
       continue;
     }
     current += ch;
     raw += ch;
+    started = true;
   }
-  if (current) pushWord(words, current, raw);
+  if (started) pushWord(words, current, raw);
   return words;
 }
 
 function tokenize(command: string): string[] {
   return splitShellWords(command).map((word) => word.value);
+}
+
+/**
+ * Quote a de-quoted word again so it survives being joined into a command
+ * string. Words that need no quoting keep their spelling, which leaves flags
+ * and simple operands readable.
+ */
+function quoteShellWord(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function pushWord(words: ShellWord[], value: string, raw: string): void {
@@ -483,7 +499,11 @@ function isAttachedShortFlagValue(arg: string, flag: string): boolean {
 // Command handler helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-type CommandHandler = (args: string[], cwd: string) => ShellOperation[];
+type CommandHandler = (
+  args: string[],
+  cwd: string,
+  homeUnknown?: boolean,
+) => ShellOperation[];
 
 /** Build read_file operations from positional path arguments. */
 function readOps(
@@ -1081,7 +1101,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       ]),
     ),
 
-  find: (args, cwd) => {
+  find: (args, cwd, homeUnknown) => {
     // `find [starting-point...] [expression]`
     // Starting points come before any expression keyword beginning with `-` or `(`.
     const expressionKeywords = new Set([
@@ -1144,7 +1164,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     if (startingPoints.length === 0) {
       return [
         { virtualTool: 'list_directory', filePath: cwd },
-        ...extractFindExecOps(args, cwd),
+        ...extractFindExecOps(args, cwd, homeUnknown),
       ];
     }
     return [
@@ -1152,7 +1172,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         virtualTool: 'list_directory' as const,
         filePath: p,
       })),
-      ...extractFindExecOps(args, cwd),
+      ...extractFindExecOps(args, cwd, homeUnknown),
     ];
   },
 
@@ -2038,21 +2058,34 @@ function extractShellOperationsUnmarked(
       // and friends pass the environment through, so a `HOME` assignment among
       // the words skipped above reaches the child, and a `HOME` the enclosing
       // command already changed still applies inside it.
-      const innerCommand = tokens.slice(startIdx).join(' ');
+      //
+      // The reconstruction quotes each word again: the tokens lost their
+      // quotes when they were split, and a wrapper's script argument must stay
+      // a single word — `timeout 5 bash -c "cd && echo {} > f"` unwrapped as
+      // `bash -c cd && echo {} > f` would analyse a different command.
+      const innerCommand = tokens.slice(startIdx).map(quoteShellWord).join(' ');
       const scopedHome =
         homeUnknown ||
         tokens.slice(1, startIdx).some((token) => {
-          const assignment = parseAssignmentWord({ value: token, raw: token });
-          return assignment !== null && homeAssignmentChangesValue(assignment);
+          const assignment = parseAssignmentWord(
+            { value: token, raw: token },
+            true,
+          );
+          return (
+            assignment !== null && homeAssignmentChangesValue(assignment, true)
+          );
         });
-      ops.push(...extractShellOperations(innerCommand, cwd, scopedHome));
+      // The inner command may itself be a wrapper (`timeout 5 bash -c '…'`) or
+      // a compound one (`sudo sh -c 'cd && …'`), so it goes through the walker
+      // rather than the single-simple-command entry point.
+      ops.push(...walkCompoundCommand(innerCommand, cwd, 1, false, scopedHome));
     }
   } else {
     // ── Dispatch to the known-command handler ─────────────────────────────
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      ops.push(...handler(args, cwd, homeUnknown));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
@@ -2108,10 +2141,52 @@ function isDynamicShellPath(word: string): boolean {
 // Local to the HOME tracking: `HOME+=…` appends to the value, so it changes
 // `HOME` just like `HOME=…` does, but the shared `isEnvAssignmentToken` (used
 // elsewhere to strip command prefixes) deliberately does not match the `+`.
-// Bash also accepts `HOME[0]=…`, which assigns the scalar itself, so the name
-// may carry a zero subscript; `HOME[1]=…` leaves `$HOME` alone.
-const ASSIGNMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*(?:\[0\])?$/;
-const HOME_NAME = /^HOME(?:\[0\])?$/;
+// A subscript is evaluated arithmetically by bash, so the name accepts any
+// `[…]`; whether the assignment reaches `$HOME` is decided separately.
+const ASSIGNMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?$/;
+
+interface AssignmentName {
+  base: string;
+  /** Raw subscript text without the brackets, `null` when there is none. */
+  subscript: string | null;
+}
+
+function parseAssignmentName(rawName: string): AssignmentName | null {
+  if (!ASSIGNMENT_NAME.test(rawName)) return null;
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[([^\]]*)\])?$/.exec(rawName);
+  if (!match) return null;
+  return { base: match[1]!, subscript: match[2] ?? null };
+}
+
+/**
+ * Subscript spellings that name element 0, i.e. the scalar `$HOME` itself:
+ * bash evaluates the subscript as arithmetic, so `0`, `00`, `+0` and `0x0` all
+ * assign the scalar.
+ */
+const SUBSCRIPT_ZERO = /^(?:[+]?0+|0[xX]0+)$/;
+/** Non-zero integer literals — decimal, `+`-prefixed, hex or octal — name an element only. */
+const SUBSCRIPT_ELEMENT =
+  /^(?:[+]?[1-9][0-9]*|0[xX][0-9a-fA-F]*[1-9a-fA-F][0-9a-fA-F]*|0[0-7]*[1-7][0-7]*)$/;
+
+/**
+ * Whether an assignment target of this name changes the value `$HOME` reads.
+ * `export` and `readonly` reject a subscript outright (`not a valid
+ * identifier`), so a subscripted name never reaches the scalar through them.
+ */
+function assignmentTargetsHome(
+  name: AssignmentName,
+  allowSubscript: boolean,
+): boolean {
+  if (name.base !== 'HOME') return false;
+  if (name.subscript === null) return true;
+  if (!allowSubscript) return false;
+  const subscript = name.subscript.trim();
+  if (SUBSCRIPT_ZERO.test(subscript)) return true;
+  if (SUBSCRIPT_ELEMENT.test(subscript)) return false;
+  // Anything that is not a plain integer literal is evaluated at runtime; fail
+  // closed and treat it as reaching `$HOME`.
+  return true;
+}
 
 const REDIRECT_OPERATORS = new Set([
   '>',
@@ -2150,10 +2225,12 @@ const RESERVED_PREFIX_WORDS = new Set([
 ]);
 
 interface AssignmentWord {
-  name: string;
+  name: AssignmentName;
   append: boolean;
-  /** Raw value text, quotes intact. */
+  /** Value after quote removal, i.e. what bash would assign. */
   value: string;
+  /** True when part of the value cannot expand (single quotes or escapes). */
+  literal: boolean;
 }
 
 /**
@@ -2176,43 +2253,97 @@ function withoutRedirects(words: ShellWord[]): ShellWord[] {
 }
 
 /**
- * Parse `name=value` (or `name+=value`) from a word. Bash recognises the
- * assignment before quote removal, so a quote or escape inside the name turns
- * the word into a command name (`"HOME=/x"`, `\HOME=/x`) and must not count.
+ * Remove the quotes and escapes from a value, reporting whether any of them
+ * suppressed expansion — `HOME='$HOME'` assigns the four characters `$HOME`,
+ * while `HOME="$HOME"` assigns whatever `$HOME` holds.
  */
-function parseAssignmentWord(word: ShellWord): AssignmentWord | null {
-  const equals = word.raw.indexOf('=');
-  if (equals <= 0) return null;
-  const namePart = word.raw.slice(0, equals);
-  if (/['"\\]/.test(namePart)) return null;
-  const append = namePart.endsWith('+');
-  const name = append ? namePart.slice(0, -1) : namePart;
-  if (!ASSIGNMENT_NAME.test(name)) return null;
-  return { name, append, value: word.raw.slice(equals + 1) };
+function splitAssignmentValue(rawValue: string): {
+  value: string;
+  literal: boolean;
+} {
+  let value = '';
+  let literal = false;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < rawValue.length; i++) {
+    const ch = rawValue[i]!;
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      literal = true;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      const next = rawValue[i + 1];
+      if (next === undefined) continue;
+      value += next;
+      i++;
+      literal = true;
+      continue;
+    }
+    value += ch;
+  }
+  return { value, literal };
 }
 
 /**
- * Whether the assignment leaves bash's `$HOME` different from the analyzer's
- * own. A self-reference such as `HOME=$HOME`, `HOME="$HOME"` or
- * `HOME=${HOME}` assigns the current value back, including with a trailing
- * slash, which names the same directory and expands the same way. Single
- * quotes suppress expansion, so `HOME='$HOME'` really does change the value.
+ * Parse `name=value` (or `name+=value`) from a word. Bash recognises the
+ * assignment before quote removal, so a quote or escape inside the name turns
+ * the word into a command name (`"HOME=/x"`, `\HOME=/x`) and must not count.
+ * Builtin operands are different: `declare "HOME=/x"` quotes the operand, so
+ * there the de-quoted value is the name bash parses, and there a whole-word
+ * single quote still suppresses expansion in the value.
  */
-function isSelfReferentialHomeValue(rawValue: string): boolean {
-  if (rawValue.startsWith("'")) return false;
-  const value =
-    rawValue.startsWith('"') && rawValue.endsWith('"') && rawValue.length > 1
-      ? rawValue.slice(1, -1)
-      : rawValue;
-  return /^(?:\$HOME|\$\{HOME\})\/*$/.test(value);
+function parseAssignmentWord(
+  word: ShellWord,
+  fromValue = false,
+): AssignmentWord | null {
+  // `''` is an empty argument, not an assignment.
+  if (word.value === '') return null;
+  const text = fromValue ? word.value : word.raw;
+  const equals = text.indexOf('=');
+  if (equals <= 0) return null;
+  const namePart = text.slice(0, equals);
+  if (!fromValue && /['"\\]/.test(namePart)) return null;
+  const append = namePart.endsWith('+');
+  const name = parseAssignmentName(append ? namePart.slice(0, -1) : namePart);
+  if (!name) return null;
+  if (fromValue) {
+    // The name may be quoted; the raw word tells whether the value expands.
+    const rawValue = word.raw.replace(/^[^=]*=/, '');
+    const parsed = splitAssignmentValue(rawValue);
+    return {
+      name,
+      append,
+      value: parsed.value,
+      literal: parsed.literal,
+    };
+  }
+  const parsed = splitAssignmentValue(text.slice(equals + 1));
+  return { name, append, value: parsed.value, literal: parsed.literal };
 }
 
-function homeAssignmentChangesValue(assignment: AssignmentWord): boolean {
-  if (!HOME_NAME.test(assignment.name)) return false;
-  // `HOME+=` appends an empty string, which leaves the value alone; every
-  // other append grows it, including `HOME+=$HOME`.
+/**
+ * A value that assigns the very directory `$HOME` already names: `$HOME`,
+ * `${HOME}` and `~`, each optionally with trailing slashes. `~` expands to
+ * `$HOME`, and the slashes name the same directory. A literal value such as
+ * `HOME='$HOME'` or `HOME='~'` really does change what `$HOME` reads.
+ */
+const SELF_REFERENTIAL_HOME = /^(?:~|\$HOME|\$\{HOME\})\/*$/;
+
+function homeAssignmentChangesValue(
+  assignment: AssignmentWord,
+  allowSubscript: boolean,
+): boolean {
+  if (!assignmentTargetsHome(assignment.name, allowSubscript)) return false;
+  // `HOME+=` and `HOME+=''` append nothing, which leaves the value alone;
+  // every other append grows it, including `HOME+=$HOME`.
   if (assignment.append) return assignment.value !== '';
-  return !isSelfReferentialHomeValue(assignment.value);
+  if (assignment.literal) return true;
+  return !SELF_REFERENTIAL_HOME.test(assignment.value);
 }
 
 /**
@@ -2230,10 +2361,9 @@ function hasHomeAssignmentOperand(
     const value = words[index]!.value;
     if (value === '--') continue;
     if (value.startsWith('-') && value.length > 1) continue;
-    const assignment = parseAssignmentWord(words[index]!);
-    if (!assignment || !homeAssignmentChangesValue(assignment)) continue;
-    if (!allowSubscript && assignment.name !== 'HOME') continue;
-    return true;
+    const assignment = parseAssignmentWord(words[index]!, true);
+    if (!assignment) continue;
+    if (homeAssignmentChangesValue(assignment, allowSubscript)) return true;
   }
   return false;
 }
@@ -2296,7 +2426,7 @@ function segmentHomeMutation(
   while (index < words.length) {
     const assignment = parseAssignmentWord(words[index]!);
     if (!assignment) break;
-    if (homeAssignmentChangesValue(assignment)) prefixedHome = true;
+    if (homeAssignmentChangesValue(assignment, true)) prefixedHome = true;
     index++;
   }
   if (index === words.length) {
@@ -2349,27 +2479,26 @@ function segmentHomeMutation(
 
 /**
  * Whether the segment scopes a `HOME` assignment to the command it prefixes,
- * e.g. `HOME=/repo/.qwen cd` or `env HOME=/repo/.qwen bash -c …`. Bash applies
- * that value to the command — so a bare `cd` there does not go to the
- * analyzer's `HOME` — but leaves the parent shell's `HOME` unchanged, so it
- * must not latch for later segments.
+ * e.g. `HOME=/repo/.qwen cd`. Bash applies that value to the command — so a
+ * bare `cd` there does not go to the analyzer's `HOME` — but leaves the parent
+ * shell's `HOME` unchanged, so it must not latch for later segments. `env`
+ * prefixes are handled by the walker, which re-enters on the command `env`
+ * runs, so they are not looked at here.
  */
 function segmentPrefixesHome(command: string): boolean {
   const words = withoutRedirects(splitShellWords(command));
   let index = 0;
-  // `env HOME=/x cmd` hands the value to the command the same way.
-  if (words[index]?.value === 'env') {
+  while (
+    index < words.length &&
+    RESERVED_PREFIX_WORDS.has(words[index]!.value)
+  ) {
     index++;
-    while (index < words.length && words[index]!.value.startsWith('-')) {
-      const flag = words[index]!.value;
-      index += /^(?:-u|--unset|-C|--chdir)$/.test(flag) ? 2 : 1;
-    }
   }
   let homeAssigned = false;
   while (index < words.length) {
     const assignment = parseAssignmentWord(words[index]!);
     if (!assignment) break;
-    if (homeAssignmentChangesValue(assignment)) homeAssigned = true;
+    if (homeAssignmentChangesValue(assignment, true)) homeAssigned = true;
     index++;
   }
   return homeAssigned && index < words.length;
@@ -2428,16 +2557,17 @@ function resolveCdTargetCwd(
   }
 
   // A bare `cd` goes to bash's `$HOME`, and `~` / `~/…` expands it, so once
-  // this compound command reassigned `HOME` — or the segment scopes a `HOME`
-  // assignment to this `cd` — the analyzer process's own value is not what bash
-  // expands and the target is unknown rather than the parent's HOME.
+  // this compound command reassigned `HOME` the analyzer process's own value is
+  // not what bash expands and the target is unknown. A command-scoped prefix
+  // (`HOME=/repo/.qwen cd`) only applies to that command, so it makes a *bare*
+  // `cd` unknown while an explicit `~` target — expanded from the parent
+  // shell's `HOME` before the command runs — stays the analyzer's home.
   const explicitTarget = words[targetIndex]?.value;
-  const homeIsUnknown = homeReassigned || homePrefixed;
   const expandsHome =
     explicitTarget === undefined ||
     explicitTarget === '~' ||
     explicitTarget.startsWith('~/');
-  if (homeIsUnknown && expandsHome) {
+  if (expandsHome && (homeReassigned || (homePrefixed && !explicitTarget))) {
     return { kind: 'dynamic' };
   }
 
@@ -2490,11 +2620,16 @@ function resolveCdTargetCwd(
 export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
+  homeUnknown = false,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false, false);
+  return walkCompoundCommand(command, cwd, 0, false, homeUnknown);
 }
 
-function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
+function extractFindExecOps(
+  args: string[],
+  cwd: string,
+  homeUnknown = false,
+): ShellOperation[] {
   const ops: ShellOperation[] = [];
   for (let i = 0; i < args.length; i++) {
     const marker = args[i]!;
@@ -2516,9 +2651,15 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
     if (inner.length === 0) continue;
 
     const innerCommand = inner
-      .map((arg) => arg.replaceAll('{}', '__find_exec_path__'))
+      .map((arg) => quoteShellWord(arg.replaceAll('{}', '__find_exec_path__')))
       .join(' ');
-    const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
+    // The command runs with the calling shell's `HOME`, so a reassignment the
+    // enclosing compound command already made applies inside it too.
+    const innerOps = extractShellOperationsAcrossCommand(
+      innerCommand,
+      cwd,
+      homeUnknown,
+    );
     ops.push(
       ...(marker.endsWith('dir')
         ? markCwdUnknownOps(innerOps, innerCommand, cwd)
@@ -2611,8 +2752,115 @@ function getHeredocDelimiters(line: string): string[] {
 // A function definition segment, e.g. `setup() {` or `function setup {`.
 const FUNCTION_HEADER =
   /^\s*(?:function\s+[A-Za-z_][A-Za-z0-9_:-]*\s*(?:\(\s*\))?|[A-Za-z_][A-Za-z0-9_:-]*\s*\(\s*\))\s*\{/;
-// The closing brace that ends a function body.
-const FUNCTION_CLOSE = /^\s*\}\s*$/;
+// A header whose `{` is still to come, e.g. the first line of
+// `f()\n{` or `function f`.
+const FUNCTION_HEADER_OPEN =
+  /^\s*(?:function\s+[A-Za-z_][A-Za-z0-9_:-]*\s*(?:\(\s*\))?|[A-Za-z_][A-Za-z0-9_:-]*\s*\(\s*\))\s*$/;
+
+/** One `{ … }` body, `{ … }` group or `( … )` subshell that spans segments. */
+interface ShellFrame {
+  kind: 'function' | 'group' | 'subshell';
+  /** True once this body scoped a `HOME` assignment for its remaining part. */
+  homeScoped: boolean;
+}
+
+interface SegmentStructure {
+  /** Frames this segment opens, outermost first. */
+  opens: ShellFrame[];
+  /** How many enclosing frames it closes. */
+  closes: number;
+  /** Whether any `( … )` opens here, so the segment runs in a subshell. */
+  subshell: boolean;
+}
+
+/**
+ * Read the `{`, `}`, `(` and `)` that change shell scope out of one segment.
+ * Quotes, `${…}` parameter expansions and `$((…))` arithmetic are skipped, and
+ * the empty `()` of a function header is not a subshell. `pendingFunction`
+ * is true when a previous segment ended with a function header and this one
+ * starts the body, so its `{` opens a function frame rather than a group.
+ */
+function scanSegmentStructure(
+  segment: string,
+  pendingFunction: boolean,
+): SegmentStructure {
+  const opens: ShellFrame[] = [];
+  let closes = 0;
+  let subshell = false;
+  let pending = pendingFunction;
+  // `${` and `$(` open constructs whose `}` / `)` are not shell scope.
+  const expansions: Array<'param' | 'paren'> = [];
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle) continue;
+
+    if (ch === '$' && (segment[i + 1] === '{' || segment[i + 1] === '(')) {
+      expansions.push(segment[i + 1] === '{' ? 'param' : 'paren');
+      i++;
+      continue;
+    }
+    if (ch === '{') {
+      if (expansions[expansions.length - 1] === 'param') {
+        expansions.push('param');
+      } else if (pending) {
+        opens.push({ kind: 'function', homeScoped: false });
+        pending = false;
+      } else {
+        opens.push({ kind: 'group', homeScoped: false });
+      }
+      continue;
+    }
+    if (ch === '}') {
+      if (expansions[expansions.length - 1] === 'param') expansions.pop();
+      else closes++;
+      continue;
+    }
+    if (ch === '(') {
+      // `name()` — the empty parameter list of a function definition.
+      if (
+        segment[i + 1] === ')' &&
+        i > 0 &&
+        /[A-Za-z0-9_]/.test(segment[i - 1]!)
+      ) {
+        i++;
+        continue;
+      }
+      if (expansions[expansions.length - 1] === 'paren') {
+        expansions.push('paren');
+        continue;
+      }
+      subshell = true;
+      opens.push({ kind: 'subshell', homeScoped: false });
+      continue;
+    }
+    if (ch === ')') {
+      if (expansions[expansions.length - 1] === 'paren') expansions.pop();
+      else closes++;
+    }
+  }
+
+  return { opens, closes, subshell };
+}
 
 /**
  * Indices of the segments inside a brace group that bash runs in a subshell,
@@ -2663,6 +2911,48 @@ function redirectOpsForSegment(command: string, cwd: string): ShellOperation[] {
   ];
 }
 
+/**
+ * Split an `env` prefix off a segment: `env -i -u FOO HOME=/x cmd` runs `cmd`
+ * with the given environment. Returns the command `env` runs with its original
+ * quoting, plus whether one of those assignments changed `HOME`.
+ */
+function splitEnvPrefix(
+  command: string,
+): { rest: string; homeAssigned: boolean } | null {
+  const words = splitShellWords(command);
+  if (words[0]?.value !== 'env') return null;
+
+  let index = 1;
+  let homeAssigned = false;
+  while (index < words.length) {
+    const assignment = parseAssignmentWord(words[index]!);
+    if (assignment) {
+      if (homeAssignmentChangesValue(assignment, true)) homeAssigned = true;
+      index++;
+      continue;
+    }
+    const value = words[index]!.value;
+    if (value === '--') {
+      index++;
+      continue;
+    }
+    if (!value.startsWith('-')) break;
+    // `-u NAME`, `-C DIR` and their long forms take the next word as a value.
+    index += /^(?:-u|--unset|-C|--chdir)$/.test(value) ? 2 : 1;
+  }
+
+  if (index >= words.length) return null;
+  // `raw` keeps the child command's quotes, so a `bash -c 'cd && …'` script
+  // stays one word.
+  return {
+    rest: words
+      .slice(index)
+      .map((word) => word.raw)
+      .join(' '),
+    homeAssigned,
+  };
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
@@ -2677,11 +2967,13 @@ function walkCompoundCommand(
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
   let homeReassigned = initialHomeReassigned;
-  // One entry per open `name() { … }` body, true once that body has scoped a
-  // `HOME` assignment (`local HOME=…`, `declare HOME=…`). The entry is dropped
-  // when the body closes, so a nested body's `local` does not outlive it while
-  // an enclosing body's `local` still applies afterwards.
-  const homeScopedInBodies: boolean[] = [];
+  // One entry per open shell frame: a `name() { … }` body, a `{ … }` group or
+  // a `( … )` subshell. A function frame is dropped when its body closes, so a
+  // nested body's `local` does not outlive it while an enclosing body's `local`
+  // still applies afterwards; a subshell frame means its assignments never
+  // reach the parent shell. Groups do not isolate anything.
+  const frames: ShellFrame[] = [];
+  let pendingFunction = false;
   // Terminator of the previous segment: a `|` there makes this segment a
   // pipeline element even though its own terminator is empty.
   let previousTerminator = '';
@@ -2708,28 +3000,40 @@ function walkCompoundCommand(
       previousTerminator === '|&';
     previousTerminator = terminator;
 
-    if (FUNCTION_CLOSE.test(sub)) homeScopedInBodies.pop();
-    // Only a header that leaves the body open spans later segments; a
-    // single-line `f() { … }` is one segment and must not raise the depth for
-    // the rest of the compound command.
-    if (FUNCTION_HEADER.test(sub) && /\{\s*$/.test(sub)) {
-      homeScopedInBodies.push(false);
-    }
-
-    const inFunctionBody = homeScopedInBodies.length > 0;
+    // A function body (`f() {` / `…` / `}`), a bare `{ … }` group and a
+    // `( … )` subshell all carry their own scope, and only the closing segment
+    // says where the body ends: `{ echo hi; }` must not read as an unclosed
+    // function body, and `(\n export HOME=/x \n)` must not latch.
+    const structure = scanSegmentStructure(
+      sub,
+      pendingFunction || FUNCTION_HEADER.test(sub),
+    );
+    frames.push(...structure.opens);
+    pendingFunction =
+      !structure.opens.some((frame) => frame.kind === 'function') &&
+      FUNCTION_HEADER_OPEN.test(sub);
+    const inFunctionBody = frames.some((frame) => frame.kind === 'function');
+    const insideSubshellFrame =
+      structure.subshell || frames.some((frame) => frame.kind === 'subshell');
     // `HOME=/x & …` runs the assignment in a background subshell and
     // `HOME=/x cmd` scopes it to one command; neither leaves the parent
     // shell's HOME changed, so only a foreground persistent form latches.
-    if (!backgrounded && !inSubshell && !inPipeline) {
+    if (!backgrounded && !inSubshell && !inPipeline && !insideSubshellFrame) {
       const mutation = segmentHomeMutation(sub, inFunctionBody);
       if (mutation === 'persistent') {
         homeReassigned = true;
       } else if (mutation === 'scoped') {
-        homeScopedInBodies[homeScopedInBodies.length - 1] = true;
+        for (let frame = frames.length - 1; frame >= 0; frame--) {
+          if (frames[frame]!.kind === 'function') {
+            frames[frame]!.homeScoped = true;
+            break;
+          }
+        }
       }
     }
+    for (let closed = 0; closed < structure.closes; closed++) frames.pop();
     const homeUnknown =
-      homeReassigned || homeScopedInBodies.some((scoped) => scoped);
+      homeReassigned || frames.some((frame) => frame.homeScoped);
     const prefixesHome = segmentPrefixesHome(sub);
 
     const cdTarget = resolveCdTargetCwd(
@@ -2748,6 +3052,12 @@ function walkCompoundCommand(
       if (cwdUnknown) {
         redirectOps = markCwdUnknownOps(redirectOps, sub, effectiveCwd);
       }
+      // `cd > ~/settings.json` expands `~` with the `HOME` this command
+      // reassigned, exactly like the redirected writes of other commands, so
+      // the redirect ops get the same marking here.
+      if (homeUnknown) {
+        redirectOps = markHomeUnknownOps(redirectOps, sub, effectiveCwd);
+      }
       ops.push(...redirectOps);
       if (cdTarget.kind === 'static') {
         if (!backgrounded) {
@@ -2757,6 +3067,24 @@ function walkCompoundCommand(
       } else if (!backgrounded) {
         cwdUnknown = true;
       }
+      continue;
+    }
+
+    // `env HOME=/x cmd` hands its environment to the command it runs: the
+    // child resolves `~` and a bare `cd` against the new value while the parent
+    // shell's `HOME` stays unchanged, so re-enter on that command rather than
+    // trusting the analyzer's own home.
+    const envPrefix = splitEnvPrefix(sub);
+    if (envPrefix) {
+      ops.push(
+        ...walkCompoundCommand(
+          envPrefix.rest,
+          effectiveCwd,
+          depth,
+          cwdUnknown,
+          homeUnknown || prefixesHome || envPrefix.homeAssigned,
+        ),
+      );
       continue;
     }
 
@@ -2844,19 +3172,25 @@ function markCwdUnknownOps(
  * `HOME`: bash expands those tokens against the new value, so a path resolved
  * through them is not the one the analyzer computed.
  *
- * The scan runs on the raw text rather than on tokens because the `~` is
- * usually part of a longer token (`>>~/log`, `--target-directory=~/bak`,
- * `~/settings.json`), and a token-level comparison missed every one of those.
- * Requiring a delimiter (or end of text) after the path keeps `~user` and URLs
- * such as `http://host/~user/x` out. A `~` inside quotes is not expanded by
- * bash, so flagging it here is deliberately conservative.
+ * The scan runs on words, not on the raw text, because the `~` is usually part
+ * of a longer word (`>>~/log`, `--target-directory=~/bak`, `~/settings.json`)
+ * and can be followed by a quote (`~/"settings.json"`) or contain a space
+ * (`~/.qwen\ bak`). A word-level regex stopped at the quote or the space and
+ * missed both. `~user` and URLs such as `http://host/~user/x` are still out:
+ * the `~` must be the whole first path segment.
  */
-const HOME_TILDE_TOKEN = /~(?:\/[^\s"'`|;&()<>{}]*)?(?=$|[\s"'`|;&()<>{}])/g;
-
 function homeTildeTargets(command: string, cwd: string): Set<string> {
   const targets = new Set<string>();
-  for (const match of command.matchAll(HOME_TILDE_TOKEN)) {
-    targets.add(resolvePath(match[0], cwd));
+  const add = (candidate: string) => {
+    const trimmed = candidate.replace(/\/+$/, '');
+    targets.add(resolvePath(trimmed || '~', cwd));
+  };
+  for (const word of splitShellWords(command)) {
+    const value = word.value;
+    // `--out=~/log`, `>>~/log`: the value may follow `=` or a redirect.
+    const prefix = /^[^=<>~]*[=<>](?=~(?:\/|$))/.exec(value)?.[0] ?? '';
+    const candidate = value.slice(prefix.length);
+    if (candidate === '~' || candidate.startsWith('~/')) add(candidate);
   }
   return targets;
 }
@@ -2870,11 +3204,12 @@ function markHomeUnknownOps(
   if (targets.size === 0) return ops;
   return ops.map((op) => {
     if (!op.filePath) return op;
+    const filePath = op.filePath.replace(/\/+$/, '');
     // `~` names a directory, so an operation on anything below it also
     // depends on the reassigned value (`> ~/settings.json`, `cp x ~/.qwen/`,
     // `mkdir -p ~/a/b`), not just on the path itself.
     for (const target of targets) {
-      if (op.filePath === target || op.filePath.startsWith(`${target}/`)) {
+      if (filePath === target || filePath.startsWith(`${target}/`)) {
         return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
       }
     }

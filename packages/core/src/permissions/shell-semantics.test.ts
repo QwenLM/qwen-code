@@ -928,6 +928,155 @@ describe('extractShellOperationsAcrossCommand', () => {
     }
   });
 
+  // The same latch, for the shapes that hide the reassignment inside another
+  // construct: a comment after an empty word, a redirect on a `cd`, a `{ … }`
+  // group inside a function body, a quoted builtin operand, an arithmetic
+  // subscript, a child shell started by `timeout` / `env` / `find -exec`, and
+  // a `~` path that is quoted or carries a suffix.
+  it('latches HOME through quoted words, groups, subscripts and child shells', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      // `''` starts a word, so the `#` after it is data, not a comment.
+      expect(across("cd ''#dir ; echo {} > settings.json")).toEqual([
+        write('/repo/#dir/settings.json'),
+      ]);
+      expect(across("sudo cp /etc/passwd '#out'")).toEqual([
+        read('/etc/passwd'),
+        write('/repo/#out'),
+      ]);
+      // A redirect on a `cd` is performed before the builtin and expands `~`
+      // with the reassigned HOME, so it is as uncertain as any other write.
+      expect(
+        across('export HOME=/tmp/attacker ; cd > ~/settings.json'),
+      ).toEqual([
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/settings.json`),
+      ]);
+      // A plain `{ … }` group is not a function body: it must close, leaving
+      // the enclosing function's `local HOME=` in effect for the `cd`.
+      expect(
+        across(
+          'setup() {\n { echo hi; }\n local HOME=/repo/.qwen\n cd && echo {} > settings.json\n}',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // A `} # done` closes the body; the following top-level `cd` runs with
+      // the parent's HOME again.
+      expect(
+        across(
+          'f() {\n local HOME=/tmp/x\n} # done\ncd && echo {} > settings.json',
+        ),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // A `( … )` subshell keeps its assignments to itself, also across lines.
+      expect(
+        across('(\nexport HOME=/tmp/attacker\n)\ncd ; echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // Bash evaluates a subscript as arithmetic, so every spelling of zero
+      // assigns the scalar and a non-zero literal does not.
+      for (const command of [
+        'HOME[00]=/repo/.qwen',
+        'declare HOME[0x0]=/repo/.qwen',
+        'HOME[+0]=/repo/.qwen',
+      ]) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          uncertainWrite('/repo/settings.json'),
+        ]);
+      }
+      // A quoted builtin operand is still an assignment for `export`/`declare`,
+      // and an empty word before it is a real argument, not a comment.
+      for (const command of [
+        'export "HOME=/tmp/attacker"',
+        'declare "HOME=/tmp/attacker"',
+        "export '' HOME=/tmp/attacker",
+      ]) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          uncertainWrite('/repo/settings.json'),
+        ]);
+      }
+      // A child shell started by a prefix command receives the environment,
+      // so the script's bare `cd` is not the analyzer's HOME either. The
+      // wrapper's script must stay one word across the re-parse.
+      expect(
+        across(
+          'export HOME=/repo/.qwen ; timeout 5 bash -c "cd && echo {} > settings.json"',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across(
+          "export HOME=/repo/.qwen ; find . -exec bash -c 'cd && echo {} > settings.json' ;",
+        ),
+      ).toEqual([dir('/repo'), uncertainWrite('/repo/settings.json')]);
+      // `env HOME=… cmd` hands the value to the child; `env` itself does not
+      // change the parent shell.
+      expect(
+        across("env HOME=/repo/.qwen bash -lc 'cd && echo {} > settings.json'"),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // A quoted `~` and a `~` path with a suffix are composed from HOME too.
+      expect(
+        across('export HOME=/repo/.qwen ; echo {} > ~/"settings.json"'),
+      ).toEqual([
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/settings.json`),
+      ]);
+      expect(across('export HOME=/repo/.qwen ; cp x ~/.qwen\\ bak/')).toEqual([
+        read('/repo/x'),
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/.qwen bak/`),
+      ]);
+      // Reserved words and a `HOME=` prefix on the `cd` itself.
+      expect(
+        across(
+          'if true; then HOME=/repo/.qwen cd; fi ; echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across('! HOME=/tmp/attacker cd ; echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // `do`, `time` and a bare `while` put the prefix in a later position too.
+      for (const command of [
+        'for i in 1; do HOME=/tmp/attacker cd; echo {} > settings.json; done',
+        'while :; do HOME=/tmp/attacker cd; break; done ; echo {} > settings.json',
+        'time HOME=/tmp/attacker cd ; echo {} > settings.json',
+      ]) {
+        expect(across(command)).toEqual([
+          uncertainWrite('/repo/settings.json'),
+        ]);
+      }
+      // A nested `env` inside another prefix command still hands HOME down.
+      for (const command of [
+        'timeout 5 env HOME=/tmp/x bash -c "echo {} > ~/s"',
+        "env HOME='$HOME' bash -c 'echo {} > ~/s'",
+      ]) {
+        expect(
+          across(command).every((op) => op.cwdUnknown && op.pathMayDependOnCwd),
+        ).toBe(true);
+      }
+      // A literal `~` does not expand, and appending nothing changes nothing;
+      // `HOME=~` does expand, so it keeps the analyzer home.
+      expect(across("HOME='~' ; cd ; echo {} > settings.json")).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      for (const command of [
+        'HOME=~',
+        'export HOME=~',
+        'HOME+=""',
+        "HOME+=''",
+      ]) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          write('/home/tester/settings.json'),
+        ]);
+      }
+      expect(across('HOME+=" " ; cd ; echo {} > settings.json')).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+      // A prefix on the `cd` applies to that builtin, but an explicit `~`
+      // target is expanded from the parent's HOME before it runs.
+      expect(across('HOME=/tmp/x cd ~ ; echo {} > settings.json')).toEqual([
+        write(`${homedir().replace(/\\/g, '/')}/settings.json`),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
+  });
+
   // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
   // and the next segment's relative write lands in the *original* directory —
   // which is exactly where a protected settings file lives. Attributing the
