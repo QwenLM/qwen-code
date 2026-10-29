@@ -134,12 +134,13 @@ class WorkspaceCsiNativeActivationGateTest {
         var before = journal.restore("tenant", "workspace", sessionId, token);
         byte[] original = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = 2", byte[].class);
         String activationId = jdbc.queryForObject("SELECT activation_id FROM ma_session_head", String.class);
+        long initialExpiry = jdbc.queryForObject("SELECT activation_expires_at FROM ma_session_head", Long.class);
         ManagedSessionStoreModels.WriterGrant grant = null;
         for (int index = 1; index <= 100; index++) {
             int sequence = index;
             grant = transaction.execute(status -> journal.renewWriter("tenant", sessionId, token,
                     new ManagedSessionStoreModels.RenewWriterRequest("workspace", writerId, 1, 300_000L,
-                            new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, sequence, 120_000))));
+                            new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, sequence, 300_000))));
         }
         assertThat(grant.activationLeaseRenewal()).isTrue();
         assertThat(grant.activationLease().renewalSeq()).isEqualTo(100);
@@ -149,6 +150,8 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = 2", byte[].class)).isEqualTo(original);
         var lease = grant.activationLease();
+        assertThat(lease.expiresAt()).isGreaterThan(initialExpiry);
+        assertThat(jdbc.queryForObject("SELECT activation_expires_at FROM ma_session_head", Long.class)).isEqualTo(lease.expiresAt());
         assertThat(journal.restore("tenant", "workspace", sessionId, token).activationLease()).isEqualTo(lease);
         transaction.executeWithoutResult(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
             var head = com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission.lockNativeHead(connection,
@@ -159,12 +162,12 @@ class WorkspaceCsiNativeActivationGateTest {
         }));
         var duplicate = transaction.execute(status -> journal.renewWriter("tenant", sessionId, token,
                 new ManagedSessionStoreModels.RenewWriterRequest("workspace", writerId, 1, 300_000L,
-                        new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, 100, 120_000))));
+                        new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, 100, 300_000))));
         assertThat(duplicate.activationLease()).isEqualTo(lease);
         for (long sequence : new long[] {99, 102}) {
             assertThatThrownBy(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, token,
                     new ManagedSessionStoreModels.RenewWriterRequest("workspace", writerId, 1, 300_000L,
-                            new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, sequence, 120_000)))))
+                            new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, sequence, 300_000)))))
                     .isInstanceOf(ManagedAgentException.class);
         }
         assertThat(commit(2).replayed()).isFalse();
