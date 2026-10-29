@@ -83,6 +83,7 @@
     "test:e2e:managed-harness-restart-approval-cleanup-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault cleanup-failed",
     "test:e2e:managed-harness-restart-approval-decision-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault decision-reply-lost",
     "test:e2e:managed-harness-restart-approval-admission-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault admission-reply-lost",
+    "test:e2e:managed-harness-restart-approval-load-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault load-reply-lost",
     "test:e2e:managed-harness-restart-approval-terminal-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-reply-lost",
     "test:e2e:managed-harness-restart-approval-terminal-write-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-write-failed",
     "test:e2e:managed-harness-restart-continuation-closeout": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify continuation",

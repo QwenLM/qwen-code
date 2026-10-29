@@ -1800,11 +1800,20 @@ profile or unreadable evidence keeps its debt and waits for the operator
 recheck route. See
 [the cleanup debt design](../../docs/design/2026-10-28-hosted-cleanup-debt-retry.md).
 
+A lost takeover-load reply (A4's load half) drops the reply to the replacement's
+first drive load once, via a test-gated Harness hook (`QWEN_E2E_DROP_LOAD_REPLY`,
+never set in production). The control plane redrives the same load into the
+now-active driver; the arm asserts the reply was actually lost, then requires the
+original Turn to project exactly one terminal with the recovered answer — the
+redrive restates the active attachment instead of wedging the Turn:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-load-reply-lost
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
-focused or integration tested for now: the lost takeover-load reply (the
-packaged arm showed the redrive's active handoff leaves the original Turn
-RUNNING instead of projecting its terminal), mixed calls and rewritten inputs
+focused or integration tested for now: mixed calls and rewritten inputs
 across a replacement, Hook/MCP/child uncertainty, the attempt and stream
 identities plus the live SSE view, the round and cost budgets, and the
 mixed-version reader/bundle closure (#14481).
