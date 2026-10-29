@@ -194,7 +194,9 @@ describe('StandaloneRecents', () => {
     const newSession = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
     );
-    expect(newSession?.parentElement?.className).toContain('invisible');
+    expect(newSession?.parentElement?.className).toContain(
+      'projectsHeaderActions',
+    );
     const sessions = container.querySelector(
       '[data-testid="standalone-active-group"] > div:nth-child(2)',
     );
@@ -202,6 +204,11 @@ describe('StandaloneRecents', () => {
     const header = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] > div > button',
     )!;
+    expect(header.parentElement?.className).toContain('projectsHeader');
+    expect(header.className).toContain('projectsHeaderToggle');
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-down',
+    );
     header.focus();
     await act(async () =>
       header.dispatchEvent(
@@ -209,6 +216,9 @@ describe('StandaloneRecents', () => {
       ),
     );
     expect(document.activeElement).not.toBe(header);
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-right',
+    );
     await act(async () =>
       header.dispatchEvent(
         new MouseEvent('click', { bubbles: true, detail: 1 }),
