@@ -1,11 +1,11 @@
 name: 'Prepare isolated release runner'
-description: 'Wipes the workspace and isolates Git/npm/Docker/gh/Maven state before a release job checks out on a persistent self-hosted machine. No-op on GitHub-hosted runners.'
+description: 'Wipes the workspace and isolates Git/npm/Docker/gh state before a release job checks out on a persistent self-hosted machine. No-op on GitHub-hosted runners.'
 
 runs:
   using: 'composite'
   steps:
-    # This runs before actions/checkout, so the scripts are not on disk yet and
-    # have to come from the API at the pinned workflow SHA.
+    # This runs before actions/checkout, so the script must come from the API
+    # at the pinned workflow SHA, outside the workspace it will wipe.
     - name: 'Prepare isolated release runner'
       if: "${{ runner.environment == 'self-hosted' }}"
       working-directory: '${{ runner.temp }}'
@@ -19,7 +19,5 @@ runs:
         trap 'rm -rf -- "$bootstrap"' EXIT
         export GH_CONFIG_DIR="$bootstrap/gh"
         mkdir -p "$GH_CONFIG_DIR"
-        for script in prepare-release-runner.sh check-disk-floor.sh; do
-          gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script"
-        done
+        gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/prepare-release-runner.sh?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/prepare-release-runner.sh"
         bash "$bootstrap/prepare-release-runner.sh"

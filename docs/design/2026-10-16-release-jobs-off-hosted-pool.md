@@ -59,18 +59,19 @@ credentials) also runs on `ubuntu-latest`.
   `ecs-qwen-release-host`, gated by a new opt-in repository variable
   `ECS_RELEASE_HOST_RUNNER_ENABLED`:
   `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
+  This remains the `publish` expression. The audio-reuse follow-up removes
+  `x64` from `collect` only, since collection does not execute target binaries.
   With the variable unset (default), both jobs dispatch to `ubuntu-latest`
   exactly as before this change. Operations provisions dedicated machines
   carrying only the `ecs-qwen-release-host` label, then flips the variable.
 - `publish` gains the `release_disk_floor_gate` anchor (after its checkout,
   before install), bringing it under the same ENOSPC fast-fail regime (#10035)
   as every other pool-routed job.
-- `collect` gains a fail-closed `rm -rf prebuilds` step before the artifact
-  merge: on a persistent workspace, `download-artifact` with
-  `merge-multiple: true` merges into existing paths, so a leftover directory
-  from a previous release would re-upload stale prebuilds. `rm` failing
-  (e.g. root-owned leftovers) fails the job instead of publishing a dirty
-  artifact.
+- `collect` and the release workflow's wipe anchor use the shared
+  `prepare-release-runner` action before checkout or artifact merge. On a
+  persistent workspace, `download-artifact` merges into existing paths, so
+  stale files must be removed with workspace containment checks first. A
+  cleanup failure stops the job instead of publishing a dirty artifact.
 - `.github/actionlint.yaml` registers the new label.
 
 ## Design Decisions and Rationale

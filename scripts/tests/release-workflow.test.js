@@ -293,7 +293,7 @@ describe('CUA release workflow', () => {
 });
 
 // The canonical workspace restoration script shared by all nine
-// 'Restore workspace ownership' copies in release.yml. The full wipe (vs
+// 'Restore workspace ownership' action calls in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
 // checkouts persist credentials and the publish job can mint the npm OIDC
 // id-token, so no pre-existing repo state may survive into them. Pin the
@@ -301,7 +301,9 @@ describe('CUA release workflow', () => {
 // pins its sweep copies: a commented-out find, an inserted early exit, or a
 // uniformly dropped ownership ladder all ship green under substring pins,
 // and each of those mutants reopens the incident class this step exists for.
-const canonicalWipe = `set -uo pipefail
+const canonicalWipe = `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
 # Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
 while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
@@ -382,7 +384,15 @@ mkdir "\${release_state}/gh" || exit 1
   echo "NPM_CONFIG_USERCONFIG=\${release_state}/npmrc"
   echo "DOCKER_CONFIG=\${release_state}/docker"
   echo "GH_CONFIG_DIR=\${release_state}/gh"
-} >> "\${GITHUB_ENV:?}"`;
+} >> "\${GITHUB_ENV:?}"
+`;
+const releaseRunnerAction = parse(
+  readFileSync('.github/actions/prepare-release-runner/action.yml', 'utf8'),
+);
+const releaseRunnerScript = readFileSync(
+  '.github/scripts/prepare-release-runner.sh',
+  'utf8',
+);
 
 describe('release workflow', () => {
   // The shard-completeness pin and the zero-test ratchet must gate on the
@@ -444,12 +454,13 @@ describe('release workflow', () => {
         String(step.uses ?? '').includes('actions/checkout'),
       );
       expect(checkoutIndex, id).toBeGreaterThan(0);
-      // Full-string equality against the shared constant: commenting out
-      // the find, inserting an early exit, or dropping the chown/chmod
-      // ladder uniformly from all nine copies keeps every substring and
-      // equality-across-copies pin green while reopening the incident.
-      expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
+      // Every caller must reach the same pinned cleanup implementation.
+      expect(job.steps[restoreIndex]?.uses, id).toBe(
+        '$/.github/actions/prepare-release-runner',
+      );
     }
+    // Full-body equality also catches early exits or a commented-out wipe.
+    expect(releaseRunnerScript).toBe(canonicalWipe);
     // Pool-routed jobs inherit root-owned leftovers whether or not they
     // check out, so the exemption above must never extend to them.
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
@@ -457,6 +468,7 @@ describe('release workflow', () => {
         continue;
       }
       expect(wipesWorkspace(job), id).toBe(true);
+      expect(['read', 'write'], id).toContain(job.permissions?.contents);
     }
   });
 
@@ -568,7 +580,7 @@ describe('release workflow', () => {
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/.github/workflows/audio-capture-prebuilds.yml\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -1896,7 +1908,7 @@ describe('release workflow', () => {
   it.skipIf(
     !hasGnuRealpath || process.getuid?.() === 0 || process.platform === 'win32',
   )('executes the workspace wipe against guard branches', () => {
-    const wipeScript = canonicalWipe;
+    const wipeScript = releaseRunnerScript;
 
     const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
       const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
@@ -3850,9 +3862,19 @@ describe('release lane runner routing', () => {
     // must stay first and self-hosted-only; dropping it (or reordering it
     // after the merge) re-opens that leak.
     const [wipe, ...rest] = audioPrebuildsYaml.jobs.collect.steps;
-    expect(wipe.name).toBe('Clear stale prebuilds (self-hosted)');
-    expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
-    expect(wipe.run).toBe('rm -rf prebuilds');
+    expect(wipe.uses).toBe('$/.github/actions/prepare-release-runner');
+    const [bootstrap] = releaseRunnerAction.runs.steps;
+    expect(bootstrap.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(bootstrap['working-directory']).toBe('${{ runner.temp }}');
+    expect(bootstrap.env.WORKFLOW_SHA).toBe('${{ github.workflow_sha }}');
+    expect(bootstrap.run).toContain('set -euo pipefail');
+    expect(bootstrap.run).toContain(
+      '/contents/.github/scripts/prepare-release-runner.sh?ref=${WORKFLOW_SHA}',
+    );
+    expect(bootstrap.run).toContain(
+      'bash "$bootstrap/prepare-release-runner.sh"',
+    );
+    expect(releaseRunnerScript).toBe(canonicalWipe);
     expect(rest[0].name).toBe('Merge per-platform prebuilds');
   });
 });

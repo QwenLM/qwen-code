@@ -116,8 +116,6 @@ it
         'NPM_CONFIG_USERCONFIG',
         'DOCKER_CONFIG',
         'GH_CONFIG_DIR',
-        'RELEASE_RUNNER_STATE',
-        'NPM_CONFIG_PREFIX',
       ])
         assert.ok(
           parsed[key].startsWith(temp + '/release-state.'),
@@ -126,17 +124,14 @@ it
       assert.equal(parsed.GIT_CONFIG_COUNT, '0');
       assert.equal(parsed.GIT_CONFIG_NOSYSTEM, '1');
       assert.equal(parsed.GIT_CONFIG_PARAMETERS, '');
-      assert.ok(
-        parsed.MAVEN_OPTS.includes(parsed.RELEASE_RUNNER_STATE + '/maven'),
-      );
       assert.equal(readFileSync(parsed.GIT_CONFIG_GLOBAL, 'utf8'), '');
       assert.equal(readFileSync(parsed.NPM_CONFIG_USERCONFIG, 'utf8'), '');
-      assert.equal(statSync(parsed.RELEASE_RUNNER_STATE).mode & 0o077, 0);
+      assert.equal(statSync(parsed.GH_CONFIG_DIR).mode & 0o077, 0);
       const second = run();
       assert.equal(second.status, 0, second.stderr);
       const states = readFileSync(envFile, 'utf8')
         .split('\n')
-        .filter((x) => x.startsWith('RELEASE_RUNNER_STATE='));
+        .filter((x) => x.startsWith('GIT_CONFIG_GLOBAL='));
       assert.equal(new Set(states).size, 2);
     } else assert.equal(readFileSync(envFile, 'utf8'), '');
   } finally {

@@ -106,7 +106,7 @@ jobs:
       # A persistent workspace must be wiped before the merge below, because
       # download-artifact's merge-multiple merges into existing paths and a
       # leftover prebuilds/ would leak into the artifact. The shared preflight
-      # does that with path containment and asserts Node 22, instead of an
+      # does that with path containment, instead of an
       # ad-hoc rm -rf that would follow a leftover symlinked parent out of the
       # workspace. It also isolates inherited tool state on the pool.
       - uses: '$/.github/actions/prepare-release-runner'

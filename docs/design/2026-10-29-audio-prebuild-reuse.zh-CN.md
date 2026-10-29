@@ -59,6 +59,7 @@ Node 版本 pin 和 `prebuildify --target` 参数进入 key 的方式。
 校验**都成功后才发布：
 
 - 查询 API 失败 → 没有候选
+- 指纹计算或临时目录创建失败 → 没有 key，执行原生构建矩阵
 - 下载失败 → 跳过接受步骤（以 `outcome` 为判据，因为 `continue-on-error`
   会改写 `conclusion`）
 - 载荷校验失败 → 该步骤在写出 output 之前就失败
@@ -84,9 +85,15 @@ Node 版本 pin 和 `prebuildify --target` 参数进入 key 的方式。
 `rm -rf` 会按主机上当时的 `packages` 解析：存在残留符号链接时，它删除了
 工作区外的目录并 exit 0，随后的下载又从同一链接写入。
 
-汇总任务此前调用 `node` 却完全没有 Node 契约，只是偶然从 hosted 镜像继承
-了 Node。现在它在 self-hosted 上断言 Node 22，在 hosted 上 pin 一个
-`setup-node`，两者都在校验步骤之前。
+现有 release workflow 的清理锚点也调用同一 action，因此工作区边界检查与
+Git/npm/Docker/gh 状态隔离只有一份实现。action 在 checkout 前按 workflow
+SHA 把脚本下载到 runner 临时目录，不执行工作区残留的副本。Node 准备与现有
+磁盘余量门禁继续独立于工作区清理。
+
+汇总任务在 self-hosted 上使用现有的预装 Node 预检，在 hosted 上把
+`setup-node` 固定为 22.22.3，两者都在载荷校验前执行。原生编译始终使用
+Node 22.22.3。工作区清理本身不依赖 Node，也不增加比现有 self-hosted
+预检更严格的版本门禁。
 
 它的 release 专用 label 去掉了 `x64` 组件：承载 `ecs-qwen-release-host`
 的 runner 是 ARM64，而该 label 里的架构组件不会回退到 hosted——它永远匹配
@@ -97,6 +104,9 @@ Node 版本 pin 和 `prebuildify --target` 参数进入 key 的方式。
 以上都不依赖 `ECS_RELEASE_HOST_RUNNER_ENABLED`。复用决策发生在 `prepare`，
 它本就运行在自己的池上，消费方是现有的发布任务。开关保持未设置，这项改动
 依然生效。
+
+发布任务的 runner 路由保持不变，包括现有的 `x64` 标签。隔离构建通道与
+hosted npm 发布的边界属于 #15832；本 PR 不证明启用该通道已经安全。
 
 ## 验证
 
