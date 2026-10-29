@@ -18,6 +18,8 @@
 
 该操作属于现有持久化 Session writer 路由。保留租户、Workspace、凭证、placement、生命周期、writer 身份、generation、恢复状态和 CSI continuation 校验。先锁定当前 head，再修改两处投影。续租必须绑定当前 active activation ID、epoch 及其原始事务，不能复活已释放、替换或被隔离的 activation。新有效期使用数据库时间。重复的续租序号返回持久化结果，跳号或回退则拒绝。响应结果未知时，以同一序号重试，之后 authority 的工作才能观察新租约。
 
+重试结算了同一仍处于 active 状态的身份租约后，续租直接返回当前 activation 状态，不再额外写一次续租。缺失、已释放、已替换或恢复被阻止的 activation 仍不返回租约，已停止的 writer 仍保持隔离。
+
 续租不推进 committed sequence、journal revision、UUID 链、命令重放历史或 checkpoint revision。恢复时在从不可变字节重建的 activation 上叠加经校验的当前租约元数据。前缀读取不能借用其范围之后的租约。已有原生日志快照保持不可变；当前租约状态从权威 restore head 取得。
 
 ## CSI 与历史证据

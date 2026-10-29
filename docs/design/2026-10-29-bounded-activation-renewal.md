@@ -18,6 +18,8 @@ The internal writer-renewal request can also renew a named activation. The serve
 
 The existing persisted Session writer route owns this operation. Preserve tenant, Workspace, credential, placement, lifecycle, writer identity, generation, recovery and CSI continuation checks. Lock the current head before changing either projection. Bind the renewal to the current active activation ID and epoch and its original transaction. A released, replaced or fenced activation cannot be revived. Use database time for the new expiry. Repeating a renewal sequence returns its durable result; a skipped or regressed sequence is refused. An unknown response is retried under the same sequence before later authority work observes a newer lease.
 
+When a retry settles the lease for the same still-active identity, renewal returns that current activation state without another renewal write. Missing, released, replaced or recovery-blocked activations still return no lease, and a stopped writer remains fenced.
+
 Renewals do not advance committed sequence, journal revision, UUID chain, replay command history or checkpoint revision. Restoration overlays validated current lease metadata on the activation reconstructed from immutable bytes. A prefix read must not borrow a lease from beyond its prefix. Existing native journal snapshots remain immutable; current lease state comes from the authoritative restore head.
 
 ## CSI and historical evidence

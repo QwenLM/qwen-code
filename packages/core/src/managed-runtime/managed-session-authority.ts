@@ -3742,12 +3742,14 @@ export class LocalManagedSessionAuthority {
           !live ||
           live.phase !== 'active' ||
           live.activationId !== current.activationId ||
-          live.epoch !== current.epoch ||
-          live.renewalSeq !== current.renewalSeq
+          live.epoch !== current.epoch
         )
           return { supported: true };
         if (this.writeFailure)
           throw new ManagedSessionWritesStoppedError(this.writeFailure);
+        // Settling a lost acknowledgement can already have renewed this identity.
+        if (live.renewalSeq !== current.renewalSeq)
+          return { supported: true, activation: live };
         this.unsettledActivationRenewal = {
           activation: live,
           leaseDurationMs: input.leaseDurationMs,

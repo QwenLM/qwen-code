@@ -560,6 +560,50 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('returns the settled active compact renewal after a lost acknowledgement', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    let dropAcknowledgements = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (
+        dropAcknowledgements &&
+        requestUrl(input).endsWith('/writers:renew') &&
+        JSON.parse(String(init?.body)).activation
+      )
+        throw new TypeError('lost activation renewal acknowledgement');
+      return response;
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      const initial = authority.currentActivation!;
+      await expect(
+        authority.renewActivation({ leaseDurationMs: 120_000 }),
+      ).rejects.toBeInstanceOf(ManagedSessionAppendUnsettledError);
+      dropAcknowledgements = false;
+      const renewed = await authority.renewActivation({
+        leaseDurationMs: 120_000,
+      });
+      expect(authority.currentActivation).toMatchObject({
+        activationId: initial.activationId,
+        epoch: initial.epoch,
+        phase: 'active',
+        renewalSeq: 1,
+      });
+      expect(authority.currentActivation!.expiresAt).toBeGreaterThan(
+        initial.expiresAt,
+      );
+      expect(authority.writesStopped).toBe(false);
+      expect(server.commits).toHaveLength(2);
+      expect(renewed).toEqual(authority.currentActivation);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it('settles a compact renewal with a lost acknowledgement before releasing the activation', async () => {
     const server = new FakeManagedSessionStore();
     server.activationLeaseRenewal = true;
