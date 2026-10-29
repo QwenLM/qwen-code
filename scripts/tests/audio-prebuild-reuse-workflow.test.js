@@ -125,10 +125,15 @@ describe('audio prebuild reuse wiring', () => {
       'audio-capture-prebuilds-${{ inputs.cache_key }}',
     );
     expect(retain.with['if-no-files-found']).toBe('error');
+    expect(retain.with.overwrite).toBe(true);
     expect(
       collect.steps.find((entry) => entry.name === 'Upload combined prebuilds')
         .with.name,
     ).toBe('audio-capture-prebuilds');
+    expect(
+      collect.steps.find((entry) => entry.name === 'Upload combined prebuilds')
+        .with.overwrite,
+    ).toBe(true);
     // The producer builds the ref the release pinned, not the branch tip.
     expect(
       audioYaml.jobs.build.steps.find((entry) =>
