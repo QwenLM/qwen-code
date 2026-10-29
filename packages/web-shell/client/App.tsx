@@ -13343,6 +13343,16 @@ export function App({
         target.closest('[data-web-shell-context-popover]')
       )
         return;
+      // Exempt controls the user is deliberately activating (editable fields
+      // like the inline rename input, and the pane title's keyboard-activation
+      // path) so the dismisser can't swallow their Enter/Space or preempt the
+      // title's own handler.
+      if (
+        isEditableTarget(target) ||
+        (target instanceof Element &&
+          target.closest('[data-web-shell-pane-title], [role="button"]'))
+      )
+        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 

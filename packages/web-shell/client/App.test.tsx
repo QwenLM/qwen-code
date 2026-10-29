@@ -32643,6 +32643,82 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('lets the inline rename input keep a space with a settled btw answer', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    await flush();
+    testState.prompt = '';
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const title = container.querySelector<HTMLElement>(
+      '[data-testid="chat-context-header"] [data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    await act(async () => {
+      title!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+    expect(input).not.toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Project ');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const space = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => input!.dispatchEvent(space));
+    expect(space.defaultPrevented).toBe(false);
+    expect(input.value).toBe('Project ');
+    expect(btw()).not.toBeNull();
+  });
+
+  it('lets Enter on the pane title open the rename with a settled btw answer', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    await flush();
+    testState.prompt = '';
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const title = container.querySelector<HTMLElement>(
+      '[data-testid="chat-context-header"] [data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    act(() => {
+      title!.focus();
+    });
+    act(() =>
+      title!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+    expect(input).not.toBeNull();
+    expect(btw()).not.toBeNull();
+  });
+
   it('settles visible recap after a same-id attachment replacement', async () => {
     const recap = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
