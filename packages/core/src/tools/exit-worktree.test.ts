@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -69,7 +70,8 @@ describe('ExitWorktreeTool', () => {
   // Real git invocations + user-global hooks can spike to 10-20s alongside
   // other integ tests; bump timeouts so CI / busy local runs aren't flaky.
   // (Phase C #4174.)
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+  const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
+  vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
   describe('metadata', () => {
     it('exposes the correct tool name', () => {

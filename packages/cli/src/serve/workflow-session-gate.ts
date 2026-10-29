@@ -23,6 +23,26 @@ export function redactWorkflowsFromSupportedCommands(
   };
 }
 
+export function redactWorkflowModeFromConfigOptions<
+  T extends { configOptions?: unknown[] | null },
+>(state: T): T {
+  if (!Array.isArray(state.configOptions)) return state;
+  const configOptions = state.configOptions.filter(
+    (option) => asRecord(option)?.['id'] !== 'workflow_mode',
+  );
+  return configOptions.length === state.configOptions.length
+    ? state
+    : { ...state, configOptions };
+}
+
+export function redactWorkflowModeFromSessionState<
+  T extends { state?: { configOptions?: unknown[] | null } },
+>(session: T): T {
+  if (!session.state) return session;
+  const state = redactWorkflowModeFromConfigOptions(session.state);
+  return state === session.state ? session : { ...session, state };
+}
+
 export function redactWorkflowsFromAvailableCommandsEvent<
   T extends { type: string; data: unknown },
 >(event: T): T {
@@ -32,28 +52,34 @@ export function redactWorkflowsFromAvailableCommandsEvent<
   const wrapped = asRecord(data['update']);
   const flat = !wrapped && data['sessionUpdate'] !== undefined;
   const candidate = flat ? data : wrapped;
-  if (
-    !candidate ||
-    candidate['sessionUpdate'] !== 'available_commands_update'
-  ) {
+  if (!candidate) return event;
+  let nextCandidate: Record<string, unknown>;
+  if (candidate['sessionUpdate'] === 'config_option_update') {
+    const configOptions = candidate['configOptions'];
+    if (!Array.isArray(configOptions)) return event;
+    nextCandidate = redactWorkflowModeFromConfigOptions({
+      ...candidate,
+      configOptions,
+    });
+    if (nextCandidate['configOptions'] === configOptions) return event;
+  } else if (candidate['sessionUpdate'] === 'available_commands_update') {
+    const availableCommands = candidate['availableCommands'];
+    if (!Array.isArray(availableCommands)) return event;
+    const filteredCommands = availableCommands.filter(
+      (command) => asRecord(command)?.['name'] !== 'workflows',
+    );
+    if (filteredCommands.length === availableCommands.length) return event;
+    nextCandidate = { ...candidate, availableCommands: filteredCommands };
+  } else {
     return event;
   }
-  const availableCommands = candidate['availableCommands'];
-  if (!Array.isArray(availableCommands)) return event;
-  const filteredCommands = availableCommands.filter(
-    (command) => asRecord(command)?.['name'] !== 'workflows',
-  );
-  if (filteredCommands.length === availableCommands.length) return event;
-  const nextCandidate = {
-    ...candidate,
-    availableCommands: filteredCommands,
-  };
   if (flat) return { ...event, data: nextCandidate };
   return { ...event, data: { ...data, update: nextCandidate } };
 }
 
 export function redactWorkflowsFromReplayArrays<
   T extends {
+    state?: { configOptions?: unknown[] | null };
     compactedReplay?: BridgeEvent[];
     liveJournal?: BridgeEvent[];
     lifecycleReplay?: BridgeEvent[];
@@ -64,9 +90,9 @@ export function redactWorkflowsFromReplayArrays<
     !session.liveJournal &&
     !session.lifecycleReplay
   )
-    return session;
+    return redactWorkflowModeFromSessionState(session);
   return {
-    ...session,
+    ...redactWorkflowModeFromSessionState(session),
     ...(session.compactedReplay
       ? {
           compactedReplay: session.compactedReplay.map(

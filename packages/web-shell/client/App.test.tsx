@@ -88,6 +88,8 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
+import { DaemonAvailabilityContext } from './daemon/availability-context.js';
+import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
@@ -870,6 +872,8 @@ const {
       provisionalTurns:
         [] as import('./daemon/session/turn-navigation-store').DaemonProvisionalTurn[],
       promptStatus: 'idle' as 'idle' | 'running',
+      notices: [] as import('./daemon/session/types').DaemonSessionNotice[],
+      dismissNotice: vi.fn(),
       ownerVersion: 0,
       recoveryVersion: 0,
       prompt: 'hello',
@@ -1179,7 +1183,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       onAcceptFollowup: mockFollowup.onAcceptFollowup,
       onDismissFollowup: mockFollowup.onDismissFollowup,
     }),
-    useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
+    useSessionNotices: () => ({
+      notices: testState.notices,
+      dismissNotice: testState.dismissNotice,
+    }),
     usePromptStatus: () => testState.promptStatus,
     useTurnNavigationState: () => ({
       mode: 'ready',
@@ -3578,6 +3585,51 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-testid="sources-section"] [role="alert"]'),
     ).toBeNull();
+  });
+
+  it('clears an attachment failure alert when the daemon goes unavailable', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    mockSessionActions.listAttachments.mockRejectedValue(
+      new TypeError('Failed to fetch'),
+    );
+    const { server, availability } = offlineDaemon();
+    try {
+      const { container } = renderApp(
+        { environmentPanel: { items: ['sources'] } },
+        undefined,
+        false,
+        false,
+        availability,
+      );
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click(),
+      );
+      for (const delay of [0, 1_000, 0, 1_000, 0]) {
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      expect(
+        container.querySelector(
+          '[data-testid="sources-section"] [role="alert"]',
+        ),
+      ).not.toBeNull();
+      server.healthy = false;
+      await act(async () => availability.check(true));
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="sources-section"] [role="alert"]',
+        ),
+      ).toBeNull();
+    } finally {
+      availability.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it('retries a failed first attachment listing without flashing empty', async () => {
@@ -11909,6 +11961,7 @@ function renderApp(
   notificationTarget?: EventTarget,
   standalone = false,
   urlNavigation = false,
+  availability?: ReturnType<typeof offlineDaemon>['availability'],
 ): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -11919,7 +11972,7 @@ function renderApp(
   const root = createRoot(container);
   const doRender = (nextProps: React.ComponentProps<typeof App> = props) => {
     act(() => {
-      root.render(
+      const content = (
         <StandaloneContext.Provider value={standalone}>
           <TurnNotificationNavigationContext.Provider
             value={notificationTarget}
@@ -11940,7 +11993,16 @@ function renderApp(
               <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
             )}
           </TurnNotificationNavigationContext.Provider>
-        </StandaloneContext.Provider>,
+        </StandaloneContext.Provider>
+      );
+      root.render(
+        availability ? (
+          <DaemonAvailabilityContext.Provider value={availability}>
+            {content}
+          </DaemonAvailabilityContext.Provider>
+        ) : (
+          content
+        ),
       );
     });
   };
@@ -12149,6 +12211,8 @@ beforeEach(() => {
   testState.turnLocations.clear();
   testState.provisionalTurns = [];
   testState.promptStatus = 'idle';
+  testState.notices = [];
+  testState.dismissNotice.mockReset();
   // Split persistence uses sessionStorage; clear it so one test's split doesn't
   // auto-restore into the next test's App mount.
   try {
@@ -19653,6 +19717,7 @@ describe('App session callbacks', () => {
   describe('cancelling a prompt before it produced anything', () => {
     const snapshot = (turnIndex: number) => ({
       promptId: `prompt-${turnIndex}`,
+      daemonPromptId: turnIndex === 1 ? PROMPT_ID : 'daemon-first',
       turnIndex,
       timestamp: '2026-01-01T00:00:00.000Z',
       diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
@@ -19670,7 +19735,7 @@ describe('App session callbacks', () => {
       mockSessionActions.sendPrompt.mockImplementation((text, options) => {
         testState.blocks = [
           ...testState.blocks,
-          { id: 'u1', kind: 'user', text },
+          { id: 'u1', kind: 'user', text, promptId: PROMPT_ID },
         ];
         options?.onAdmissionStarted?.();
         options?.onAdmitted?.({ promptId: PROMPT_ID });
@@ -19743,6 +19808,40 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
     }
 
+    it.each(['checkpoint', 'user'] as const)(
+      'restores cancelled text without rewinding a duplicated %s identity',
+      async (kind) => {
+        if (kind === 'checkpoint') {
+          mockSessionActions.getRewindSnapshots.mockResolvedValue({
+            snapshots: [
+              snapshot(1),
+              { ...snapshot(2), daemonPromptId: PROMPT_ID },
+            ],
+          });
+        }
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel(() => {
+          if (kind === 'user') {
+            testState.blocks = [
+              {
+                id: 'duplicate-user',
+                kind: 'user',
+                text: 'older duplicate',
+                promptId: PROMPT_ID,
+              },
+              ...testState.blocks,
+            ];
+          }
+        });
+        await settleTurn();
+        expect(testState.prompt).toBe('oops typo');
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+      },
+    );
+
     it('hands the prompt back to the composer and rewinds the turn once it settles', async () => {
       const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
       renderApp({ language: 'en' });
@@ -19794,7 +19893,7 @@ describe('App session callbacks', () => {
           await Promise.resolve();
           testState.blocks = [
             ...testState.blocks,
-            { id: 'u1', kind: 'user', text },
+            { id: 'u1', kind: 'user', text, promptId: PROMPT_ID },
           ];
           options?.onAdmissionStarted?.();
           options?.onAdmitted?.({ promptId: PROMPT_ID });
@@ -19827,7 +19926,7 @@ describe('App session callbacks', () => {
         });
       });
 
-      it('is taken back when a turn of this client settles cancelled', async () => {
+      it('returns an unassociated prompt to the composer without rewinding another turn', async () => {
         renderApp({ language: 'en' });
         await flush();
         await submitAndCancel();
@@ -19836,9 +19935,7 @@ describe('App session callbacks', () => {
         await settleTurn('cancelled', 'http-prompt-unseen');
 
         expect(testState.prompt).toBe('oops typo');
-        await vi.waitFor(() =>
-          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
-        );
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
       });
 
       it("is only stopped when another client's turn settles", async () => {
@@ -20346,7 +20443,14 @@ describe('App session callbacks', () => {
 
   describe('inline user message edits', () => {
     beforeEach(() => {
-      testState.blocks = [{ id: 'u0', kind: 'user', text: 'original' }];
+      testState.blocks = [
+        {
+          id: 'u0',
+          kind: 'user',
+          text: 'original',
+          promptId: 'daemon-original',
+        },
+      ];
       mockStore.appendLocalUserMessage.mockImplementation(
         (text, images, meta, files) => {
           testState.blocks = [
@@ -20366,7 +20470,8 @@ describe('App session callbacks', () => {
         snapshots: [
           {
             promptId: 'prompt-1',
-            turnIndex: 0,
+            daemonPromptId: 'daemon-original',
+            turnIndex: 2,
             timestamp: '2026-01-01T00:00:00.000Z',
             diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
           },
@@ -20389,6 +20494,47 @@ describe('App session callbacks', () => {
         content,
       );
     }
+
+    it.each(['missing block identity', 'duplicate checkpoint identity'])(
+      'refuses an inline edit with %s without changing the transcript',
+      async (kind) => {
+        if (kind === 'missing block identity') {
+          testState.blocks = [{ id: 'u0', kind: 'user', text: 'original' }];
+        }
+        const checkpoint = {
+          promptId: 'prompt-1',
+          daemonPromptId: 'daemon-original',
+          turnIndex: 0,
+          timestamp: '2026-01-01T00:00:00.000Z',
+          diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+        };
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots:
+            kind === 'duplicate checkpoint identity'
+              ? [
+                  checkpoint,
+                  {
+                    ...checkpoint,
+                    promptId: 'another-checkpoint',
+                    turnIndex: 7,
+                  },
+                ]
+              : [checkpoint],
+        });
+        const before = [...testState.blocks];
+        renderApp({ language: 'en' });
+        await flush();
+        let accepted;
+        await act(async () => {
+          accepted = await submit();
+        });
+        expect(accepted).toBe(false);
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(testState.blocks).toEqual(before);
+      },
+    );
 
     it('opens without rewinding and sends only after preflight and rewind', async () => {
       const prepareSubmit = vi.fn().mockResolvedValue(undefined);
@@ -20434,7 +20580,12 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
         expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
         expect(testState.blocks).toEqual([
-          { id: 'u0', kind: 'user', text: 'original' },
+          {
+            id: 'u0',
+            kind: 'user',
+            text: 'original',
+            promptId: 'daemon-original',
+          },
         ]);
         expect(testState.prompt).toBe('hello');
       },
@@ -20521,7 +20672,15 @@ describe('App session callbacks', () => {
           mockSessionActions.getRewindSnapshots.mockImplementationOnce(
             async () => {
               await gate.promise;
-              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+              return {
+                snapshots: [
+                  {
+                    promptId: 'prompt-1',
+                    daemonPromptId: 'daemon-original',
+                    turnIndex: 2,
+                  },
+                ],
+              };
             },
           );
         } else {
@@ -20656,6 +20815,7 @@ describe('App session callbacks', () => {
               id: 'u0',
               kind: 'user',
               text: 'original',
+              promptId: 'daemon-original',
               images: [{ data: 'AQID', mimeType: 'image/png' }],
             },
           ];
@@ -20702,16 +20862,28 @@ describe('App session callbacks', () => {
         '@qwen-code/sdk/daemon'
       );
       const transcript = createDaemonTranscriptStore();
-      transcript.appendLocalUserMessage('original');
+      transcript.dispatch({
+        type: 'user.text.delta',
+        text: 'original',
+        promptId: 'daemon-original',
+      });
       testState.blocks = transcript.getSnapshot().blocks;
-      const snapshots = [{ promptId: 'original', turnIndex: 0 }];
+      const snapshots = [
+        {
+          promptId: 'original',
+          daemonPromptId: 'daemon-original',
+          turnIndex: 2,
+        },
+      ];
       mockSessionActions.getRewindSnapshots.mockImplementation(async () => ({
         snapshots: [...snapshots],
       }));
       mockSessionActions.rewindSession.mockImplementation(async (promptId) => {
         transcript.dispatch({
           type: 'session.rewound',
-          targetTurnIndex: 0,
+          targetTurnIndex: snapshots[0].turnIndex,
+          daemonPromptId: snapshots[0].daemonPromptId,
+          replay: [],
           promptId,
         });
         testState.blocks = transcript.getSnapshot().blocks;
@@ -20729,8 +20901,23 @@ describe('App session callbacks', () => {
         async (text, options) => {
           if (options?.optimisticUserMessage !== false)
             transcript.appendLocalUserMessage(text);
+          const blockId = transcript.getSnapshot().blocks.at(-1)!.id;
+          const current = transcript.getSnapshot();
+          transcript.reset({
+            ...current,
+            retainedBytes: undefined,
+            blocks: current.blocks.map((block) =>
+              block.id === blockId
+                ? { ...block, promptId: 'daemon-accepted' }
+                : block,
+            ),
+          });
           testState.blocks = transcript.getSnapshot().blocks;
-          snapshots.push({ promptId: 'accepted', turnIndex: 0 });
+          snapshots.push({
+            promptId: 'accepted',
+            daemonPromptId: 'daemon-accepted',
+            turnIndex: 6,
+          });
           options?.onAdmissionStarted?.();
           options?.onAdmitted?.();
         },
@@ -20752,6 +20939,13 @@ describe('App session callbacks', () => {
       });
       act(() => {
         rerender();
+      });
+      // The retry reuses the block the failed attempt appended.
+      expect(
+        mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
+      ).toMatchObject({
+        optimisticUserMessage: false,
+        bindBlockId: failedUsers[0].id,
       });
       const users = transcript
         .getSnapshot()
@@ -20818,6 +21012,7 @@ describe('App session callbacks', () => {
           id: 'u0',
           kind: 'user',
           text: 'original',
+          promptId: 'daemon-original',
           images: [
             { data: 'aW5saW5l', mimeType: 'image/png' },
             { data: '', mimeType: 'image/png', attachmentId: 'image-ref' },
@@ -23265,6 +23460,41 @@ describe('App session callbacks', () => {
       'retained-branch',
     );
   });
+
+  it.each([false, true])(
+    'clears failed Git snapshots unless recovery blocked the read: %s',
+    async (offline) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.gitBranch = undefined;
+      mockConnection.gitStatus = undefined;
+      const workspaceGit = vi
+        .fn()
+        .mockResolvedValue({ branch: 'retained-branch' });
+      mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+        workspaceGit,
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      }));
+      renderApp({ composerToolbarActions: ['gitBranch'] });
+      await flush();
+      expect(testState.latestChatEditorProps?.gitBranch).toBe(
+        'retained-branch',
+      );
+      const { DaemonUnavailableError } = await import('./daemon/availability');
+      workspaceGit.mockRejectedValue(
+        offline ? new DaemonUnavailableError() : new Error('HTTP 404'),
+      );
+      await act(async () => window.dispatchEvent(new Event('focus')));
+      await flush();
+      if (offline)
+        expect(testState.latestChatEditorProps?.gitBranch).toBe(
+          'retained-branch',
+        );
+      else
+        expect(testState.latestChatEditorProps?.gitBranch).not.toBe(
+          'retained-branch',
+        );
+    },
+  );
 
   it('fetches the composer git status on both the fast and the wait:true fresh path', async () => {
     mockConnection.sessionId = undefined;
@@ -33498,6 +33728,141 @@ describe('App session callbacks', () => {
       '/Deploy staging',
       expect.any(Object),
     );
+  });
+
+  it.each([true, false])(
+    'calls the local slash handler while offline, without daemon dispatch (handled=%s)',
+    async (handled) => {
+      const { availability } = offlineDaemon();
+      try {
+        await availability.check(true);
+        const onSlashCommand = vi.fn(() => handled);
+        const { container } = renderApp(
+          { onSlashCommand },
+          undefined,
+          false,
+          false,
+          availability,
+        );
+        await flush();
+        testState.prompt = '/deploy production';
+        await clickSubmit(container);
+        expect(onSlashCommand).toHaveBeenCalledOnce();
+        testState.prompt = 'Ordinary offline draft';
+        await clickSubmit(container);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(onSlashCommand).toHaveBeenCalledOnce();
+      } finally {
+        availability.dispose();
+      }
+    },
+  );
+
+  it('runs built-in local slash commands while offline', async () => {
+    const { availability } = offlineDaemon();
+    const onThemeChange = vi.fn();
+    try {
+      await availability.check(true);
+      const { container } = renderApp(
+        { onThemeChange },
+        undefined,
+        false,
+        false,
+        availability,
+      );
+      await flush();
+      testState.prompt = '/theme dark';
+      await clickSubmit(container);
+      await flush();
+      expect(onThemeChange).toHaveBeenCalledWith('dark');
+      testState.prompt = '!echo hello';
+      await clickSubmit(container);
+      await flush();
+      await flush();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('/help');
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-dialog-title="Help"]'),
+      ).not.toBeNull();
+    } finally {
+      availability.dispose();
+    }
+  });
+
+  it('keeps actionable connection notices while offline and suppresses stream noise', async () => {
+    const { availability } = offlineDaemon();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await availability.check(true);
+      testState.notices = [
+        {
+          id: 'journal',
+          severity: 'warning',
+          category: 'connection',
+          operation: 'load_session',
+          code: 'daemon.live_journal_repair.failed',
+          message: 'Could not restore the complete turn.',
+          createdAt: 0,
+        },
+        {
+          id: 'stream',
+          severity: 'error',
+          category: 'connection',
+          operation: 'stream',
+          code: 'daemon.session_died',
+          message: 'Session died.',
+          createdAt: 0,
+        },
+      ];
+      testState.dismissNotice.mockClear();
+      renderApp({}, undefined, false, false, availability);
+      await flush();
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] daemon notice',
+        expect.objectContaining({ id: 'journal' }),
+      );
+      expect(warn).not.toHaveBeenCalledWith(
+        '[web-shell] daemon notice',
+        expect.objectContaining({ id: 'stream' }),
+      );
+      expect(testState.dismissNotice).toHaveBeenCalledWith('journal');
+      expect(testState.dismissNotice).toHaveBeenCalledWith('stream');
+    } finally {
+      warn.mockRestore();
+      availability.dispose();
+    }
+  });
+
+  it('keeps stream notices for a healthy daemon', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      testState.notices = [
+        {
+          id: 'stream',
+          severity: 'error',
+          category: 'connection',
+          operation: 'stream',
+          code: 'daemon.session_died',
+          message: 'Session died.',
+          createdAt: 0,
+        },
+      ];
+      testState.dismissNotice.mockClear();
+      renderApp();
+      await flush();
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] daemon notice',
+        expect.objectContaining({ id: 'stream' }),
+      );
+      expect(testState.dismissNotice).toHaveBeenCalledWith('stream');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('lets the host handle a slash command instead of forwarding it', async () => {
@@ -49517,6 +49882,51 @@ describe('approval mode allowlist', () => {
 });
 
 describe('Managed home integration', () => {
+  it('keeps the offline banner when Managed home hides an open floating artifact', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { availability } = offlineDaemon();
+    try {
+      const { container } = renderApp(
+        { managedAgentProvider: managedProvider(), language: 'en' },
+        undefined,
+        false,
+        false,
+        availability,
+      );
+      await flush();
+      await act(async () =>
+        testState.latestChatEditorProps?.onAttachmentPreview?.({
+          name: 'kept.txt',
+          text: 'Keep open',
+        }),
+      );
+      await flush();
+      expect(document.body.textContent).toContain('kept.txt');
+      await act(async () => availability.check(true));
+      await chooseBackend(container, 'Managed');
+      const managedHome = container.querySelector(
+        '[data-testid="managed-home"]',
+      );
+      expect(managedHome).not.toBeNull();
+      expect(managedHome?.getAttribute('aria-hidden')).not.toBe('true');
+      expect(
+        container.querySelector('[data-testid="daemon-connection-banner"]'),
+      ).not.toBeNull();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      availability.dispose();
+    }
+  });
+
   it.each([undefined, 'managed-target'])(
     'passes the Managed Extensions target through Plugins (Session: %s)',
     async (sessionId) => {

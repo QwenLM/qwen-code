@@ -381,6 +381,7 @@ describe('UiTelemetryService', () => {
       apiResponse('qwen3-coder', 500, [10, 20, 30, 0, 0], {
         prompt_id: 'user-query',
         ttft_ms: 100,
+        generation_ms: 400,
         ...overrides,
       });
 
@@ -391,6 +392,7 @@ describe('UiTelemetryService', () => {
           model: 'qwen-plus',
           duration_ms: 800,
           ttft_ms: 200,
+          generation_ms: 600,
           output_token_count: 30,
         }),
       );
@@ -458,17 +460,31 @@ describe('UiTelemetryService', () => {
       expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
     });
 
-    it('clamps sampling time when TTFT exceeds request duration', () => {
-      service.addEvent(timedResponse({ duration_ms: 100, ttft_ms: 150 }));
+    it('leaves events recorded without generation_ms out of timing', () => {
+      service.addEvent(
+        timedResponse({ ttft_ms: 1_500, generation_ms: undefined }),
+      );
+
+      expect(service.getMetrics().generation).toBeUndefined();
+      expect(service.getMetrics().models['qwen3-coder'].tokens.candidates).toBe(
+        20,
+      );
+    });
+
+    it('keeps sub-100ms generation windows out of output speed', () => {
+      service.addEvent(
+        timedResponse({ generation_ms: 99, output_token_count: 95 }),
+      );
+      service.addEvent(
+        timedResponse({ generation_ms: 100, output_token_count: 10 }),
+      );
 
       expect(service.getMetrics().generation).toMatchObject({
-        timedRequests: 1,
-        totalGenerationDurationMs: 0,
-        totalThroughputOutputTokens: 0,
-        last: {
-          ttftMs: 150,
-          generationDurationMs: 0,
-        },
+        timedRequests: 2,
+        totalTtftMs: 200,
+        totalGenerationDurationMs: 100,
+        totalThroughputOutputTokens: 10,
+        last: { generationDurationMs: 100, outputTokens: 10 },
       });
     });
 

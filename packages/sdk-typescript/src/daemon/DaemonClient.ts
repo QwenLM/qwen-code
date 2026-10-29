@@ -1281,6 +1281,45 @@ export class DaemonClient {
     return new WorkspaceDaemonClient(this, urlEncode(workspaceCwd));
   }
 
+  /**
+   * Issue a native REST request for a daemon route without ACP translation.
+   * HTTP status and response-body handling belong to the caller. The timeout
+   * covers the connection through response headers, not a streaming body;
+   * pass a signal to cancel body consumption, or `0` to disable the timer.
+   */
+  async requestRest(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs?: number,
+  ): Promise<Response> {
+    if (
+      !/^\/(?![/\\\t\r\n])/.test(path) ||
+      new URL(path, 'http://daemon.invalid').origin !== 'http://daemon.invalid'
+    ) {
+      throw new Error('Daemon REST requests require an absolute route path');
+    }
+    const base = new URL(`${this.baseUrl}/`, 'http://daemon.invalid');
+    if (
+      !new URL(
+        `${this.baseUrl}${path}`,
+        'http://daemon.invalid',
+      ).pathname.startsWith(base.pathname)
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
+    const headers = new Headers(this.headers());
+    new Headers(init.headers).forEach((value, name) =>
+      headers.set(name, value),
+    );
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      { ...init, headers },
+      undefined,
+      timeoutMs,
+      'rest',
+    );
+  }
+
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
@@ -6511,17 +6550,37 @@ export class DaemonClient {
     );
   }
 
-  async setSessionConfigOption(
+  setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setSessionConfigOption(
+    sessionId: string,
+    configId: 'workflow_mode',
+    value: 'on' | 'off',
+    clientOrOptions?: string | { clientId?: string },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort' | 'workflow_mode',
+    value: ReasoningSelection | 'on' | 'off',
     clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
         ? { clientId: clientOrOptions }
         : clientOrOptions;
-    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+    if (
+      configId === 'workflow_mode' &&
+      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
+    ) {
+      throw new Error(
+        'Workflow mode requires on/off and does not accept persist',
+      );
+    }
+    const result = await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
       {
@@ -6536,6 +6595,11 @@ export class DaemonClient {
         clientId: options?.clientId,
       },
     );
+    // ACP returns configOptions only; a successful Workflow mode write has
+    // already committed the session state before acknowledging the request.
+    return configId === 'workflow_mode' && this.transport.type !== 'rest'
+      ? { ...result, persisted: result.persisted ?? true }
+      : result;
   }
 
   async setSessionLanguage(
