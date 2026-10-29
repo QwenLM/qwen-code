@@ -2541,6 +2541,18 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toBe('C:\\Users\\中文');
     });
 
+    it('reads a GBK character split after its lead byte as UTF-8 when the whole output is UTF-8', async () => {
+      useSystemEncoding('gbk');
+      // 目 in GBK (C4 BF) is also the UTF-8 character Ŀ. The complete output
+      // is valid UTF-8, so it is read as UTF-8, as the pseudo-terminal path
+      // reads it, although the chunk split led the first decoder to GBK.
+      const { result } = await runChunks('dir', [
+        Buffer.concat([Buffer.from('C:\\Users\\'), Buffer.from('c4', 'hex')]),
+        Buffer.from('bf', 'hex'),
+      ]);
+      expect(result.output).toBe('C:\\Users\\Ŀ');
+    });
+
     it('decodes complete output that ends like a cut-off UTF-8 character with the code page', async () => {
       useSystemEncoding('gbk');
       // 目浣 in GBK (C4 BF E4 BD) reads as UTF-8 Ŀ followed by the start of
@@ -2682,6 +2694,7 @@ describe('ShellExecutionService child_process fallback', () => {
       ['unknown', null],
       ['plain ASCII (macOS with no locale set)', 'us-ascii'],
       ['plain ASCII (a locale that reports the ascii label)', 'ascii'],
+      ['GBK (the UTF-8 output outweighs one stray byte)', 'gbk'],
     ])(
       'still picks the decoder from the first chunk when the system encoding is %s',
       async (_label, encoding) => {

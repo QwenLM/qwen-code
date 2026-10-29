@@ -364,23 +364,35 @@ function hasLegacyCodePage(): boolean {
 }
 
 /**
- * Decodes one stream's complete output with the usual detection: UTF-8 when
- * it is UTF-8, otherwise the code page. Output cut off at the capture limit
- * or by a cancel or kill can end partway through a UTF-8 character; it still
- * counts as UTF-8 when the bytes before that character are UTF-8 and hold a
- * multibyte character.
+ * Decodes one stream's complete output: UTF-8 when it is UTF-8, otherwise
+ * the code page unless the output is mostly UTF-8. Output cut off at the
+ * capture limit or by a cancel or kill can end partway through a UTF-8
+ * character; it still counts as UTF-8 when the bytes before that character
+ * are UTF-8 and hold a multibyte character.
  */
 function decodeCompleteOutput(bytes: Buffer, wasCut: boolean): string {
-  if (wasCut && !isUtf8(bytes)) {
-    try {
-      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes, {
-        stream: true,
-      });
-      if (/[\u0080-\uffff]/.test(text)) {
-        return new TextDecoder('utf-8').decode(bytes);
+  if (!isUtf8(bytes)) {
+    if (wasCut) {
+      try {
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes, {
+          stream: true,
+        });
+        if (/[\u0080-\uffff]/.test(text)) {
+          return new TextDecoder('utf-8').decode(bytes);
+        }
+      } catch {
+        // Not UTF-8 before the cut either.
       }
-    } catch {
-      // Not UTF-8 before the cut either.
+    }
+    // A few stray bytes in UTF-8 text (a Latin-1 file name in a git log)
+    // keep it UTF-8: it decodes to more characters than replacement
+    // characters, while code page text such as GBK decodes to mostly
+    // replacement characters.
+    const text = new TextDecoder('utf-8').decode(bytes);
+    const replacements = text.match(/\ufffd/g)?.length ?? 0;
+    const characters = text.match(/[^\p{ASCII}\ufffd]/gu)?.length ?? 0;
+    if (characters > replacements) {
+      return text;
     }
   }
   return decodeBufferedOutput(bytes);
