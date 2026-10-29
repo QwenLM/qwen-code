@@ -236,6 +236,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   scheduled_task_gate: NO_MANAGED_EQUIVALENT(
     'no scheduled-task gate in Managed automations',
   ),
+  autofix_pr_watches: NO_MANAGED_EQUIVALENT(
+    'no /autofix-pr watch in a Managed workspace',
+  ),
   session_monitor_tool_correlation: {
     standing: 'managed',
     evidence: 'tool:monitor',
@@ -386,6 +389,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed stateless generation route',
   ),
   session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
+  session_btw_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed streaming side-question route',
+  ),
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
@@ -561,7 +567,6 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'SESSION_GET',
   'SESSION_RENAME',
   'SESSION_DELETE',
-  'SESSION_CWD_CHANGE',
   'SESSION_OPERATION_GET',
   'SESSION_MODELS',
   'SESSION_MCP',
@@ -652,6 +657,7 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
+  'SESSION_WORKTREE',
 ];
 
 /**

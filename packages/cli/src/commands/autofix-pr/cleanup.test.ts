@@ -25,6 +25,31 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: stdout,
   writeStderrLineSafe: () => {},
 }));
+// What happens while cleanup reads the watch, and while it asks the remote
+// for the PR's head: a fix attempt that opens meanwhile.
+const hooks = vi.hoisted(() => ({
+  afterRead: null as (() => void) | null,
+  remoteHead: null as (() => string) | null,
+}));
+vi.mock('./state.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./state.js')>();
+  return {
+    ...actual,
+    readState: (...args: Parameters<typeof actual.readState>) => {
+      const state = actual.readState(...args);
+      hooks.afterRead?.();
+      return state;
+    },
+  };
+});
+vi.mock('./worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./worktree.js')>();
+  return {
+    ...actual,
+    remoteRef: (...args: Parameters<typeof actual.remoteRef>) =>
+      hooks.remoteHead ? hooks.remoteHead() : actual.remoteRef(...args),
+  };
+});
 
 import { runCleanup } from './cleanup.js';
 import {
@@ -32,6 +57,7 @@ import {
   historyPath,
   readHistory,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -41,6 +67,7 @@ describe('runCleanup (real git)', () => {
   let headSha: string;
   let savedCwd: string;
   let savedSession: string | undefined;
+  let savedServe: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
 
   const run = (cwd: string, ...args: string[]) =>
@@ -79,17 +106,26 @@ describe('runCleanup (real git)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, state);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     stdout.mockClear();
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    // `watchRoot` roots a daemon session's watch at its own worktree; a runner
+    // under `qwen serve` must not leak that into these clone-rooted tests.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(repo);
   });
 
   afterEach(() => {
+    hooks.afterRead = null;
+    hooks.remoteHead = null;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -255,6 +291,74 @@ describe('runCleanup (real git)', () => {
       reason: expect.stringMatching(/uncommitted changes/),
     });
     expect(kept.lastKnownHeadSha).toBe(headSha);
+  });
+
+  describe('a fix attempt that opens while it runs', () => {
+    const openAttempt = () =>
+      writeFileSync(
+        paths.fixPath,
+        JSON.stringify({
+          version: 1,
+          attempt: '0123456789ab',
+          task: 'aaaaaaaaaaaa',
+          head: headSha,
+          startedAt: new Date().toISOString(),
+        }),
+      );
+    const refused = /a fix agent is working in PR #7's worktree/;
+
+    it('keeps the worktree it was about to remove', () => {
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      const pushed = run(paths.worktreePath, 'rev-parse', 'HEAD');
+      // The commit is on the PR: nothing would be lost.
+      hooks.remoteHead = () => {
+        openAttempt();
+        return pushed;
+      };
+      expect(() => runCleanup(7, false)).toThrow(refused);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(branchExists()).toBe(true);
+      expect(existsSync(paths.statePath)).toBe(true);
+    });
+
+    it('leaves the watch it would end with the work it keeps running', () => {
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        watch: { every: 2, reply: true, instructions: '' },
+      });
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      hooks.remoteHead = () => {
+        openAttempt();
+        return headSha;
+      };
+      expect(() => runCleanup(7, false)).toThrow(refused);
+      expect(readState(paths.statePath)).toMatchObject({
+        watch: { every: 2 },
+      });
+      expect(readState(paths.statePath)).not.toHaveProperty('ended');
+    });
+
+    it('names the running fix before anything else, an unreadable watch too', () => {
+      // Before it reads the watch: a state file it cannot read would
+      // otherwise send the user to --force, which then refuses the same.
+      writeFileSync(paths.statePath, '{');
+      openAttempt();
+      for (const force of [false, true]) {
+        expect(() => runCleanup(7, force)).toThrow(refused);
+      }
+      expect(existsSync(paths.worktreePath)).toBe(true);
+    });
+
+    it('keeps the worktree --force would discard', () => {
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      hooks.afterRead = () => {
+        hooks.afterRead = null;
+        openAttempt();
+      };
+      expect(() => runCleanup(7, true)).toThrow(refused);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(existsSync(paths.statePath)).toBe(true);
+    });
   });
 
   it('keeps everything when the worktree has unpushed commits', () => {
@@ -549,6 +653,44 @@ describe('runCleanup (real git)', () => {
     } finally {
       process.chdir(repo);
       rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('ends a main-rooted watch from a daemon session in a linked worktree', () => {
+    // The watch is rooted in the main worktree (beforeEach); a daemon session
+    // in a linked worktree must still discover and end it, not report a
+    // nonexistent path under its own root and leave the real watch running.
+    const linked = join(dirname(repo), `${basename(repo)}-linked`);
+    run(repo, 'worktree', 'add', '-q', '--detach', linked);
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linked);
+    try {
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(existsSync(paths.worktreePath)).toBe(false);
+      expect(branchExists()).toBe(false);
+    } finally {
+      process.chdir(repo);
+      delete process.env['QWEN_CODE_SERVE'];
+      run(repo, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('ends the watch despite a sibling worktree with a malformed .qwen/tmp', () => {
+    const sibling = join(dirname(repo), `${basename(repo)}-sibling`);
+    run(repo, 'worktree', 'add', '-q', '--detach', sibling);
+    mkdirSync(join(sibling, '.qwen'), { recursive: true });
+    writeFileSync(join(sibling, '.qwen', 'tmp'), 'not a directory');
+    try {
+      // Discovery must isolate the sibling's ENOTDIR, not abort: the healthy
+      // main-rooted watch is still found and ended.
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(branchExists()).toBe(false);
+    } finally {
+      run(repo, 'worktree', 'remove', '--force', sibling);
+      rmSync(sibling, { recursive: true, force: true });
     }
   });
 });

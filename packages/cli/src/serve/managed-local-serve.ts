@@ -50,6 +50,8 @@ export function managedLocalJavaEnvironment(
   return {
     ...environment,
     SPRING_APPLICATION_JSON: JSON.stringify({
+      'qwen.managed-agent.runtime-broker.session-worktrees-enabled':
+        process.platform !== 'win32',
       'qwen.managed-agent.model-catalog': models,
       'qwen.managed-agent.definition-models': models.map(
         (model) => model.modelId,

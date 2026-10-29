@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -72,11 +73,11 @@ class WorkspaceMigrationMySqlIT {
     }
 
     @Test
-    void freshBaselineContainsOneGcAuthorityAndExactly38Tables() {
+    void freshBaselineContainsOneGcAuthorityAndEveryContractTable() {
         ManagedSchema.initialize(data);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema"
-                                        + " = ?", Integer.class, schema)).isEqualTo(38);
+                                        + " = ?", Integer.class, schema)).isEqualTo(ManagedSchemaContract.TABLES.size());
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
                                         + " 'SESSION_RESOURCE_GC'", Integer.class)).isZero();
@@ -108,7 +109,7 @@ class WorkspaceMigrationMySqlIT {
 
     @Test
     @Timeout(30)
-    void cwdWaitingForMigrationSeesCommittedFenceAndPreservesReplay() throws Exception {
+    void legacyCwdSettlementWaitingForMigrationSeesCommittedFence() throws Exception {
         admissionWaitingForMigrationSeesCommittedFenceAndPreservesReplay(true);
     }
 
@@ -131,13 +132,14 @@ class WorkspaceMigrationMySqlIT {
                 new ManagedWorkspaceRegistry(jdbc), properties);
         var original = create(store, transaction, "migrating", "original");
         var other = cwd ? create(store, transaction, "unrelated", "other") : null;
-        var originalCwd = cwd ? changeCwd(store, transaction, "migrating", original.sessionId(), "original", 1) : null;
-        if (cwd) {
-            var claim = transaction.execute(status -> store.claimOperation("migrating", original.sessionId(),
-                    originalCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow());
-            assertThat(transaction.execute(status -> store.completeCwdChangeOperation("migrating", original.sessionId(),
-                    claim.operationId(), "owner", claim.claimGeneration())).completed()).isTrue();
-        }
+        var originalCwd = cwd ? com.alibaba.qwen.code.managedagent.LegacyCwdOperations.seed(jdbc, store,
+                "migrating", original.sessionId(), "actor", "actor-digest", "original", "digest", ".", 1) : null;
+        var originalClaim = cwd ? transaction.execute(status -> store.claimOperation("migrating", original.sessionId(),
+                originalCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
+        var otherCwd = cwd ? com.alibaba.qwen.code.managedagent.LegacyCwdOperations.seed(jdbc, store,
+                "unrelated", other.sessionId(), "actor", "actor-digest", "other", "digest", ".", 1) : null;
+        var otherClaim = cwd ? transaction.execute(status -> store.claimOperation("unrelated", other.sessionId(),
+                otherCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
         var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
         var attemptingLock = new CountDownLatch(1);
         var waitingJdbc = new ManagedSchemaJdbcTemplate(data) {
@@ -155,13 +157,15 @@ class WorkspaceMigrationMySqlIT {
             migration.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(migration, "migrating");
             var creation = pool.submit(() -> cwd
-                    ? changeCwd(waitingStore, transaction, "migrating", original.sessionId(), "racing", 2)
+                    ? transaction.execute(status -> waitingStore.completeCwdChangeOperation("migrating", original.sessionId(),
+                            originalClaim.operationId(), "owner", originalClaim.claimGeneration()))
                     : create(waitingStore, transaction, "migrating", "racing"));
             try {
                 assertThat(attemptingLock.await(5, TimeUnit.SECONDS)).isTrue();
                 assertThatThrownBy(() -> creation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
                 assertThat(pool.submit(() -> cwd
-                        ? changeCwd(store, transaction, "unrelated", other.sessionId(), "other", 1)
+                        ? transaction.execute(status -> store.completeCwdChangeOperation("unrelated", other.sessionId(),
+                                otherClaim.operationId(), "owner", otherClaim.claimGeneration()))
                         : create(store, transaction, "unrelated", "other"))
                         .get(5, TimeUnit.SECONDS)).isNotNull();
                 assertThat(creation.isDone()).isFalse();
@@ -176,15 +180,22 @@ class WorkspaceMigrationMySqlIT {
                     fence.executeUpdate();
                 }
                 migration.commit();
-                assertThatThrownBy(() -> creation.get(5, TimeUnit.SECONDS))
-                        .isInstanceOf(ExecutionException.class)
-                        .hasCauseInstanceOf(RuntimeBrokerException.class)
-                        .satisfies(error -> {
-                            var refusal = (RuntimeBrokerException) error.getCause();
-                            assertThat(refusal.getCode()).isEqualTo("workspace_unavailable");
-                            assertThat(refusal.getStatusCode()).isEqualTo(409);
-                            assertThat(refusal.isRetryable()).isFalse();
-                        });
+                if (cwd) {
+                    var outcome = (com.alibaba.qwen.code.managedagent.session.AgentStateStore.CwdChangeOutcome)
+                            creation.get(5, TimeUnit.SECONDS);
+                    assertThat(outcome.completed()).isFalse();
+                    assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+                } else {
+                    assertThatThrownBy(() -> creation.get(5, TimeUnit.SECONDS))
+                            .isInstanceOf(ExecutionException.class)
+                            .hasCauseInstanceOf(RuntimeBrokerException.class)
+                            .satisfies(error -> {
+                                var refusal = (RuntimeBrokerException) error.getCause();
+                                assertThat(refusal.getCode()).isEqualTo("workspace_unavailable");
+                                assertThat(refusal.getStatusCode()).isEqualTo(409);
+                                assertThat(refusal.isRetryable()).isFalse();
+                            });
+                }
             } finally {
                 migration.rollback();
             }
@@ -203,22 +214,12 @@ class WorkspaceMigrationMySqlIT {
         assertThat(replay.sessionId()).isEqualTo(original.sessionId());
         assertThat(store.findSession("migrating", original.sessionId()).orElseThrow().workspace()).isEqualTo(binding);
         if (cwd) {
-            assertThat(jdbc.queryForObject(
-                                    "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
-                                            + " 'CWD_CHANGE' AND tenant_id = X'6d6967726174696e67'",
-                    Integer.class)).isEqualTo(1);
-            var cwdReplay = changeCwd(store, transaction, "migrating", original.sessionId(), "original", 1);
-            assertThat(cwdReplay.replayed()).isTrue();
-            assertThat(cwdReplay.operation().operationId()).isEqualTo(originalCwd.operation().operationId());
-            assertThat(cwdReplay.operation().state()).isEqualTo("COMPLETED");
-            assertThat(cwdReplay.operation().resultContextRevision()).isEqualTo(2);
+            var retained = store.findOperation("migrating", original.sessionId(),
+                    originalCwd.operation().operationId()).orElseThrow();
+            assertThat(retained.state()).isEqualTo("FAILED");
+            assertThat(retained.failureCode()).isEqualTo("workspace_unavailable");
+            assertThat(store.requireSession("migrating", original.sessionId()).workspace().getContextRevision()).isEqualTo(1);
         }
-    }
-
-    private StoreModels.OperationAdmission changeCwd(ManagedAgentStore store, TransactionTemplate transaction,
-            String tenant, String sessionId, String key, long revision) {
-        return transaction.execute(status -> store.beginCwdChangeOperation(tenant, sessionId, "actor", "actor-digest",
-                key, "cwd-digest", ".", revision));
     }
 
     private StoreModels.Admission create(ManagedAgentStore store, TransactionTemplate transaction, String tenant, String key) {

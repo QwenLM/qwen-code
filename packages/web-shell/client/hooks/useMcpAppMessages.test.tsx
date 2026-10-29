@@ -8,6 +8,7 @@ import { WebShellPortalRootContext } from '../portalRoot';
 import type { McpAppMessages } from '../mcpAppHostContext';
 import { PromptDispatchCancelledError } from '../utils/promptAdmission';
 import {
+  readGeneratedUiParameters,
   useMcpAppMessages,
   type McpAppPromptSubmission,
 } from './useMcpAppMessages';
@@ -73,13 +74,23 @@ function setup() {
   const render = (props = {}) => act(() => root.render(<Harness {...props} />));
   render();
   mounted.push({ root, container });
-  const request = (signal = new AbortController().signal) => {
+  const request = (
+    signal = new AbortController().signal,
+    message: {
+      resourceUri?: string;
+      requiredFeature?: 'generated-ui';
+      text?: string;
+    } = {},
+  ) => {
     let result!: ReturnType<McpAppMessages['requestMessage']>;
     act(() => {
       result = context!.requestMessage({
         serverName: 'trusted-host-server',
-        resourceUri: 'ui://host/resource',
-        text: '<script>untrusted text</script>\nFull message',
+        resourceUri: message.resourceUri ?? 'ui://host/resource',
+        ...(message.requiredFeature
+          ? { requiredFeature: message.requiredFeature }
+          : {}),
+        text: message.text ?? '<script>untrusted text</script>\nFull message',
         signal,
       });
     });
@@ -103,6 +114,114 @@ function setup() {
   };
 }
 
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired' | 'failed') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
+
+const parameterMessage = (
+  inputs: Record<string, { value: string; checked: boolean }> = {
+    people: { value: '7', checked: false },
+    annual: { value: 'on', checked: true },
+  },
+  rejectedEvents = 0,
+) =>
+  'Continue the analysis using the captured view parameters below.\n\n' +
+  JSON.stringify(
+    {
+      kind: 'qwen.generated-ui.parameters',
+      title: 'Bill splitter',
+      snapshot: { schemaVersion: 1, inputs },
+      rejectedEvents,
+    },
+    null,
+    2,
+  );
+const parameterText = parameterMessage();
+
+describe('Generated UI parameter review', () => {
+  it('reads only the built-in parameter message', () => {
+    expect(
+      readGeneratedUiParameters({
+        requiredFeature: 'generated-ui',
+        text: parameterText,
+      }),
+    ).toEqual({
+      title: 'Bill splitter',
+      inputs: [
+        { id: 'people', value: '7', checked: false },
+        { id: 'annual', value: 'on', checked: true },
+      ],
+      rejectedEvents: 0,
+    });
+    // Any server can claim the bundled resource URI; only core's mark counts.
+    expect(readGeneratedUiParameters({ text: parameterText })).toBeUndefined();
+    expect(
+      readGeneratedUiParameters({
+        requiredFeature: 'generated-ui',
+        text: 'Fix the view.\n{not json',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('shows parameters first and keeps the full message one step away', async () => {
+    const h = setup();
+    h.submit.mockImplementation(async (_text, submission) => {
+      submission.onDispatched();
+      submission.onAdmitted({ promptId: 'p' });
+    });
+    const result = h.request(undefined, {
+      resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      requiredFeature: 'generated-ui',
+      text: parameterText,
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Continue with these parameters');
+    expect(dialog.textContent).toContain('Bill splitter');
+    const rows = Array.from(dialog.querySelectorAll('tbody tr')).map(
+      (row) => row.textContent,
+    );
+    expect(rows).toEqual(['people7', 'annual✓ on']);
+    expect(dialog.querySelector('details')?.open).toBe(false);
+    expect(dialog.querySelector('details pre')?.textContent).toBe(
+      parameterText,
+    );
+    await act(async () => h.button('Continue analysis').click());
+    expect(h.submit).toHaveBeenCalledWith(parameterText, expect.anything());
+    expect(await result).toEqual({});
+  });
+
+  it('keeps the generic review for an App that only claims the resource URI', () => {
+    const h = setup();
+    h.request(undefined, {
+      resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      text: parameterText,
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).not.toContain('Continue with these parameters');
+    expect(dialog.querySelector('table')).toBeNull();
+    expect(dialog.querySelector('details')).toBeNull();
+    expect(dialog.querySelector('pre')?.textContent).toBe(parameterText);
+  });
+
+  it('says when interactions were dropped and when there is nothing to send', () => {
+    const h = setup();
+    h.request(undefined, {
+      requiredFeature: 'generated-ui',
+      text: parameterMessage({}, 3),
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain(
+      '3 earlier interactions were not processed',
+    );
+    expect(dialog.textContent).toContain(
+      'This view has no parameters to send.',
+    );
+    expect(dialog.querySelector('table')).toBeNull();
+  });
+});
+
 describe('MCP App host message review', () => {
   it('uses the host language inside the portal', async () => {
     const h = setup();
@@ -111,7 +230,7 @@ describe('MCP App host message review', () => {
     expect(h.container.textContent).toContain('审阅 App 消息');
     expect(h.container.textContent).toContain('目标会话');
     await act(async () => h.button('取消').click());
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('cancelled'));
   });
   it('waits for host confirmation and resolves at the real receipt, before turn completion', async () => {
     const modelTurn = deferred<unknown>();
@@ -153,9 +272,9 @@ describe('MCP App host message review', () => {
   it('rejects duplicate reviews and cancels with zero submissions', async () => {
     const h = setup();
     const first = h.request();
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     await act(async () => h.button('cancel').click());
-    expect(await first).toEqual({ isError: true });
+    expect(await first).toEqual(notSent('cancelled'));
     expect(h.submit).not.toHaveBeenCalled();
     expect(h.container.querySelector('[role="dialog"]')).toBeNull();
   });
@@ -187,7 +306,7 @@ describe('MCP App host message review', () => {
         if (reason === 'disconnected') h.render({ enabled: false });
       });
       if (reason === 'session') h.render({ sessionId: 'session-a' });
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(notSent('cancelled'));
       await act(async () => gate.resolve());
       expect(writes).not.toHaveBeenCalled();
       expect(h.submit).toHaveBeenCalledTimes(1);
@@ -213,7 +332,7 @@ describe('MCP App host message review', () => {
       'Acceptance could not be confirmed',
     );
     expect(h.container.textContent).toContain('session-a');
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     expect(h.submit).toHaveBeenCalledTimes(1);
     await act(async () =>
       h.submit.mock.calls[0][1].onAdmitted({ promptId: 'late-real-receipt' }),
@@ -259,7 +378,7 @@ describe('MCP App host message review', () => {
       expect(h.container.textContent).toContain('Review the full message');
       expect(h.submit).toHaveBeenCalledOnce();
       await act(async () => h.button('cancel').click());
-      expect(await next).toEqual({ isError: true });
+      expect(await next).toEqual(notSent('cancelled'));
       await act(async () => turn.resolve());
     },
   );
@@ -276,7 +395,9 @@ describe('MCP App host message review', () => {
       });
       const result = h.request();
       await act(async () => h.button('Send to session').click());
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(
+        definite ? notSent('failed') : { isError: true },
+      );
       expect(h.container.textContent).toContain(
         definite
           ? 'The message was not accepted'
@@ -292,7 +413,7 @@ describe('MCP App host message review', () => {
     const h = setup();
     const result = h.request();
     await act(async () => h.button('Send to session').click());
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('cancelled'));
     expect(h.container.textContent).toContain('Cancelled before sending');
   });
 
@@ -307,7 +428,7 @@ describe('MCP App host message review', () => {
     expect(h.container.textContent).toContain(
       'Acceptance could not be confirmed',
     );
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
   });
 
   it('shows a host refusal before dispatch as a failed review with its reason', async () => {
@@ -315,7 +436,7 @@ describe('MCP App host message review', () => {
     h.submit.mockRejectedValue(new Error('The session is busy'));
     const result = h.request();
     await act(async () => h.button('Send to session').click());
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('failed'));
     expect(h.container.textContent).toContain('The message was not accepted');
     expect(h.container.textContent).toContain('The session is busy');
     expect(h.container.textContent).not.toContain(
@@ -343,7 +464,7 @@ describe('MCP App host message review', () => {
     expect(h.container.querySelector('pre')?.textContent).toBe(
       '<script>untrusted text</script>\nFull message',
     );
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     await act(async () => pending.reject(new Error('lost response')));
     expect(await result).toEqual({ isError: true });
     expect(h.submit).toHaveBeenCalledTimes(1);
@@ -358,7 +479,7 @@ describe('MCP App host message review', () => {
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
       );
     });
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('cancelled'));
     expect(h.submit).not.toHaveBeenCalled();
   });
 
@@ -367,7 +488,7 @@ describe('MCP App host message review', () => {
     const h = setup();
     const result = h.request();
     await act(async () => vi.advanceTimersByTime(90_000));
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('expired'));
     expect(h.container.textContent).toContain('Review expired before sending');
     expect(h.submit).not.toHaveBeenCalled();
   });
@@ -400,7 +521,7 @@ describe('MCP App host message review', () => {
     const requestMessage = h.context()!.requestMessage;
     h.render({ enabled: false });
     expect(h.context()!.requestMessage).toBe(requestMessage);
-    expect(await h.request()).toEqual({ isError: true });
+    expect(await h.request()).toEqual(notSent('failed'));
     expect(h.submit).not.toHaveBeenCalled();
     h.render({ clientId: '' });
     expect(h.context()).toBeUndefined();
@@ -429,7 +550,7 @@ describe('MCP App host message review', () => {
         'Acceptance could not be confirmed',
       );
       expect(settled).not.toHaveBeenCalled();
-      expect(await h.request()).toEqual({ isError: true });
+      expect(await h.request()).toEqual(notSent('failed'));
       await act(async () =>
         h.submit.mock.calls[0][1].onAdmitted({ promptId: 'late-receipt' }),
       );
@@ -459,7 +580,7 @@ describe('MCP App host message review', () => {
     const next = h.request();
     expect(h.container.textContent).toContain('Review the full message');
     await act(async () => h.button('cancel').click());
-    expect(await next).toEqual({ isError: true });
+    expect(await next).toEqual(notSent('cancelled'));
     await act(async () => turn.resolve());
   });
 
@@ -493,7 +614,7 @@ describe('MCP App host message review', () => {
       });
       const result = h.request();
       await act(async () => h.button('Send to session').click());
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(notSent('cancelled'));
       expect(h.container.textContent).toContain('Cancelled before sending');
       expect(h.container.textContent).not.toContain(
         'Acceptance could not be confirmed',
@@ -501,7 +622,7 @@ describe('MCP App host message review', () => {
       expect(h.container.textContent).not.toContain('Session client changed');
       const next = h.request();
       await act(async () => h.button('cancel').click());
-      expect(await next).toEqual({ isError: true });
+      expect(await next).toEqual(notSent('cancelled'));
     },
   );
 
@@ -519,7 +640,9 @@ describe('MCP App host message review', () => {
       });
       const result = h.request();
       await act(async () => h.button('Send to session').click());
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(
+        status < 500 ? notSent('failed') : { isError: true },
+      );
       expect(h.container.textContent).toContain(
         status < 500
           ? 'The message was not accepted'

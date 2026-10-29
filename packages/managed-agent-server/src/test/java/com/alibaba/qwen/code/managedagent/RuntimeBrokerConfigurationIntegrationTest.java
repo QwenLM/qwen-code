@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -59,6 +60,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     @Autowired
     private SecretProtector secretProtector;
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbcTemplate;
     @Autowired
     private org.springframework.context.ApplicationContext context;
@@ -67,7 +69,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     void recoveryTickRunsOnADedicatedScheduler() throws Exception {
         assertThat(context.containsBean("runtimeRecoveryScheduler")).isTrue();
         assertThat(context.getBean("runtimeRecoveryScheduler"))
-                .isNotSameAs(context.getBean("taskScheduler"));
+                .isNotSameAs(context.getBean("managedAgentScheduler"));
         var scheduled = EmbeddedRuntimeBroker.class.getMethod("recoverSavedRuntimes")
                 .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler()).isEqualTo("runtimeRecoveryScheduler");

@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -60,6 +61,7 @@ class JournalEventPublicationPointTest {
     private ObjectMapper objectMapper;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     // The store-side handoff is pinned here with a stand-in; the LiteTopic

@@ -212,6 +212,7 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonSessionBtwStreamEvent,
   DaemonSessionAttachmentData,
   DaemonSessionAttachmentReference,
   DaemonSessionGenerationEvent,
@@ -294,7 +295,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
-import { parseSseStream } from './sse.js';
+import { parseSseStream, SseFramingError } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
@@ -1278,6 +1279,45 @@ export class DaemonClient {
 
   workspaceByCwd(workspaceCwd: string): WorkspaceDaemonClient {
     return new WorkspaceDaemonClient(this, urlEncode(workspaceCwd));
+  }
+
+  /**
+   * Issue a native REST request for a daemon route without ACP translation.
+   * HTTP status and response-body handling belong to the caller. The timeout
+   * covers the connection through response headers, not a streaming body;
+   * pass a signal to cancel body consumption, or `0` to disable the timer.
+   */
+  async requestRest(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs?: number,
+  ): Promise<Response> {
+    if (
+      !/^\/(?![/\\\t\r\n])/.test(path) ||
+      new URL(path, 'http://daemon.invalid').origin !== 'http://daemon.invalid'
+    ) {
+      throw new Error('Daemon REST requests require an absolute route path');
+    }
+    const base = new URL(`${this.baseUrl}/`, 'http://daemon.invalid');
+    if (
+      !new URL(
+        `${this.baseUrl}${path}`,
+        'http://daemon.invalid',
+      ).pathname.startsWith(base.pathname)
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
+    const headers = new Headers(this.headers());
+    new Headers(init.headers).forEach((value, name) =>
+      headers.set(name, value),
+    );
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      { ...init, headers },
+      undefined,
+      timeoutMs,
+      'rest',
+    );
   }
 
   // -- Lifecycle / discovery ---------------------------------------------
@@ -4571,6 +4611,151 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Stream answer snapshots; reconnects resume the same model request.
+   * Callers must preflight `capabilities.features` for `session_btw_stream`.
+   */
+  async *streamSessionBtw(
+    sessionId: string,
+    question: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+    opts?.signal?.throwIfAborted();
+    const requestId = createStandaloneSessionId();
+    const url = `${this.baseUrl}/session/${urlEncode(sessionId)}/btw/stream`;
+    let resume = false;
+    let terminal = false;
+    let retryDelay = 1_000;
+    let reconnectDeadline: number | undefined;
+    let lastReconnectError: unknown;
+    try {
+      while (true) {
+        opts?.signal?.throwIfAborted();
+        if (reconnectDeadline !== undefined && Date.now() >= reconnectDeadline)
+          throw lastReconnectError;
+        const connection = new AbortController();
+        const signal = opts?.signal
+          ? composeAbortSignals([opts.signal, connection.signal])
+          : connection.signal;
+        let timer: ReturnType<typeof setTimeout>;
+        const armTimeout = () => {
+          clearTimeout(timer);
+          timer = setTimeout(
+            () => {
+              connection.abort(
+                new DOMException('BTW connection timed out', 'TimeoutError'),
+              );
+            },
+            Math.min(
+              45_000,
+              reconnectDeadline === undefined
+                ? 45_000
+                : Math.max(1, reconnectDeadline - Date.now()),
+            ),
+          );
+        };
+        armTimeout();
+        try {
+          const res = await this._fetch(url, {
+            method: 'POST',
+            headers: this.headers(
+              {
+                'Content-Type': 'application/json',
+                Accept: 'text/event-stream',
+              },
+              opts?.clientId,
+            ),
+            body: JSON.stringify({
+              question,
+              requestId,
+              ...(resume ? { resume: true } : {}),
+            }),
+            signal,
+          });
+          if (!res.ok)
+            throw await this.failOnError(res, 'POST /session/:id/btw/stream');
+          resume = true;
+          if (!res.body)
+            throw new SseFramingError('BTW response body is missing');
+          const body = res.body.pipeThrough(
+            new TransformStream<Uint8Array, Uint8Array>({
+              transform(chunk, controller) {
+                armTimeout();
+                controller.enqueue(chunk);
+              },
+            }),
+          );
+          for await (const raw of parseSseStream(body, signal)) {
+            const event = raw as unknown as Record<string, unknown>;
+            if (
+              !event ||
+              typeof event !== 'object' ||
+              Array.isArray(event) ||
+              event['v'] !== 1 ||
+              event['requestId'] !== requestId ||
+              !(
+                ((event['type'] === 'answer' || event['type'] === 'done') &&
+                  typeof event['answer'] === 'string') ||
+                (event['type'] === 'error' &&
+                  typeof event['code'] === 'string' &&
+                  typeof event['message'] === 'string')
+              )
+            ) {
+              throw new SseFramingError('Invalid BTW stream event');
+            }
+            reconnectDeadline = undefined;
+            armTimeout();
+            retryDelay = 1_000;
+            terminal = event['type'] === 'done' || event['type'] === 'error';
+            yield event as unknown as DaemonSessionBtwStreamEvent;
+            if (terminal) return;
+          }
+          throw new Error('BTW stream ended before completion');
+        } catch (error) {
+          opts?.signal?.throwIfAborted();
+          if (
+            error instanceof SseFramingError ||
+            (error instanceof DaemonHttpError &&
+              error.status !== 408 &&
+              error.status !== 429 &&
+              error.status < 500) ||
+            (reconnectDeadline !== undefined && Date.now() >= reconnectDeadline)
+          )
+            throw error;
+          lastReconnectError = error;
+          reconnectDeadline ??= Date.now() + 60_000;
+        } finally {
+          clearTimeout(timer!);
+          connection.abort();
+        }
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(opts?.signal?.reason);
+          };
+          const timer = setTimeout(
+            () => {
+              opts?.signal?.removeEventListener('abort', onAbort);
+              resolve();
+            },
+            Math.min(retryDelay, Math.max(0, reconnectDeadline! - Date.now())),
+          );
+          opts?.signal?.addEventListener('abort', onAbort, { once: true });
+          if (opts?.signal?.aborted) onAbort();
+        });
+        retryDelay = Math.min(retryDelay * 2, 5_000);
+      }
+    } finally {
+      if (!terminal) {
+        void this._fetch(`${url}/${urlEncode(requestId)}`, {
+          method: 'DELETE',
+          headers: this.headers({}, opts?.clientId),
+          signal: abortTimeout(5_000),
+        }).catch(() => undefined);
+      }
+    }
+  }
+
   async btwSession(
     sessionId: string,
     question: string,
@@ -6365,17 +6550,37 @@ export class DaemonClient {
     );
   }
 
-  async setSessionConfigOption(
+  setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setSessionConfigOption(
+    sessionId: string,
+    configId: 'workflow_mode',
+    value: 'on' | 'off',
+    clientOrOptions?: string | { clientId?: string },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort' | 'workflow_mode',
+    value: ReasoningSelection | 'on' | 'off',
     clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
         ? { clientId: clientOrOptions }
         : clientOrOptions;
-    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+    if (
+      configId === 'workflow_mode' &&
+      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
+    ) {
+      throw new Error(
+        'Workflow mode requires on/off and does not accept persist',
+      );
+    }
+    const result = await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
       {
@@ -6390,6 +6595,11 @@ export class DaemonClient {
         clientId: options?.clientId,
       },
     );
+    // ACP returns configOptions only; a successful Workflow mode write has
+    // already committed the session state before acknowledging the request.
+    return configId === 'workflow_mode' && this.transport.type !== 'rest'
+      ? { ...result, persisted: result.persisted ?? true }
+      : result;
   }
 
   async setSessionLanguage(

@@ -2,7 +2,7 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-Status: **design proposal, unimplemented**. Builds on `docs/design/2026-10-23-external-runtime-provider.md` (phase 1, `external-scratch`, accepted contract) and the verified Aone operator‑adapter rehearsal. Nothing here weakens `external-scratch` invariants: deterministic logical handle before the first remote call, no replacement after a lost reply, no release‑to‑kill, Broker‑side independent attestation, provider deduplication by `provisionRequestId`.
+Status: **step 3a (provisioning prerequisite) implemented; the product feature is not.** Builds on `docs/design/2026-10-23-external-runtime-provider.md` (phase 1, `external-scratch`, accepted contract) and the verified Aone operator‑adapter rehearsal. Nothing here weakens `external-scratch` invariants: deterministic logical handle before the first remote call, no replacement after a lost reply, no release‑to‑kill, Broker‑side independent attestation, provider deduplication by `provisionRequestId`.
 
 ## 1. Why this phase exists
 
@@ -60,11 +60,22 @@ In one sentence: durable registrations survive server restarts; sandbox rotation
   "storage": {
     "storageRef": "sha256-of-canonical-storage-identity",
     "mountRoot": "/workspace/storage",
-    "mountNonce": "control-plane-registration-nonce",
     "continuity": "confirms"
   }
 }
 ```
+
+**Implemented shape (step 3a).** The members above are the whole set step 3a
+verifies, and the set is closed: `storageRef`, `mountRoot` and `continuity`, all
+three required, nothing else accepted. `mountNonce` belongs to this design's wider
+set, but it cannot be verified yet — the persisted registration record has no nonce
+column, so a worker-reported nonce would be an unverified claim. A response that
+carries `mountNonce` is therefore **refused** (`external_storage_registration_mismatch`)
+rather than accepted with the member ignored; adding it to the record is step 3b
+work, because the registration REST/write path is a shipped Phase-1 surface.
+`storageRef` is the canonical-JSON SHA-256 (members sorted by name, the revision as
+a JSON integer, lowercase hex) of exactly `{providerId, physicalKey,
+registrationRevision}` — the registered identity tuple, with no wrapper member.
 
 `state` is the phase‑1 observe member and takes exactly four values — `RUNNING`, `STARTING`, `UNKNOWN`, `GONE` — because this profile answers on `protocolVersion: 1` and must not expose a second status vocabulary; any other value blocks adoption exactly as in phase 1. `storage` carries storage‑specific evidence and never a state of its own: it is present only with `RUNNING`, and `RUNNING` without it is evidence‑free and cannot authorize writes. `READY`, used elsewhere in this document for this profile, is the Broker‑local predicate defined below and is never a wire value.
 
@@ -158,3 +169,63 @@ The upstream never learns the word Aone for these APIs; auth/token/wire shape st
 5. Public Hosted E2E in full‑tier CI; only at this point documents the profile as deployable for Hosted tools.
 
 Each step is independently revertible. The phase‑1 contract and its fault‑gate evidence stay as the base — this design adds semantics only.
+
+## 12. Implemented step 3a: the provisioning prerequisite
+
+The first slice of step 3 landed as a Broker/adapter prerequisite, not as the product
+feature. It adds the `external-workspace` provisioner kind and nothing a user can reach
+yet:
+
+- **Kind and transport.** `ExternalWorkspaceProvisioner` extends the shipped
+  `external-scratch` provisioner, so placement, durable handle, idempotency by
+  `provisionRequestId`, startup recovery, attestation and no-op `release` are the same
+  code paths rather than a copy. `ExternalRuntimeKinds` names the family once; the
+  configuration validator, the provisioner factory, the preflight broker check and the
+  retry/recovery classification all use it, so the new kind cannot silently fall into a
+  zero-validation or permanent-recovery-block branch.
+- **Storage identity comes only from the durable registration.** `ExternalStorageRegistry`
+  is a read-only view over `ma_storage`/`ma_storage_owner`; the provisioner resolves
+  `(tenant, alias)` on every admission and refuses with permanent codes
+  (`external_storage_registration_not_found`, `external_storage_registration_mismatch`,
+  `external_storage_continuity_denied`). Provider identity, physical key, revision, alias
+  path and mount root are compared against the registration, never against the request or
+  the provider reply. The lookup uses the registration's primary key (the same alias key
+  the write path inserts), joins the owner row on the owner's primary key, admits only a
+  `REGISTERED` row — a `RETIRING` or `RETIRED` row resolves as no registration — and
+  bounds the revision to 2^53-1, the largest integer both sides of the wire represent
+  exactly. `storageRef` is the canonical-JSON SHA-256 of that identity tuple, and a
+  revision bump makes an existing handle unadoptable instead of silently re-binding it.
+  A lookup that cannot be read to completion is retryable (`runtime_external_unavailable`)
+  so the Broker keeps the placement adoptable; a row that was read but disagrees with
+  itself is a permanent refusal.
+- **The boot document is unchanged.** The Broker mints the shipped `managed-context/1`
+  document and adds the already-admitted `storage` member
+  (`kind/physicalKey/aliasPath/mountRoot/registrationRevision`), which the shipped worker
+  admits under `session` isolation and the Workspace capability digest. This slice
+  therefore makes **no** CLI or worker change and does not supersede
+  `2026-10-25-external-container-publication.md`: the `storage` extension and the adapter
+  written `registration.json` descriptor keep their meaning, and the worker still creates
+  a missing mount root as `0700`.
+- **Optional storage evidence.** A provider may report
+  `storage: {storageRef, mountRoot, continuity}` on `RUNNING`. `confirms` is adopted,
+  `unknown` keeps ownership but loses readiness, `denies` is a permanent refusal, and
+  absent evidence keeps the phase-1 meaning because this slice authorizes no writes.
+
+Deliberately **not** in this slice: Hosted tool profiles and EXTERNAL execution admission
+(§5), foreground shell publication consumption (§7), `stopDrained` (§8) and close gating.
+`supportsDrainedStop()` therefore stays `false`, a Session placed here could not be
+closed, and the configuration validator still refuses every managed Workspace feature for
+both external kinds. The provisioner is therefore **configurable, but no Session can be
+placed yet, and every placement fails closed**: the profile is opt-in through
+configuration, preflight reports a prerequisite warning saying exactly that, and only
+component and contract tests drive a placement.
+
+**#15512 is not complete.** Files execution (`read_file`/`write_file`/`edit`/`glob`),
+foreground shell, approval, capture, and a verified close/drain remain unimplemented; the
+profile is not deployable for Hosted tools until those land and are verified.
+
+Recorded deviations from §6, for the follow-up slices: no new
+`managed-runtime-boot/2` document, no reversal of mount-root ownership, and no
+`rootDevice`/`rootInode` receipt. Those are worker-contract changes, and the shipped
+`storage` contract is already a published adapter surface; a repository with no producer
+of a document is not evidence that no consumer exists.

@@ -9,12 +9,12 @@ import java.util.concurrent.Executors;
 
 @Configuration
 public class ExecutionConfiguration {
-    @Bean
+    @Bean(defaultCandidate = false)
     public Clock managedAgentClock() {
         return Clock.systemUTC();
     }
 
-    @Bean(destroyMethod = "close")
+    @Bean(defaultCandidate = false, destroyMethod = "close")
     public ExecutorService managedAgentExecutor() {
         return Executors.newVirtualThreadPerTaskExecutor();
     }
