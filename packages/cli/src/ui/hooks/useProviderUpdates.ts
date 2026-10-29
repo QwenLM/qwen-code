@@ -68,6 +68,8 @@ interface ProviderMetadata {
   postponedAt?: number;
   /** Built-in model ids served to the key when the provider was last checked. */
   servedModels?: string[];
+  /** Unserved built-ins retained to protect the selected model. */
+  retainedModels?: string[];
   /** Served model ids whose re-check prompt was answered with "Later". */
   postponedServedModels?: string[];
 }
@@ -76,6 +78,12 @@ interface ProviderMetadata {
 // user who defers is not nagged on every launch. A new model-list version
 // still re-prompts immediately (postponedVersion no longer matches).
 const LATER_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h
+// Persist tombstones so lower-scope postponements cannot reappear on reload.
+const CLEARED_POSTPONEMENT = {
+  postponedVersion: '',
+  postponedServedModels: [] as string[],
+  postponedAt: undefined,
+};
 
 function getProviderMetadata(
   settings: LoadedSettings,
@@ -172,6 +180,7 @@ interface PendingUpdate {
   upToDate: boolean;
   /** Served model ids recorded by the last check. */
   storedServedModels?: string[];
+  storedRetainedModels?: string[];
   /** Served model ids postponed by "Later", set only while the cooldown runs. */
   postponedServedModels?: string[];
   existingModelIds: string[];
@@ -185,6 +194,7 @@ interface PendingUpdate {
   installModelIds?: string[];
   /** Sorted built-in model ids served to the key, when narrowed. */
   servedModels?: string[];
+  retainedModels?: string[];
 }
 
 function resolveDiscoveryApiKey(provider: ProviderConfig): string | undefined {
@@ -301,6 +311,7 @@ function findAllPendingUpdates(
       currentVersion,
       upToDate,
       ...(storedServedModels ? { storedServedModels } : {}),
+      storedRetainedModels: readModelIdList(metadata.retainedModels),
       ...(postponedServedModels ? { postponedServedModels } : {}),
       existingModelIds,
       diff,
@@ -353,10 +364,15 @@ async function narrowToServedModels(
       (servedIds.has(id) && offers(id)) ||
       (keepsCurrentModel && id === currentModel),
   );
+  // An empty install is not supported. Keep the provider unchanged until a
+  // later check offers at least one built-in, rather than prompting a failure.
+  if (installModelIds.length === 0) return pending;
+  const retainedModels = installModelIds.filter((id) => !servedIds.has(id));
   return {
     ...pending,
     installModelIds,
     servedModels: [...servedBuiltInIds].sort(),
+    retainedModels: retainedModels.length ? retainedModels.sort() : undefined,
     diff: computeModelDiff(
       pending.existingModelIds,
       installModelIds,
@@ -481,6 +497,11 @@ export function useProviderUpdates(
         // Unset when discovery did not narrow the list, which clears the
         // served models recorded for an earlier key.
         providerState['servedModels'] = pending.servedModels;
+        const retainedModels =
+          pending.servedModels &&
+          defaultIds.filter((id) => !pending.servedModels!.includes(id)).sort();
+        providerState['retainedModels'] = retainedModels ?? [];
+        Object.assign(providerState, CLEARED_POSTPONEMENT);
         delete installPlan.env;
         // Template updates never change the selected model.
         delete installPlan.modelSelection;
@@ -582,18 +603,23 @@ export function useProviderUpdates(
           } else if (choice === 'skip') {
             const persistScope = getPersistScopeForModelSelection(settings);
             try {
-              for (const p of pendingList) {
-                // For an up-to-date install, skipping accepts the served
-                // models as they are, so it is not asked again until they
-                // change.
-                settings.setValue(
-                  persistScope,
-                  p.upToDate
-                    ? `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`
-                    : `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
-                  p.upToDate ? p.servedModels : p.currentVersion,
-                );
-              }
+              // Skipping accepts the current state, including any retained
+              // models, until the served set or preset changes again.
+              settings.setValues(
+                pendingList.flatMap((p) =>
+                  Object.entries({
+                    ...CLEARED_POSTPONEMENT,
+                    retainedModels: [],
+                    ...(p.upToDate
+                      ? { servedModels: p.servedModels }
+                      : { ignoredVersion: p.currentVersion }),
+                  }).map(([field, value]) => ({
+                    scope: persistScope,
+                    key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.${field}`,
+                    value,
+                  })),
+                ),
+              );
             } catch (error) {
               addItem(
                 {
@@ -627,6 +653,11 @@ export function useProviderUpdates(
                         key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
                         value: p.currentVersion,
                       },
+                  {
+                    scope: persistScope,
+                    key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.${p.upToDate ? 'postponedVersion' : 'postponedServedModels'}`,
+                    value: p.upToDate ? '' : [],
+                  },
                   {
                     scope: persistScope,
                     key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
@@ -692,10 +723,16 @@ export function useProviderUpdates(
           const persistScope = getPersistScopeForModelSelection(settings);
           for (const p of narrowed) {
             if (p.upToDate) {
-              // Only a change in the served models matters here; without a
-              // discovery result there is nothing to compare.
+              // Re-check a changed served set or a former selection's
+              // retention; without discovery there is nothing to compare.
               if (!p.servedModels) continue;
-              if (sameModelIds(p.servedModels, p.storedServedModels)) continue;
+              if (
+                sameModelIds(p.servedModels, p.storedServedModels) &&
+                !p.diff.removed.some((id) =>
+                  p.storedRetainedModels?.includes(id),
+                )
+              )
+                continue;
               if (sameModelIds(p.servedModels, p.postponedServedModels)) {
                 continue;
               }
@@ -707,22 +744,18 @@ export function useProviderUpdates(
             // Nothing changes for this key: record the version and served
             // models without asking, in one write.
             try {
-              settings.setValues([
-                ...(p.upToDate
-                  ? []
-                  : [
-                      {
-                        scope: persistScope,
-                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.version`,
-                        value: p.currentVersion,
-                      },
-                    ]),
-                {
+              settings.setValues(
+                Object.entries({
+                  ...CLEARED_POSTPONEMENT,
+                  ...(p.upToDate ? {} : { version: p.currentVersion }),
+                  servedModels: p.servedModels,
+                  retainedModels: p.retainedModels ?? [],
+                }).map(([field, value]) => ({
                   scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`,
-                  value: p.servedModels,
-                },
-              ]);
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.${field}`,
+                  value,
+                })),
+              );
             } catch (error) {
               addItem(
                 {

@@ -471,9 +471,15 @@ qwen --model "qwen3.5-plus"
 
 ## Built-in provider updates
 
-This applies to QwenCloud (Token Plan and Standard API Key) and to Alibaba ModelStudio (Coding Plan, Token Plan and Standard API Key). At startup, Qwen Code checks the endpoint's model list with your stored API key. When a newer built-in model list ships, or when the models served to your key change (for example after you switch to a key for a different plan), Qwen Code offers a **Built-in Provider Update**.
+Installed providers with a built-in model list can offer a **Built-in Provider Update** when a newer preset ships.
 
-The update configures only the built-in models your key is served and removes the ones it cannot use, except the model you have selected, which is always kept. When only the served models changed, the update adds just the models your key was not served before, so a built-in model you left out during `/auth` is not added back. If nothing would change for your key, the check is recorded without a prompt. **Later** waits 24 hours before asking again about the same change, and **Skip** keeps your configuration as it is: a skipped model list is not offered again until a newer one ships, and a skipped change in served models is not offered again until they change once more.
+QwenCloud (Token Plan and Standard API Key) and Alibaba ModelStudio (Coding Plan, Token Plan and Standard API Key) also check `/models` at startup. This check uses the provider-specific API-key variable saved by `/auth` (for example, `BAILIAN_TOKEN_PLAN_API_KEY`), including values from `settings.env`. A key supplied only through a CLI flag, `OPENAI_API_KEY`, or generic authentication settings does not enable this check; generic keys are not forwarded to other providers' endpoints.
+
+Successful discovery limits the update to built-in models your key is served, while preserving user-added models. It can also offer an update when the served set changes without a preset release, such as after switching plans. Discovery alone keeps the selected model; once you switch away, a later startup check can offer its removal. If filtering leaves no built-in model to install, the existing provider configuration is kept without prompting. When only the served set changes, the update adds just newly served models, so a model you left out during `/auth` is not added back. If nothing would change, the check is recorded without a prompt.
+
+If discovery is unavailable, fails, or matches no built-in model, a preset update uses the full built-in list; an already-current install is left unchanged. Providers without discovery continue to use the built-in list.
+
+**Later** waits 24 hours before asking again about the same version or served set; a different change can still prompt. Updating, skipping, or silently recording a newer decision clears the earlier postponement. **Skip** keeps your configuration, including retained models: a skipped preset version is not offered again until a newer one ships, and a skipped served set is not offered again until it changes.
 
 ## Removed `qwen auth` CLI command
 
