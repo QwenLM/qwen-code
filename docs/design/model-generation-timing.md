@@ -31,15 +31,15 @@ Each `statsModels` entry gets an optional `generation` object with `timedRequest
 
 When a model has at least one timed request, `GET /session/:id/stats` adds `models[name].generation` with the four counters. `ServeSessionStatsModelMetrics` and `DaemonSessionStatsModelMetrics` declare the field as optional. Consumers that cast the JSON keep working.
 
-### D5 — One latency line per model card
+### D5 — Inline timing metrics per model card
 
-Each model card in Token Usage shows `First-token latency <duration> · Generation <duration> · Output speed <rate> tok/s` below its header:
+Each model card in Token Usage shows an always-visible grid below its header. Available first-token latency, output speed and average generation time precede request count and average latency. The [Token usage hierarchy](token-usage-hierarchy.md) governs the card layout and overflow behavior:
 
 - **First-token latency:** `totalTtftMs / timedRequests`.
 - **Generation:** `totalGenerationDurationMs / timedRequests`. It shares its denominator with first-token latency, so the two add up to the average latency of the timed requests up to their last visible chunk.
 - **Output speed:** token-weighted, `totalThroughputOutputTokens / totalGenerationDurationMs`.
-- **When parts are missing:** generation and output speed are omitted when no request had a generation window. A model without timing shows no line.
-- **Header unchanged:** the header's average latency still covers every request, including failed, internal and non-streamed ones. It can therefore differ from the sum of the line's first two values.
+- **When parts are missing:** generation and output speed are omitted when no request had a generation window. A model without timing shows only request count and average latency.
+- **Average latency:** average latency still covers every request, including failed, internal and non-streamed ones. It can therefore differ from the sum of first-token latency and generation time.
 
 ## Compatibility
 
@@ -52,7 +52,7 @@ Each model card in Token Usage shows `First-token latency <duration> · Generati
 - Percentiles. Only sums and counts are kept.
 - Per-model timing in CLI `/stats` and in the Web Shell `/stats` card.
 - A separate first-chunk TTFT. `gen_ai.response.time_to_first_chunk` remains a span attribute.
-- Panel layout changes beyond the latency line. #14648 redesigns the panel.
+- Other panel layout changes. The [Token usage hierarchy](token-usage-hierarchy.md) records the current presentation.
 
 ## Validation
 
@@ -62,5 +62,5 @@ Each model card in Token Usage shows `First-token latency <duration> · Generati
   - A single visible chunk records `generation_ms = 0`.
   - `UiTelemetryService` prefers `generation_ms` and falls back without it. It aggregates per model into `statsModels` only, and excludes internal prompts.
 - **CLI:** the stats extension method returns per-model generation without the `last` sample, and omits it for models without timed requests.
-- **Web Shell:** the latency line renders in English and Chinese. Generation uses the same denominator as first-token latency. The line omits generation and output speed when there is no generation window, and is absent for models without timing.
+- **Web Shell:** the timing grid renders in English and Chinese. Generation uses the same denominator as first-token latency. The grid omits generation and output speed when there is no generation window. Models without timing retain request count and average latency.
 - **E2E:** run a real daemon session on an OpenAI-compatible model with thinking disabled. Compare the TTFT recorded for tool-call-only turns before and after the change, and check the panel.

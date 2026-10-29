@@ -405,8 +405,8 @@ function ModelCard({
       <dl className={styles.modelStats}>
         {stats.map(({ label, value }) => (
           <div key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
+            <dt title={label}>{label}</dt>
+            <dd title={value}>{value}</dd>
           </div>
         ))}
       </dl>

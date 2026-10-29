@@ -677,7 +677,28 @@ describe('TokenUsagePanel', () => {
     expect(document.querySelector('[data-slot="tooltip-content"]')).toBeNull();
   });
 
-  it('localizes the model timing line', async () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'keeps full model timing labels and values in titles in %s',
+    async (language) => {
+      const stats = statsFixture();
+      stats.models['qwen-plus::hybrid'].generation = {
+        timedRequests: 4,
+        totalTtftMs: 4_800,
+        totalGenerationDurationMs: 2_000,
+        totalThroughputOutputTokens: 898,
+      };
+      const container = renderPanel(vi.fn().mockResolvedValue(stats), language);
+      await act(async () => {});
+
+      const timing = container.querySelector('[data-color] > dl')!;
+      expect(timing.textContent).toContain('449.0 tok/s');
+      for (const text of timing.querySelectorAll('dt, dd')) {
+        expect(text.getAttribute('title')).toBe(text.textContent);
+      }
+    },
+  );
+
+  it('localizes the model timing grid', async () => {
     const stats = statsFixture();
     stats.models['qwen-plus::hybrid'].generation = {
       timedRequests: 2,
@@ -697,7 +718,7 @@ describe('TokenUsagePanel', () => {
     ]);
   });
 
-  it('omits the timing line for models without streamed timing', async () => {
+  it('omits timing metrics for models without streamed timing', async () => {
     const container = renderPanel(vi.fn().mockResolvedValue(statsFixture()));
     await act(async () => {});
 

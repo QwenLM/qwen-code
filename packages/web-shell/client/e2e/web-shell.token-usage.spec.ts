@@ -60,7 +60,7 @@ for (const { width, language, theme } of [
               timedRequests: 4,
               totalTtftMs: 4800,
               totalGenerationDurationMs: 2000,
-              totalThroughputOutputTokens: 170,
+              totalThroughputOutputTokens: 898,
             },
           },
           'qwen3.8-max-0902': metrics(3000000, 750000, 2700000),
@@ -134,14 +134,14 @@ for (const { width, language, theme } of [
       const timing = zh
         ? [
             ['首 token', '1.2s'],
-            ['输出速度', '85.0 tok/s'],
+            ['输出速度', '449.0 tok/s'],
             ['生成', '500ms'],
             ['请求', '105'],
             ['平均延迟', '22.9s'],
           ]
         : [
             ['First token', '1.2s'],
-            ['Output speed', '85.0 tok/s'],
+            ['Output speed', '449.0 tok/s'],
             ['Generation', '500ms'],
             ['Requests', '105'],
             ['Avg latency', '22.9s'],
@@ -162,21 +162,30 @@ for (const { width, language, theme } of [
         timing.map(([, value]) => value),
       );
       await expect(timingGrid).toHaveCSS('display', 'grid');
-      for (const value of await timingGrid.locator('dd').all()) {
-        await expect(value).toBeVisible();
-        await expect(value).toHaveCSS('white-space', 'nowrap');
-        expect(
-          await value.evaluate(
-            (element) => element.scrollWidth <= element.clientWidth,
-          ),
-        ).toBe(true);
-      }
-      const otherTiming = panel
+      const checkTimingOverflow = async () => {
+        for (const text of await timingGrid.locator('dt, dd').all()) {
+          await expect(text).toBeVisible();
+          await expect(text).toHaveCSS('white-space', 'nowrap');
+          const { clipped, tagName } = await text.evaluate((element) => ({
+            clipped: element.scrollWidth > element.clientWidth,
+            tagName: element.tagName,
+          }));
+          if (width === 390 && tagName === 'DD') {
+            expect(clipped).toBe(false);
+          }
+          if (clipped) {
+            await expect(text).toHaveAttribute(
+              'title',
+              (await text.textContent())!,
+            );
+          }
+        }
+      };
+      await checkTimingOverflow();
+      const otherModel = panel
         .locator('[data-color]')
-        .filter({ has: page.locator('[title="qwen3.8-max-0902"]') })
-        .locator('dl')
-        .first()
-        .locator('dt');
+        .filter({ has: page.locator('[title="qwen3.8-max-0902"]') });
+      const otherTiming = otherModel.locator('dl').first().locator('dt');
       await expect(otherTiming).toHaveText(
         zh ? ['请求', '平均延迟'] : ['Requests', 'Avg latency'],
       );
@@ -347,6 +356,13 @@ for (const { width, language, theme } of [
       const modelTrack = model.getByRole('img', { name: modelShareLabel });
       await modelTrack.hover();
       await expect(page.getByRole('tooltip')).toHaveText(modelShareLabel);
+      const otherTrack = otherModel.getByRole('img');
+      await otherTrack.hover();
+      const otherShareLabel = (await otherTrack.getAttribute('aria-label'))!;
+      await expect(
+        page.getByRole('tooltip', { name: otherShareLabel, exact: true }),
+      ).toHaveText(otherShareLabel);
+      await expect(otherTrack).toHaveAttribute('data-state', 'instant-open');
       await page.mouse.move(0, 0);
       await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
         0,
@@ -434,6 +450,14 @@ for (const { width, language, theme } of [
             .getByText('71.3%', { exact: true })
             .evaluate((element) => getComputedStyle(element).fontSize),
           tokenRow.evaluate((element) => getComputedStyle(element).fontSize),
+          timingGrid
+            .locator('dt')
+            .first()
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          timingGrid
+            .locator('dd')
+            .first()
+            .evaluate((element) => getComputedStyle(element).fontSize),
           hero
             .locator('..')
             .evaluate((element) => getComputedStyle(element).fontSize),
@@ -458,6 +482,8 @@ for (const { width, language, theme } of [
         '15px',
         '14px',
         '12px',
+        '11px',
+        '13px',
         '28px',
         '24px',
         '12px',
@@ -492,6 +518,7 @@ for (const { width, language, theme } of [
             String(targetWidth),
           );
           expect(await readFonts()).toEqual(dockedFonts);
+          await checkTimingOverflow();
           if (targetWidth === minWidth) {
             const alignment = await panel
               .getByRole('button', {
