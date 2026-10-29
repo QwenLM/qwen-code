@@ -173,17 +173,12 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Drop matches from files a path-scoped deny rule claims. The
       // input-side check only sees the search root, which can never match a
       // rule that targets an individual result file (#15129).
-      const permissionManager = this.config.getPermissionManager?.();
-      const deniedPaths = permissionManager
-        ? await selectPathsDeniedByPermissionRules(
-            permissionManager,
-            ToolNames.GREP,
-            this.config.getTargetDir(),
-            Array.from(
-              new Set(rawMatches.map((match) => match.absoluteFilePath)),
-            ),
-          )
-        : new Set<string>();
+      const deniedPaths = await selectPathsDeniedByPermissionRules(
+        this.config.getPermissionManager?.(),
+        ToolNames.GREP,
+        this.config.getTargetDir(),
+        Array.from(new Set(rawMatches.map((match) => match.absoluteFilePath))),
+      );
       const omittedFileCount = deniedPaths.size;
       if (omittedFileCount > 0) {
         debugLogger.debug('Files omitted by permission rules:', [

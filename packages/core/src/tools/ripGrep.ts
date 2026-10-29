@@ -337,25 +337,22 @@ class GrepToolInvocation extends BaseToolInvocation<
         });
       }
 
-      const permissionManager = this.config.getPermissionManager?.();
-      const deniedPaths = permissionManager
-        ? await selectPathsDeniedByPermissionRules(
-            permissionManager,
-            ToolNames.GREP,
-            this.config.getTargetDir(),
-            Array.from(
-              new Set(
-                allLines.map((line) =>
-                  toAbsoluteResultPath(
-                    line.filePath,
-                    searchPaths,
-                    resolvedPathCache,
-                  ),
-                ),
+      const deniedPaths = await selectPathsDeniedByPermissionRules(
+        this.config.getPermissionManager?.(),
+        ToolNames.GREP,
+        this.config.getTargetDir(),
+        Array.from(
+          new Set(
+            allLines.map((line) =>
+              toAbsoluteResultPath(
+                line.filePath,
+                searchPaths,
+                resolvedPathCache,
               ),
             ),
-          )
-        : new Set<string>();
+          ),
+        ),
+      );
       const omittedFileCount = deniedPaths.size;
       const omittedFilesNote = formatPermissionOmissionNote(omittedFileCount);
       if (omittedFileCount > 0) {

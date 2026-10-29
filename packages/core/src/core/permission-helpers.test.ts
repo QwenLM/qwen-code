@@ -88,6 +88,27 @@ describe('selectPathsDeniedByPermissionRules', () => {
     ).toEqual(new Set());
     expect(evaluate).not.toHaveBeenCalled();
   });
+
+  it('does not inspect deny matchers when the manager has no deny rules', async () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getProjectRoot: () => process.cwd(),
+      getCwd: () => process.cwd(),
+    });
+    pm.initialize();
+    const findMatchingDenyRule = vi.spyOn(pm, 'findMatchingDenyRule');
+
+    await selectPathsDeniedByPermissionRules(
+      pm,
+      ToolNames.GREP,
+      process.cwd(),
+      [path.resolve('file.txt')],
+    );
+
+    expect(findMatchingDenyRule).not.toHaveBeenCalled();
+  });
 });
 
 describe('buildPermissionCheckContext', () => {

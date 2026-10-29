@@ -264,6 +264,8 @@ class GlobToolInvocation extends BaseToolInvocation<
       const allFilteredEntries: GlobPath[] = [];
       const seenPaths = new Set<string>();
       let hitCollectionLimit = false;
+      let scannedFileCount = 0;
+      let omittedFileCount = 0;
 
       for (const searchDir of searchDirs) {
         const remainingEntries =
@@ -279,44 +281,41 @@ class GlobToolInvocation extends BaseToolInvocation<
           remainingEntries,
         );
         hitCollectionLimit ||= hitLimit;
+        const unseenEntries: GlobPath[] = [];
         for (const entry of entries) {
           // Deduplicate entries that might appear in overlapping directories
           const normalized = normalizePathForComparison(entry.fullpath());
           if (!seenPaths.has(normalized)) {
             seenPaths.add(normalized);
-            allFilteredEntries.push(entry);
+            unseenEntries.push(entry);
           }
         }
+        scannedFileCount += unseenEntries.length;
+        const deniedPaths = await selectPathsDeniedByPermissionRules(
+          this.config.getPermissionManager?.(),
+          ToolNames.GLOB,
+          this.config.getTargetDir(),
+          unseenEntries.map((entry) => entry.fullpath()),
+        );
+        omittedFileCount += deniedPaths.size;
+        if (deniedPaths.size > 0) {
+          debugLogger.debug('Files omitted by permission rules:', [
+            ...deniedPaths,
+          ]);
+        }
+        allFilteredEntries.push(
+          ...unseenEntries.filter(
+            (entry) => !deniedPaths.has(entry.fullpath()),
+          ),
+        );
       }
 
-      // Drop files a path-scoped deny rule claims. The input-side check only
-      // sees the search root, which can never match a rule that targets an
-      // individual result file (#15129).
-      const collectedPaths = allFilteredEntries.map((entry) =>
-        entry.fullpath(),
-      );
-      const deniedPaths = await selectPathsDeniedByPermissionRules(
-        this.config.getPermissionManager?.(),
-        ToolNames.GLOB,
-        this.config.getTargetDir(),
-        collectedPaths,
-      );
-      const omittedFileCount = deniedPaths.size;
       const omittedFilesNote = formatPermissionOmissionNote(omittedFileCount);
-      if (omittedFileCount > 0) {
-        debugLogger.debug('Files omitted by permission rules:', [
-          ...deniedPaths,
-        ]);
-      }
-      const filteredEntries = omittedFileCount
-        ? allFilteredEntries.filter(
-            (_, index) => !deniedPaths.has(collectedPaths[index]!),
-          )
-        : allFilteredEntries;
+      const filteredEntries = allFilteredEntries;
 
       if (!filteredEntries || filteredEntries.length === 0) {
         const noFilesMsg = hitCollectionLimit
-          ? `No permitted files found among the first ${allFilteredEntries.length} matching files scanned for pattern "${this.params.pattern}" ${searchLocationDescription}. Narrow the pattern or path.`
+          ? `No permitted files found among the first ${scannedFileCount} matching files scanned for pattern "${this.params.pattern}" ${searchLocationDescription}. Narrow the pattern or path.`
           : omittedFileCount > 0
             ? `No permitted files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`
             : `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`;
@@ -368,7 +367,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (hitCollectionLimit) {
-        resultMessage += `\n---\n[Results truncated after scanning ${allFilteredEntries.length} matching files. Narrow the pattern or path.]`;
+        resultMessage += `\n---\n[Results truncated after scanning ${scannedFileCount} matching files. Narrow the pattern or path.]`;
       } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';

@@ -107,6 +107,7 @@ describe('GlobTool', () => {
     prefix: string,
     count: number,
     extension = 'streamlimit',
+    baseDir = tempRootDir,
   ) => {
     const baseMtimeMs = Date.now();
     let yielded = 0;
@@ -117,7 +118,7 @@ describe('GlobTool', () => {
         const fileNumber = index + 1;
         yield {
           fullpath: () =>
-            path.join(tempRootDir, `${prefix}${fileNumber}.${extension}`),
+            path.join(baseDir, `${prefix}${fileNumber}.${extension}`),
           mtimeMs: baseMtimeMs + fileNumber,
         } as unknown as GlobResultPath;
       }
@@ -1060,6 +1061,30 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('1 file omitted by permission rules');
       expect(result.collectedFilePaths).toHaveLength(999);
       expect(result.collectedFilePaths).not.toContain(denied);
+    });
+
+    it('does not spend the cross-workspace budget on denied files', async () => {
+      const wsA = path.join(tempRootDir, 'wsA');
+      const wsB = path.join(tempRootDir, 'wsB');
+      await fs.mkdir(wsA);
+      await fs.mkdir(wsB);
+      mockGlobStreamResults('denied-', 1200, 'streamlimit', wsA);
+      mockGlobStreamResults('allowed-', 1, 'streamlimit', wsB);
+
+      const result = await run(
+        { pattern: '*.streamlimit' },
+        toolWith({
+          getWorkspaceContext: () => createMockWorkspaceContext(wsA, [wsB]),
+          getPermissionManager: () => denyPm([`Read(/${wsA}/**)`]),
+        }),
+      );
+
+      const allowedPath = path.join(wsB, 'allowed-1.streamlimit');
+      expect(result.resultFilePaths ?? []).toContain(allowedPath);
+      expect(result.collectedFilePaths ?? []).toContain(allowedPath);
+      expect(result.llmContent).toContain(
+        '1000 files omitted by permission rules',
+      );
     });
 
     it('keeps files matched only by ask rules visible', async () => {

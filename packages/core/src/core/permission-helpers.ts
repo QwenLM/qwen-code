@@ -20,7 +20,10 @@ import type {
   ToolConfirmationPayload,
 } from '../tools/tools.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { buildPermissionRules } from '../permissions/rule-parser.js';
+import {
+  buildPermissionRules,
+  withPathPatternCache,
+} from '../permissions/rule-parser.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Context building
@@ -126,28 +129,27 @@ export async function selectPathsDeniedByPermissionRules(
   filePaths: readonly string[],
 ): Promise<Set<string>> {
   const denied = new Set<string>();
-  if (!pm || filePaths.length === 0) {
+  if (!pm || filePaths.length === 0 || !pm.hasDenyRules()) {
     return denied;
   }
-  for (const filePath of filePaths) {
-    const ctx = buildPermissionCheckContext(
-      toolName,
-      { file_path: filePath },
-      targetDir,
-    );
-    if (pm.findMatchingDenyRule(ctx) === undefined) {
-      continue;
+  return withPathPatternCache(async () => {
+    for (const filePath of filePaths) {
+      const ctx = buildPermissionCheckContext(
+        toolName,
+        { file_path: filePath },
+        targetDir,
+      );
+      const { finalPermission } = await evaluatePermissionRules(
+        pm,
+        'default',
+        ctx,
+      );
+      if (finalPermission === 'deny') {
+        denied.add(filePath);
+      }
     }
-    const { finalPermission } = await evaluatePermissionRules(
-      pm,
-      'default',
-      ctx,
-    );
-    if (finalPermission === 'deny') {
-      denied.add(filePath);
-    }
-  }
-  return denied;
+    return denied;
+  });
 }
 
 /** Result of {@link evaluatePermissionRules}. */
