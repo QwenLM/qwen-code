@@ -35,7 +35,10 @@ jobs:
   # `npm ci`), so one job builds once and every leg downloads the result.
   # The build shares the legs' pool-first routing: hosted ubuntu jobs sat
   # queued for hours while the pool idled (2026-10-28), and one build per
-  # push adds no measurable pool load. See .github/scripts/e2e-build-pack.sh.
+  # push adds no measurable pool load. The OpenTUI interactive leg is still
+  # hosted-pinned, so a run can still wait on hosted capacity for that leg —
+  # pool routing takes the wait off the critical first step, it does not
+  # remove every hosted dependency. See .github/scripts/e2e-build-pack.sh.
   build:
     name: 'Build for E2E'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'

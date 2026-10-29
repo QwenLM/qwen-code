@@ -1,7 +1,7 @@
 # E2E: build once, unpack on every leg
 
-Design note for the `build` job in `.github/workflows/e2e.yml`: one hosted
-runner builds and bundles the commit, and the eleven test legs download the
+Design note for the `build` job in `.github/workflows/e2e.yml`: one job
+builds and bundles the commit, and the eleven test legs download the
 result instead of each rebuilding it.
 
 ## Context
@@ -18,16 +18,16 @@ run, so this repeats many times a day.
 
 ## Decision
 
-- A `build` job on `ubuntu-latest` installs (with `QWEN_SKIP_PREPARE=1`),
-  builds, bundles, and packs the outputs with
-  `.github/scripts/e2e-build-pack.sh`: the bundle (`dist/`), every workspace
-  `dist/` under the roots that root `package.json`'s `workspaces` declares
-  (node_modules pruned, a matched `dist/` not descended again), and an
-  `e2e-build.sha` stamp of the commit. The script fails closed — with an
-  `::error::` line — when the bundle is missing or when the scan finds no
-  workspace `dist/` at all, the same under-pack contract as release.yml's
-  Pack Build Outputs. The archive is one gzip tarball uploaded as the
-  `e2e-build` artifact with one day of retention.
+- A `build` job installs (with `QWEN_SKIP_PREPARE=1`), builds, bundles, and
+  packs the outputs with `.github/scripts/e2e-build-pack.sh`: the bundle
+  (`dist/`), every workspace `dist/` under the roots that root
+  `package.json`'s `workspaces` declares (node_modules pruned, a matched
+  `dist/` not descended again), and an `e2e-build.sha` stamp of the commit.
+  The script fails closed — with an `::error::` line — when the bundle is
+  missing or when the scan finds no workspace `dist/` at all, the same
+  under-pack contract as release.yml's Pack Build Outputs. The archive is one
+  gzip tarball uploaded as the `e2e-build` artifact with one day of
+  retention.
 - Every leg gains `needs: [build]`, keeps its own `npm ci` (node_modules,
   native modules, and the `generate` step that `prepare` still runs), and
   replaces its build and bundle steps with a download plus
@@ -40,13 +40,32 @@ run, so this repeats many times a day.
   skips them for the same reason instead of failing them on a missing
   artifact.
 
-## Why a hosted builder
+## Why the build left the hosted runner
 
-The build is platform-independent JavaScript; the platform-specific parts are
-native modules that each leg's own `npm ci` installs. A hosted VM builds it in
-about four minutes with no pool contention, and the ECS legs then pay a
-download rather than a build. Building on the pool would put the one job the
-whole run waits on behind the same queue that made the legs slow.
+The build was hosted-pinned because it is platform-independent JavaScript —
+the platform-specific parts are native modules that each leg's own `npm ci`
+installs. A hosted VM built it in about four minutes with no pool contention,
+and the ECS legs then paid a download rather than a build. Building on the
+pool was expected to put the one job the whole run waits on behind the same
+queue that made the legs slow.
+
+That premise inverted on 2026-10-28. Hosted ubuntu allocations for this
+repository degraded across one day from a 47-minute wait (run created 02:19
+UTC, build started 03:06) to 2 hours 16 minutes (build started 04:56) to 2
+hours 52 minutes (run created 05:26 UTC, build started 08:18), while the
+self-hosted pool — several hundred runners, mostly idle — went unused because
+`build` was the workflow's only hosted-pinned structural job. Every leg waits
+on `build`, so each push to `main` accumulated a queued run and the backlog
+could not drain. The build now shares the legs' pool-first routing (the
+ecs-qwen pool, falling back to hosted ubuntu only when the pool is disabled)
+and carries the pool's self-hosted contract: the workspace-ownership heal
+before checkout, the pre-installed Node preflight, the persistent npm cache,
+and the disk-floor gate. On a probe run of the change (40935790797), the
+build scheduled onto the pool 4 seconds after creation and finished in
+6m02s.
+
+The OpenTUI interactive leg remains hosted-pinned, so a run can still end on
+a hosted wait for that leg; rerouting it is a separate decision.
 
 ## Measured locally
 

@@ -1272,18 +1272,33 @@ describe('e2e workflow', () => {
       expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
       for (const [id, job] of poolJobs) {
         const steps = job.steps ?? [];
-        const gate = steps.find(
-          (step) => step.name === 'Disk floor gate (self-hosted)',
+        const names = steps.map((step) => step.name);
+        const checkoutIndex = steps.findIndex((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
         );
-        expect(gate, id).toBeDefined();
+        const installIndex = names.indexOf('Install dependencies');
+        // Presence alone is not the contract: the heal must precede
+        // checkout, the gate must sit between checkout and install, and the
+        // preflight must be the pool's own action — a reordered or
+        // re-pointed step fails here instead of on a runner.
         const heal = steps.find(
           (step) => step.name === 'Restore workspace ownership',
         );
         expect(heal?.if, id).toBe("${{ runner.environment == 'self-hosted' }}");
+        expect(names.indexOf('Restore workspace ownership'), id).toBeLessThan(
+          checkoutIndex,
+        );
+        const gate = steps.find(
+          (step) => step.name === 'Disk floor gate (self-hosted)',
+        );
+        expect(gate, id).toBeDefined();
+        const gateIndex = names.indexOf('Disk floor gate (self-hosted)');
+        expect(gateIndex, id).toBeGreaterThan(checkoutIndex);
+        expect(gateIndex, id).toBeLessThan(installIndex);
         const poolNode = steps.find(
           (step) => step.name === 'Use pre-installed Node.js (self-hosted)',
         );
-        expect(poolNode, id).toBeDefined();
+        expect(poolNode?.uses, id).toBe('./.github/actions/self-hosted-node');
         const hostedNode = steps.find(
           (step) =>
             typeof step.name === 'string' &&
