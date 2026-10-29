@@ -383,6 +383,8 @@ type ChatEditorTestProps = {
     canDisable?: boolean;
   };
   onSelectModel?: (modelId: string) => void;
+  currentModel?: string;
+  availableModels?: Array<{ id: string; label: string }>;
   onSelectReasoningEffort?: (value: string) => Promise<void> | void;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
@@ -42895,6 +42897,69 @@ describe('App session callbacks', () => {
       );
     },
   );
+
+  it.each(['default(openai)', 'qwen-route:v1:opaque-route'])(
+    'preserves the selected model route and display name after switching %s',
+    async (modelId) => {
+      mockConnection.models = [{ id: modelId, label: 'Auto' }];
+      const summary = {
+        authType: 'openai',
+        modelId: 'default',
+        baseUrl: 'https://models.example/v1',
+        apiKey: '***',
+        isRuntime: false,
+      };
+      mockSessionActions.setModel.mockResolvedValueOnce({
+        _meta: { qwenModelSwitch: summary },
+      });
+      renderApp();
+      await flush();
+
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(modelId));
+      await flush();
+
+      expect(mockSessionActions.setModel).toHaveBeenCalledWith(modelId);
+      expect.soft(testState.latestChatEditorProps?.currentModel).toBe(modelId);
+      expect(testState.latestChatEditorProps?.availableModels).toEqual([
+        { id: modelId, label: 'Auto' },
+      ]);
+      expect(mockStore.dispatch).toHaveBeenCalledWith({
+        type: 'debug',
+        text: 'Using model: Auto',
+        source: 'model_switch_summary',
+        data: summary,
+      });
+    },
+  );
+
+  it('falls back to the effective model ID in confirmation when the label is unavailable', async () => {
+    mockConnection.models = [{ id: 'default(openai)' }];
+    mockSessionActions.setModel.mockResolvedValueOnce({
+      _meta: {
+        qwenModelSwitch: {
+          authType: 'openai',
+          modelId: 'default',
+          baseUrl: 'https://models.example/v1',
+          apiKey: '***',
+        },
+      },
+    });
+    renderApp();
+    await flush();
+
+    act(() =>
+      testState.latestChatEditorProps?.onSelectModel?.('default(openai)'),
+    );
+    await flush();
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'debug',
+        text: 'Using model: default',
+        source: 'model_switch_summary',
+      }),
+    );
+  });
 
   it('clears model selection busy state after a same-session reattach', async () => {
     const selection = deferred<void>();
