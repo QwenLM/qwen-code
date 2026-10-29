@@ -1873,7 +1873,7 @@ describe('WebShellSidebar workspace removal', () => {
       container.querySelectorAll<HTMLElement>(`.${workspaceStyles.section}`),
     ).find((section) => section.querySelector('[title="/tmp/other"]'))!;
     const newTask = workspaceSection.querySelector<HTMLButtonElement>(
-      'button[aria-label="New task"]',
+      'button[aria-label="New session"]',
     );
     expect(newTask).not.toBeNull();
     await act(async () => {
@@ -1887,7 +1887,7 @@ describe('WebShellSidebar workspace removal', () => {
     const onNewSession = vi.fn(() => true);
     renderSidebar({ onNewSession });
     const globalNewTask = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="New task"]',
+      'button[aria-label="New session"]',
     );
     expect(globalNewTask).not.toBeNull();
 
@@ -1956,7 +1956,7 @@ describe('WebShellSidebar workspace removal', () => {
     const rowNewTask = workspaceAction(
       '/tmp/project',
     )?.parentElement?.querySelector<HTMLButtonElement>(
-      'button[aria-label="New task"]',
+      'button[aria-label="New session"]',
     );
     expect(rowNewTask).toBeDefined();
     await act(async () => {
@@ -2054,7 +2054,7 @@ describe('WebShellSidebar workspace removal', () => {
       expect(trigger).toBeDefined();
       const newSession =
         trigger!.parentElement!.querySelector<HTMLButtonElement>(
-          'button[aria-label="New task"]',
+          'button[aria-label="New session"]',
         );
       expect(newSession).not.toBeNull();
       await act(async () => click(newSession!));
@@ -3317,7 +3317,7 @@ describe('WebShellSidebar workspace removal', () => {
         container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
       ).find(
         (button) =>
-          button.textContent?.includes('Project') &&
+          button.textContent?.includes('Workspaces') &&
           !button.textContent?.includes('other'),
       );
     expect(projectsToggle()).toBeDefined();
@@ -3658,7 +3658,7 @@ describe('WebShellSidebar workspace removal', () => {
     // Positive half first: the menu really opened with the surviving actions.
     expect(menuItemLabels()).toEqual([
       'Copy path',
-      'New task',
+      'New session',
       'Move up',
       'Move down',
       'Reload runtime',
@@ -3703,7 +3703,7 @@ describe('WebShellSidebar workspace removal', () => {
     act(() => click(trigger!));
     const labels = menuItemLabels();
     expect(labels).toContain('Copy path');
-    expect(labels).toContain('New task');
+    expect(labels).toContain('New session');
     expect(labels).toContain('Reload runtime');
     expect(labels).not.toContain('Remove workspace');
     expect(labels).not.toContain('Rename…');
@@ -3961,21 +3961,21 @@ describe('WebShellSidebar workspace removal', () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(menuItemLabels()).toContain('New worktree task');
+    expect(menuItemLabels()).toContain('New worktree session');
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((element) => element.textContent === 'New worktree task');
+    ).find((element) => element.textContent === 'New worktree session');
     act(() => click(worktree!));
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
     await act(async () => {
       await Promise.resolve();
     });
     act(() => click(workspaceAction('/tmp/project')!));
-    expect(menuItemLabels()).toContain('New task');
-    expect(menuItemLabels()).not.toContain('New worktree task');
+    expect(menuItemLabels()).toContain('New session');
+    expect(menuItemLabels()).not.toContain('New worktree session');
     const primaryNewTask = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((element) => element.textContent === 'New task');
+    ).find((element) => element.textContent === 'New session');
     act(() => click(primaryNewTask!));
     expect(onNewSession).toHaveBeenCalledWith('/tmp/project');
     act(() => {
@@ -3984,8 +3984,8 @@ describe('WebShellSidebar workspace removal', () => {
     // A trusted secondary workspace without a branch gets no worktree entry
     // either — the gate is the branch, not the primary flag.
     act(() => click(workspaceAction('/tmp/plain')!));
-    expect(menuItemLabels()).toContain('New task');
-    expect(menuItemLabels()).not.toContain('New worktree task');
+    expect(menuItemLabels()).toContain('New session');
+    expect(menuItemLabels()).not.toContain('New worktree session');
   });
 
   it('passes the explicit primary cwd to a primary workspace worktree task', async () => {
@@ -4010,7 +4010,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((element) => element.textContent === 'New worktree task');
+    ).find((element) => element.textContent === 'New worktree session');
     act(() => click(worktree!));
 
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/project');
@@ -4142,7 +4142,7 @@ describe('WebShellSidebar workspace removal', () => {
       });
       const item = Array.from(
         document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-      ).find((element) => element.textContent === 'New worktree task');
+      ).find((element) => element.textContent === 'New worktree session');
       expect(item).toBeDefined();
       act(() => click(item!));
     };
@@ -6732,7 +6732,7 @@ describe('WebShellSidebar Live group', () => {
     ).find((button) => button.textContent?.includes('Live'));
     expect(liveToggle).toBeDefined();
     expect(
-      liveToggle?.parentElement?.querySelector('[aria-label="New task"]'),
+      liveToggle?.parentElement?.querySelector('[aria-label="New session"]'),
     ).toBeNull();
 
     await expandWorkspace('Live');
@@ -7729,7 +7729,7 @@ describe('WebShellSidebar standalone grouping', () => {
     await openArchiveSettings();
 
     const projectGroup = container.querySelector(
-      'section[aria-label="Archived: Project"]',
+      'section[aria-label="Archived: Workspace"]',
     );
     expect(projectGroup?.textContent).toContain('Archive without cwd');
   });

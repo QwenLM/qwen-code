@@ -307,7 +307,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
-  /** Built-in primary nav entries to show. Embedded hosts default to New task only. */
+  /** Built-in primary nav entries to show. Embedded hosts default to New session only. */
   items?: readonly WebShellSidebarPrimaryNavItem[];
   /** Additional custom content rendered after the built-in nav buttons. */
   render?: () => ReactNode;
@@ -566,7 +566,7 @@ interface WebShellSidebarProps {
   showSessionSourceSwitch?: boolean;
   /** Show Live conversations and, in rail layout, the Live entry. Defaults to false. */
   showLive?: boolean;
-  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  /** Whether to hide the "Workspaces" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
@@ -6978,7 +6978,7 @@ export function WebShellSidebar({
                           if (
                             target instanceof Element &&
                             target.closest(
-                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
                             )
                           )
                             event.preventDefault();

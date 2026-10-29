@@ -46,6 +46,7 @@ import {
   GOAL_PAUSE_REASON_COMMAND,
   type DaemonInputAnnotation,
   type DaemonSessionBtwStreamEvent,
+  type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
   type DaemonSessionSummary,
@@ -56,6 +57,8 @@ import {
   type DaemonBrand,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
+  type DaemonSessionTaskWithWorkflowStatus,
+  type DaemonSessionWorkflowTaskStatus,
   type DaemonSettingDescriptor,
   type DaemonSkillToggleMutation,
   type DaemonWorkspaceMcpServerStatus,
@@ -91,6 +94,7 @@ import { StandaloneContext } from './config/standalone';
 import { DaemonAvailabilityContext } from './daemon/availability-context.js';
 import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
+import { HotkeySetter } from './live/HotkeySetter';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 
@@ -383,6 +387,8 @@ type ChatEditorTestProps = {
     canDisable?: boolean;
   };
   onSelectModel?: (modelId: string) => void;
+  currentModel?: string;
+  availableModels?: Array<{ id: string; label: string }>;
   onSelectReasoningEffort?: (value: string) => Promise<void> | void;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
@@ -910,7 +916,9 @@ const {
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
-      latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
+      latestStatusBarTasks: null as
+        | DaemonSessionTaskWithWorkflowStatus[]
+        | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
@@ -2323,7 +2331,7 @@ vi.doMock('./components/StatusBar', async () => {
   const React = await import('react');
   return {
     StatusBar: (props: {
-      tasks?: DaemonSessionMonitorTaskStatus[];
+      tasks?: DaemonSessionTaskWithWorkflowStatus[];
       onOpenTasks?: () => void;
       hideSettings?: boolean;
       onSelectModel?: () => void;
@@ -17685,6 +17693,211 @@ describe('App session callbacks', () => {
     expect(testState.latestStatusBarTasks).toEqual([monitor]);
   });
 
+  it('feeds the footer pill the task snapshot while a background agent runs', () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-running',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    testState.backgroundTasks = [agent, shell];
+
+    renderApp({
+      header: { items: ['title', 'environment', 'rightPanel'] },
+      environmentPanel: {
+        items: [
+          'environment',
+          'sources',
+          'subagents',
+          'backgroundTasks',
+          'artifacts',
+        ],
+      },
+    });
+
+    // The pill must see the unfiltered snapshot (the design doc's
+    // "1 shell, 3 local agents"), not an agents-only projection.
+    expect(testState.latestStatusBarTasks).toEqual([agent, shell]);
+  });
+
+  it('keeps the footer pill suppressed in the shipped entry without a running agent', () => {
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-suppressed',
+      label: 'Watch build',
+      description: 'Watch build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    // A parked (paused) background agent must not re-open the pill: the
+    // gate is hasActiveBackgroundAgent (running only), not a kind check.
+    const pausedAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-paused',
+      label: 'Research',
+      description: 'Research',
+      status: 'paused',
+      startTime: 3,
+      runtimeMs: 30,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [monitor, pausedAgent];
+
+    renderApp();
+
+    expect(testState.latestStatusBarTasks).toEqual([]);
+  });
+
+  it('keeps background agents out of headerless embed footers', () => {
+    // Headerless embeds (e.g. the VS Code companion, header={{ items: [] }})
+    // land on the !environmentTasksReplacementEnabled arm: they keep the
+    // pre-filtered composer tasks, so a live background agent must not
+    // open or feed their footer.
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-embed',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-embed',
+      label: 'Watch build',
+      description: 'Watch build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    testState.backgroundTasks = [agent, monitor];
+
+    renderApp({ header: { items: [] } });
+
+    expect(testState.latestStatusBarTasks).toEqual([monitor]);
+  });
+
+  it('passes agent tasks to a host-provided footer', () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-host',
+      label: 'Refactor',
+      description: 'Refactor',
+      status: 'running',
+      startTime: 3,
+      runtimeMs: 30,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    // The host footer gets composer tasks plus BACKGROUND agents (design
+    // doc); foreground agents are transcript-only and must stay out.
+    const foregroundAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-foreground',
+      label: 'Refactor foreground',
+      description: 'Refactor foreground',
+      status: 'running',
+      startTime: 5,
+      runtimeMs: 50,
+      isBackgrounded: false,
+      subagentType: 'general-purpose',
+    };
+    // Terminal (completed) background agents keep reaching host footers
+    // (design doc), so the predicate must not narrow to running-only.
+    const terminalAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-terminal',
+      label: 'Refactor terminal',
+      description: 'Refactor terminal',
+      status: 'completed',
+      startTime: 6,
+      runtimeMs: 60,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-host',
+      label: 'Watch deploy',
+      description: 'Watch deploy',
+      status: 'running',
+      startTime: 4,
+      runtimeMs: 40,
+    };
+    // Retained workflow history stays out of host footers: the composer
+    // filter is isComposerTask, not a kind-only check.
+    const historicalWorkflow: DaemonSessionWorkflowTaskStatus = {
+      kind: 'workflow',
+      id: 'workflow-historical',
+      label: 'Refactor history',
+      description: 'Refactor history',
+      status: 'completed',
+      startTime: 7,
+      runtimeMs: 70,
+      isBackgrounded: false,
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+      isHistorical: true,
+    };
+    testState.backgroundTasks = [
+      agent,
+      foregroundAgent,
+      terminalAgent,
+      monitor,
+      historicalWorkflow,
+    ];
+    let footerTasks: unknown;
+    renderApp({
+      renderFooter: (props) => {
+        footerTasks = props.tasks;
+        return null;
+      },
+    });
+    expect(footerTasks).toEqual([
+      expect.objectContaining({ kind: 'agent', id: 'agent-host' }),
+      expect.objectContaining({ kind: 'agent', id: 'agent-terminal' }),
+      expect.objectContaining({ kind: 'monitor', id: 'monitor-host' }),
+    ]);
+    expect(footerTasks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'agent-foreground' }),
+      ]),
+    );
+    expect(footerTasks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'workflow-historical' }),
+      ]),
+    );
+  });
+
   it('passes terminal background shell task ids to the message list', async () => {
     const running: DaemonSessionShellTaskStatus = {
       kind: 'shell',
@@ -22013,7 +22226,7 @@ describe('App session callbacks', () => {
     ).toBeNull();
     expect(
       browserView.container.querySelector(
-        '[data-dialog-title="Add Workspace"]',
+        '[data-dialog-title="Add workspace"]',
       ),
     ).not.toBeNull();
 
@@ -24098,7 +24311,7 @@ describe('App session callbacks', () => {
 
     // New task on a row starts a draft there and returns to the chat view.
     const newTask = Array.from(panel!.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('New task'),
+      (button) => button.textContent?.includes('New session'),
     );
     expect(newTask).toBeDefined();
     await act(async () => {
@@ -27223,6 +27436,38 @@ describe('App session callbacks', () => {
       'error',
       'Slash commands are unavailable while a Goal owns the session or its state is loading.',
     );
+  });
+
+  it('accepts /language ui ru, the locale this PR ships', async () => {
+    // The gate and the /language listings both derive from WEB_SHELL_LANGUAGES:
+    // a hand-rolled valid list missing ru rejects the locale, and a stale
+    // hardcoded listing hides it from the user.
+    const onLanguageChange = vi.fn();
+    const onToast = vi.fn();
+    renderApp({ onLanguageChange, onToast });
+    await flush();
+
+    let accepted: boolean | undefined;
+    await act(async () => {
+      expect(testState.latestChatEditorProps).toBeDefined();
+      accepted = testState.latestChatEditorProps?.onSubmit('/language ui ru');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language ui ru',
+      ),
+    ).toBe(true);
+    // The invalid-language toast is the gate rejecting the locale.
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Invalid language'),
+    );
+    // handleLanguageChange runs on the sendPrompt success path.
+    expect(onLanguageChange).toHaveBeenCalledWith('ru');
   });
 
   it('refuses /rename --auto without a session', async () => {
@@ -43337,6 +43582,69 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each(['default(openai)', 'qwen-route:v1:opaque-route'])(
+    'preserves the selected model route and display name after switching %s',
+    async (modelId) => {
+      mockConnection.models = [{ id: modelId, label: 'Auto' }];
+      const summary = {
+        authType: 'openai',
+        modelId: 'default',
+        baseUrl: 'https://models.example/v1',
+        apiKey: '***',
+        isRuntime: false,
+      };
+      mockSessionActions.setModel.mockResolvedValueOnce({
+        _meta: { qwenModelSwitch: summary },
+      });
+      renderApp();
+      await flush();
+
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(modelId));
+      await flush();
+
+      expect(mockSessionActions.setModel).toHaveBeenCalledWith(modelId);
+      expect.soft(testState.latestChatEditorProps?.currentModel).toBe(modelId);
+      expect(testState.latestChatEditorProps?.availableModels).toEqual([
+        { id: modelId, label: 'Auto' },
+      ]);
+      expect(mockStore.dispatch).toHaveBeenCalledWith({
+        type: 'debug',
+        text: 'Using model: Auto',
+        source: 'model_switch_summary',
+        data: summary,
+      });
+    },
+  );
+
+  it('falls back to the effective model ID in confirmation when the label is unavailable', async () => {
+    mockConnection.models = [{ id: 'default(openai)' }];
+    mockSessionActions.setModel.mockResolvedValueOnce({
+      _meta: {
+        qwenModelSwitch: {
+          authType: 'openai',
+          modelId: 'default',
+          baseUrl: 'https://models.example/v1',
+          apiKey: '***',
+        },
+      },
+    });
+    renderApp();
+    await flush();
+
+    act(() =>
+      testState.latestChatEditorProps?.onSelectModel?.('default(openai)'),
+    );
+    await flush();
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'debug',
+        text: 'Using model: default',
+        source: 'model_switch_summary',
+      }),
+    );
+  });
+
   it('clears model selection busy state after a same-session reattach', async () => {
     const selection = deferred<void>();
     mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
@@ -50147,6 +50455,663 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
       expect(panel?.getAttribute('data-floating')).toBe('false');
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+});
+
+describe('App view navigation shortcuts (#13175)', () => {
+  // Same marker the shell-ref overview test uses: the panel container with a
+  // stable aria-label (the session table viewport is virtualized and does not
+  // render in jsdom).
+  const OVERVIEW_PANEL =
+    '[data-testid="inline-panel"][aria-label="Session Overview"]';
+  const SPLIT_VIEW_PAGE = '[data-testid="split-view-page"]';
+  // The hotkeys are live only while the sidebar offers their buttons, and
+  // App normalizes an omitted footer to ['collapse'], so list both items the
+  // way the standalone shell does.
+  const VIEW_SIDEBAR: React.ComponentProps<typeof App>['sidebar'] = {
+    enabled: true,
+    footer: { items: ['sessionsOverview', 'splitView'] },
+  };
+  const OVERVIEW_CHORD: KeyboardEventInit = {
+    key: 'O',
+    code: 'KeyO',
+    metaKey: true,
+    shiftKey: true,
+  };
+  const SPLIT_CHORD: KeyboardEventInit = {
+    key: '\\',
+    code: 'Backslash',
+    ctrlKey: true,
+  };
+
+  function renderViewApp(props: React.ComponentProps<typeof App> = {}) {
+    return renderApp({ sidebar: VIEW_SIDEBAR, ...props });
+  }
+
+  function pressViewShortcut(
+    init: KeyboardEventInit,
+    target: EventTarget = window,
+  ): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  async function press(
+    init: KeyboardEventInit,
+    target: EventTarget = window,
+  ): Promise<KeyboardEvent> {
+    let event!: KeyboardEvent;
+    await act(async () => {
+      event = pressViewShortcut(init, target);
+      await Promise.resolve();
+    });
+    return event;
+  }
+
+  // Split view needs desktop-scale room: the hotkey mirrors the sidebar's
+  // isLargeScreen gate, so match (or miss) the large-screen queries.
+  function stubLargeScreen(large: boolean): void {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: large && query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+  }
+
+  it('opens the Session Overview panel with Cmd+Shift+O, also while it is open', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    const first = await press(OVERVIEW_CHORD);
+    expect(first.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    // The open overview is an activePanel; it must not gate its own chord.
+    const second = await press(OVERVIEW_CHORD);
+    expect(second.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('opens the Session Overview panel with Ctrl+Shift+O', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press({
+      key: 'O',
+      code: 'KeyO',
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('opens the split view with Ctrl+Backslash', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press(SPLIT_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('matches the physical backslash key, not the produced character', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press({ ...SPLIT_CHORD, key: ';' });
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('opens the Session Overview from the split view', async () => {
+    // Unlike the chat-only shortcuts, the view chords are not gated on
+    // interactionBlocked: they navigate away from covering views.
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    await press(SPLIT_CHORD);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+    const event = await press(OVERVIEW_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('opens the split view from the ISO backslash key (IntlBackslash)', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press({ ...SPLIT_CHORD, code: 'IntlBackslash' });
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('runs the sidebar button path for a host that controls the split view', async () => {
+    // The sidebar button opens the split view locally even when the host
+    // passes splitSessionIds; the chord must do the same, not a no-op.
+    stubLargeScreen(true);
+    const { container } = renderViewApp({ splitSessionIds: [] });
+    await flush();
+    const event = await press(SPLIT_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('leaves the split chord to the browser on a narrow viewport', async () => {
+    // The sidebar withholds its split button below the large-screen
+    // breakpoint, so the chord is inert and must not consume the key —
+    // while the overview chord stays live: its button carries no
+    // large-screen gate, so this one screen pins the gates' width
+    // asymmetry on both sides (button gate and chord must agree).
+    stubLargeScreen(false);
+    const { container } = renderViewApp();
+    await flush();
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    expect(sidebar?.getAttribute('data-can-open-sessions-overview')).toBe(
+      'true',
+    );
+    expect(sidebar?.getAttribute('data-can-open-split-view')).toBe('false');
+    const split = await press(SPLIT_CHORD);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    const overview = await press(OVERVIEW_CHORD);
+    expect(overview.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('leaves both chords to the browser when the sidebar does not offer the buttons', async () => {
+    stubLargeScreen(true);
+    for (const sidebar of [
+      false,
+      { enabled: false, footer: { items: ['sessionsOverview', 'splitView'] } },
+      { enabled: true, footer: { items: [] } },
+      { enabled: true, footer: { items: ['settings'] } },
+    ] satisfies Array<React.ComponentProps<typeof App>['sidebar']>) {
+      const { container, unmount } = renderApp({ sidebar });
+      await flush();
+      const overview = await press(OVERVIEW_CHORD);
+      const split = await press(SPLIT_CHORD);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+      unmount();
+    }
+  });
+
+  it('gates each chord on its own footer item', async () => {
+    // The footer items are an independent per-item allowlist, so a host can
+    // offer only one of the two buttons; each chord must follow its own
+    // item, not the other's.
+    stubLargeScreen(true);
+    const { container, unmount } = renderApp({
+      sidebar: { enabled: true, footer: { items: ['sessionsOverview'] } },
+    });
+    await flush();
+    const overview = await press(OVERVIEW_CHORD);
+    expect(overview.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    const split = await press(SPLIT_CHORD);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    unmount();
+    const splitOnly = renderApp({
+      sidebar: { enabled: true, footer: { items: ['splitView'] } },
+    });
+    await flush();
+    const split2 = await press(SPLIT_CHORD);
+    expect(split2.defaultPrevented).toBe(true);
+    expect(splitOnly.container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+    const overview2 = await press(OVERVIEW_CHORD);
+    expect(overview2.defaultPrevented).toBe(false);
+    expect(splitOnly.container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    splitOnly.unmount();
+  });
+
+  it('leaves both chords to the browser when the sidebar withholds the buttons for lack of project features', async () => {
+    // The footer still lists both items; the buttons' availability gate
+    // (no ordinary workspace) is what hides them.
+    stubLargeScreen(true);
+    mockWorkspace.capabilities = {
+      workspaces: [],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const { container } = renderViewApp();
+    await flush();
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    expect(sidebar?.getAttribute('data-project-features-enabled')).toBe(
+      'false',
+    );
+    expect(sidebar?.getAttribute('data-can-open-sessions-overview')).toBe(
+      'false',
+    );
+    expect(sidebar?.getAttribute('data-can-open-split-view')).toBe('false');
+    const overview = await press(OVERVIEW_CHORD);
+    const split = await press(SPLIT_CHORD);
+    expect(overview.defaultPrevented).toBe(false);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+  });
+
+  it('matches the physical key, not the produced character (RU layout)', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    // On the Russian layout the physical O key produces "л".
+    await press({ ...OVERVIEW_CHORD, key: 'л' });
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('does not fire from the character alone (KeyL typing "o")', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press({ ...OVERVIEW_CHORD, key: 'o', code: 'KeyL' });
+    expect(event.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+  });
+
+  it('skips both chords while an external modal is registered', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const blocker = container.querySelector<HTMLButtonElement>(
+      '[data-testid="interaction-blocker"]',
+    );
+    expect(blocker).not.toBeNull();
+    await act(async () => {
+      blocker?.click();
+      await Promise.resolve();
+    });
+    const overview = await press(OVERVIEW_CHORD);
+    const split = await press(SPLIT_CHORD);
+    expect(overview.defaultPrevented).toBe(false);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    // Releasing the block re-arms the chord (the gate is the block itself).
+    await act(async () => {
+      blocker?.click();
+      await Promise.resolve();
+    });
+    const released = await press(OVERVIEW_CHORD);
+    expect(released.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('skips both chords while a modal alert dialog is open (Esc keeps priority)', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    // The shape ui/alert-dialog renders for a component-owned confirm such
+    // as the Session Overview archive/delete dialog.
+    const confirm = document.createElement('div');
+    confirm.setAttribute('role', 'alertdialog');
+    confirm.setAttribute('data-slot', 'alert-dialog-content');
+    confirm.setAttribute('data-state', 'open');
+    document.body.appendChild(confirm);
+    try {
+      const overview = await press(OVERVIEW_CHORD);
+      const split = await press(SPLIT_CHORD);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    } finally {
+      confirm.remove();
+    }
+  });
+
+  it('skips both chords while a modal ui/dialog is open', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    // The shape ui/dialog renders for a component-owned modal such as the
+    // expanded-table dialog opened from a chat message.
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('data-slot', 'dialog-content');
+    dialog.setAttribute('data-state', 'open');
+    document.body.appendChild(dialog);
+    try {
+      const overview = await press(OVERVIEW_CHORD);
+      const split = await press(SPLIT_CHORD);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    } finally {
+      dialog.remove();
+    }
+  });
+
+  it('skips both chords while a modal confirm is open in a shadow-DOM portal root', async () => {
+    // Under shadowDom: { portals: true } the portal root lives inside a
+    // shadow root that document.querySelector cannot pierce.
+    stubLargeScreen(true);
+    const { container } = renderViewApp({ shadowDom: { portals: true } });
+    await flush();
+    const portalHost = document.querySelector<HTMLElement>(
+      '[data-web-shell-shadow-host="portals"]',
+    );
+    const shadowPortalRoot = portalHost?.shadowRoot?.querySelector(
+      '[data-web-shell-portal-root]',
+    );
+    expect(shadowPortalRoot).toBeTruthy();
+    const confirm = document.createElement('div');
+    confirm.setAttribute('role', 'alertdialog');
+    confirm.setAttribute('data-slot', 'alert-dialog-content');
+    confirm.setAttribute('data-state', 'open');
+    shadowPortalRoot!.appendChild(confirm);
+    try {
+      expect(
+        document.querySelector('[data-slot="alert-dialog-content"]'),
+      ).toBeNull();
+      const overview = await press(OVERVIEW_CHORD);
+      const split = await press(SPLIT_CHORD);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    } finally {
+      confirm.remove();
+    }
+  });
+
+  it('still fires over non-modal dialog roles (details popover, approval card)', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    // Session details tooltips are popovers with role="dialog"; the inline
+    // tool-approval card carries role="alertdialog". Neither is modal.
+    const popover = document.createElement('div');
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('data-slot', 'popover-content');
+    const approval = document.createElement('div');
+    approval.setAttribute('role', 'alertdialog');
+    approval.setAttribute('data-web-shell-permission-panel', '');
+    document.body.append(popover, approval);
+    try {
+      const event = await press(OVERVIEW_CHORD);
+      expect(event.defaultPrevented).toBe(true);
+      expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    } finally {
+      popover.remove();
+      approval.remove();
+    }
+  });
+
+  it('does not open views while the floating artifact drawer is open', async () => {
+    // Floating variant: below the dock breakpoint the panel opens in a
+    // modal drawer whose overlay covers the chat, at drawer width and
+    // fullscreen alike.
+    stubLargeScreen(false);
+    const { container } = renderViewApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] [data-slot="drawer-content"]',
+      )?.className,
+    ).toContain('min(520px');
+    const drawerWidth = await press(OVERVIEW_CHORD);
+    // The overview chord is otherwise live here, so this pins the drawer
+    // gate itself.
+    expect(drawerWidth.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-portal-root] aside[aria-label="Right panel"] ' +
+            'button[aria-label="Fullscreen"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const overview = await press(OVERVIEW_CHORD);
+    expect(overview.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    // The ignored keystroke leaves the fullscreen state untouched.
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] [data-slot="drawer-content"]',
+      )?.className,
+    ).toContain('w-full');
+  });
+
+  it('keeps the chords live beside the docked artifact panel', async () => {
+    // The docked panel sits beside the chat and covers nothing, so the
+    // fix for covering surfaces must not be a blanket artifact-panel gate.
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[data-slot="drawer-content"]')).toBeNull();
+    const event = await press(OVERVIEW_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('does not open views while the docked artifact panel is fullscreen', async () => {
+    // Docked fullscreen is the shell's own covering surface (no ui/drawer),
+    // so the artifactPanelFullscreen gate is what keeps the chords inert.
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[data-slot="drawer-content"]')).toBeNull();
+    const overview = await press(OVERVIEW_CHORD);
+    const split = await press(SPLIT_CHORD);
+    expect(overview.defaultPrevented).toBe(false);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+  });
+
+  it('ignores alt-combos, inexact modifiers, unmodified presses, auto-repeat and IME composition', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    for (const init of [
+      { ...OVERVIEW_CHORD, altKey: true },
+      { ...OVERVIEW_CHORD, key: 'o', shiftKey: false },
+      { key: '\\', code: 'Backslash' },
+      { ...SPLIT_CHORD, shiftKey: true },
+      { ...OVERVIEW_CHORD, repeat: true },
+      { ...OVERVIEW_CHORD, isComposing: true },
+    ]) {
+      const event = await press(init);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+  });
+
+  it('does not scan the DOM for modals on unrelated Cmd/Ctrl chords', async () => {
+    renderViewApp();
+    await flush();
+    const querySpy = vi.spyOn(document, 'querySelector');
+    try {
+      await press({ key: 'c', code: 'KeyC', metaKey: true });
+      await press({ key: 'Enter', code: 'Enter', metaKey: true });
+      expect(
+        querySpy.mock.calls.filter(([selector]) =>
+          String(selector).includes('alert-dialog-content'),
+        ),
+      ).toEqual([]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it('registers in the capture phase, ahead of handlers on the target', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    // A target that stops the keydown in its own bubble phase: a bubble-phase
+    // window listener would never see it.
+    const field = document.createElement('div');
+    field.tabIndex = 0;
+    field.addEventListener('keydown', (event) => event.stopPropagation());
+    document.body.appendChild(field);
+    try {
+      const event = await press(OVERVIEW_CHORD, field);
+      expect(event.defaultPrevented).toBe(true);
+      expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    } finally {
+      field.remove();
+    }
+  });
+
+  it('fires both chords from inside the composer editor', async () => {
+    // Issue #13175: the chords produce no text, so they stay live while the
+    // composer has focus (the desktop composer is a CodeMirror editor).
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const composer = document.createElement('div');
+    composer.setAttribute('data-web-shell-composer-editor', '');
+    const editor = document.createElement('div');
+    editor.className = 'cm-editor';
+    const content = document.createElement('div');
+    content.setAttribute('contenteditable', 'true');
+    editor.appendChild(content);
+    composer.appendChild(editor);
+    document.body.appendChild(composer);
+    try {
+      const overview = await press(OVERVIEW_CHORD, content);
+      expect(overview.defaultPrevented).toBe(true);
+      expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+      const split = await press(SPLIT_CHORD, content);
+      expect(split.defaultPrevented).toBe(true);
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it('leaves both chords to an ordinary editable target', async () => {
+    // A search box, a rename field or a settings input keeps the keys while
+    // the user is typing; the view must not be yanked away.
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const search = document.createElement('input');
+    search.type = 'search';
+    document.body.appendChild(search);
+    try {
+      const overview = await press(OVERVIEW_CHORD, search);
+      const split = await press(SPLIT_CHORD, search);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    } finally {
+      search.remove();
+    }
+  });
+
+  it('leaves the chord to an armed shortcut recorder', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const recorderContainer = document.createElement('div');
+    document.body.appendChild(recorderContainer);
+    const recorderRoot = createRoot(recorderContainer);
+    const onChange = vi.fn(async (_accelerator: string) => {});
+    try {
+      act(() => {
+        recorderRoot.render(
+          <HotkeySetter
+            accelerator=""
+            disabled={false}
+            captureLabel="Press shortcut"
+            clearLabel="Clear"
+            offLabel="Off"
+            onChange={onChange}
+          />,
+        );
+      });
+      await act(async () => {
+        recorderContainer
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Press shortcut"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      const input = recorderContainer.querySelector<HTMLInputElement>(
+        'input[aria-label="Press shortcut"]',
+      );
+      expect(input).not.toBeNull();
+      await press(SPLIT_CHORD, input!);
+      expect(onChange).toHaveBeenCalledWith('Control+\\');
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    } finally {
+      act(() => recorderRoot.unmount());
+      recorderContainer.remove();
+    }
+  });
+
+  it('does not hijack keys targeted at the web terminal', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    // A non-editable focus target, so this pins the terminal gate rather
+    // than the editable-target one.
+    const terminal = document.createElement('div');
+    terminal.setAttribute('data-web-terminal', '');
+    const screen = document.createElement('div');
+    screen.tabIndex = 0;
+    terminal.appendChild(screen);
+    document.body.appendChild(terminal);
+    try {
+      const event = await press(OVERVIEW_CHORD, screen);
+      expect(event.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    } finally {
+      terminal.remove();
     }
   });
 });
