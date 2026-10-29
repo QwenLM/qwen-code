@@ -1561,7 +1561,7 @@ class HostedMcpRestartFaultGatesIT {
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root="
                                 + workspace.getParent());
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         store = spring.getBean(ManagedAgentStore.class);
         // The storage registration and the Workspace rows are durable, so a
         // restarted context reuses them. Registering again is an operator
