@@ -10,6 +10,7 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -784,6 +785,25 @@ describe('SplitView', () => {
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
     expect(addButton.disabled).toBe(true);
+  });
+
+  it('keeps the add button enabled one below MAX_PANES', () => {
+    sessionsState = Array.from({ length: MAX_SPLIT_PANES + 2 }, (_, i) => ({
+      sessionId: `x${i}`,
+      workspaceCwd: '/w',
+      displayName: `Pane ${i}`,
+    }));
+    // One slot spare and a session left to add, so the entry point must work.
+    render({
+      sessionIds: sessionsState
+        .slice(0, MAX_SPLIT_PANES - 1)
+        .map((session) => session.sessionId),
+    });
+    expect(panes()).toHaveLength(MAX_SPLIT_PANES - 1);
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    expect(addButton.disabled).toBe(false);
   });
 
   it('isolates a crashing pane so the rest of the split survives', () => {
