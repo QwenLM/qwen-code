@@ -82,9 +82,7 @@ import static org.mockito.Mockito.when;
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
  *       fixed number of grouped batch queries.</li>
  *   <li>Tool-publication authorization and async heartbeats
- *       read the activation state from the journal head when journal-head-authorization is enabled (the flag
- *       ships false), rescanning the journal only for pre-migration heads
- *       (and backfilling them).</li>
+ *       read activation state from the journal head and refuse stale projections.</li>
  * </ol>
  */
 class Issue13181QueryBudgetTest {
@@ -161,9 +159,9 @@ class Issue13181QueryBudgetTest {
                 .containsExactly(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
         // Hot path 1 is bounded the same way hot path 3 is: the whole
         // batch's statement count is pinned, so any added per-row read
-        // shows here.
+        // shows here. Session and stream counters lock separately once per batch.
         assertThat(totals)
-                .containsExactly(60L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 43L);
+                .containsExactly(61L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 44L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -343,9 +341,9 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.count("insert into ma_snapshot"))
                 .isZero();
         // The empty tick — the scheduler's hottest path — is pinned whole:
-        // the event read, the session lock, the progress lock, and the
-        // snapshot read.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // the event read, the session lock, the stream counter lock, the
+        // progress lock, and the snapshot read.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
         // The not-aged exit must leave the deferral marker untouched —
         // clearing or re-stamping it would stop the aged reselection from
         // ever converging the snapshot.
@@ -618,8 +616,9 @@ class Issue13181QueryBudgetTest {
         assertThat(webShellPage).hasSize(20);
         System.out.println("[issue-13181] listWebShellSessions(20 rows): "
                 + fixture.ledger.summary());
-        // Page + latest turns + environment events; unbound rows read no model metadata.
-        assertThat(fixture.ledger.total()).isEqualTo(3);
+        // Page + latest turns + environment events + lifecycle summary; unbound rows read no model metadata.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
         // The latest-turn batch read projects only the summary columns.
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
         assertThat(fixture.ledger.count("turn_record.session_id,"
@@ -649,8 +648,8 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         assertThat(fixture.service.getWebShellSession(plain, null,
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
-        // Session read + latest turns + environment events, one each.
-        assertThat(fixture.ledger.total()).isEqualTo(3);
+        // Session read + latest turns + environment events + lifecycle summary, one each.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
 
         String bound = "tenant-" + UUID.randomUUID();
         fixture.jdbc.update("INSERT INTO ma_workspace"
@@ -698,13 +697,14 @@ class Issue13181QueryBudgetTest {
         System.out.println("[issue-13181] listPublicSessions(20 workspace"
                 + " rows): " + fixture.ledger.summary());
         // Page + active turns + covered sequences + the workspace-close
-        // batch; the approval mode rides on the page's own SELECT *.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // batch; compression adds its projection, missing-head and active-operation
+        // batches. The approval mode rides on the page's own SELECT *.
+        assertThat(fixture.ledger.total()).isEqualTo(7);
         assertThat(fixture.ledger.count(
                 "approval_mode from ma_session"))
                 .isZero();
         assertThat(fixture.ledger.count("from ma_operation"))
-                .isEqualTo(1);
+                .isEqualTo(2);
         for (var row : boundPublic) {
             int index = boundIds.indexOf(row.id());
             assertThat(row.metadata()).containsEntry("title", "w-" + index);
@@ -722,8 +722,9 @@ class Issue13181QueryBudgetTest {
         // Page + the latest-turn read + the workspace-close batch; without
         // turns the environment-event read is skipped, and the approval mode
         // rides on the page's own SELECT *. Model selection, context, approval
-        // selection and approval ownership add one bounded query each.
-        assertThat(fixture.ledger.total()).isEqualTo(7);
+        // selection, ownership and lifecycle summary add one bounded query each;
+        // compression adds three page-wide batches.
+        assertThat(fixture.ledger.total()).isEqualTo(11);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -824,9 +825,11 @@ class Issue13181QueryBudgetTest {
                 + " role rows): " + fixture.ledger.summary());
         // Page + latest turns + the close batch + the grant batch across
         // both workspaces + the execution-facts batch over the
-        // submit-shaped sessions, plus model/context and approval/owner batches:
+        // submit-shaped sessions, plus model/context, approval/owner and lifecycle batches:
+        // compression projection, missing-head and operation batches remain
         // constant, not per row.
-        assertThat(fixture.ledger.total()).isEqualTo(9);
+        assertThat(fixture.ledger.total()).isEqualTo(13);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -861,17 +864,22 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void cwdCapabilitySharesTheGrantAndFactsBatchesRegardlessOfPageSize() {
+    void contextChangeCapabilitySharesTheGrantAndFactsBatchesRegardlessOfPageSize() {
         for (int size : new int[] {1, 20}) {
-            Fixture fixture = new Fixture(Clock.systemUTC(), true);
+            Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+            when(fixture.harness.supportsModelSelection()).thenReturn(true);
             when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
             String tenant = "cwd-" + UUID.randomUUID();
             fixture.createCwdSessions(tenant, size);
             fixture.ledger.reset();
             var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
             assertThat(page).hasSize(size);
-            assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
-            assertThat(fixture.ledger.total()).isEqualTo(9);
+            assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("modelChange").asBoolean()).isTrue());
+            assertThat(fixture.ledger.total()).isEqualTo(13);
+            assertThat(fixture.ledger.count("select session_id, revision from ma_session_record")).isEqualTo(1);
+            assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
+            assertThat(fixture.ledger.count("operation_kind = 'context_compression'")).isEqualTo(1);
+            assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
             assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -882,7 +890,8 @@ class Issue13181QueryBudgetTest {
 
     @Test
     void executableFactsBatchInheritsOnlyAnExactParentBindingAndRejectsCycles() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "lineage-" + UUID.randomUUID();
         List<String> ids = fixture.createCwdSessions(tenant, 3);
         String parent = ids.get(0);
@@ -905,31 +914,33 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void cwdCapabilityMirrorsAdmissionWithoutTheTurnProfileRestrictions() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+    void contextChangeCapabilityMirrorsAdmissionWithoutTheTurnProfileRestrictions() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "cwd-" + UUID.randomUUID();
         String id = fixture.createCwdSessions(tenant, 1).getFirst();
         fixture.jdbc.update("UPDATE ma_session SET agent_id = 'custom' WHERE tenant_id = ? AND session_id = ?", tenant, id);
         var view = fixture.service.getWebShellSession(tenant, "actor", id);
         assertThat(view.capabilities().workspaceTurns()).isFalse();
-        assertThat(JSON.valueToTree(view).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        assertThat(JSON.valueToTree(view).path("capabilities").path("modelChange").asBoolean()).isTrue();
         // Busy admission remains separate from support and authorization.
         fixture.store.insertTurnCommand(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest");
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
     }
 
     @Test
-    void cwdCapabilityRequiresOperatorRoleAndExactRegistryFacts() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+    void contextChangeCapabilityRequiresOperatorRoleAndExactRegistryFacts() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "cwd-" + UUID.randomUUID();
         String id = fixture.createCwdSessions(tenant, 1).getFirst();
         // A non-creator holding OPERATOR on the Workspace sees the
         // capability, mirroring admission's atLeast(OPERATOR); a READER
         // does not.
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
         for (String mutation : new String[] {
                 "UPDATE ma_workspace SET state = 'DRAINING'",
                 "UPDATE ma_workspace SET state = 'ACTIVE', workspace_generation = 2",
@@ -940,16 +951,17 @@ class Issue13181QueryBudgetTest {
             for (String statement : mutation.split(";")) {
                 fixture.jdbc.update(statement);
             }
-            assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+            assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
         }
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'");
         fixture.jdbc.update("UPDATE ma_session SET status = 'CLOSED'");
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
     }
 
     @Test
-    void cwdCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+    void contextChangeCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "cwd-" + UUID.randomUUID();
         String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
         fixture.jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -961,23 +973,24 @@ class Issue13181QueryBudgetTest {
         var page = fixture.service.listWebShellSessions(tenant, "other", null, 20).data();
         java.util.Map<String, Boolean> cwd = new java.util.HashMap<>();
         for (var row : page) {
-            cwd.put(row.sessionId(), row.capabilities().cwdChange());
+            cwd.put(row.sessionId(), row.capabilities().modelChange());
         }
         assertThat(cwd).hasSize(2).containsEntry(operateRow, true).containsEntry(readRow, false);
         assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
     }
 
     @Test
-    void cwdCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
+    void contextChangeCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
         for (boolean enabled : new boolean[] {false, true}) {
-            Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
+            Fixture fixture = new Fixture(Clock.systemUTC(), enabled, true);
+            when(fixture.harness.supportsModelSelection()).thenReturn(true);
             String tenant = "cwd-" + UUID.randomUUID();
             fixture.createCwdSessions(tenant, 1);
             fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
             fixture.ledger.reset();
             var page = fixture.service.listWebShellSessions(tenant, "reader", null, 20).data();
             assertThat(page).hasSize(1);
-            assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+            assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("modelChange").asBoolean()).isFalse();
             assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isZero();
         }
     }
@@ -1141,13 +1154,7 @@ class Issue13181QueryBudgetTest {
     }
 
     private PublicationFixture publicationFixture(Fixture fixture) {
-        return publicationFixture(fixture, true);
-    }
-
-    private PublicationFixture publicationFixture(Fixture fixture,
-            boolean journalHeadAuthorization) {
-        journal = PublicationJournalFixture.create(fixture.dataSource,
-                journalHeadAuthorization);
+        journal = PublicationJournalFixture.create(fixture.dataSource);
         binding = journal.binding;
         checkpoint = journal.checkpoint;
         journal.reserve();
@@ -1197,13 +1204,18 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
+            long renewals = fixture.ledger.count("update ma_operation set",
+                    "claim_until = ?, verification_next_at = case when");
+            assertThat(renewals).isGreaterThanOrEqualTo(2);
+            assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
+            assertThat(fixture.ledger.count("from ma_session_head", "for update"))
+                    .isGreaterThanOrEqualTo(2 * (renewals + 1));
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                verifier.runOnce();
+                assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
+                        .path("state").asText()).isEqualTo("SUCCEEDED");
+            });
         }
-        long renewals = fixture.ledger.count("update ma_operation set",
-                "claim_until = ?, verification_next_at = case when");
-        assertThat(renewals).isGreaterThanOrEqualTo(2);
-        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
-        assertThat(fixture.ledger.count("from ma_session_head", "for update"))
-                .isGreaterThanOrEqualTo(2 * (renewals + 1));
         fixture.ledger.reset();
         for (int i = 0; i < 12; i++) {
             assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
@@ -1352,14 +1364,10 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void preV36CommitSkewStillFencesWhileTheHeadGateIsOff() {
+    void staleHeadStampRefusesAuthorizationWithoutScanning() {
         Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture, false);
-        // The head columns hold the active activation from the dispatch
-        // commit. A pre-V36 binary then commits a release: the journal gains
-        // the row and the revision bumps, but the columns stay untouched.
-        // Reproduce that exact skew by restoring the columns and their stamp
-        // after a real release commit.
+        PublicationFixture publication = publicationFixture(fixture);
+        // Restore a stale active projection after a committed release.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
@@ -1378,83 +1386,12 @@ class Issue13181QueryBudgetTest {
                 head.get("activation_event_epoch"),
                 head.get("activation_expires_at"),
                 head.get("activation_head_revision"));
-        // The gate ships off: authorization reads the journal and fences
-        // the release instead of trusting the stale active head.
+        // A stale projection cannot authorize the original execution.
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
-        // The legacy path's cost is explicit: one locked journal read (the
-        // release sits at the latest revision), no head write.
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isEqualTo(1);
-        assertThat(fixture.ledger.count("update ma_session_head"))
-                .isZero();
-        // The renew path's evidence read must not trust the stale head
-        // either.
-        assertThatThrownBy(() -> publication.store().apply(request("renew"),
-                WRITER_TOKEN, PUBLICATION_TOKEN))
-                .hasMessageContaining("Activation is not active");
-    }
-
-    @Test
-    void staleHeadStampRescansInsteadOfTrustingTheColumns() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // The rolling-window residue: columns backfilled active, then a
-        // pre-V36 binary commits a release, bumping journal_revision without
-        // touching the columns. Reproduce by restoring the columns and their
-        // stamp after a real release commit, with the gate ON.
-        var head = fixture.jdbc.queryForMap("SELECT activation_id,"
-                + " activation_phase, activation_event_epoch,"
-                + " activation_expires_at, activation_head_revision"
-                + " FROM ma_session_head");
-        append("activation.release",
-                event(journal.sequence + 1, "activation.changed",
-                        activation("released")) + COMMIT_MARKER,
-                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
-                "checkpoint-1");
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                        + " activation_id = ?, activation_phase = ?,"
-                        + " activation_event_epoch = ?,"
-                        + " activation_expires_at = ?,"
-                        + " activation_head_revision = ?",
-                head.get("activation_id"), head.get("activation_phase"),
-                head.get("activation_event_epoch"),
-                head.get("activation_expires_at"),
-                head.get("activation_head_revision"));
-        // The stamp lags journal_revision, so the head is not trusted: the
-        // legacy scan fences the released activation even with the gate on.
-        fixture.ledger.reset();
-        assertThatThrownBy(() -> publication.store().verifyDispatch(
-                publication.executions().findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN))
-                .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isGreaterThan(0);
-    }
-
-    @Test
-    void staleHeadStampRebackfillsAndRejoinsTheHeadPath() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // The self-heal arm: the columns are current but the stamp lags, so
-        // the first authorization scans and re-stamps; the next reads the
-        // head again.
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                + " activation_head_revision = activation_head_revision - 1");
-        publication.store().verifyDispatch(publication.executions()
-                .findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN);
-        var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
-                + " journal_revision FROM ma_session_head");
-        assertThat(head.get("activation_head_revision"))
-                .isEqualTo(head.get("journal_revision"));
-        fixture.ledger.reset();
-        publication.store().verifyDispatch(publication.executions()
-                .findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN);
         assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
@@ -1463,10 +1400,7 @@ class Issue13181QueryBudgetTest {
     void noChangeCommitDoesNotRestampASkewedHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // The rolling-window skew: the columns hold the active activation,
-        // then a pre-V36 binary commits a release (journal row + revision
-        // bump, columns and stamp untouched) — reproduced by restoring the
-        // pre-commit columns and stamp after a real release commit.
+        // Simulate a stale active projection without rewinding the journal.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
@@ -1497,24 +1431,21 @@ class Issue13181QueryBudgetTest {
                         + " FROM ma_session_head");
         assertThat(stamped.get("activation_head_revision"))
                 .isNotEqualTo(stamped.get("journal_revision"));
-        // The skew stays detectable: authorization rescans the journal and
-        // fences the release.
+        // The skew stays detectable and authorization refuses it.
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
         assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isGreaterThan(0);
+                "for update")).isZero();
     }
 
     @Test
     void unrepresentableExpiresAtFencesTheHeadCleanly() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // An activation with no expiresAt: id/phase are stored, the expiry
-        // column stays NULL, and the head branch must refuse cleanly (a
-        // missing expiry fails exactly like the scan's absent read).
+        // A missing expiry cannot authorize an active grant.
         ObjectNode noExpiry = JSON.createObjectNode()
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active");
@@ -1603,9 +1534,7 @@ class Issue13181QueryBudgetTest {
     void expiredActivationFencesThroughTheHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // A warm head carrying an already-expired activation: both grant
-        // paths must refuse through the head columns, exactly as the scan
-        // would refuse the same payload.
+        // Both grant paths refuse an expired activation through the head.
         ObjectNode expired = JSON.createObjectNode()
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
@@ -1633,29 +1562,25 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void legacyHeadRenewBackfillsFromTheJournalScan() {
+    void missingActivationHeadRefusesAuthorizationWithoutScanning() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // Simulate a pre-V36 head: the evidence scan on renew authorizes
-        // from the journal and backfills the head columns.
         fixture.jdbc.update("UPDATE ma_session_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
                 + " activation_expires_at = NULL,"
                 + " activation_head_revision = NULL");
-        publication.store().apply(request("renew"), WRITER_TOKEN,
-                PUBLICATION_TOKEN);
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " ma_session_head", String.class))
-                .isEqualTo("active");
-        // The next authorization reads the head: zero journal reads.
         fixture.ledger.reset();
-        publication.store().verifyDispatch(publication.executions()
-                .findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count(
-                "from ma_session_journal_tx", "for update"))
-                .isZero();
+        assertThatThrownBy(() -> publication.store().apply(request("renew"),
+                WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+        assertThatThrownBy(() -> publication.store().verifyDispatch(
+                publication.executions().findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
+                        + " ma_session_head", String.class)).isNull();
     }
 
     @Test
@@ -1712,109 +1637,6 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void oversizedActivationPhaseBlanksTheHeadColumnsCleanly() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // The phase arm of the width guard: a 33+ character phase with a
-        // conforming id blanks the columns instead of failing the commit,
-        // and the stamp still advances.
-        append("activation.wide-phase",
-                event(journal.sequence + 1, "activation.changed",
-                        JSON.createObjectNode()
-                                .put("activationId", ACTIVATION_ID)
-                                .put("epoch", 1)
-                                .put("phase", "active-" + "a".repeat(40))
-                                .put("expiresAt",
-                                        System.currentTimeMillis() + 180000))
-                        + COMMIT_MARKER,
-                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
-                "checkpoint-1");
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " ma_session_head", String.class))
-                .isNull();
-        var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
-                + " journal_revision FROM ma_session_head");
-        assertThat(head.get("activation_head_revision"))
-                .isEqualTo(head.get("journal_revision"));
-        // Authorization reads the journal and fences the unknown phase.
-        fixture.ledger.reset();
-        assertThatThrownBy(() -> publication.store().verifyDispatch(
-                publication.executions().findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN))
-                .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isGreaterThan(0);
-    }
-
-    @Test
-    void oversizedJournalActivationFencesAuthorizationCleanly() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        // A non-conforming writer commits an activation.changed wider than
-        // the V36 columns; the commit blanks the head columns.
-        append("activation.oversize",
-                event(journal.sequence + 1, "activation.changed",
-                        JSON.createObjectNode()
-                                .put("activationId",
-                                        "activation-" + "a".repeat(600))
-                                .put("epoch", 1).put("phase", "active")
-                                .put("expiresAt",
-                                        System.currentTimeMillis() + 180000))
-                        + COMMIT_MARKER,
-                1, List.of(), null);
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_id FROM"
-                        + " ma_session_head", String.class))
-                .isNull();
-        // Authorization reads the journal and fences the id mismatch
-        // cleanly — no storage error from writing the oversized value.
-        assertThatThrownBy(() -> publication.store().verifyDispatch(
-                publication.executions().findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN))
-                .hasMessageContaining("Original activation is fenced");
-    }
-
-    @Test
-    void publicationAuthorizationRescansAndBackfillsPreMigrationHeads() {
-        Fixture fixture = new Fixture();
-        PublicationFixture publication = publicationFixture(fixture);
-        ToolPublicationStore store = publication.store();
-        JdbcToolExecutionRepository executions = publication.executions();
-        int filler = 30;
-        for (int index = 0; index < filler; index++) {
-            append("tool.dispatch",
-                    event(journal.sequence + 1, "tool.intent",
-                            JSON.createObjectNode()) + COMMIT_MARKER,
-                    1, List.of(), null);
-        }
-        // Simulate a journal last written before migration V36.
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
-
-        fixture.ledger.reset();
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        long scans = fixture.ledger.count(
-                "from ma_session_journal_tx", "for update");
-        System.out.println("[issue-13181] legacy head verifyDispatch: "
-                + scans + " locked journal reads, then backfilled");
-        // The legacy fallback scans the filler revisions plus the
-        // activation's own.
-        assertThat(scans).isEqualTo(filler + 1L);
-        // The scan backfills the head, so later checks are O(1).
-        assertThat(fixture.jdbc.queryForObject(
-                "SELECT activation_phase FROM ma_session_head",
-                String.class)).isEqualTo("active");
-        fixture.ledger.reset();
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isZero();
-    }
-
-    @Test
     void renewReadsTheIntentAtItsOwnRevision() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
@@ -1842,15 +1664,13 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void stringExpiresAtReadsConsistentlyAcrossTheScanAndTheHead() {
+    void stringExpiresAtIsProjectedIntoTheHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
         ToolPublicationStore store = publication.store();
         JdbcToolExecutionRepository executions = publication.executions();
         long expiry = System.currentTimeMillis() + 180000;
-        // A non-conforming writer sends expiresAt as a JSON string; the
-        // commit must store what the scans have always parsed, or the head
-        // would fence what the scan authorizes.
+        // Numeric strings use the same bounded expiry projection as numbers.
         ObjectNode stringExpiry = JSON.createObjectNode()
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
@@ -1864,23 +1684,6 @@ class Issue13181QueryBudgetTest {
                         + " FROM ma_session_head",
                 Long.class)).isEqualTo(expiry);
         // The head branch authorizes it without a journal read.
-        fixture.ledger.reset();
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from ma_session_journal_tx",
-                "for update")).isZero();
-        // A pre-V36 head scans the journal, parses the same value, and
-        // backfills it; the next authorization reads the head again.
-        fixture.jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM ma_session_head",
-                Long.class)).isEqualTo(expiry);
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
@@ -1932,6 +1735,10 @@ class Issue13181QueryBudgetTest {
         }
 
         Fixture(Clock clock, boolean workspaceFilesEnabled) {
+            this(clock, workspaceFilesEnabled, false);
+        }
+
+        Fixture(Clock clock, boolean workspaceFilesEnabled, boolean modelSelection) {
             JdbcDataSource raw = new JdbcDataSource();
             raw.setURL("jdbc:h2:mem:repro-" + UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;"
@@ -1946,6 +1753,13 @@ class Issue13181QueryBudgetTest {
                     new ManagedWorkspaceRegistry(jdbc);
             ManagedAgentProperties properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
+            if (modelSelection) {
+                var option = new ManagedAgentProperties.ModelOption();
+                option.setModelId("model-a");
+                option.setLabel("Model A");
+                properties.setModelCatalog(List.of(option));
+                when(harness.supportsModelSelection()).thenReturn(true);
+            }
             store = new ManagedAgentStore(jdbc, JSON, clock, hub::publish,
                     registry, properties);
             service = new ManagedAgentService(store, new RequestDigests(),

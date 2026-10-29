@@ -47,7 +47,7 @@ class ManagedSchemaTimeContractTest {
             "ma_channel_instance=gmt_create,gmt_modified",
             "ma_channel_binding=gmt_create",
             "ma_delivery=claimed_at,claim_until,available_at,gmt_create,gmt_modified",
-            "ma_schedule=armed_at,watermark_slot,lease_until,gmt_create,gmt_modified",
+            "ma_schedule=armed_at,watermark_slot,lease_until,gate_last_at,gmt_create,gmt_modified",
             "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified");
 
     @Test
@@ -57,7 +57,7 @@ class ManagedSchemaTimeContractTest {
     }
 
     @Test
-    void all78PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
+    void all79PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
         Map<String, String> declarations = declarations();
         List<Executable> checks = new ArrayList<>();
         int count = 0;
@@ -74,7 +74,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(78, count);
+        assertEquals(79, count);
         assertAll(checks);
     }
 
@@ -98,8 +98,8 @@ class ManagedSchemaTimeContractTest {
             }
             try (var insert = connection.prepareStatement(
                     "INSERT INTO ma_session_head (tenant_key,harness_key,tenant_id,session_id,"
-                            + "harness_session_id,head_kind,gmt_create,gmt_modified,o3_backfill_pending)"
-                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?,FALSE)")) {
+                            + "harness_session_id,head_kind,gmt_create,gmt_modified)"
+                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?)")) {
                 insert.setBytes(1, ManagedSchemaKeys.identity("tenant"));
                 insert.setBytes(2, ManagedSchemaKeys.identity("harness"));
                 insert.setBytes(3, ManagedSchemaKeys.identity("harness"));

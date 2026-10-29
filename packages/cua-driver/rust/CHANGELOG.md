@@ -1,3 +1,22 @@
+# 0.27.0 (2026-10-26)
+
+- Enable the native agent cursor for same-process Node SDK and main-thread MCP hosts by default.
+- Add local macOS live previews for recently authorized windows, with session cursor mapping and nonactivating controls.
+- Keep preview sampling and native UI cleanup scoped to the owning runtime and session.
+- Present previews as draggable, borderless card stacks with hover controls and animated card switching.
+
+# 0.26.0 (2026-10-16)
+
+Qwen Computer Use release; no longer follows the upstream version number. The SDK, native payload, browser SDK and Node REPL use this same version.
+
+- Driver-owned app/window resolution, current short IDs, AX diffs/budgets and structured dispatch errors; compact 19-tool direct MCP surface.
+- Background-first platform delivery, guarded foreground fallback on Windows/Linux, and explicit desktop input with session-owned held-key cleanup. Native Wayland removed.
+- Runtime documentation and browser-use facade replace the two bundled Computer Use/Browser Use skill entrypoints. Browser functionality is unchanged.
+- Windows UIAccess is optional; default installation does not require a signed worker. Native archives remain on-demand downloads with SHA-256 verification.
+- Selected upstream MIT fixes are recorded per PR in `.vendored-patches.md` and `docs/design/cua-upgrade-platform-ports.md`, including platform adaptations and runtime evidence gaps.
+
+This local development checkpoint does not claim published assets, GUI parity or model benchmark improvement.
+
 # Changelog
 
 ## [0.20.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.19.3...cua-driver-rs-v0.20.0) (2026-08-15)

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCreationStore;
@@ -11,6 +12,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.CacheControl;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -63,7 +65,7 @@ public class WorkspaceDiscoveryController {
                 page.defaultWorkspace() == null ? null
                         : webShellItem(page.defaultWorkspace()), page.hasMore(),
                 page.nextCursor(), new WebShellCapabilities(true, false, creation.enabled(), true,
-                        creation.directorySelectionEnabled())));
+                        creation.directorySelectionEnabled(), creation.localDirectoryImportEnabled())));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/get")
@@ -77,25 +79,45 @@ public class WorkspaceDiscoveryController {
     public ResponseEntity<WorkspaceSummary> webShellCreate(TenantContext tenant,
             @Valid @RequestBody CreateRequest request) {
         return noStore(webShellItem(creation.create(tenant.tenantId(), tenant.requireActorId(),
-                request.displayName(), request.idempotencyKey(), request.sourceWorkspaceId(), request.cwdRelative())));
+                request.displayName(), request.idempotencyKey(), request.sourceWorkspaceId(), request.cwdRelative(),
+                request.localPath())));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/directories/query")
     public ResponseEntity<WorkspaceCreationStore.DirectoryPage> webShellDirectories(TenantContext tenant,
             @Valid @RequestBody DirectoryRequest request) {
-        return noStore(creation.directories(tenant.tenantId(), tenant.requireActorId(),
+        String actor = tenant.requireActorId();
+        if (request.localPath() != null) {
+            if (request.workspaceId() != null || request.cwdRelative() != null) {
+                throw new ManagedAgentException(
+                        HttpStatus.BAD_REQUEST, "invalid_request",
+                        "Local path and source Workspace must not be combined.");
+            }
+            return noStore(creation.localDirectories(request.localPath()));
+        }
+        if (request.workspaceId() == null || request.cwdRelative() == null) {
+            throw new ManagedAgentException(
+                    HttpStatus.BAD_REQUEST, "invalid_request",
+                    "Source Workspace and directory are required.");
+        }
+        return noStore(creation.directories(tenant.tenantId(), actor,
                 request.workspaceId(), request.cwdRelative()));
     }
 
     public record CreateRequest(@NotBlank String displayName, @NotBlank String idempotencyKey,
-            String sourceWorkspaceId, String cwdRelative) {
+            String sourceWorkspaceId, String cwdRelative, String localPath) {
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
             throw new IllegalArgumentException("Unknown Workspace creation field");
         }
     }
 
-    public record DirectoryRequest(@NotBlank String workspaceId, @NotBlank String cwdRelative) {}
+    public record DirectoryRequest(String workspaceId, String cwdRelative, String localPath) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown directory query field");
+        }
+    }
 
     private static PublicItem publicItem(WorkspaceSummary item) {
         return new PublicItem(item.workspaceId(), "agent.workspace",
@@ -123,7 +145,13 @@ public class WorkspaceDiscoveryController {
 
     public record WebShellCapabilities(boolean workspaceBinding,
             boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection,
-            boolean workspaceDirectorySelection) {
+            boolean workspaceDirectorySelection, boolean localDirectoryImport) {
+        public WebShellCapabilities(boolean workspaceBinding,
+                boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection,
+                boolean workspaceDirectorySelection) {
+            this(workspaceBinding, workspaceContext, workspaceCreation, approvalModeSelection,
+                    workspaceDirectorySelection, false);
+        }
         public WebShellCapabilities(boolean workspaceBinding,
                 boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection) {
             this(workspaceBinding, workspaceContext, workspaceCreation, approvalModeSelection, false);

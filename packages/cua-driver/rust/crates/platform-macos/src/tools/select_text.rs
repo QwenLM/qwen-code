@@ -29,12 +29,12 @@ use super::ToolState;
 use crate::ax::bindings::*;
 
 pub struct SelectTextTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 
 impl SelectTextTool {
     pub fn new(state: Arc<ToolState>) -> Self {
-        Self { state }
+        Self { _state: state }
     }
 }
 
@@ -59,7 +59,7 @@ impl Tool for SelectTextTool {
         if input.text.is_empty() {
             return refusal("invalid_arguments", "text must not be empty");
         }
-        let index = match resolve_element_args(
+        let resolved = match resolve_element_args(
             pid,
             None,
             Some(&input.element_token),
@@ -67,20 +67,20 @@ impl Tool for SelectTextTool {
             Some(window_id),
             "select_text",
         ) {
-            Ok(ResolvedElement::Element { element_index, .. }) => element_index,
-            Ok(_) => {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
+        let index = match resolved {
+            ResolvedElement::Element { element_index, .. } => element_index,
+            _ => {
                 return refusal(
                     "invalid_arguments",
                     "An observed element token is required.",
                 )
             }
-            Err(error) => return error,
         };
-        let Some(element) = self
-            .state
-            .element_cache
-            .get_element_retained(pid, window_id, index)
-        else {
+        let Some(element) = element_cache.get_element_retained(pid, window_id, index) else {
             return refusal(
                 "stale_element",
                 "The text element is stale. Observe the app again.",
@@ -355,7 +355,7 @@ unsafe fn click_field(element: AXUIElementRef, pid: i32, window_id: u32) -> anyh
     )
 }
 
-unsafe fn read_range(element: AXUIElementRef) -> Option<(usize, usize)> {
+pub(crate) unsafe fn read_range(element: AXUIElementRef) -> Option<(usize, usize)> {
     let attr = CFString::new("AXSelectedTextRange");
     let mut value = std::ptr::null();
     let status = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);

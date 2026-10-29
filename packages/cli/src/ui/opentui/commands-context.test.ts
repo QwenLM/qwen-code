@@ -48,6 +48,7 @@ function createFakeHost(): OpenTuiCommandHost & {
     updateItem: record('updateItem') as never,
     clearItems: record('clearItems'),
     loadHistory: record('loadHistory') as never,
+    resetTranscript: record('resetTranscript'),
     refreshStatic: record('refreshStatic'),
     clearPendingState: record('clearPendingState'),
     cancelBtw: record('cancelBtw'),

@@ -227,7 +227,10 @@ export interface ShellExecutionResult {
    * clean-exit signal of 0 is normalized to null at the service boundary.
    */
   signal: number | null;
-  /** An error if execution failed or cancellation cleanup could not be confirmed. */
+  /**
+   * An error if spawning, PTY resource handling, or cancellation cleanup failed.
+   * PTY resource failures keep exitCode and signal null; no native exit is fabricated.
+   */
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
@@ -251,12 +254,24 @@ export interface ShellExecutionResult {
   /** The process ID of the spawned shell. */
   pid: number | undefined;
   /** The method used to execute the shell command. */
-  executionMethod: 'lydell-node-pty' | 'node-pty' | 'child_process' | 'none';
+  executionMethod:
+    | 'lydell-node-pty'
+    | 'node-pty'
+    | 'qwen-bun-pty'
+    | 'child_process'
+    | 'none';
   /**
    * True when output was discarded at the maxBufferedOutputBytes bound, so
    * `output` is a retained prefix rather than the whole stream.
    */
   outputCaptureLimitExceeded?: boolean;
+  /**
+   * `streamStdout` only: the process exited, but its stdout was still open
+   * when the post-exit drain ran out — something it started in the
+   * background still holds it, and what that prints is not in the result.
+   * A held stderr alone does not set it.
+   */
+  stdoutHeldAfterExit?: boolean;
 }
 
 /** A handle for an ongoing shell execution. */
@@ -1071,6 +1086,7 @@ export class ShellExecutionService {
         let drainTimer: NodeJS.Timeout | null = null;
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
+        let stdoutHeld = false;
         let pendingCaptureWrites = 0;
         let cleanupConfirmed = false;
         let stdoutEnded = false;
@@ -1094,6 +1110,7 @@ export class ShellExecutionService {
             return;
           }
           if (remainingDrainMs <= 0) {
+            stdoutHeld = !stdoutEnded;
             const recorded = recordedExit ?? {
               code: child.exitCode,
               signal: child.signalCode,
@@ -1104,6 +1121,7 @@ export class ShellExecutionService {
           drainStartedAt = performance.now();
           drainTimer = setTimeout(() => {
             drainTimer = null;
+            stdoutHeld = !stdoutEnded;
             const recorded = recordedExit ?? {
               code: child.exitCode,
               signal: child.signalCode,
@@ -1415,6 +1433,7 @@ export class ShellExecutionService {
             aborted: abortSignal.aborted,
             pid: undefined,
             executionMethod: 'child_process',
+            ...(stdoutHeld ? { stdoutHeldAfterExit: true } : {}),
           });
         };
 
@@ -1490,7 +1509,9 @@ export class ShellExecutionService {
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
-        if (rawCapture) {
+        if (rawCapture || streamStdout) {
+          // streamStdout reads the stdout end too: the drain reports a
+          // stdout still held, not a held stderr.
           child.stdout?.on('end', () => {
             stdoutEnded = true;
           });
@@ -2350,6 +2371,16 @@ export class ShellExecutionService {
                 }
               }),
           );
+          // Observe rejection in the same turn, before exit needs to drain it.
+          processingChain = processingChain.catch((error) => {
+            try {
+              debugLogger.warn(
+                `PTY output processing failed: ${getErrorMessage(error)}`,
+              );
+            } catch {
+              // Diagnostics must not reject the drain again.
+            }
+          });
         };
 
         // Capture the IDisposables that node-pty returns so the
@@ -2371,6 +2402,18 @@ export class ShellExecutionService {
         const ptyErrorHandler = (err: NodeJS.ErrnoException) => {
           if (isExpectedPtyReadExitError(err)) {
             // EIO is expected when the PTY process exits - ignore it
+            return;
+          }
+
+          // The qwen-bun-pty backend terminates a command itself when its
+          // bounded write queue is exhausted and reports a stable structured
+          // reason. Converge the execution on that error — a visible failure
+          // carrying no fabricated exit code — instead of the crash path
+          // below; the backend has already killed
+          // the child and closed the master fd, so no onExit will follow.
+          const limitCode = getErrnoCode(err);
+          if (limitCode === 'QWEN_PTY_WRITE_LIMIT') {
+            settleResult(null, null, err);
             return;
           }
 
@@ -2466,7 +2509,6 @@ export class ShellExecutionService {
           releaseGroup();
         };
 
-        let ptySettled = false;
         let recordedPtyExit: { exitCode: number; signal?: number } | undefined;
         let resolvePtyExit!: () => void;
         const nativePtyExit = new Promise<void>((resolve) => {
@@ -2494,12 +2536,18 @@ export class ShellExecutionService {
           })();
           return ptyDrain;
         };
-        const finalizePty = async (
+        // Resolves the execution exactly once — with the real native exit
+        // status on the natural path, or with a structured resource-failure
+        // error and NO exit code when the PTY backend terminated the command
+        // itself (the exit code is never fabricated).
+        let settled = false;
+        const finalizeResult = async (
           exitCode: number | null,
-          signal: number | null | undefined,
+          signal: number | null,
+          failureError: Error | null,
         ) => {
-          if (ptySettled) return;
-          ptySettled = true;
+          if (settled) return;
+          settled = true;
           if (posixGroup?.completion) {
             const cleanupError = await posixGroup.completion;
             error ??= cleanupError;
@@ -2554,16 +2602,32 @@ export class ShellExecutionService {
               output: fullOutput,
               outputCaptureLimitExceeded,
               exitCode,
-              signal: signal === 0 ? null : (signal ?? null),
-              error,
+              signal,
+              error: failureError ?? error,
               aborted: abortSignal.aborted,
               pid: ptyProcess.pid,
-              executionMethod:
-                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+              executionMethod: ptyInfo?.name ?? 'node-pty',
             });
           } finally {
             disposeForegroundPtyResources();
           }
+        };
+
+        // Give any last onData callbacks a chance to run before finalizing.
+        // onExit can arrive slightly before late PTY data is processed.
+        let settling: Promise<void> | undefined;
+        const settleResult = (
+          exitCode: number | null,
+          signal: number | null,
+          failureError: Error | null,
+        ): Promise<void> => {
+          if (settling) return settling;
+          exited = true;
+          abortSignal.removeEventListener('abort', abortHandler);
+          settling = drainPtyOutput()
+            .catch(() => undefined)
+            .then(() => finalizeResult(exitCode, signal, failureError));
+          return settling;
         };
 
         const exitDisposable = ptyProcess.onExit(
@@ -2573,12 +2637,11 @@ export class ShellExecutionService {
             resolvePtyExit();
             abortSignal.removeEventListener('abort', abortHandler);
             if (!posixGroup?.cancelling) releaseGroup();
-
-            // Give any last onData callbacks a chance to run before finalizing.
-            // onExit can arrive slightly before late PTY data is processed.
-            void drainPtyOutput().then(() => {
-              void finalizePty(exitCode, signal);
-            });
+            void settleResult(
+              exitCode,
+              signal === 0 ? null : (signal ?? null),
+              null,
+            );
           },
         );
 
@@ -2955,7 +3018,7 @@ export class ShellExecutionService {
               output: snapshot,
               exitCode: null,
               signal: null,
-              error,
+              error: null,
               // See childProcessFallback for the full rationale — promoted
               // results are NOT user-cancellations, so callers' `if
               // (result.aborted)` branches must NOT trigger.
@@ -2963,8 +3026,7 @@ export class ShellExecutionService {
               promoted: true,
               outputCaptureLimitExceeded,
               pid: ptyProcess.pid,
-              executionMethod:
-                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+              executionMethod: ptyInfo?.name ?? 'node-pty',
             });
           } finally {
             try {
@@ -2990,13 +3052,27 @@ export class ShellExecutionService {
           // the finalizer reap tree-kills. Guarded by `exited` above, so a late
           // abort after a normal exit returns early and never sets this.
           cancelKillDispatched = true;
+          if (os.platform() !== 'win32') {
+            try {
+              // A flow-control pause (XOFF) can leave the master unread; on
+              // macOS a child killed with output undrained only finishes
+              // exiting once the master is read again, so `exited` would
+              // never flip. Resume first — a no-op when not paused.
+              ptyProcess.resume();
+            } catch {
+              // Best effort: the kill below must still run.
+            }
+          }
           if (posixGroup) {
             const cleanupError = await posixGroup.cancel();
             error ??= cleanupError;
             await drainPtyOutput();
-            await finalizePty(
+            await settleResult(
               recordedPtyExit?.exitCode ?? null,
-              recordedPtyExit?.signal,
+              recordedPtyExit?.signal === 0
+                ? null
+                : (recordedPtyExit?.signal ?? null),
+              error,
             );
             return;
           }
@@ -3140,6 +3216,23 @@ export class ShellExecutionService {
       };
     } catch (e) {
       const error = e as Error;
+      if (!ptySpawned && getErrnoCode(error) === 'QWEN_PTY_ACTIVE_LIMIT') {
+        // Capacity refusal did not run a command. Keep the failure explicit,
+        // with no native status, and never bypass the cap via fallback.
+        return {
+          pid: undefined,
+          result: Promise.resolve({
+            error,
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            pid: undefined,
+            executionMethod: 'none',
+          }),
+        };
+      }
       if (!ptySpawned && useBundledConpty) {
         // The bundled ConPTY backend (useConptyDll above) adds throw sites
         // node-pty reaches synchronously out of spawn — the conpty.dll it

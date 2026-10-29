@@ -18,6 +18,6 @@ public final class HarnessOwnership {
                 && "workspace".equals(request.getScope().getIsolationClass())
                 && request.isManagedContext()
                 && LocalProcessRuntimeProvisioner.KIND.equals(request.getProvisionerKind())
-                && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest());
+                && WorkspaceExecutionProfile.admitsCapabilityDigest(request.getScope().getCapabilityDigest());
     }
 }

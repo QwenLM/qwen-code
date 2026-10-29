@@ -19,7 +19,11 @@ leave no physical call, no duplicate execution and a retryable record.
 `StoreFaultGate` (test-only) gains four Hook phases: `HOOK_INTENT`,
 `HOOK_DISPATCH_STARTED`, `HOOK_SETTLED` and `HOOK_PLAN_SETTLED`. It matches a
 `hook_execution` record by `hookExecutionId`, and separates the plan marker by
-`hookId == "__plan__"`. `FaultingExtensionRecordStore` already wraps the store
+`hookId == "__plan__"`. `HOOK_PLAN_SETTLED` additionally requires
+`eventName == "PreToolUse"`, because `SessionStart` and `UserPromptSubmit`
+commit an empty settled marker even when no Hook matches, and a phase that
+only checked `__plan__` would refuse that unrelated marker first.
+`FaultingExtensionRecordStore` already wraps the store
 bean; the Hook IT registers it through a test `@Configuration`, so every
 commit still runs in the real transaction.
 
@@ -37,8 +41,12 @@ commit still runs in the real transaction.
 
 Measured on the `hosted-harness-mysql` lane, one mutation at a time.
 
-- Arm the wrong phase, or leave the gate unarmed: `attempts` never leaves zero,
-  so the cell reddens as a `ConditionTimeout` on that wait.
+- Arm a phase that never matches, or leave the gate unarmed: `attempts` never
+  leaves zero, so the cell reddens as a `ConditionTimeout` on that wait.
+- Arm an earlier phase than the cell expects (for the result cell,
+  `HOOK_INTENT`): `attempts` does fire and the turn ends recovery-blocked, but
+  the Hook never ran, so the cell reddens on the one-`hook.call` assertion
+  (`Expected size: 1 but was: 0`) rather than on the wait.
 - Match only the MCP domains, so the Hook commit is never rejected: the same
   `ConditionTimeout` on `attempts`, since the injection never fires.
 - Let every commit through with the gate still armed: the shipped 2–3 s window

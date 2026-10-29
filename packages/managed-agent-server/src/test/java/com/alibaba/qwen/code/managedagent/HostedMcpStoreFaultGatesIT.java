@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -636,17 +635,16 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private String holderIdentity() {
-        List<String> rows = jdbc.queryForList("SELECT CONVERT(holder_key"
-                + " USING utf8mb4) FROM ma_storage_owner WHERE tenant_id = ?"
-                + " AND holder_key IS NOT NULL", String.class, tenant);
+        List<String> rows = jdbc.queryForList("SELECT CONCAT(CONVERT(binding_id USING utf8mb4),"
+                + " ':', runtime_generation, ':', CONVERT(runtime_session_id USING utf8mb4),"
+                + " ':', execution_storage_key) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", String.class, tenant);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private int storageHolds() {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " ma_storage_owner WHERE tenant_id = ? AND holder_key IS"
-                + " NOT NULL", Integer.class, tenant);
-        return count == null ? 0 : count;
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", Integer.class, tenant);
     }
 
     private int drainReceipts(SessionRef session) {
@@ -827,17 +825,14 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private OperationRecord admitClose(SessionRef session) {
+        var transactions = new org.springframework.transaction.support.TransactionTemplate(
+                spring.getBean(org.springframework.transaction.PlatformTransactionManager.class));
         String key = "close-" + uuid();
         RuntimeException last = null;
         for (int attempt = 0; attempt < 60; attempt++) {
             try {
-                var admission = store.beginWorkspaceLifecycle(tenant,
-                        session.id(), OperationKind.CLOSE, "actor",
-                        DigestUtils.sha256Hex("actor"), key,
-                        "sha256:" + DigestUtils.sha256Hex(key), true, 2);
-                return store.claimOperation(tenant, session.id(),
-                        admission.operation().operationId(), "fg12d-close",
-                        Duration.ofMinutes(10)).orElseThrow();
+                return HostedGateTestSupport.admitAndClaimClose(transactions,
+                        store, tenant, session.id(), key, "fg12d-close");
             } catch (RuntimeException failure) {
                 last = failure;
                 String message = String.valueOf(failure.getMessage());

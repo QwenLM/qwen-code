@@ -75,6 +75,7 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 import { isCommandAllowed, stripShellWrapper } from '../utils/shell-utils.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
+  SHELL_RECORD_ARTIFACT_REMINDER,
   ShellTool,
   type ShellToolInvocation,
   type ShellToolParams,
@@ -359,6 +360,7 @@ describe('ShellTool', () => {
       getPermissionsAsk: vi.fn().mockReturnValue([]),
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(true),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
@@ -766,6 +768,9 @@ describe('ShellTool', () => {
       await runShell('gh pr create --help', 'usage: gh pr create\n');
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: URL absent from the command output',
+      );
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
@@ -813,6 +818,11 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      // A merged PR arrives as `status: 'pr'`; the state is what names it.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'pr', state: 'merged' },
+      );
     });
 
     it('does not bind an open PR the branch already had before the run', async () => {
@@ -824,6 +834,10 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: PR already existed before the run',
+        { number: 42 },
+      );
     });
 
     it('does not bind when the pre-run snapshot errored', async () => {
@@ -837,6 +851,32 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: pre-run PR snapshot unavailable',
+      );
+    });
+
+    it('names the post-run resolution status instead of paraphrasing a cause', async () => {
+      // `none` (gh proved the branch has no PR) and `error` (gh could not
+      // answer at all) are different facts; the log must not report the first
+      // when the second happened.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'error' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'error' },
+      );
+
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'none' },
+      );
     });
 
     it('does not re-emit when the resolved PR is already bound', async () => {
@@ -857,6 +897,10 @@ describe('ShellTool', () => {
         [{ ...prRecord(42), source: 'create' }],
       );
       expect(sessionServiceMock().emitSessionPrBound).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: already bound',
+        { number: 42 },
+      );
     });
 
     it('binds when a promote is refused after the command settled', async () => {
@@ -915,6 +959,10 @@ describe('ShellTool', () => {
       );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: branch mismatch',
+        { created: 'other-branch', expected: 'main' },
+      );
     });
 
     it('does not bind when the pre-run branch could not be captured', async () => {
@@ -2128,6 +2176,59 @@ describe('ShellTool', () => {
       expectSpawned('dir', { cwd: '/test/dir' });
     });
 
+    it('asks the model to record deliverable files after a successful command', async () => {
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(result.llmContent).toContain('call record_artifact');
+      expect(result.llmContent).toContain('workspacePath');
+      expect(result.returnDisplay).toMatchObject({
+        text: 'wrote orders.csv',
+      });
+      expect(
+        (result.returnDisplay as { text?: string }).text ?? '',
+      ).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when recording is disabled', async () => {
+      vi.mocked(mockConfig.isRecordArtifactEnabled).mockReturnValue(false);
+
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact after a read-only command', async () => {
+      const result = await runFg('ls', { output: 'orders.csv', exitCode: 0 });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command exits non-zero', async () => {
+      const result = await runFg('python rewrite.py', {
+        exitCode: 2,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command fails', async () => {
+      const result = await runFg('python rewrite.py', {
+        error: new Error('boom'),
+        exitCode: 1,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
     it('should format error messages correctly', async () => {
       const error = new Error('wrapped command failed');
       const result = await runFg('user-command', {
@@ -2149,6 +2250,19 @@ describe('ShellTool', () => {
       expect(result.error).toBeDefined();
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
       expect(result.error?.message).toBe('command failed');
+    });
+
+    it('keeps bounded captured output in the model-facing QWEN_PTY_WRITE_LIMIT failure', async () => {
+      const code = 'QWEN_PTY_WRITE_LIMIT';
+      const result = await runFg('user-command', {
+        error: Object.assign(new Error('resource limit reached'), { code }),
+        exitCode: null,
+        signal: null,
+        output: 'captured-output-marker',
+      });
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+      expect(result.error?.message).toContain('captured-output-marker');
+      expect(result.error?.message).toBe(result.llmContent);
     });
 
     it('should throw an error for invalid parameters', async () => {
@@ -2925,6 +3039,7 @@ describe('ShellTool', () => {
     describe('output truncation threshold', () => {
       const TRUNCATED = 'Tool output was too large and has been truncated';
       const ADVISORY = 'this foreground command ran for 60s';
+      const recordReminderReserve = 2 + SHELL_RECORD_ARTIFACT_REMINDER.length;
 
       /** Runs `mid-output-cmd` to `output`/`exitCode` after 60s of faked Date/performance (so the advisory appends). */
       const runPastAdvisory = (output: string, exitCode = 0) => {
@@ -2958,7 +3073,9 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 30_000 }),
+          expect.objectContaining({
+            threshold: 30_000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3039,7 +3156,7 @@ describe('ShellTool', () => {
           ShellTool.Name,
           expect.any(String),
           expect.objectContaining({
-            threshold: 10_000,
+            threshold: 10_000 - recordReminderReserve,
             previewChars: 4000,
             lines: Number.POSITIVE_INFINITY,
           }),
@@ -3061,7 +3178,10 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 1000, previewChars: 1000 }),
+          expect.objectContaining({
+            threshold: 1000 - recordReminderReserve,
+            previewChars: 1000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3168,7 +3288,7 @@ describe('ShellTool', () => {
         it('still delivers a band-fitting body whole with the advisory', async () => {
           // Guards against over-shrinking: a body comfortably under
           // budget-minus-advisory is delivered whole, advisory included.
-          const output = 'x'.repeat(29_000);
+          const output = 'x'.repeat(29_000 - recordReminderReserve);
           const result = await runPastAdvisory(output);
 
           expect(result.outputBudgetApplied).toBe(true);

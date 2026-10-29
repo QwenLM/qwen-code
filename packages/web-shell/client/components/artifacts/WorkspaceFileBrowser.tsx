@@ -58,6 +58,7 @@ import {
   downloadWorkspaceFile,
   getImageMimeTypeFromPath,
   isExcelFile,
+  isDocxFile,
   isPdfArtifact,
 } from './artifactUtils';
 import { writeClipboardText } from '../../utils/clipboard';
@@ -760,6 +761,7 @@ export function WorkspaceFileBrowser({
                 {(/\.(?:md|markdown|html?)$/i.test(menu.path) ||
                   getImageMimeTypeFromPath(menu.path) ||
                   isExcelFile(menu.path) ||
+                  isDocxFile(menu.path) ||
                   isPdfArtifact({ workspacePath: menu.path })) && (
                   <DropdownMenuItem
                     onSelect={() =>

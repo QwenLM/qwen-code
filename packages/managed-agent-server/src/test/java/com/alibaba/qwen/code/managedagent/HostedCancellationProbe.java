@@ -15,10 +15,8 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
@@ -103,9 +101,14 @@ final class HostedCancellationProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+                + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session.get("sessionId"));
+        member.put("physicalOwner", physical);
+        return member;
     }
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
@@ -155,11 +158,10 @@ final class HostedCancellationProbe implements AutoCloseable {
         assertThat(original.get("binding_id")).isEqualTo(execution.get("binding_id"));
         assertThat(original.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
         assertThat(original.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
-        assertThat(original.get("holder_key")).isEqualTo(sha256((execution.get("binding_id") + "\u0000"
-                + execution.get("runtime_generation") + "\u0000" + execution.get("runtime_session_id"))
-                .getBytes(StandardCharsets.UTF_8)));
+        assertThat(original.get("execution_storage_key"))
+                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("storage_key"));
         if (released) {
-            assertThat(owner.get("holder_key")).isNull();
+            assertThat(owner.get("execution_storage_key")).isNull();
         } else {
             assertThat(owner).as("original owner until confirmed cancellation").isEqualTo(original);
         }
@@ -252,10 +254,6 @@ final class HostedCancellationProbe implements AutoCloseable {
     private static int count(Map<String, AtomicInteger> counts, String session) {
         AtomicInteger value = counts.get(session);
         return value == null ? 0 : value.get();
-    }
-
-    private static String sha256(byte[] bytes) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
     @Override

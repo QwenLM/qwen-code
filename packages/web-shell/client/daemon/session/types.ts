@@ -411,6 +411,12 @@ export interface SendPromptOptions {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  /**
+   * Existing transcript user block the admitted prompt binds to. Needed when
+   * `optimisticUserMessage: false` reuses the block a failed attempt already
+   * appended, so admission still has a block to bind.
+   */
+  bindBlockId?: string;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -436,7 +442,7 @@ export interface SendPromptOptions {
 }
 
 export interface SubmitPromptOptions
-  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source'> {
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source' | 'bindBlockId'> {
   sessionId?: string;
   signal?: AbortSignal;
 }
@@ -532,6 +538,13 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+  ): Promise<void>;
+
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -638,6 +651,11 @@ export interface DaemonSessionActions {
       silent?: boolean;
     },
   ): Promise<DaemonRewindResult>;
+  btwSessionStream(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<{ type: 'answer' | 'done'; answer: string }>;
+  /** Legacy JSON action retained for existing daemon-react-sdk consumers. */
   btwSession(
     question: string,
     opts?: { signal?: AbortSignal },

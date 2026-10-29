@@ -6,6 +6,7 @@ import type {
 } from '@codemirror/autocomplete';
 import { Fzf } from 'fzf';
 import type { CommandInfo } from '../adapters/types';
+import { WEB_SHELL_LANGUAGES, languageLabel } from '../i18n';
 import type { WebShellLanguage } from '../i18n';
 import {
   compareCommandsByCategory,
@@ -54,6 +55,11 @@ interface SubcommandNode {
   children?: SubcommandNode[];
 }
 
+const LANGUAGE_OPTIONS: SubcommandNode[] = WEB_SHELL_LANGUAGES.map((l) => ({
+  name: l,
+  description: languageLabel(l),
+}));
+
 const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: '管理现有 subagents' },
@@ -73,10 +79,7 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     {
       name: 'ui',
       description: '设置 UI 语言',
-      children: [
-        { name: 'en', description: 'English' },
-        { name: 'zh-CN', description: '中文' },
-      ],
+      children: LANGUAGE_OPTIONS,
     },
     {
       name: 'output',
@@ -113,10 +116,7 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
     {
       name: 'ui',
       description: 'Set UI language',
-      children: [
-        { name: 'en', description: 'English' },
-        { name: 'zh-CN', description: '中文' },
-      ],
+      children: LANGUAGE_OPTIONS,
     },
     {
       name: 'output',
@@ -332,6 +332,7 @@ export function getImplicitTabCompletion(
 
   const cmdName = match[1];
   const cmd = commands.find((c) => c.name === cmdName);
+  if (cmd?.source === 'skill') return null;
   const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
   if (cmd?.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
     return null;
@@ -362,6 +363,8 @@ export function getSlashCommandArgumentHint(
   if (!cmd) return null;
 
   const subcommandPath = match[2]?.trim();
+  if (cmd.source === 'skill')
+    return subcommandPath ? null : cmd.argumentHint?.trim() || null;
   if (subcommandPath) {
     const parts = subcommandPath.split(/\s+/);
     if (cmdName === 'skills' && parts.length === 1) {
@@ -500,6 +503,7 @@ export function getSlashCommandCompletionResult(
   if (subMatch) {
     const [, cmdName, rest] = subMatch;
     const cmd = commands.find((c) => c.name === cmdName);
+    if (cmd?.source === 'skill') return null;
     const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
     const implicitTree =
       language === 'zh-CN'
@@ -649,6 +653,7 @@ export function slashCompletionSource(
       const [, cmdName, rest] = subMatch;
       const commands = getCommands();
       const cmd = commands.find((c) => c.name === cmdName);
+      if (cmd?.source === 'skill') return null;
       const language = getLanguage();
       const tree =
         language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;

@@ -34,7 +34,11 @@ class ManagedSnapshotPoolTest {
         source.setUrl("jdbc:h2:mem:snapshot-pool-" + UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         source.setMaxActive(1);
-        source.setMaxWait(500);
+        // Creating the first connection runs the schema DDL, which can exceed a
+        // short lease on a loaded runner and fails setup with
+        // "Fresh Managed schema initialization failed".
+        source.setMaxWait(3_000L);
+        source.setInitialSize(1);
         source.init();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);

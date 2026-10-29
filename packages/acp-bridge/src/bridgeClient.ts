@@ -23,6 +23,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
   isValidCronTaskRoutingId,
+  MAX_CRON_GATE_CHARS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
@@ -47,6 +48,7 @@ import {
 } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
+  BridgeSessionState,
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
@@ -700,6 +702,7 @@ export interface BridgeClientSessionEntry {
   sourceType?: string;
   sourceId?: string;
   events: EventBus;
+  restoreState?: BridgeSessionState;
   artifacts: SessionArtifactStore;
   artifactWorkspaceReady: boolean;
   prepareArtifactWorkspace?: () => Promise<void>;
@@ -1184,6 +1187,12 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    if (
+      entry?.restoreState &&
+      params.update.sessionUpdate === 'config_option_update'
+    ) {
+      entry.restoreState.configOptions = params.update.configOptions;
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
@@ -2369,6 +2378,20 @@ export class BridgeClient implements Client {
         '`recurring` must be a boolean',
       );
     }
+    // Shape only: the daemon route validates the command itself with the
+    // same rule `cron_create` applies.
+    const gate = params['gate'];
+    if (
+      gate !== undefined &&
+      (typeof gate !== 'string' ||
+        gate.trim().length === 0 ||
+        gate.length > MAX_CRON_GATE_CHARS)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`gate\` must be a non-empty string within the ${MAX_CRON_GATE_CHARS}-character limit`,
+      );
+    }
 
     const entry = this.resolveEntry(callerSessionId);
     if (
@@ -2398,6 +2421,7 @@ export class BridgeClient implements Client {
       cron,
       prompt,
       recurring,
+      ...(gate !== undefined ? { gate } : {}),
       assertCallerPromptActive: () => {
         const currentEntry = this.resolveEntry(callerSessionId);
         if (
@@ -2424,7 +2448,11 @@ export class BridgeClient implements Client {
         'Scheduled-task host returned an invalid result',
       );
     }
-    return { id: result.id, cron: result.cron };
+    return {
+      id: result.id,
+      cron: result.cron,
+      ...(result.gate !== undefined ? { gate: result.gate } : {}),
+    };
   }
 
   private async handleLiveScreenContextCapture(
@@ -2540,6 +2568,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
    * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
+   * `qwen/notify/session/mcp-changed`,
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -2553,6 +2582,17 @@ export class BridgeClient implements Client {
       typeof notificationSessionId === 'string' &&
       this.abandonedRestoreIds.has(notificationSessionId)
     ) {
+      return;
+    }
+    if (method === 'qwen/notify/session/mcp-changed') {
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || !this.ownsSession(sessionId)) return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'settings_changed',
+        data: { key: 'mcp' },
+      });
       return;
     }
     if (method === 'qwen/notify/session/sources-changed') {

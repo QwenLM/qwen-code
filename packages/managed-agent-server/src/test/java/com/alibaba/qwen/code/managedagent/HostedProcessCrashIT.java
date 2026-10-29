@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -8,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -22,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -43,8 +47,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class HostedProcessCrashIT {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-unknown",
-            "harness-result", "spring-kill", "worker-kill", "worker-stop");
-    @TempDir
+            "harness-result", "spring-kill", "worker-kill", "worker-stop", "recovery-settlement");
+    @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
 
     @Test
@@ -255,7 +259,7 @@ class HostedProcessCrashIT {
             builder.environment().put("FG6C_MYSQL_PASSWORD", System.getProperty("mysql.password", ""));
             spring = builder.start();
             processes.add(spring.toHandle());
-            await(() -> Files.exists(readiness) || !spring.isAlive(), 30, "coordinator Spring readiness");
+            await(() -> Files.exists(readiness) || !spring.isAlive(), 90, "coordinator Spring readiness");
             assertThat(spring.isAlive()).as("Spring failed: %s", Files.readString(log)).isTrue();
             assertThat(JSON.readTree(Files.readString(readiness)).path("storeUrl").asText())
                     .isEqualTo("http://127.0.0.1:" + port);
@@ -325,7 +329,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() -> !running(process), 10, "process cleanup " + process.pid());
+                HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "process cleanup");
             }
         }
     }
@@ -346,6 +350,12 @@ class HostedProcessCrashIT {
         private int boots;
         private int injections;
         private Map<String, Object> originalOwner;
+        private Map<String, Object> originalMember;
+        private final int springPort;
+        private final int harnessProxyPort;
+        private final int brokerPort;
+        private Process brokerSidecar;
+        private ProcessHandle residentWorker;
 
         private Fixture(JdbcTemplate jdbc, String fault) throws Exception {
             this.jdbc = jdbc;
@@ -355,10 +365,23 @@ class HostedProcessCrashIT {
             Files.createDirectories(root.resolve("workspace/child"));
             // Keep initialized-root mtime distinct from birth time without relying on sleeps.
             Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
+            springPort = freePort();
+            harnessProxyPort = freePort();
+            brokerPort = freePort();
+            if (fault.equals("recovery-settlement")) {
+                Files.setPosixFilePermissions(root.resolve("runtime"),
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+                Files.createDirectory(root.resolve("coordinator-runtime"),
+                        java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
+            }
             assertThat(cli).isRegularFile();
         }
 
         private void run() throws Exception {
+            if (fault.equals("recovery-settlement")) {
+                startBrokerSidecar();
+            }
             startSpring();
             if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
@@ -389,6 +412,9 @@ class HostedProcessCrashIT {
             controller.start();
             Path config = root.resolve("driver.json");
             ready.put("controlUrl", "http://127.0.0.1:" + controller.getAddress().getPort());
+            if (fault.equals("recovery-settlement")) {
+                ready.put("harnessProxyPort", harnessProxyPort);
+            }
             JSON.writeValue(config.toFile(), ready);
             Path log = root.resolve("driver.log");
             driver = new ProcessBuilder(node, "--import", "tsx",
@@ -402,8 +428,33 @@ class HostedProcessCrashIT {
             System.out.println(Files.readString(log));
             assertThat(Files.readString(log)).contains("HOSTED_PROCESS_CRASH_OK");
             assertThat(injections).isEqualTo(fault.startsWith("harness-") ? 0 : 1);
-            assertThat(boots).isEqualTo(fault.equals("spring-kill") ? 2 : 1);
-            assertLedger(JSON.readTree(Files.readString(Path.of(config + ".results"))));
+            assertThat(boots).isEqualTo(List.of("spring-kill", "recovery-settlement").contains(fault) ? 2 : 1);
+            JsonNode report = JSON.readTree(Files.readString(Path.of(config + ".results")));
+            if (fault.equals("recovery-settlement")) {
+                assertResidentExecution();
+                var finalExecutions = executions();
+                assertThat(finalExecutions).hasSize(1);
+                var originalExecution = finalExecutions.getFirst();
+                assertThat(originalExecution.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
+                assertThat(originalExecution.get("idempotency_key")).isEqualTo(report.path("idempotencyKey").asText());
+                assertThat(originalExecution.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
+                assertThat(originalExecution.get("turn_id")).isEqualTo(report.path("promptId").asText());
+                assertThat(((Number) originalExecution.get("dispatch_generation")).longValue()).isEqualTo(1);
+                assertThat(report.path("modelCalls").asInt()).isEqualTo(2);
+                assertThat(report.path("promptSubmissions").asInt()).isEqualTo(2);
+                assertThat(report.path("cancelAdmissions").asInt()).isGreaterThanOrEqualTo(2);
+                assertThat(report.path("continuationsAfterFailure").asInt()).isZero();
+                assertThat(report.path("lateCancelReplays").asInt()).isEqualTo(1);
+                assertThat(jdbc.queryForList("SELECT status FROM ma_turn WHERE tenant_id=?"
+                        + " AND session_id=? ORDER BY gmt_create", String.class,
+                        tenant, ready.path("sessionId").asText())).containsExactly("CANCELLED", "COMPLETED");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id=?"
+                        + " AND session_id=? AND event_type IN ('turn.cancelled', 'turn.completed')"
+                        + " AND source_key IS NOT NULL", Integer.class,
+                        tenant, ready.path("sessionId").asText())).isEqualTo(2);
+            } else {
+                assertLedger(report);
+            }
         }
 
         private void startSpring() throws Exception {
@@ -411,15 +462,20 @@ class HostedProcessCrashIT {
             Files.deleteIfExists(readiness);
             String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
             Path log = root.resolve("spring-" + ++boots + ".log");
-            ProcessBuilder builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                     "-cp", classpath, HostedProcessCrashFixtureMain.class.getName(), root.toString(), node,
-                    cli.toString(), tenant, fault).redirectErrorStream(true).redirectOutput(log.toFile());
+                    cli.toString(), tenant, fault));
+            if (fault.equals("recovery-settlement")) {
+                command.addAll(List.of(Integer.toString(springPort), Integer.toString(harnessProxyPort),
+                        Integer.toString(brokerPort)));
+            }
+            ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile());
             builder.environment().put("FG6C_MYSQL_URL", required("mysql.url"));
             builder.environment().put("FG6C_MYSQL_USER", required("mysql.user"));
             builder.environment().put("FG6C_MYSQL_PASSWORD", System.getProperty("mysql.password", ""));
             spring = builder.start();
             processes.add(spring.toHandle());
-            await(() -> Files.exists(readiness) || !spring.isAlive(), 30, "Spring readiness");
+            await(() -> Files.exists(readiness) || !spring.isAlive(), 90, "Spring readiness");
             assertThat(spring.isAlive()).as("Spring failed: %s", Files.readString(log)).isTrue();
             ObjectNode next = (ObjectNode) JSON.readTree(Files.readString(readiness));
             if (ready != null) {
@@ -428,7 +484,52 @@ class HostedProcessCrashIT {
             ready = next;
         }
 
+        private void startBrokerSidecar() throws Exception {
+            Path log = root.resolve("broker-sidecar.log");
+            String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
+            var builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", classpath, HostedProcessCrashFixtureMain.class.getName(), root.toString(), node,
+                    cli.toString(), tenant, "recovery-broker", "0", Integer.toString(harnessProxyPort),
+                    Integer.toString(brokerPort)).redirectErrorStream(true).redirectOutput(log.toFile());
+            builder.environment().put("FG6C_MYSQL_URL", required("mysql.url"));
+            builder.environment().put("FG6C_MYSQL_USER", required("mysql.user"));
+            builder.environment().put("FG6C_MYSQL_PASSWORD", System.getProperty("mysql.password", ""));
+            brokerSidecar = builder.start();
+            processes.add(brokerSidecar.toHandle());
+            Path readiness = root.resolve("broker-ready.json");
+            await(() -> Files.exists(readiness) || !brokerSidecar.isAlive(), 90, "resident Broker readiness");
+            assertThat(brokerSidecar.isAlive()).as("Broker failed: %s", Files.readString(log)).isTrue();
+            assertThat(JSON.readTree(Files.readString(readiness)).path("brokerUrl").asText())
+                    .isEqualTo("http://127.0.0.1:" + brokerPort + "/");
+        }
+
+        private void assertResidentExecution() {
+            assertThat(brokerSidecar.isAlive()).as("resident Broker survived coordinator restart").isTrue();
+            assertThat(spring.children().toList()).as("coordinator must not provision a worker").isEmpty();
+            var workers = brokerSidecar.children().filter(process -> Arrays.asList(
+                    process.info().arguments().orElse(new String[0])).contains("managed-runtime-worker")).toList();
+            assertThat(workers).as("the resident Broker owns the original worker").hasSize(1);
+            if (residentWorker == null) {
+                residentWorker = workers.getFirst();
+            }
+            assertThat(workers.getFirst().pid()).isEqualTo(residentWorker.pid());
+            assertThat(HostedProcessLiveness.running(residentWorker)).isTrue();
+        }
+
         private Map<String, Object> control(String route) throws Exception {
+            if (route.equals("/recovery-pending")) {
+                assertResidentExecution();
+                var turn = jdbc.queryForMap("SELECT status, error_code FROM ma_turn WHERE tenant_id=?"
+                        + " AND session_id=?", tenant, ready.path("sessionId").asText());
+                assertThat(turn.get("status")).isEqualTo("RUNNING");
+                assertThat(turn.get("error_code")).isEqualTo(AgentStateStore.RUNTIME_RECOVERY_BLOCKED);
+                var execution = executions();
+                assertThat(execution).hasSize(1);
+                assertThat(execution.getFirst().get("execution_state")).isIn("EXECUTING", "CANCEL_REQUESTED");
+                assertThat(((Number) execution.getFirst().get("dispatch_generation")).longValue()).isEqualTo(1);
+                assertOwner(execution.getFirst());
+                return turn;
+            }
             if (route.equals("/evidence")) {
                 var rows = executions();
                 if (rows.isEmpty()) {
@@ -447,9 +548,25 @@ class HostedProcessCrashIT {
             assertThat(injections++).isZero();
             var execution = executions();
             assertThat(execution).hasSize(1);
-            assertThat(execution.getFirst().get("execution_state")).isEqualTo("EXECUTING");
+            if (fault.equals("recovery-settlement")) {
+                assertThat(execution.getFirst().get("execution_state")).isIn("EXECUTING", "CANCEL_REQUESTED");
+            } else {
+                assertThat(execution.getFirst().get("execution_state")).isEqualTo("EXECUTING");
+            }
             assertThat(((Number) execution.getFirst().get("dispatch_generation")).longValue()).isEqualTo(1);
             assertOwner(execution.getFirst());
+            if (route.equals("/recovery-settlement")) {
+                control("/recovery-pending");
+                processes.addAll(spring.descendants().toList());
+                long pid = spring.pid();
+                spring.destroyForcibly();
+                assertThat(spring.waitFor(10, TimeUnit.SECONDS)).isTrue();
+                assertThat(spring.exitValue()).isEqualTo(137);
+                startSpring();
+                assertResidentExecution();
+                return Map.of("pid", pid, "newPid", spring.pid(), "signal", "SIGKILL",
+                        "brokerPid", brokerSidecar.pid(), "workerPid", residentWorker.pid());
+            }
             List<ProcessHandle> workers = spring.children().filter(process -> Arrays.asList(
                     process.info().arguments().orElse(new String[0])).contains("managed-runtime-worker")).toList();
             assertThat(workers).as("one actual worker owned by Spring").hasSize(1);
@@ -460,7 +577,7 @@ class HostedProcessCrashIT {
                 spring.destroyForcibly();
                 assertThat(spring.waitFor(10, TimeUnit.SECONDS)).isTrue();
                 assertThat(spring.exitValue()).isEqualTo(137);
-                assertThat(running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
+                assertThat(HostedProcessLiveness.running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
                 // Keep the Store down beyond the Harness's five-second writer lease.
                 Thread.sleep(8_000);
                 startSpring();
@@ -470,7 +587,7 @@ class HostedProcessCrashIT {
             }
             if (route.equals("/worker-kill")) {
                 assertThat(worker.destroyForcibly()).isTrue();
-                await(() -> !running(worker), 10, "worker SIGKILL");
+                HostedProcessLiveness.awaitStopped(worker, Duration.ofSeconds(10), "worker SIGKILL");
                 return Map.of("pid", worker.pid(), "signal", "SIGKILL");
             }
             assertThat(route).isEqualTo("/worker-stop");
@@ -503,6 +620,54 @@ class HostedProcessCrashIT {
             var owner = owner();
             assertThat(originalOwner).as("owner captured before crash").isNotNull();
             assertThat(owner).isEqualTo(originalOwner);
+            if (owner.get("holder_key") == null) {
+                assertThat(owner.get("holder_key")).isNull();
+                assertThat(owner.get("binding_id")).isNull();
+                assertThat(owner.get("runtime_generation")).isNull();
+                assertThat(owner.get("runtime_session_id")).isNull();
+                assertThat(owner.get("maintenance_id")).isNull();
+                assertThat(owner.get("storage_kind")).isEqualTo("LOCAL");
+                assertThat(owner.get("mount_state")).isEqualTo("READY");
+                assertThat(((Number) owner.get("mount_revision")).longValue()).isPositive();
+                assertThat(owner.get("mount_root")).isEqualTo(root.resolve("workspace").toString());
+                var members = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns()
+                        + " FROM ma_runtime_session WHERE execution_storage_key=?", owner.get("storage_key"));
+                assertThat(members).as("the original shared Workspace execution member").hasSize(1);
+                var member = members.getFirst();
+                if (originalMember == null) {
+                    originalMember = new LinkedHashMap<>(member);
+                }
+                for (String key : List.of("scope_key", "tenant_id", "workspace_id", "workspace_generation",
+                        "canonical_cwd", "capability_digest", "isolation_class", "harness_session_id",
+                        "runtime_session_id", "binding_id", "runtime_generation", "execution_storage_key")) {
+                    assertThat(member.get(key)).as("original Workspace member %s", key).isEqualTo(originalMember.get(key));
+                }
+                assertThat(member).containsEntry("tenant_id", tenant)
+                        .containsEntry("harness_session_id", ready.path("sessionId").asText())
+                        .containsEntry("workspace_id", "workspace").containsEntry("isolation_class", "session")
+                        .containsEntry("capability_digest", WorkspaceExecutionProfile.CAPABILITY_DIGEST)
+                        .containsEntry("canonical_cwd", owner.get("mount_root"))
+                        .containsEntry("runtime_session_id", execution.get("runtime_session_id"))
+                        .containsEntry("binding_id", execution.get("binding_id"))
+                        .containsEntry("runtime_generation", execution.get("runtime_generation"))
+                        .containsEntry("session_state", "READY").containsEntry("execution_exclusive", false);
+                assertThat(((Number) member.get("runtime_generation")).longValue()).isEqualTo(1);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding b"
+                        + " JOIN ma_runtime_session rs ON rs.binding_id=b.binding_id AND rs.runtime_generation=b.runtime_generation"
+                        + " JOIN ma_session s ON s.tenant_id=rs.tenant_id AND s.session_id=rs.harness_session_id"
+                        + " JOIN ma_storage st ON st.tenant_id=s.tenant_id AND st.storage_id=s.workspace_storage_id"
+                        + " WHERE rs.scope_key=? AND rs.runtime_session_id=? AND b.scope_key=rs.scope_key"
+                        + " AND b.tenant_id=rs.tenant_id AND b.workspace_id=rs.workspace_id AND b.workspace_generation=rs.workspace_generation"
+                        + " AND b.canonical_cwd=rs.canonical_cwd AND b.capability_digest=rs.capability_digest AND b.isolation_class=rs.isolation_class"
+                        + " AND b.provisioner_kind='local-process' AND b.binding_state='READY' AND b.drain_requested=FALSE"
+                        + " AND s.workspace_id=b.workspace_id AND s.workspace_generation=b.workspace_generation AND s.workspace_storage_id=b.storage_id"
+                        + " AND st.physical_key=rs.execution_storage_key AND st.registration_state='REGISTERED' AND st.storage_kind='LOCAL'"
+                        + " AND st.registration_revision>0 AND s.workspace_config_ref=? AND s.workspace_policy_ref=? AND s.context_config_ref=?",
+                        Integer.class, member.get("scope_key"), member.get("runtime_session_id"),
+                        WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF,
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF)).isEqualTo(1);
+                return;
+            }
             assertThat(owner.get("binding_id")).isEqualTo(execution.get("binding_id"));
             assertThat(owner.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
             assertThat(owner.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
@@ -621,9 +786,12 @@ class HostedProcessCrashIT {
             if (spring != null) {
                 processes.addAll(spring.descendants().toList());
             }
+            if (brokerSidecar != null) {
+                processes.addAll(brokerSidecar.descendants().toList());
+            }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() -> !running(process), 10, "process cleanup " + process.pid());
+                HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "process cleanup");
             }
             if (driver != null) {
                 assertThat(driver.waitFor(5, TimeUnit.SECONDS)).isTrue();
@@ -631,23 +799,10 @@ class HostedProcessCrashIT {
             if (spring != null) {
                 assertThat(spring.waitFor(5, TimeUnit.SECONDS)).isTrue();
             }
-        }
-    }
-
-    private static boolean running(ProcessHandle process) {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (Files.exists(stat)) {
-            try {
-                String value = Files.readString(stat);
-                return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-            } catch (java.io.IOException gone) {
-                return process.isAlive();
+            if (brokerSidecar != null) {
+                assertThat(brokerSidecar.waitFor(5, TimeUnit.SECONDS)).isTrue();
             }
         }
-        return true;
     }
 
     private static boolean stopped(ProcessHandle worker) {
@@ -668,6 +823,12 @@ class HostedProcessCrashIT {
         while (!condition.getAsBoolean()) {
             assertThat(System.nanoTime()).as(description).isLessThan(deadline);
             Thread.sleep(20);
+        }
+    }
+
+    private static int freePort() throws java.io.IOException {
+        try (var socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
         }
     }
 

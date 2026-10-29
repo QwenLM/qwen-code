@@ -75,6 +75,7 @@ lines.on('line', async (line) => {
           { uri: 'ext://hold', name: 'hold' },
           { uri: 'ext://big', name: 'big' },
           { uri: 'ext://notify', name: 'notify' },
+          { uri: 'ext://late', name: 'late' },
         ],
       };
       break;
@@ -92,6 +93,20 @@ lines.on('line', async (line) => {
           ],
         };
         break;
+      }
+      if (uri === 'ext://late') {
+        // The first answer is deliberately unparseable: the Runtime records
+        // outcome_unknown while the request stays in its pending map. The
+        // second answer, same id, then settles the original exactly once.
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        respond(request.id, { contents: 'not-an-array' });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        respond(request.id, {
+          contents: [
+            { uri, mimeType: 'text/plain', text: `EXT_RESOURCE_${revision}` },
+          ],
+        });
+        return;
       }
       if (uri === 'ext://notify') {
         // The catalog change is announced while the read is still open: the

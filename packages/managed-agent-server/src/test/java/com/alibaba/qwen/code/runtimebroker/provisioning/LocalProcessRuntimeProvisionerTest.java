@@ -31,12 +31,15 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -45,6 +48,24 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class LocalProcessRuntimeProvisionerTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+
+    @Test
+    void keepsTheControlPlaneConfigurationOutOfTheWorkerEnvironment() {
+        Map<String, String> environment = new HashMap<>();
+        for (String name : List.of("SPRING_DATASOURCE_PASSWORD", "spring_datasource_password",
+                "SPRING_APPLICATION_JSON", "QWEN_MANAGED_AGENT_HARNESS_TOKEN",
+                "QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY", "qwen_managed_agent_runtime_broker_token",
+                "QWEN_MANAGEDAGENT_AUTH_SIGNING_KEY", "OSS_ACCESS_KEY_SECRET",
+                "QWEN_MANAGED_RUNTIME_BROKER_TOKEN", "qwen_managed_runtime_broker_url",
+                // Worker inputs and the ordinary environment pass through.
+                "QWEN_MANAGED_MCP_CONFIG", "QWEN_MANAGED_HOOK_CONFIG", "PATH", "HOME",
+                "QWEN_HOME", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS")) {
+            environment.put(name, "value");
+        }
+        LocalProcessRuntimeProvisioner.removeControlPlaneEnvironment(environment);
+        assertEquals(Set.of("QWEN_MANAGED_MCP_CONFIG", "QWEN_MANAGED_HOOK_CONFIG", "PATH", "HOME",
+                "QWEN_HOME", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS"), environment.keySet());
+    }
 
     @Test
     void refusesPrivateProfileBeforeSpawningOrAdopting(
@@ -424,7 +445,9 @@ public class LocalProcessRuntimeProvisionerTest {
                 worker.destroyForcibly();
             }
             worker.onExit().get(10, TimeUnit.SECONDS);
-            assertFalse(provisioner.isUsable(first));
+            // ProcessHandle exit can precede the Process object's exit update.
+            await().atMost(10, TimeUnit.SECONDS)
+                    .untilAsserted(() -> assertFalse(provisioner.isUsable(first)));
             if (release) {
                 provisioner.release(request, first).toCompletableFuture()
                         .get(10, TimeUnit.SECONDS);
@@ -827,7 +850,8 @@ public class LocalProcessRuntimeProvisionerTest {
                     .findFirst().orElseThrow();
             worker.destroyForcibly();
             worker.onExit().get(10, TimeUnit.SECONDS);
-            assertFalse(provisioner.isUsable(lease));
+            await().atMost(10, TimeUnit.SECONDS)
+                    .untilAsserted(() -> assertFalse(provisioner.isUsable(lease)));
             RuntimeObservation lost = provisioner
                     .reconcile(request, seed, handle, lease)
                     .toCompletableFuture().get(10, TimeUnit.SECONDS);

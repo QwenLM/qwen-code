@@ -61,6 +61,12 @@ not, and keeps its existing fence.
 - **No renewal backlog.** The activation renewal timer skips a tick while its
   previous renewal is still in flight, so a stalled Store call cannot queue one
   renewal per interval for the whole outage.
+- **Renewal stops only on consecutive non-recoverable refusals.** The loop
+  ends after three consecutive refusals, or as soon as the writer stops
+  accepting appends. An unsettled append and a rollbackable commit rejection
+  are recoverable: both keep retrying and clear the count, so the cap cannot
+  measure refusals separated by a recovery and a workspace-level refusal
+  window cannot permanently end renewal for a session that stays writable.
 - **No duplicate application.** The settlement path and the normal append share
   one post-commit function, including the extension-record apply callback, so a
   landed transaction advances the authority exactly once.
@@ -96,7 +102,11 @@ not, and keeps its existing fence.
   - an unsettled member command propagates `HostedToolRecoveryRequiredError`
     and keeps the parked wait in `await_command`.
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`
-  - activation renewals do not stack behind one in flight.
+  - activation renewals do not stack behind one in flight;
+  - three consecutive refusals stop the loop, and a stopped writer stops it at
+    once;
+  - an unsettled append or a rollbackable commit rejection keeps renewing and
+    clears the consecutive count.
 
 ## Non-goals
 

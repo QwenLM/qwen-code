@@ -30,7 +30,7 @@ public final class EventIdentity {
     public static Identity of(String type, String turnId, long sequence,
             Map<String, Object> data, Identity previous) {
         return switch (type) {
-            case "turn.accepted" -> new Identity(type,
+            case "turn.accepted", "item.input.added" -> new Identity(type,
                     itemId(data, StoreModels.inputItemId(turnId)), null);
             case "item.output_text.delta", "item.reasoning.delta" ->
                     textIdentity(type, turnId, sequence, data, previous);

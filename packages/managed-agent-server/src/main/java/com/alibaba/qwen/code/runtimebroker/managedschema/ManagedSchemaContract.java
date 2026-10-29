@@ -7,8 +7,12 @@ public final class ManagedSchemaContract {
     public static final Set<String> TABLES =
             Set.of(
                     "ma_session",
+                    "ma_session_worktree",
                     "ma_session_head",
                     "ma_turn",
+                    "ma_user_message_queue",
+                    "ma_user_message",
+                    "ma_user_message_command",
                     "ma_session_journal_tx",
                     "ma_event_stream",
                     "ma_public_event",
@@ -16,6 +20,9 @@ public final class ManagedSchemaContract {
                     "ma_snapshot",
                     "ma_session_record",
                     "ma_agent_definition",
+                    "ma_extension_package",
+                    "ma_extension_settings",
+                    "ma_extension_operation",
                     "ma_resource",
                     "ma_resource_ref",
                     "ma_output_capture",
@@ -48,11 +55,13 @@ public final class ManagedSchemaContract {
         UNARCHIVE,
         RENAME,
         CWD_CHANGE,
+        CONTEXT_COMPRESSION,
         ACTION_RESPONSE,
         TASK_CANCEL,
         CHILD_SESSION_START,
         CHILD_SESSION_CLOSE,
         CHILD_WORKSPACE,
+        SESSION_WORKTREE,
         OUTPUT_UPLOAD,
         OUTPUT_VERIFY,
         OUTPUT_FINISH,
@@ -64,6 +73,8 @@ public final class ManagedSchemaContract {
         WORKSPACE_RECOVERY,
         STORAGE_MIGRATION,
         CSI_RETIREMENT,
+        WORKSPACE_RETIREMENT,
+        WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
         SUBMIT_INPUT,
         CANCEL
@@ -77,7 +88,8 @@ public final class ManagedSchemaContract {
         AUTOMATION,
         CHANNEL_INGRESS,
         ACTION_DECISION,
-        WORKSPACE_CREATE
+        WORKSPACE_CREATE,
+        EXTERNAL_STORAGE
     }
 
     public enum ReceiptScope {
@@ -93,12 +105,15 @@ public final class ManagedSchemaContract {
         EXECUTION_ACK,
         RUNTIME_BINDING,
         CSI_WORKER_ACK,
-        RECOVERY_EVIDENCE
+        RECOVERY_EVIDENCE,
+        POD_DELETE_ATTEMPT,
+        POD_FINALIZER_ATTEMPT
     }
 
     public enum ResourceOwnerKind {
         JOURNAL,
         SNAPSHOT,
+        NATIVE_SNAPSHOT,
         CAPTURE,
         ARTIFACT,
         MESSAGE,

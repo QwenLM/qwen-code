@@ -59,8 +59,7 @@ if [[ "$SKIP" != "gtk3" && "$ONLY" == *",gtk3,"* ]]; then
 
     cat > "$GTK3_STAGE/CuaTestHarness.Gtk3" <<'LAUNCHER'
 #!/usr/bin/env bash
-# X11 remains the default for the canonical Xvfb lane. A native Wayland lane
-# exports GDK_BACKEND=wayland before launching this repo-owned fixture.
+# Linux fixtures use X11, including when the surrounding session uses XWayland.
 export GDK_BACKEND="${GDK_BACKEND:-x11}"
 exec python3 "$(dirname "$(readlink -f "$0")")/main.py" "$@"
 LAUNCHER

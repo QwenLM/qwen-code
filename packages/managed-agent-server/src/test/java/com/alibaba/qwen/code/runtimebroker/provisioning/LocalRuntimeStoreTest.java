@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
@@ -11,6 +12,8 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
 class LocalRuntimeStoreTest {
     @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
@@ -98,6 +101,48 @@ class LocalRuntimeStoreTest {
         } finally {
             System.setProperty("os.name", os);
         }
+    }
+
+    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    @Test
+    void linuxIdentityDiscoveryUsesTheRequiredFilesystemSources() {
+        var expected = DurableLocalProcessRuntimeProvisionerTest.HOST;
+        try (var files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            files.when(() -> Files.readString(Path.of("/etc/machine-id")))
+                    .thenReturn(expected.hostId() + "\n");
+            files.when(() -> Files.readString(Path.of("/proc/sys/kernel/random/boot_id")))
+                    .thenReturn(expected.bootId() + "\n");
+            files.when(() -> Files.readSymbolicLink(Path.of("/proc/self/ns/pid")))
+                    .thenReturn(Path.of(expected.pidNamespace()));
+            files.when(() -> Files.readSymbolicLink(Path.of("/proc/self/ns/time")))
+                    .thenReturn(Path.of(expected.timeNamespace()));
+            assertEquals(expected, LocalRuntimeStore.HostIdentity.linux());
+        }
+    }
+
+    @Test
+    void missingMachineIdCannotSupplyTrustedLinuxIdentity() {
+        Path machineId = Path.of("/etc/machine-id");
+        try (var files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            files.when(() -> Files.readString(machineId))
+                    .thenThrow(new NoSuchFileException(machineId.toString()));
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    LocalRuntimeStore.HostIdentity::linux);
+            assertTrue(error.getCause() instanceof NoSuchFileException);
+        }
+    }
+
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.LINUX)
+    @Test
+    void nativeLinuxIdentityIsStableOnSupportedHosts() throws Exception {
+        for (String source : List.of("/etc/machine-id", "/proc/sys/kernel/random/boot_id",
+                "/proc/self/ns/pid", "/proc/self/ns/time")) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(Files.isReadable(Path.of(source)),
+                    "Native durable identity source unavailable: " + source);
+        }
+        var identity = LocalRuntimeStore.HostIdentity.linux();
+        assertEquals(Files.readString(Path.of("/etc/machine-id")).strip(), identity.hostId());
+        assertEquals(identity, LocalRuntimeStore.HostIdentity.linux());
     }
 
     // The store owns Posix permissions; Windows has none to validate against.

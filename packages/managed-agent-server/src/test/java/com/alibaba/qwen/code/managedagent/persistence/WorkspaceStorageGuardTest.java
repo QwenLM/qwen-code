@@ -626,6 +626,34 @@ class WorkspaceStorageGuardTest {
     }
 
     @Test
+    void retainedReleasedMembershipBlocksPhysicalStepsAndPreservesCompletedRestoreReplay() throws Exception {
+        String registration = UUID.randomUUID().toString();
+        var guard = guard();
+        guard.register("tenant", "storage", registration);
+        String key = jdbc.queryForObject("SELECT storage_key FROM ma_storage_owner", String.class);
+        jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+                + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind,"
+                + " binding_id, runtime_generation, session_state, record_version, last_active_at, execution_storage_key)"
+                + " VALUES (?, 'retained', 'tenant', 'workspace', '1', '/workspace', 'digest', 'session', 'session',"
+                + " 'bootstrap', 'binding', 1, 'RELEASED', 0, 1, ?)", "a".repeat(64), key);
+        assertThat(guard.inspect("tenant", "storage")).contains("holder=true");
+        assertUnavailable(() -> guard.register("tenant", "storage", registration));
+        String operation = UUID.randomUUID().toString();
+        assertUnavailable(() -> guard.fence("tenant", "storage", 1, operation));
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "retained");
+        guard.fence("tenant", "storage", 1, operation);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", key, "retained");
+        assertUnavailable(() -> guard.recoveryRegistration("tenant", "storage", 1, operation));
+        assertUnavailable(() -> guard.restoreOriginal("tenant", "storage", 1, operation));
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "retained");
+        guard.restoreOriginal("tenant", "storage", 1, operation);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", key, "retained");
+        guard.restoreOriginal("tenant", "storage", 1, operation);
+        assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?", String.class, "retained"))
+                .isEqualTo(key);
+    }
+
+    @Test
     void restoreRetryVerifiesPhysicalStateAndPreservesNewHolder() throws Exception {
         guard().register("tenant", "storage", UUID.randomUUID().toString());
         String operation = UUID.randomUUID().toString();

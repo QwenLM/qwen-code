@@ -27,42 +27,6 @@
   border: 0;
   cursor: pointer;
 }
-.notice {
-  flex: none;
-  padding: 2px 6px;
-  margin: 0;
-  font-size: 10px;
-  color: var(--muted-foreground);
-}
-.followControls {
-  flex: 1 1 auto;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 6px;
-  padding: 2px 6px;
-  font-size: 11px;
-  color: var(--muted-foreground);
-}
-.followControls > span {
-  flex: 1 1 auto;
-}
-.followControls button {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 5px;
-  background: var(--background);
-  color: var(--foreground);
-  cursor: pointer;
-}
-.followControls button[aria-disabled='true'] {
-  opacity: 0.5;
-  cursor: default;
-}
 .axis {
   display: flex;
   flex: none;
@@ -141,10 +105,6 @@
   }
   .track {
     display: none;
-  }
-  .notice {
-    max-height: 28px;
-    overflow: auto;
   }
 }
 

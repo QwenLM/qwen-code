@@ -840,8 +840,8 @@ describe('managed session per-kind rules', () => {
   });
 
   it('registers the v1 domains including file history and session source', () => {
-    expect(MANAGED_SESSION_DOMAINS).toHaveLength(34);
-    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(34);
+    expect(MANAGED_SESSION_DOMAINS).toHaveLength(35);
+    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(35);
     expect(MANAGED_SESSION_DOMAINS).toContain('session_command');
   });
 
@@ -996,16 +996,12 @@ describe('managed session header', () => {
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
-      { minimumReader: 'managed-session/2' },
-      /is not supported by this reader/,
-    );
-    headerError(
       { minimumReader: 'managed-session/3' },
       /is not supported by this reader/,
     );
   });
 
-  it('accepts an older minimum-reader requirement and returns its token', () => {
+  it('accepts supported minimum-reader requirements and returns their tokens', () => {
     expect(
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/0' }))
         .minimumReader,
@@ -1014,6 +1010,10 @@ describe('managed session header', () => {
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/1' }))
         .minimumReader,
     ).toBe('managed-session/1');
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/2' }))
+        .minimumReader,
+    ).toBe('managed-session/2');
   });
 
   it('refuses a malformed minimum-reader token', () => {

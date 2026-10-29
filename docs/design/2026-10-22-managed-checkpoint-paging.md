@@ -1,0 +1,75 @@
+# Paged Managed Harness checkpoint history
+
+[English](2026-10-22-managed-checkpoint-paging.md) | [简体中文](2026-10-22-managed-checkpoint-paging.zh-CN.md)
+
+## Status and problem
+
+Implemented; focused local acceptance passes. Retained regression failures and native-path limits are recorded below. This follows the bounded budget/recovery fix in #15094. A single open Turn accumulates settled tool receipts and Runtime bindings in its checkpoint. Moving the physical limit from 64 KiB to 1 MiB postpones exhaustion; deleting consumed entries would remove the durable repeat-dispatch fence. The HTTP transaction also enumerates all transitive dependencies again, with a 1,024-resource limit. A page list without committed-history reuse does not solve that second limit.
+
+This main-targeted follow-up depends on #15094 for the 1 MiB physical-root and publication/readback reference budgets. Until that prerequisite merges, main still refuses checkpoint resources above 64 KiB; bounded 48 KiB history pages do not remove this active-root prerequisite. The prerequisite budget/recovery patches remain in #15094 and are not duplicated here. Rebase and verify the combined deployment before rollout.
+
+## Goals and boundaries
+
+Keep physical checkpoint bodies and immutable history pages bounded, append history incrementally, preserve every execution identity and outcome reference, and restore without replaying completed tools. Keep pending/unconsumed calls in the active checkpoint. Publish new pages, their references, the checkpoint root and journal/head advance in the existing atomic transaction.
+
+This slice changes checkpoint persistence, not the complete Session retention model. The logical execution view still materializes the full tool/binding arrays so existing transition checks and duplicate guards remain authoritative. Loading and logically validating one checkpoint remain O(history). Replaying a complete journal can revisit historical prefixes and cost more; this is not a claim of bounded process memory or constant-time restore. Journal compaction, object storage, UI history paging and automatic resumption of unknown physical executions are outside scope. Existing Session/CSI inventory and snapshot total row/byte limits remain explicit capacity guards, including the 4,096-entry history/inventory bounds; this feature does not qualify 10,000 native CSI calls. Active batches and tool-publication profiles retain their existing limits. Main's publication profile still has a 64 KiB checkpoint reference bound until #15094 merges; the codec's 1 MiB root guard alone does not make a root of that size deployable.
+
+## Logical and physical formats
+
+Keep the existing Harness v1 logical state and object-level schema validation. Small inline v1 checkpoints remain unchanged and readable. A paged physical checkpoint retains the same top-level identity, continuation, active tools and Runtime groups, and adds the explicit `storageProfile=managed-checkpoint-paged/1` plus a history head reference and cumulative tool/binding counts. The ordinary `managed-checkpoint` reference kind/version remains unchanged. Older Harness readers reject the unfamiliar physical fields and stay recovery-blocked.
+
+Only a prefix of settled, consumed tool entries and their terminal Runtime bindings may be sealed. Keep a recent tail and every unfinished/unconsumed entry inline. Seal in batches of at most 32 tools; a `managed-checkpoint-history` page is at most 48 KiB and carries Session/Turn/prompt scope, the preceding page reference, cumulative counts, tool entries and matching bindings. Split a batch when its encoded bytes reach the page bound. The root keeps at most 63 settled, consumed entries during normal incremental execution, plus every pending or unconsumed entry. Its existing 1 MiB physical limit still protects unusually large active metadata.
+
+History entries contain bounded identifiers and durable references, not raw tool output. Existing stable-ID validation caps each identifier at 512 UTF-8 bytes; digests and numeric metadata are also bounded. A large outcome stays behind its reference and cannot make one valid history entry exceed 48 KiB. Raising the root budget does not lift those field limits. The single-entry capacity check remains a defensive guard against future schema changes.
+
+Pages are immutable and chained rather than collecting an ever-growing root array of page references. Loading validates scope, exact reference identity/digest, decreasing cumulative counts, terminal/consumed entries, binding correspondence, uniqueness and the complete reconstructed v1 phase shape. Missing, corrupt, cyclic or substituted history is blocked recovery, never an empty history. Preserve original array order, ordinals and references. Both publication and cold decoding enforce 4,096 pages and 64 MiB of encoded history page bytes per checkpoint. These are corruption and memory guards, not a promise that the surrounding Session or CSI can reach them; their existing lower total inventory/snapshot limits still apply.
+
+## Publication, reuse and crash behavior
+
+The authority assigns checkpoint identity before encoding. The command digest covers the actual physical root. Its publisher may reuse only the already-committed history of the previous checkpoint and must reject modifications to that prefix. A latest-checkpoint cache is advanced only after a definite journal commit; an uncertain append does not certify pages as committed. A cold reader reconstructs its basis from the pinned committed root.
+
+The HTTP census includes new page bodies and the reused history boundary, instead of recursively re-declaring the complete old history. Historical descendants may be omitted only behind this explicit page boundary. Java verifies exact metadata and same tenant/Workspace/Session ownership under a committed revision no later than the pinned predecessor. Newly introduced pages must have their dependencies either in the current transaction or proven in prior committed history. Generic missing-census fallbacks remain prohibited.
+
+Native CSI must decode the physical root to the complete logical state before its existing canonical expected-transition comparison. Its physical census and scoped historical-page reader are distinct: current resources still exactly match the declared census, while an archived page uses its original committed ownership proof. An unrelated old page cannot replace the expected execution prefix. Hosted closure checks apply the same narrow boundary rule. Existing active `JOURNAL` owners pin old page dependencies until permanent Session retirement; no new GC or schema migration is introduced.
+
+A crash before commit leaves the old root authoritative. A committed transaction with a lost acknowledgement is settled through existing idempotency/head checks. Writer generation and activation fencing remain unchanged. No state claims successful physical execution from a missing acknowledgement.
+
+## Integration surface and rollout
+
+Add a shared Core physical checkpoint codec and page-reference extractor; use it in both authority commit paths, authoritative load, original receipt inspection, shell capture authorization, Hosted cold loading and Workspace recovery. Keep logical schema validation separate from bounded byte parsing. HTTP transaction closure and read-only snapshot inspection must use the same page schema with different traversal purposes: incremental admission versus full pinned-snapshot verification.
+
+Add the corresponding Java page/ownership validation to Session Store, Hosted recovery closure and native CSI admission/proof, and recognize the new kind in historical application inventory. Tool publication can continue inspecting inline in-progress items because those are never archived. Read-only snapshots and CSI export/restore continue validating complete reference closure under their existing total budgets.
+
+| Layer                                                | Principal implementation paths                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Physical codec and logical authority                 | `packages/core/src/managed-runtime/managed-checkpoint-history.ts`, `managed-harness-checkpoint.ts`, `managed-session-authority.ts`                                                                                                                                                                                   |
+| Incremental transport and cold recovery              | `packages/core/src/managed-runtime/http-managed-session-store.ts`, `packages/cli/src/serve/hosted-harness-session.ts`, `workspace-recovery-session.ts`                                                                                                                                                               |
+| SQL admission and Hosted closure                     | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java`, `ManagedHostedRecoveryRecords.java`                                                                                                                                                           |
+| Native proof and historical application verification | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/ManagedCheckpointHistory.java`, `CsiNativeActivationProof.java`, `JdbcCsiActivationAdmission.java`, `JdbcCsiExecutionAdmission.java`; persistence `WorkspaceCsiApplicationHistory.java` and `WorkspaceCsiApplicationInventory.java` |
+
+Deploy compatible Java validators/readers and the Harness together before producing paged roots. Existing inline checkpoints need no migration; the next successful checkpoint can seal their consumed prefix. Downgrades after paging fail closed. Keep #15094 independently reviewable and validate the combined deployment after the prerequisite merges. Do not restart or modify the user's preview or Session for feature validation.
+
+## Validation and acceptance
+
+1. Confirm the global CLI baseline first; when it cannot reach the Managed path, preserve that evidence and use a deterministic current-baseline fixture. Demonstrate both the logical 1 MiB exhaustion and the 1,024-resource census limit with small tool outcomes.
+2. Grow a same-Turn logical history beyond both limits incrementally. Assert bounded root/page sizes and per-step census/new bytes, immutable page reuse, exact receipt/binding/outcome identities, and unchanged ordinary-resource limits.
+3. Reopen in another process and replay an execution older than the in-process 1,024-entry window. Require zero new executions/model requests, retained pending/unconsumed work, and normal following-Turn behavior.
+4. Exercise before-commit failure, lost acknowledgement, generation takeover and stale writer refusal. Reject wrong scope, future/uncommitted owners, conflicting digests, missing pages/dependencies, cycles, count/order conflicts and historical-prefix substitution.
+5. Cover old inline v1 readers, original receipt inspection, shell capture, Hosted/Workspace recovery, native CSI canonical transition proof, full snapshot closure, bounded inventory refusal and retirement reference retention.
+6. Run root build/typecheck/bundle, affected package tests, Java verification, disposable MySQL and matching native Hosted/recovery gates. Record unavailable external-model and platform checks explicitly; local deterministic success is not production qualification.
+
+## Local validation observations
+
+The observations below were collected on the earlier integration preview containing the budget/recovery fix, not on the standalone main-targeted branch. Fresh checks and any retained failures for the extracted PR are recorded in its separate E2E report.
+
+On macOS with Node 24.19.0, JDK 21 and disposable MySQL 8.4.11, the independent protocol-history test grows from 256 to 2,560 logical receipts. The actual Java/MySQL path keeps the current census at 35 resources and the final physical root at 24,211 bytes, while the logical state reaches 1,763,787 bytes. A Java restart and second Node process read back all outcomes and reject the oldest repeated execution after its in-process cache entry is evicted. Cold read plus HTTP verification of every outcome takes 171,563 ms in this run; that interval is not an isolated checkpoint decode or Turn-latency benchmark. These are synthetic logical receipts, not 2,560 native worker executions.
+
+The built CLI separately completes 96 Harness protocol file reads against a controlled model/Broker adapter. Cold replay adds no tool or model calls, and a following Turn completes. Independent refusal, lost-acknowledgement and writer-takeover checks pass. The original failed test-adapter cleanup/concurrent-retry runs remain retained; complete corrected fresh-state reruns pass without changing product code.
+
+Build, typecheck, bundle, changed TypeScript lint/format, 454 focused Core tests, full Java verification (5,175 tests; 18 existing skips) and 206 selected MySQL integration tests pass. Independent source review reports no findings. The final complete three-file CLI rerun passes all 706 tests with the original budgets and one worker; a clean unpaged control passes the same 706 tests. Source and built artifacts remain unchanged during the final run. Earlier complete runs with 700 passes/six failures and 701 passes/five failures remain retained, including their different timeout/wait and prompt-404 failures. Their cause is not established; the final complete pass does not erase those observations or establish a load/performance explanation.
+
+The matching Hosted/fault profile has 12 tests and nine failures. A clean unpaged Java and CLI baseline reproduces the same nine failed test names. The first-tool Workspace authority refusals and missing initial storage owner occur before paging history is produced, so these local gates do not qualify the rejected native execution path. Their underlying cause remains separate from this feature; no Workspace guard is bypassed. External providers, Windows and Linux-only shell recovery are not qualified by this local evidence. The user's preview and Session remain unchanged.
+
+## Open questions
+
+No product decision is needed for this slice. Broader journal compaction and removal of global CSI inventory limits belong to the long-session storage work tracked in #13184; they must not be implied by checkpoint paging acceptance.
