@@ -47,15 +47,16 @@ const mocks = vi.hoisted(() => {
         props.children,
       );
     };
-    // Stands in for the measured body box: reports its layout height once.
+    // Stands in for the measured body box: reports its layout height after
+    // every render, as OpenTUI layout re-fires onSizeChange when the height
+    // changes (tab switch, telemetry update).
     const Measured = (props: {
       onSizeChange?: (this: { height: number }) => void;
       children?: React.ReactNode;
     }) => {
       React.useEffect(() => {
         props.onSizeChange?.call({ height: state.contentRows });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
+      });
       return React.createElement('div', null, props.children);
     };
     const jsx = (
@@ -221,6 +222,55 @@ describe('OpenTuiStatsDialog scrolling', () => {
       [6],
       [-6],
     ]);
+  });
+
+  it('steps a page by one row when the region leaves a single body row', () => {
+    // Region 9 is the smallest with a non-zero budget (one body row); the
+    // page step must not floor to 0 or PageUp/PageDown go dead there.
+    render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={9}
+      />,
+    );
+    send('pagedown');
+    send('pageup');
+    expect(mocks.state.scroller.scrollBy.mock.calls).toEqual([[1], [-1]]);
+  });
+
+  it('does not advertise scrolling when the body exactly fits the budget', () => {
+    // contentRows === bodyRows: the scrollbox cannot move, so the hint must
+    // not promise a scroll.
+    mocks.state.contentRows = 7;
+    const { getByText, queryByText } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    expect(getByText('tab · esc')).toBeTruthy();
+    expect(queryByText('tab · ↑↓ scroll · esc')).toBeNull();
+  });
+
+  it('re-measures the body when the tab changes', () => {
+    const { getByTestId, getByText, queryByText } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('7');
+    expect(getByText('tab · ↑↓ scroll · esc')).toBeTruthy();
+    // The Activity body is shorter and fits the budget: the scrollbox
+    // follows its new height and the hint stops promising a scroll.
+    mocks.state.contentRows = 5;
+    send('tab');
+    expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('5');
+    expect(getByText('tab · esc')).toBeTruthy();
+    expect(queryByText('tab · ↑↓ scroll · esc')).toBeNull();
   });
 
   it('returns to the top when the tab changes', () => {

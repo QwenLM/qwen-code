@@ -117,8 +117,10 @@ import { DialogFrame } from './dialogs-shared.js';
 import { OpenTuiMemoryDialog } from './dialogs-memory-status.js';
 import { OpenTuiStatusLineDialog } from './dialogs-statusline.js';
 import {
+  computeStatsBodyRows,
   OpenTuiSkillsDialog,
   OpenTuiStatsDialog,
+  STATS_FIXED_ROWS,
 } from './dialogs-stats-skills.js';
 import { OpenTuiThemeDialog } from './dialogs-theme.js';
 
@@ -194,6 +196,42 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
       flexShrink: 0,
     });
     expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('stats frame chrome matches the rows STATS_FIXED_ROWS charges', () => {
+    // The body budget is the region minus STATS_FIXED_ROWS; the frame is
+    // unshrinkable, so any chrome row added or removed without updating the
+    // constant pushes the border past the region's clip or leaves dead rows.
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={19}
+      />,
+    );
+    const frameEl = container.firstElementChild;
+    const frame = layoutOf(frameEl);
+    expect(frame).toMatchObject({ border: true, flexShrink: 0 });
+    const [tabBar, spacer, scrollbox, footer, ...rest] = Array.from(
+      frameEl?.children ?? [],
+    );
+    expect(rest).toHaveLength(0);
+    expect(scrollbox?.getAttribute('data-kind')).toBe('scrollbox');
+    expect(layoutOf(tabBar)).toMatchObject({ flexDirection: 'row' });
+    expect(layoutOf(footer)['height']).toBeUndefined();
+    expect(footer?.children).toHaveLength(1);
+    const chrome =
+      2 + // border
+      Number(frame['paddingTop'] ?? 0) +
+      Number(frame['paddingBottom'] ?? 0) +
+      1 + // the tab bar's single row
+      Number(layoutOf(spacer)['height'] ?? 0) +
+      Number(layoutOf(footer)['marginTop'] ?? 0) +
+      1; // the footer hint's single row
+    expect(chrome).toBe(STATS_FIXED_ROWS);
+    expect(layoutOf(scrollbox)).toMatchObject({
+      height: computeStatsBodyRows(19),
+    });
   });
 
   it('skills frame opens flush and unshrinkable', () => {
