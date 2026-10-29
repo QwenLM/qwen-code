@@ -55,10 +55,13 @@ debt projection is the retry state.
 
 An attempt that reports no actionable evidence, or that throws, is paced in
 memory: 10 seconds for the first retry, doubling to a 5-minute cap, reset when
-the debt disappears. The pacing map is bounded by the current scan page. A
-failed attempt also drops the connector's cached attachment, so the next one
-performs its own cold cleanup load instead of reusing a reference to the dead
-generation. At most one debt per Session is attempted per tick.
+the debt disappears. The pacing map is bounded by the current scan page. An
+attempt that loses the daemon, sees a moved generation or a vanished reference
+also drops the connector's cached attachment, so the next one performs its own
+cold cleanup load instead of reusing a reference to the dead generation. A
+named refusal (live work, recovery required) only backs off: evicting that
+attachment would churn a Session whose Turn is still running. At most one debt
+per Session is attempted per tick.
 
 Two control planes may scan the same debt. The cleanup load is idempotent: a
 concurrent attachment is refused by the Harness while live work is present,

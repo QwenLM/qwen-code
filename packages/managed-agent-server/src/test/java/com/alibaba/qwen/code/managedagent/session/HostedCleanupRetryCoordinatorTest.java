@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore.CleanupDebt;
@@ -84,6 +85,36 @@ class HostedCleanupRetryCoordinatorTest {
         now.addAndGet(HostedCleanupRetryCoordinator.INITIAL_DELAY.toMillis());
         coordinator.retryOwedCleanup();
         verify(harness, times(2)).recheckRecoveryCleanup(TENANT, SESSION, PROMPT);
+    }
+
+    @Test
+    void keepsTheAttachmentWhenTheHarnessNamesLiveWork() {
+        when(store.findOwed(20)).thenReturn(List.of(debt(SESSION, OWNER, PROMPT)));
+        when(harness.isAvailable()).thenReturn(true);
+        DaemonHttpException refusal = mock(DaemonHttpException.class);
+        when(refusal.getStatusCode()).thenReturn(409);
+        when(harness.recheckRecoveryCleanup(TENANT, SESSION, PROMPT))
+                .thenThrow(refusal);
+
+        coordinator.retryOwedCleanup();
+
+        // A 409 means a Turn still owns the Session; evicting its attachment
+        // would churn live work instead of waiting for it to settle.
+        verify(harness, never()).discardManagedRecovery(anyString(), anyString());
+    }
+
+    @Test
+    void dropsTheAttachmentWhenTheReferenceVanished() {
+        when(store.findOwed(20)).thenReturn(List.of(debt(SESSION, OWNER, PROMPT)));
+        when(harness.isAvailable()).thenReturn(true);
+        DaemonHttpException gone = mock(DaemonHttpException.class);
+        when(gone.getStatusCode()).thenReturn(404);
+        when(harness.recheckRecoveryCleanup(TENANT, SESSION, PROMPT))
+                .thenThrow(gone);
+
+        coordinator.retryOwedCleanup();
+
+        verify(harness).discardManagedRecovery(TENANT, SESSION);
     }
 
     @Test

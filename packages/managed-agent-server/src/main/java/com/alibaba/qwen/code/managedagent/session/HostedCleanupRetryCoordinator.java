@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore.CleanupDebt;
@@ -114,11 +115,26 @@ public class HostedCleanupRetryCoordinator {
             }
             backoff(debt, null);
         } catch (RuntimeException error) {
-            // A cached attachment can name the crashed generation. Dropping it
-            // makes the next attempt perform its own cold cleanup load.
-            harness.discardManagedRecovery(debt.tenantId(), debt.sessionId());
+            if (staleAttachment(error)) {
+                // The cached reference names the crashed generation. Dropping
+                // it makes the next attempt perform its own cold cleanup load.
+                harness.discardManagedRecovery(debt.tenantId(), debt.sessionId());
+            }
             backoff(debt, error);
         }
+    }
+
+    /**
+     * A named refusal (live work, recovery required) is not evidence that the
+     * cached generation is dead, and evicting it would churn a Session whose
+     * Turn is still running. Transport loss, a moved generation and a vanished
+     * reference are.
+     */
+    private static boolean staleAttachment(RuntimeException error) {
+        if (error instanceof DaemonHttpException http) {
+            return http.getStatusCode() == 404;
+        }
+        return true;
     }
 
     private static String paceKey(CleanupDebt debt) {
