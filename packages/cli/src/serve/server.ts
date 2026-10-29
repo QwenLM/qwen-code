@@ -4381,11 +4381,16 @@ export function createServeApp(
     });
     const drains = await Promise.allSettled(pendingDrains);
     stopAppResource(() => acpHandleRef.current?.dispose());
-    const bridgeDrains = await Promise.allSettled(
-      workspaceRegistry
-        .listManaged()
-        .map((runtime) => runtime.bridge.shutdown()),
-    );
+    // A host that passes its own lifecycle drains these bridges in its close
+    // (`runQwenServe` disposes every runtime, then the primary bridge), so only
+    // a lifecycle-less app owns their teardown here.
+    const bridgeDrains = deps.serveAppLifecycle
+      ? []
+      : await Promise.allSettled(
+          workspaceRegistry
+            .listManaged()
+            .map((runtime) => runtime.bridge.shutdown()),
+        );
     const errors = [
       ...cleanupErrors,
       ...[...drains, ...bridgeDrains]
