@@ -7,7 +7,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
@@ -756,8 +755,11 @@ export function getCoreSystemPrompt(
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
   const systemMdEnabled = isSystemMdActive();
-  // Load the packaged prompt alongside the compiled prompt module.
-  const systemMdPath = fileURLToPath(new URL('./system.md', import.meta.url));
+  // Prefer an editable prompt next to the Windows launcher, then fall back to the bundled copy.
+  const externalPrompt = path.join(path.dirname(process.execPath), 'system.md');
+  const systemMdPath = fs.existsSync(externalPrompt)
+    ? externalPrompt
+    : path.join(process.cwd(), 'system.md');
 
   if (systemMdEnabled) {
 
