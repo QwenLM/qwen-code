@@ -60,12 +60,12 @@ credentials) also runs on `ubuntu-latest`.
 - `publish` and `collect` move to a new, release-only runner label
   `ecs-qwen-release-host`, gated by a new opt-in repository variable
   `ECS_RELEASE_HOST_RUNNER_ENABLED`:
-  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
-  This remains the `publish` expression. The audio-reuse follow-up removes
-  `x64` from `collect` only, since collection does not execute target binaries.
+  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
+  The audio-reuse follow-up removes `x64` from both expressions to match the
+  release-host runners. This does not make the lane ready for activation.
   With the variable unset (default), both jobs dispatch to `ubuntu-latest`
-  exactly as before this change. Operations provisions dedicated machines
-  carrying only the `ecs-qwen-release-host` label, then flips the variable.
+  exactly as before this change. Keep the variable unset until host isolation
+  is verified and #15832 separates the build lane from hosted npm publication.
 - `publish` gains the `release_disk_floor_gate` anchor (after its checkout,
   before install), bringing it under the same ENOSPC fast-fail regime (#10035)
   as every other pool-routed job.
@@ -129,9 +129,10 @@ credentials) also runs on `ubuntu-latest`.
 - The four other suites that parse `release.yml` (`ai-release-notes`,
   `install-script`, `package-scripts`, `workflow-size`) and
   `classify-release-notes.test.mjs` pass unchanged.
-- Before enabling: register an `ecs-qwen-release-host` runner, then dispatch
-  a dry-run release with `ECS_RELEASE_HOST_RUNNER_ENABLED=true` and confirm
-  `publish` + `collect` land on it while `notify_failure` stays hosted.
+- For #15854, keep `ECS_RELEASE_HOST_RUNNER_ENABLED` unset and run a release
+  dry-run on the PR head. Activation testing is deferred to #15832 after host
+  isolation and hosted npm publication are established; the original routing
+  acceptance criteria below do not authorize enabling the current lane.
 
 ## Acceptance Criteria
 

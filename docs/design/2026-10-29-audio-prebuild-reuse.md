@@ -64,8 +64,9 @@ fallback.
 
 ### Failure handling
 
-Every step that can fail on a cache miss is non-fatal, and the reuse ID is only
-published after a _trial download and payload validation_ succeed:
+Fingerprinting, lookup, trial download and validation are non-fatal, and the
+reuse ID is only published after a _trial download and payload validation_
+succeed:
 
 - lookup API failure → no candidate
 - fingerprint or temporary-directory failure → no key, so the native matrix runs
@@ -73,15 +74,17 @@ published after a _trial download and payload validation_ succeed:
   `continue-on-error` rewrites `conclusion`)
 - payload validation failure → the step fails before writing the output
 
-An empty reuse ID runs the full native matrix, which is today's behaviour. The
-trial bytes are discarded and re-downloaded by the consumer, so the trial never
-leaves state behind.
+An empty reuse ID runs the full native matrix. Fresh builds now pin Node and
+the prebuildify target to 22.22.3 and use filtered, frozen pnpm dependencies
+when a lockfile exists; only older refs retain the npm install path. The trial
+bytes are discarded and re-downloaded by the consumer.
 
 The publisher does not trust `prepare`'s decision: it recomputes the
 fingerprint from its own checkout, re-verifies the source run, downloads by
 artifact ID, and validates the payload again. That verification is fatal — by
 then the native matrix was skipped, so a bad artifact must stop the release
-rather than ship.
+rather than ship. A download failure or artifact deletion at this stage also
+stops the release; it does not restart the skipped matrix.
 
 Validation checks exactly the five target directories, each containing only
 nonempty regular `.node` files and no symlinks. It is a shape check, not a
@@ -123,9 +126,10 @@ happens in `prepare`, which already runs on its own pool, and the consumer is
 the existing publisher. The switch stays unset and this change takes effect
 anyway.
 
-Publisher runner routing is unchanged, including its existing `x64` label.
-The isolated build lane and hosted npm publication boundary belong to #15832;
-this PR does not establish that enabling that lane is safe.
+Both the collector and publisher drop the `x64` component from their opt-in
+release-host label. With the switch unset, both still use GitHub-hosted runners.
+Keep the switch unset: #15832 owns the isolated build lane and the hosted npm
+publication boundary, and host isolation must be verified before activation.
 
 ## Validation
 
@@ -136,8 +140,12 @@ the selection/consumption split. The workflow wiring — non-fatal lookup,
 ordering and the architecture-free label — is pinned by contract tests, each
 confirmed to fail against an injected regression.
 
-Not covered locally: a real Actions run, so the first live reuse is a miss that
-seeds the keyed artifact, and the first hit happens on the release after it.
+A branch release dry-run can verify the miss path, all five native payloads and
+publisher consumption without publishing. It cannot seed a trusted reuse
+candidate because producers must run on `main`. A successful `main` run must
+first retain a keyed artifact; a later run with the same key can exercise reuse.
+Keep the release-host switch unset for this validation; collector execution on
+self-hosted runners remains outside that run's evidence.
 
 ## Affected files
 

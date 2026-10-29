@@ -55,12 +55,12 @@ lane、workspace tests、两个 integration lane）——这些机器是双标�
 - `publish` 与 `collect` 迁到新的、只服务 release 的 runner 标签
   `ecs-qwen-release-host`，由新的 opt-in 仓库变量
   `ECS_RELEASE_HOST_RUNNER_ENABLED` 控制：
-  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
-  这是 `publish` 继续使用的表达式。音频复用后续改动仅移除 `collect` 的
-  `x64`，因为汇总任务不执行目标平台二进制。
+  `${{ (github.repository == 'QwenLM/qwen-code' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true') && fromJSON('["self-hosted", "linux", "ecs-qwen-release-host"]') || fromJSON('["ubuntu-latest"]') }}`
+  音频复用后续改动从两个表达式中都移除了 `x64`，以匹配 release-host
+  runner。这不代表该通道已经可以启用。
   变量未设置（默认）时两个 job 与本变更之前完全一样派发到
-  `ubuntu-latest`。运维准备好只挂 `ecs-qwen-release-host` 标签的专用机器后，
-  拨开变量即可。
+  `ubuntu-latest`。保持变量未设置，直到主机隔离得到确认，且 #15832 完成
+  构建通道与 hosted npm 发布的拆分。
 - `publish` 补上 `release_disk_floor_gate` 锚点（在它的 checkout 之后、安装
   之前），纳入与其他池路由 job 相同的 ENOSPC 快速失败机制（#10035）。
 - `collect` 和 release workflow 的清理锚点都在 checkout 或合并制品前调用
@@ -110,9 +110,9 @@ lane、workspace tests、两个 integration lane）——这些机器是双标�
 - 其余四个解析 `release.yml` 的套件（`ai-release-notes`、`install-script`、
   `package-scripts`、`workflow-size`）与 `classify-release-notes.test.mjs`
   全部通过且无需改动断言。
-- 启用前：注册一台 `ecs-qwen-release-host` runner，再以
-  `ECS_RELEASE_HOST_RUNNER_ENABLED=true` 派发一次 dry-run release，确认
-  `publish` 与 `collect` 落在专用机上、`notify_failure` 仍在托管池。
+- #15854 保持 `ECS_RELEASE_HOST_RUNNER_ENABLED` 未设置，在 PR head 上执行
+  release dry-run。启用验证留给 #15832，前提是完成主机隔离和 hosted npm
+  发布边界；下面保留的原始路由验收标准不代表可以启用当前通道。
 
 ## 验收标准
 
