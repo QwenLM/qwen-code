@@ -168,6 +168,7 @@ jobs:
           sparse-checkout: |-
             /.github/scripts
             /scripts/assert-release-version.mjs
+            /scripts/check-release-tarball-exec-bits.mjs
             /scripts/release-packages.mjs
             /scripts/workspaces.js
             /package.json
@@ -451,6 +452,16 @@ jobs:
       - *download_release_build
       - *unpack_release_build
 
+      # Same host-wide archive cache as ci.yml's test job, which runs the same
+      # standalone runtime regression; this job also runs on a persistent host.
+      - name: 'Configure persistent standalone runtime cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"
+          echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent standalone runtime cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Run Script Tests'
         env:
           VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
@@ -645,7 +656,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          token: '${{ secrets.CI_BOT_PAT }}'
+          # Read-only fetch; the bot PAT is only exported to the write steps.
           ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
           persist-credentials: false
@@ -864,3 +875,46 @@ jobs:
             --title "Release Failed for ${RELEASE_TAG} on $(date -u +%Y-%m-%d)" \
             --label 'type/bug' \
             --body "The release workflow failed and the primary failure notifier did not run to completion. Run: ${DETAILS_URL}"
+
+  reconcile_failure:
+    name: 'Close Stale Release Failure Issue'
+    # Success-gated sibling of notify_failure: that job is skipped the moment a
+    # re-run passes, which is exactly why the issue it filed outlives the
+    # failure (#15705). Hosted for the same reason as the notifier.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        (
+          github.event_name == 'schedule' ||
+          github.event.inputs.dry_run != 'true'
+        ) &&
+        needs.publish.result == 'success' &&
+        needs.prepare.result != 'failure' &&
+        needs.quality.result != 'failure' &&
+        needs.integration_none.result != 'failure' &&
+        needs.integration_docker.result != 'failure'
+      }}
+    permissions:
+      contents: 'read'
+      issues: 'write'
+
+    steps:
+      - *checkout_release_workflow_scripts
+
+      - name: 'Close the issue an earlier attempt filed'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          RUN_ATTEMPT: '${{ github.run_attempt }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure'

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -50,7 +52,7 @@ import static org.mockito.Mockito.when;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedModelSelectionTest {
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedWorkspaceRegistry registry;
     @Autowired private PlatformTransactionManager manager;
@@ -73,6 +75,87 @@ class ManagedModelSelectionTest {
         service = service(store);
         session = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "create",
                 "qwen-code", null, null, null, List.of(), new WorkspaceSelection("ws", "."))).sessionId();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"default", "auto-edit", "yolo"})
+    void creationFreezesPublishedModelAndApprovalBeforeFirstTurn(String mode) {
+        when(harness.supportsApprovalSelection()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        for (String model : List.of("model-a", "model-b")) {
+            String key = "create-" + model;
+            var input = List.of(new InputBlock(
+                    "input_text", "first"));
+            var admitted = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", key,
+                    "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), mode, null, null, model));
+            var created = store.requireSession(tenant, admitted.sessionId());
+            assertThat(created.agentId()).isEqualTo("qwen-code");
+            assertThat(created.agentDefinitionDigest()).isNull();
+            assertThat(created.approvalMode()).isEqualTo(mode);
+            var turn = store.findTurn(tenant, admitted.sessionId(), admitted.turnId()).orElseThrow();
+            assertThat(store.findTurnModelSelection(tenant, admitted.sessionId(), turn.promptId()))
+                    .isEqualTo(new WebShellModelSelection(model, 1));
+            assertThat(jdbc.queryForMap("SELECT approval_mode, approval_revision FROM ma_turn"
+                    + " WHERE tenant_id=? AND session_id=?", tenant, admitted.sessionId()))
+                    .containsEntry("approval_mode", mode).containsEntry("approval_revision", 0L);
+            when(harness.supportsModelSelection()).thenReturn(false);
+            assertThat(transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", key,
+                    "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), mode, null, null, model))
+                    .sessionId()).isEqualTo(admitted.sessionId());
+            assertCode(() -> transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", key,
+                    "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), mode, null, null,
+                    model.equals("model-a") ? "model-b" : "model-a")), "idempotency_conflict");
+            when(harness.supportsModelSelection()).thenReturn(true);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void initialModelSelectionPreservesPublicChildAdmission(boolean childrenSupported) {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage", "/tmp/model-selection")));
+        properties.setModelCatalog(List.of(option("model-a")));
+        var enabled = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsApprovalSelection()).thenReturn(true);
+        when(harness.supportsPublicChildAgents()).thenReturn(childrenSupported);
+        var input = List.of(new InputBlock("input_text", "first"));
+        var admitted = transaction().execute(status -> service(enabled).createWorkspaceSession(tenant, "actor", "combined",
+                "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), "auto-edit", null, null, "model-a"));
+        var created = enabled.requireSession(tenant, admitted.sessionId());
+        assertThat(created.publicChildAgentsVersion()).isEqualTo(childrenSupported ? 1 : 0);
+        assertThat(created.approvalMode()).isEqualTo("auto-edit");
+        var turn = enabled.findTurn(tenant, admitted.sessionId(), admitted.turnId()).orElseThrow();
+        assertThat(enabled.findTurnModelSelection(tenant, admitted.sessionId(), turn.promptId()))
+                .isEqualTo(new WebShellModelSelection("model-a", 1));
+        when(harness.supportsPublicChildAgents()).thenReturn(!childrenSupported);
+        assertThat(transaction().execute(status -> service(enabled).createWorkspaceSession(tenant, "actor", "combined",
+                "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), "auto-edit", null, null, "model-a"))
+                .sessionId()).isEqualTo(admitted.sessionId());
+        assertThat(enabled.requireSession(tenant, admitted.sessionId()).publicChildAgentsVersion())
+                .isEqualTo(childrenSupported ? 1 : 0);
+    }
+
+    @Test
+    void initialModelRefusesUnsupportedCatalogCapabilityAndCustomAgentWithoutCreatingSession() {
+        int before = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant);
+        assertCode(() -> transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "unknown",
+                "qwen-code", null, null, null, List.of(), new WorkspaceSelection("ws", "."), null, null, null,
+                "unknown")), "unsupported_model");
+        when(harness.supportsModelSelection()).thenReturn(false);
+        assertCode(() -> transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "unsupported",
+                "qwen-code", null, null, null, List.of(), new WorkspaceSelection("ws", "."), null, null, null,
+                "model-a")), "unsupported_feature");
+        when(harness.supportsModelSelection()).thenReturn(true);
+        assertCode(() -> transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "custom",
+                "agent-custom", null, null, null, List.of(), new WorkspaceSelection("ws", "."), null, null, null,
+                "model-a")), "unsupported_feature");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant))
+                .isEqualTo(before);
+        assertThat(service.queryWebShellSessionOptions(tenant, "actor", "qwen-code").modelSelectionSupported()).isTrue();
     }
 
     @Test
@@ -193,7 +276,7 @@ class ManagedModelSelectionTest {
             jdbc.update("UPDATE ma_turn SET status='RECOVERY_BLOCKED' WHERE tenant_id=?", tenant);
         }
         if (shape.equals("cwd")) {
-            transaction().execute(status -> store.beginCwdChangeOperation(tenant, session, "actor", "actor-digest",
+            transaction().execute(status -> LegacyCwdOperations.seed(jdbc, store, tenant, session, "actor", "actor-digest",
                     "cwd", "digest-cwd", "sub", 1));
         }
         if (shape.equals("closed")) {
@@ -285,6 +368,8 @@ class ManagedModelSelectionTest {
     private ManagedAgentStore store(boolean catalog) {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage", "/tmp/model-selection")));
         if (catalog) {
             properties.setModelCatalog(List.of(option("model-a"), option("model-b")));
         }

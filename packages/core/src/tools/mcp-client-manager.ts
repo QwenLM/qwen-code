@@ -44,6 +44,7 @@ import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import { mcpSessionMetadataKey } from './mcp-session-config.js';
 import { runWithTimeout } from './mcp-discovery-timeout.js';
 import { warnOnUnmatchedEagerToolEntries } from '../permissions/eager-allowlist-coverage.js';
+import { warnOnUnmatchedDisabledToolEntries } from '../permissions/disabled-tools-coverage.js';
 
 const debugLogger = createDebugLogger('MCP');
 export const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
@@ -1228,6 +1229,9 @@ export class McpClientManager {
     // The registry is settled, so `tools.eager` entries that name no
     // discovered tool can be reported without warning prematurely (#12435).
     warnOnUnmatchedEagerToolEntries(cliConfig);
+    // Same boundary for `tools.disabled`: a misspelt entry removes nothing,
+    // and the operator cannot tell that from the setting working (#15752).
+    warnOnUnmatchedDisabledToolEntries(cliConfig);
   }
 
   /**
@@ -3001,6 +3005,8 @@ export class McpClientManager {
     config: MCPServerConfig,
     originatorClientId: string,
   ): Promise<AddRuntimeMcpServerResult> {
+    this.cliConfig.assertGeneratedUiServerNotReplaced({ [name]: config });
+
     // Reject explicitly excluded servers
     if (this.cliConfig.isMcpServerDisabled(name)) {
       throw new InvalidMcpConfigError(

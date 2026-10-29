@@ -5,7 +5,8 @@
  */
 
 // The Java integration-test jobs split `*IT.java` by name: `Hosted*IT` runs
-// only in the Hosted MySQL job, every other `*IT` only in the MariaDB job.
+// only in the Hosted MySQL job, and every other `*IT` runs in the MySQL 8.4
+// mysql-integration job.
 // Maven still passes when a profile's <includes>, or -Dit.test in MAVEN_ARGS
 // or .mvn/maven.config, narrows that selection, so after a job's tests this
 // compares the failsafe reports with the source tree of each module: every

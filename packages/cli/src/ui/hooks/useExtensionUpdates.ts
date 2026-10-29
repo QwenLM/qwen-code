@@ -13,7 +13,7 @@ import {
   extensionUpdatesReducer,
   initialExtensionUpdatesState,
 } from '../state/extensions.js';
-import { useCallback, useEffect, useMemo, useReducer } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   MessageType,
@@ -48,23 +48,65 @@ function confirmationRequestsReducer(
 }
 
 export const useConfirmUpdateRequests = () => {
+  const ownedRequests = useRef(
+    new Set<{
+      cancel: () => void;
+      dispose: () => void;
+      isCurrent?: () => boolean;
+    }>(),
+  );
+  useEffect(() => {
+    for (const owned of [...ownedRequests.current]) {
+      if (owned.isCurrent?.() === false) owned.cancel();
+    }
+  });
+  useEffect(
+    () => () => {
+      for (const owned of [...ownedRequests.current]) owned.dispose();
+    },
+    [],
+  );
   const [
     confirmUpdateExtensionRequests,
     dispatchConfirmUpdateExtensionRequests,
   ] = useReducer(confirmationRequestsReducer, []);
   const addConfirmUpdateExtensionRequest = useCallback(
     (original: ConfirmationRequest) => {
-      const wrappedRequest = {
-        prompt: original.prompt,
-        onConfirm: (confirmed: boolean) => {
-          // Remove it from the outstanding list of requests by identity.
+      let settled = false;
+      const settle = (confirmed: boolean, remove = true) => {
+        if (settled) return;
+        settled = true;
+        original.signal?.removeEventListener('abort', abort);
+        ownedRequests.current.delete(lifetime);
+        if (remove)
           dispatchConfirmUpdateExtensionRequests({
             type: 'remove',
             request: wrappedRequest,
           });
-          original.onConfirm(confirmed);
-        },
+        original.onConfirm(
+          confirmed &&
+            !original.signal?.aborted &&
+            original.isCurrent?.() !== false,
+        );
       };
+      const abort = () => settle(false);
+      const lifetime = {
+        cancel: abort,
+        dispose: () => settle(false, false),
+        isCurrent: original.isCurrent,
+      };
+      const wrappedRequest = {
+        prompt: original.prompt,
+        onConfirm: (confirmed: boolean) => settle(confirmed),
+      };
+      if (original.signal?.aborted || original.isCurrent?.() === false) {
+        settle(false, false);
+        return;
+      }
+      if (original.signal || original.isCurrent) {
+        original.signal?.addEventListener('abort', abort, { once: true });
+        ownedRequests.current.add(lifetime);
+      }
       dispatchConfirmUpdateExtensionRequests({
         type: 'add',
         request: wrappedRequest,

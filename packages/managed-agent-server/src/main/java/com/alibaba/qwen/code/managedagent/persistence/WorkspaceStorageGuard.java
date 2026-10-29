@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -11,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -58,7 +60,7 @@ public class WorkspaceStorageGuard {
     private final ObjectMapper json = new ObjectMapper();
 
     @Autowired
-    public WorkspaceStorageGuard(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public WorkspaceStorageGuard(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             ManagedAgentProperties properties) {
         this(jdbc, manager, properties, WorkspaceStorageGuard::nativeIdentity);
         if (enabled && !List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
@@ -117,14 +119,15 @@ public class WorkspaceStorageGuard {
         }
         String markerStatus = "match";
         try {
-            if (!marker(row).equals(readMarker(root))) {
+            if (!marker(row).equals(readMarker(markerRoot(marker(row), root, false)))) {
                 markerStatus = "mismatch";
             }
         } catch (RuntimeException error) {
             markerStatus = "unavailable";
         }
         boolean held = row.holderKey() != null || row.bindingId() != null
-                || row.runtimeGeneration() != null || row.runtimeSessionId() != null;
+                || row.runtimeGeneration() != null || row.runtimeSessionId() != null
+                || WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical);
         boolean valid = "READY".equals(row.state()) && row.revision() > 0
                 && row.operationId() == null && validId(row.completedOperationId())
                 || "FENCED".equals(row.state()) && row.revision() > 0
@@ -143,6 +146,7 @@ public class WorkspaceStorageGuard {
 
     public RecoveryRegistration recoveryRegistration(String tenantId, String storageId,
             long revision, String operationId) {
+        requireOwnedRoot(tenantId, storageId);
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -150,7 +154,7 @@ public class WorkspaceStorageGuard {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             String physical = LocalStorageOwners.lockCovered(jdbc, tenantId, storageId);
             Registration saved = row(physical, true);
-            requireFenced(saved, revision, operationId);
+            requireFenced(saved, physical, revision, operationId);
             Path original = root(tenantId, storageId);
             requireMatching(saved, identity(original), tenantId, storageId);
             if (!marker(saved).equals(readMarker(original))) {
@@ -162,11 +166,12 @@ public class WorkspaceStorageGuard {
     }
 
     void verifyCapturedRegistration(RecoveryRegistration expected) {
+        requireOwnedRoot(expected.tenantId(), expected.storageId());
         authorityRead(() -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, expected.tenantId());
             String physical = LocalStorageOwners.lockCovered(jdbc, expected.tenantId(), expected.storageId());
             Registration saved = row(physical, true);
-            requireFenced(saved, expected.mountRevision(), expected.fenceOperationId());
+            requireFenced(saved, physical, expected.mountRevision(), expected.fenceOperationId());
             var metadata = new RecoveryRegistration(expected.tenantId(), expected.storageId(), saved.registrationId(),
                     saved.revision(), saved.operationId(), saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
             if (!metadata.equals(expected) || !physical.equals(LocalStorageOwners.physicalKey(new Identity(
@@ -184,12 +189,12 @@ public class WorkspaceStorageGuard {
         return transaction.execute(status -> action.get());
     }
 
-    private static void requireFenced(Registration saved, long revision, String operationId) {
+    private void requireFenced(Registration saved, String physical, long revision, String operationId) {
         if (saved == null || !"FENCED".equals(saved.state()) || saved.revision() != revision
                 || !operationId.equals(saved.operationId()) || saved.holderKey() != null
                 || saved.bindingId() != null || saved.runtimeGeneration() != null
                 || saved.runtimeSessionId() != null || !validId(saved.registrationId())
-                || saved.completedOperationId() != null) {
+                || saved.completedOperationId() != null || WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -245,27 +250,36 @@ public class WorkspaceStorageGuard {
     }
 
     void registerCreated(String tenantId, String storageId, String operationId) {
-        Path path = createdRoots.resolve(tenantId, storageId, true);
-        if (path == null) {
+        var root = createdRoots.registration(tenantId, storageId, true);
+        if (root == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        register(tenantId, storageId, operationId, path);
+        register(tenantId, storageId, operationId, root.path(), root.expectedIdentity());
     }
 
     public void register(String tenantId, String storageId, String operationId) {
-        register(tenantId, storageId, operationId, root(tenantId, storageId));
+        register(tenantId, storageId, operationId, root(tenantId, storageId), null);
     }
 
-    private void register(String tenantId, String storageId, String operationId, Path root) {
+    private void register(String tenantId, String storageId, String operationId, Path root, Identity expectedIdentity) {
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
         Identity identity = identity(root);
+        if (expectedIdentity != null && !expectedIdentity.equals(identity)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
         String key = LocalStorageOwners.physicalKey(identity);
         Registration prepared = transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             requireNonOverlapping(identity);
+            if (expectedIdentity != null) {
+                Registration existing = row(key, true);
+                if (existing != null && (!tenantId.equals(existing.tenantId()) || !storageId.equals(existing.storageId()))) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
@@ -273,6 +287,7 @@ public class WorkspaceStorageGuard {
                     + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
                     key, key, tenantId, storageId);
             Registration row = row(key, true);
+            requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -304,25 +319,27 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         Marker marker = marker(prepared);
+        Path metadataRoot = markerRoot(marker, root, !"READY".equals(prepared.state()));
         if ("READY".equals(prepared.state())) {
             requireMatching(prepared, identity(root), tenantId, storageId);
-            if (!marker.equals(readMarker(root))) {
+            if (!marker.equals(readMarker(metadataRoot))) {
                 throw WorkspaceExecutionStore.unavailable();
             }
         } else {
-            publishMarker(root, marker);
+            publishMarker(metadataRoot, marker);
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             Registration row = row(key, true);
+            requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             requireMatching(row, identity(root), tenantId, storageId);
-            if (!marker.equals(marker(row)) || !marker.equals(readMarker(root))) {
+            if (!marker.equals(marker(row)) || !marker.equals(readMarker(metadataRoot))) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             if ("READY".equals(row.state()) && row.operationId() == null && row.revision() > 0) {
@@ -371,6 +388,7 @@ public class WorkspaceStorageGuard {
     }
 
     public void fence(String tenantId, String storageId, long revision, String operationId) {
+        requireOwnedRoot(tenantId, storageId);
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -388,6 +406,7 @@ public class WorkspaceStorageGuard {
             }
             String physical = LocalStorageOwners.lockCovered(jdbc, tenantId, storageId);
             Registration current = row(physical, true);
+            requireNoExecutionMembers(physical);
             if (current != null && "FENCED".equals(current.state())
                     && current.revision() == revision && operationId.equals(current.operationId())) {
                 return;
@@ -409,6 +428,7 @@ public class WorkspaceStorageGuard {
 
     public void restoreOriginal(String tenantId, String storageId, long revision,
             String operationId) {
+        requireOwnedRoot(tenantId, storageId);
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -430,6 +450,7 @@ public class WorkspaceStorageGuard {
                 }
                 return;
             }
+            requireNoExecutionMembers(physical);
             if (row == null || !"FENCED".equals(row.state())
                     || row.revision() != revision || !operationId.equals(row.operationId())
                     || row.holderKey() != null || row.bindingId() != null
@@ -462,7 +483,7 @@ public class WorkspaceStorageGuard {
         }
         requireMatching(row, actual, tenantId, storageId);
         verifyHistory(tenantId, storageId, false);
-        if (!marker(row).equals(readMarker(root))) {
+        if (!marker(row).equals(readMarker(markerRoot(marker(row), root, false)))) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Path directory = root.resolve(cwd).normalize();
@@ -473,6 +494,12 @@ public class WorkspaceStorageGuard {
                 throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException | IllegalArgumentException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private void requireNoExecutionMembers(String physical) {
+        if (WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -550,7 +577,7 @@ public class WorkspaceStorageGuard {
         }
         requireMatching(row, actual, tenantId, storageId);
         verifyHistory(tenantId, storageId, true);
-        if (!marker(row).equals(readMarkerProbe(root))) {
+        if (!marker(row).equals(readMarkerProbe(markerRoot(marker(row), root, false)))) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Path directory = root.resolve(cwd).normalize();
@@ -623,6 +650,7 @@ public class WorkspaceStorageGuard {
     }
 
     RecoveryRegistration migrationSource(String tenant, String storage, long revision, String fence) {
+        requireOwnedRoot(tenant, storage);
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenant, storage);
         return authorityRead(() -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
@@ -646,6 +674,7 @@ public class WorkspaceStorageGuard {
     }
 
     byte[] migrationMarker(String tenant, String storage, Identity target, String registration) {
+        requireOwnedRoot(tenant, storage);
         try {
             return json.writeValueAsBytes(new Marker(2, tenant, storage, target.root(), target.hostId(),
                     target.device(), target.inode(), target.birthTime(), registration));
@@ -683,6 +712,7 @@ public class WorkspaceStorageGuard {
     }
 
     void publishMigrationMarker(Path root, byte[] expectedBytes, RecoveryRegistration original, String operation) {
+        requireOwnedRoot(original.tenantId(), original.storageId());
         Marker expected;
         try {
             expected = json.readValue(expectedBytes, Marker.class);
@@ -738,6 +768,7 @@ public class WorkspaceStorageGuard {
     }
 
     void promoteMigration(RecoveryRegistration source, Identity target, String registration, String operation) {
+        requireOwnedRoot(source.tenantId(), source.storageId());
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, source.tenantId());
             requireNonOverlapping(target);
@@ -780,7 +811,7 @@ public class WorkspaceStorageGuard {
         }
     }
 
-    private Path configuredRoot(String tenantId, String storageId) {
+    Path configuredRoot(String tenantId, String storageId) {
         Path root = roots.get(new Storage(tenantId, storageId));
         return root == null ? createdStorageRoot(tenantId, storageId) : root;
     }
@@ -793,7 +824,7 @@ public class WorkspaceStorageGuard {
         return root;
     }
 
-    private Identity identity(Path root) {
+    Identity identity(Path root) {
         try {
             return identities.read(root);
         } catch (IOException | RuntimeException error) {
@@ -909,6 +940,22 @@ public class WorkspaceStorageGuard {
     private Marker marker(Registration row) {
         return new Marker(2, row.tenantId(), row.storageId(), row.root(), row.hostId(),
                 row.device(), row.inode(), row.birthTime(), row.registrationId());
+    }
+
+    void requireOwnedRoot(String tenant, String storage) {
+        if (sharedImport(tenant, storage)) {
+            throw new RuntimeBrokerException(409, "workspace_shared_directory",
+                    "Shared imported directories do not support exclusive storage maintenance.", false);
+        }
+    }
+
+    private boolean sharedImport(String tenant, String storage) {
+        return WorkspaceCreationRoots.sharedStorage(storage) && !roots.containsKey(new Storage(tenant, storage));
+    }
+
+    private Path markerRoot(Marker marker, Path root, boolean create) {
+        return sharedImport(marker.tenantId(), marker.storageId())
+                ? createdRoots.importedMetadataDirectory(marker.storageId(), create) : root;
     }
 
     private Marker readMarker(Path root) {

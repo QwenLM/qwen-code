@@ -12,6 +12,15 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('explains missing rewind identities in both locales', () => {
+    expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
+      'no prompt identity',
+    );
+    expect(getTranslator('zh-CN')('rewind.identityUnavailable')).toContain(
+      '身份',
+    );
+  });
+
   it('pluralizes deletion counts and explains unsupported sessions in both locales', () => {
     const en = getTranslator('en');
     expect(en('messageDelete.selected', { count: 1 })).toBe('1 group selected');
@@ -55,12 +64,8 @@ describe('web-shell i18n catalog', () => {
     expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
       '搜索已加载记录…',
     );
-    expect(en('trajectory.filter.count', { count: 1 })).toBe(
-      '1 matching record',
-    );
-    expect(en('trajectory.filter.count', { count: 2 })).toBe(
-      '2 matching records',
-    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe('1 match');
+    expect(en('trajectory.filter.count', { count: 2 })).toBe('2 matches');
     expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
       '(1 record)',
     );

@@ -5,6 +5,7 @@
  */
 
 import * as path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -172,14 +173,21 @@ function createSendIndex(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
   return (req: Request, res: Response): void => {
     const csp = buildWebShellCsp(frameAncestors, [
-      ...remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
-      ...requestedFanoutParams(req.originalUrl).flatMap(
-        remoteDaemonConnectOrigins,
-      ),
+      ...(!managedApp
+        ? [
+            ...remoteDaemonConnectOrigins(
+              requestedDaemonParam(req.originalUrl),
+            ),
+            ...requestedFanoutParams(req.originalUrl).flatMap(
+              remoteDaemonConnectOrigins,
+            ),
+          ]
+        : []),
       ...(desktopRelayEnabled ? ['http://127.0.0.1:47821'] : []),
     ]);
     res
@@ -203,6 +211,27 @@ function createSendIndex(
     // frame-ancestors (set above) governs framing.
     if (frameAncestors.length === 0) {
       res.set('X-Frame-Options', 'DENY');
+    }
+    if (managedApp) {
+      void readFile(indexPath, 'utf8')
+        .then((html) => {
+          res
+            .type('html')
+            .send(
+              html.replace(
+                /<\/head>/iu,
+                '<meta name="qwen-managed-app" content="true"></head>',
+              ),
+            );
+        })
+        .catch(() => {
+          if (!res.headersSent) {
+            res.status(500).type('text/plain').send('Failed to load Web Shell');
+          } else {
+            res.end();
+          }
+        });
+      return;
     }
     // `dotfiles: 'allow'` is required because the resolved path may pass
     // through a dotfile directory (e.g. ~/.nvm/.../web-shell/index.html).
@@ -261,11 +290,13 @@ export function mountWebShellAssets(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): void {
   const sendIndex = createSendIndex(
     webShellDir,
     frameAncestors,
     desktopRelayEnabled,
+    managedApp,
   );
   app.use(
     '/assets',
@@ -374,11 +405,13 @@ export function mountWebShellSpaFallback(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): void {
   const sendIndex = createSendIndex(
     webShellDir,
     frameAncestors,
     desktopRelayEnabled,
+    managedApp,
   );
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();

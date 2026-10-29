@@ -1,3 +1,4 @@
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
   useCallback,
   useEffect,
@@ -187,6 +188,7 @@ export function useAgentChatEntry({
   cwd,
   baseUrl,
   token,
+  client,
   sessionApi,
   sessionApiFor,
   ensureSession,
@@ -201,6 +203,7 @@ export function useAgentChatEntry({
   cwd?: string;
   baseUrl: string;
   token?: string;
+  client?: DaemonClient;
   /** The session routes of the same workspace (`cwd`). */
   sessionApi?: SessionAgentsApi;
   /**
@@ -245,8 +248,10 @@ export function useAgentChatEntry({
   >(undefined);
   const api = useMemo(
     () =>
-      enabled && cwd ? createThreadsHttpApi(baseUrl, token, cwd) : undefined,
-    [enabled, cwd, baseUrl, token],
+      enabled && cwd
+        ? createThreadsHttpApi(baseUrl, token, cwd, client)
+        : undefined,
+    [enabled, cwd, baseUrl, token, client],
   );
   const activeApi = useRef(api);
   activeApi.current = api;
@@ -478,7 +483,12 @@ export function useAgentChatEntry({
               : undefined;
           const routes = otherWorkspace
             ? (sessionApiForRef.current?.(otherWorkspace) ??
-              createSessionAgentsHttpApi(baseUrl, token, otherWorkspace))
+              createSessionAgentsHttpApi(
+                baseUrl,
+                token,
+                otherWorkspace,
+                client,
+              ))
             : sessionApi;
           const targetSessionId = target.sessionId;
           // Counted before posting, so a record that lands quickly is still
@@ -541,7 +551,18 @@ export function useAgentChatEntry({
       })();
       return false;
     },
-    [api, sessionApi, cwd, baseUrl, token, onSubmit, listAgents, listSquads, t],
+    [
+      api,
+      sessionApi,
+      cwd,
+      baseUrl,
+      token,
+      client,
+      onSubmit,
+      listAgents,
+      listSquads,
+      t,
+    ],
   );
   return {
     providers,

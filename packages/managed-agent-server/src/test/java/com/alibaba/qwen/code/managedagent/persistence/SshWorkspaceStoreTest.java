@@ -47,14 +47,15 @@ class SshWorkspaceStoreTest {
     @BeforeEach
     void setup() {
         var source = source();
-        ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         store = new SshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
     }
 
     javax.sql.DataSource source() {
-        return new DriverManagerDataSource("jdbc:h2:mem:ssh-" + UUID.randomUUID()
+        var source = new DriverManagerDataSource("jdbc:h2:mem:ssh-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        ManagedSchema.initialize(source);
+        return source;
     }
 
     @Test
@@ -222,17 +223,17 @@ class SshWorkspaceStoreTest {
         var two = new WorkspaceExecutionStore(jdbc, manager);
         var binding = binding(intent);
         one.claim(binding, first);
-        assertThatThrownBy(() -> two.claim(binding, second))
-                .isInstanceOfSatisfying(RuntimeBrokerException.class,
-                        failure -> assertThat(failure.getCode()).isEqualTo("workspace_busy"));
+        two.claim(binding, second);
+        two.assertHeld(binding, second);
         two.release(binding, second);
         one.assertHeld(binding, first);
         one.release(binding, first);
         two.claim(binding, second);
         one.release(binding, first);
         two.assertHeld(binding, second);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class))
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_key IS NOT NULL", Integer.class))
                 .isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class)).isZero();
     }
 
     private RuntimeSessionRecord runtimeSession(SshWorkspaceStore.Intent intent, String id) {

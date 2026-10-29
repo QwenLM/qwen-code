@@ -88,7 +88,8 @@ import {
 } from '../../customization';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
-import { getMcpAppDisplay, McpApp } from './McpApp';
+import { getMcpAppDisplay, McpApp, GeneratedUiFallback } from './McpApp';
+import { useMcpAppAdmission } from '../../mcpAppHostContext';
 import type { TurnOutputOpenRequest } from '../artifacts/TurnOutputs';
 import { ToolFilePreviewButton } from './ToolFilePreviewButton';
 import { ManagedToolResultSummary } from '../managed/ManagedToolResultSummary';
@@ -1017,6 +1018,7 @@ function areToolLinePropsEqual(
   const b = next.tool;
   return (
     a.callId === b.callId &&
+    a.generatedUiToolCallId === b.generatedUiToolCallId &&
     a.toolName === b.toolName &&
     a.status === b.status &&
     a.subagentSessionReady === b.subagentSessionReady &&
@@ -1047,6 +1049,7 @@ function areSubToolsEqual(
     const b = next[i];
     if (
       a.callId !== b.callId ||
+      a.generatedUiToolCallId !== b.generatedUiToolCallId ||
       a.toolName !== b.toolName ||
       a.status !== b.status ||
       a.subagentSessionReady !== b.subagentSessionReady ||
@@ -1132,6 +1135,7 @@ export const ToolLine = memo(function ToolLine({
   const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
+  const mcpAppAllowed = useMcpAppAdmission(mcpApp);
   const isForcedExpanded = forceExpanded || Boolean(mcpApp);
   const hasApproval = approval?.toolCallId === tool.callId;
   const isHostOwnedEditApproval = Boolean(
@@ -1356,7 +1360,12 @@ export const ToolLine = memo(function ToolLine({
   }
 
   const fullDescription = getToolDescription(tool, workspaceCwd);
-  const result = getToolResultSummary(tool);
+  // Document exports carry a bounded, safe text preview. Keep the full answer
+  // in an expanded row instead of reducing it to the one-line header summary.
+  const result =
+    transcriptRenderMode === 'document' && expanded
+      ? (extractText(tool) ?? getToolResultSummary(tool))
+      : getToolResultSummary(tool);
   const summaryShell = isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)
@@ -1530,7 +1539,17 @@ export const ToolLine = memo(function ToolLine({
           )}
         </div>
       )}
-      {mcpApp && (!summaryOnly || expanded) && <McpApp display={mcpApp} />}
+      {mcpApp &&
+        (!summaryOnly || expanded) &&
+        (mcpAppAllowed ? (
+          <McpApp
+            display={mcpApp}
+            toolId={tool.generatedUiToolCallId}
+            visible={detailsVisible}
+          />
+        ) : (
+          <GeneratedUiFallback display={mcpApp} />
+        ))}
       {!mcpApp && (!summaryOnly || expanded) && isTodo && hasTodoList && (
         <TodoToolBody
           tool={tool}
