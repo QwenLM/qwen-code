@@ -36820,25 +36820,93 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each(['standalone', 'live'] as const)(
+    'opens the split from the sidebar with the %s context and a panel open',
+    async (kind) => {
+      // openPanel bumps the classification generation, and the panel-close
+      // commit re-runs the non-workspace teardown effect: the pending open
+      // started by the click must survive both instead of being superseded.
+      mockConnection.sessionContext = { kind };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )!
+          .click();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="session-overview-panel"]'),
+      ).not.toBeNull();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="add-split-s1"]')!
+          .click();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s1');
+    },
+  );
+
+  it('notifies when a sidebar-added session fails transient classification', async () => {
+    const onToast = vi.fn();
+    const notStandalone = new DaemonHttpError(
+      404,
+      { code: 'standalone_session_not_found' },
+      'not found',
+    );
+    const serverError = new DaemonHttpError(
+      500,
+      { code: 'internal_error' },
+      'boom',
+    );
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['standalone_sessions_v1'],
+    };
+    mockWorkspace.client.getStandaloneSession.mockImplementation(
+      (sessionId: string) =>
+        sessionId === 's1'
+          ? Promise.reject(serverError)
+          : Promise.reject(notStandalone),
+    );
+    const { container } = renderApp({ onToast });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="add-split-s1"]')!
+        .click();
+    });
+    await flush();
+    // The seed session is kept, the transiently-failed one is dropped —
+    // with a user-visible notice instead of a silent partial split.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('session-1');
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Some sessions could not be added to Split View. Please try again.',
+    );
+  });
+
   it.each([
     { selected: ['s2'], expected: 's1,s2' },
     { selected: ['s1'], expected: 's1' },
     { selected: ['s2', 's7'], expected: 's1,s2,s7' },
   ])(
-    'keeps mounted panes and all sidebar additions with slow classification: $selected',
+    'keeps mounted panes while adding sidebar sessions to an open split: $selected',
     async ({ selected, expected }) => {
-      const notStandalone = new DaemonHttpError(
-        404,
-        { code: 'standalone_session_not_found' },
-        'not found',
-      );
-      mockWorkspace.capabilities = {
-        ...mockWorkspace.capabilities,
-        features: ['standalone_sessions_v1'],
-      };
-      mockWorkspace.client.getStandaloneSession.mockRejectedValue(
-        notStandalone,
-      );
       saveSplitSessions(['s1']);
       const { container } = renderApp();
       await flush();
@@ -36846,11 +36914,6 @@ describe('App session callbacks', () => {
         '[data-testid="split-view-page"]',
       );
       expect(initialSplit).not.toBeNull();
-      const classification = deferred<never>();
-      void classification.promise.catch(() => undefined);
-      mockWorkspace.client.getStandaloneSession.mockReturnValueOnce(
-        classification.promise,
-      );
       const observedPanes: Array<Element | null> = [];
       for (const id of selected) {
         await act(async () => {
@@ -36865,8 +36928,6 @@ describe('App session callbacks', () => {
           container.querySelector('[data-testid="split-view-page"]'),
         );
       }
-      await act(async () => classification.reject(notStandalone));
-      await flush();
       for (const pane of observedPanes) expect(pane).toBe(initialSplit);
       expect(container.querySelector('[data-testid="split-view-page"]')).toBe(
         initialSplit,
@@ -36878,20 +36939,22 @@ describe('App session callbacks', () => {
   );
 
   it.each([
-    { selected: ['s1', 's2'], expected: 'session-1,s1,s2' },
-    { selected: ['s1', 's1', 's2'], expected: 'session-1,s1,s2' },
+    { selected: ['s1', 's2'], expected: 'session-1,s1,s2', calls: 3 },
+    { selected: ['s1', 's1', 's2'], expected: 'session-1,s1,s2', calls: 3 },
     {
       selected: ['s1', 's2', 's3', 's4', 's5', 's6', 's7'],
       expected: 'session-1,s1,s2,s3,s4,s5',
+      calls: 6,
     },
   ])(
     'keeps sidebar additions while the first split is opening: $selected',
-    async ({ selected, expected }) => {
+    async ({ selected, expected, calls }) => {
       const classification = deferred<never>();
       mockWorkspace.capabilities = {
         ...mockWorkspace.capabilities,
         features: ['standalone_sessions_v1'],
       };
+      mockWorkspace.client.getStandaloneSession.mockClear();
       mockWorkspace.client.getStandaloneSession.mockReturnValue(
         classification.promise,
       );
@@ -36909,6 +36972,13 @@ describe('App session callbacks', () => {
       expect(
         container.querySelector('[data-testid="split-view-page"]'),
       ).toBeNull();
+      // While the first open is still classifying, the sidebar already sees
+      // the merged pane list mirrored from the live pending open.
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-split-session-ids'),
+      ).toBe(JSON.stringify(expected.split(',')));
       await act(async () => {
         classification.reject(
           new DaemonHttpError(
@@ -36922,6 +36992,11 @@ describe('App session callbacks', () => {
       expect(
         container.querySelector('[data-testid="split-initial"]')?.textContent,
       ).toBe(expected);
+      // One classification per distinct id — merged re-opens reuse the
+      // memoized in-flight promise instead of re-classifying the list.
+      expect(
+        mockWorkspace.client.getStandaloneSession,
+      ).toHaveBeenCalledTimes(calls);
     },
   );
 
