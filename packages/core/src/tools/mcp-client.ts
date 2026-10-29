@@ -106,6 +106,12 @@ export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS =
   MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+/**
+ * Upper bound on `tools/list` round-trips for one server. The @google/genai
+ * pager this walk replaced stopped after 100 tools, so a 100-page ceiling is
+ * never stricter for a server that returns at least one tool per page.
+ */
+export const MCP_MAX_TOOL_LIST_PAGES = 100;
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
@@ -1657,8 +1663,19 @@ async function discoverToolsWithMetadata(
       const tools: typeof listedTools = [];
       const declarationCounts = new Map<string, number>();
       const seenCursors = new Set<string>();
+      let pages = 0;
       let cursor: string | undefined;
       do {
+        if (pages >= MCP_MAX_TOOL_LIST_PAGES) {
+          // A server that mints a fresh cursor per call never repeats one and
+          // never terminates the chain, so bound the walk itself.
+          debugLogger.warn(
+            `MCP server '${mcpServerName}' stopped paginating tools/list ` +
+              `after ${MCP_MAX_TOOL_LIST_PAGES} pages.`,
+          );
+          break;
+        }
+        pages++;
         const result = await requestTools(
           cursor === undefined ? undefined : { cursor },
         );
@@ -1670,9 +1687,19 @@ async function discoverToolsWithMetadata(
           );
         }
         const next = result.nextCursor;
+        // @google/genai's pager treats a falsy cursor as the end of the chain,
+        // so `''` is terminal here too — otherwise the last page is fetched
+        // twice and every tool on it is counted as a duplicate.
+        if (!next) break;
         // A server that ignores the cursor would otherwise loop here forever.
-        if (next !== undefined && seenCursors.has(next)) break;
-        if (next !== undefined) seenCursors.add(next);
+        if (seenCursors.has(next)) {
+          debugLogger.warn(
+            `MCP server '${mcpServerName}' repeated cursor '${next}' while ` +
+              `listing tools; stopping after ${tools.length} declarations.`,
+          );
+          break;
+        }
+        seenCursors.add(next);
         cursor = next;
       } while (cursor !== undefined);
       didListTools = true;
@@ -1810,7 +1837,14 @@ async function discoverToolsWithMetadata(
         );
       }
     }
-    return { tools: discoveredTools, hadVisibilityFilteredTools };
+    // A server whose every declaration collided is not an empty server: the
+    // caller must not report it as "found nothing" and mark it DISCONNECTED,
+    // since the warning above already named the colliding tools.
+    return {
+      tools: discoveredTools,
+      hadVisibilityFilteredTools:
+        hadVisibilityFilteredTools || collidedToolNames.length > 0,
+    };
   } catch (error) {
     if (!isMethodNotFound(error)) {
       debugLogger.error(

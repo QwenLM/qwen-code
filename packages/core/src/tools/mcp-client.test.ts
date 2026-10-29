@@ -58,6 +58,7 @@ import {
   isEnabled,
   listMcpPrompts,
   listMcpResources,
+  MCP_MAX_TOOL_LIST_PAGES,
   MCPServerStatus,
   McpClient,
   mcpServerRequiresOAuth,
@@ -163,30 +164,49 @@ function mockToolDecls(...decls: Array<string | Obj>) {
 }
 
 /**
- * Makes `mcpToTool().tool()` convert one page of the adapter, rejecting a
- * duplicated name the way @google/genai does.
+ * Makes `mcpToTool().tool()` convert the adapter the way @google/genai does:
+ * follow `nextCursor` until it is falsy, then reject a duplicated name. The
+ * page cap turns an adapter that never terminates into a failure instead of a
+ * hang, and makes the adapter's terminal page (`nextCursor: undefined`)
+ * load-bearing — a live cursor here re-enters the adapter and duplicates every
+ * declaration.
  */
 function mockGenAiDiscovery() {
+  const maxPages = 20;
+  const convert = (tools: Array<{ name: string; description?: string }>) => {
+    const names = new Set<string>();
+    for (const mcpTool of tools) {
+      if (names.has(mcpTool.name)) {
+        throw new Error(
+          `Duplicate function name ${mcpTool.name} found in MCP tools. Please ensure function names are unique.`,
+        );
+      }
+      names.add(mcpTool.name);
+    }
+    return {
+      functionDeclarations: tools.map((mcpTool) => ({
+        name: mcpTool.name,
+        description: mcpTool.description,
+      })),
+    };
+  };
   return vi.mocked(GenAiLib.mcpToTool).mockImplementation(
     ((client: { listTools: ClientLib.Client['listTools'] }) =>
       ({
         tool: async () => {
-          const { tools } = await client.listTools();
-          const names = new Set<string>();
-          for (const mcpTool of tools) {
-            if (names.has(mcpTool.name)) {
-              throw new Error(
-                `Duplicate function name ${mcpTool.name} found in MCP tools. Please ensure function names are unique.`,
-              );
-            }
-            names.add(mcpTool.name);
+          const tools: Array<{ name: string; description?: string }> = [];
+          let cursor: string | undefined;
+          for (let page = 0; page < maxPages; page++) {
+            const { tools: pageTools, nextCursor } = await client.listTools(
+              cursor === undefined ? undefined : { cursor },
+            );
+            tools.push(...pageTools);
+            if (!nextCursor) return convert(tools);
+            cursor = nextCursor;
           }
-          return {
-            functionDeclarations: tools.map((mcpTool) => ({
-              name: mcpTool.name,
-              description: mcpTool.description,
-            })),
-          };
+          throw new Error(
+            `listTools did not terminate after ${maxPages} pages`,
+          );
         },
       }) as unknown) as typeof GenAiLib.mcpToTool,
   );
@@ -1582,6 +1602,92 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       // that discovery returned at all.
       expect(tools).toEqual([]);
       expect(listTools).toHaveBeenCalledTimes(2);
+      // A truncated listing must not look like a complete one.
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("repeated cursor 'same'"),
+      );
+    });
+
+    it('treats an empty nextCursor as the end of the chain', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      // ListToolsResultSchema accepts `nextCursor: ''`; the pager this walk
+      // replaced stopped on any falsy cursor.
+      const listTools = vi.fn().mockResolvedValue({
+        tools: [listed('a', 'a tool')],
+        nextCursor: '',
+      });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['a']);
+      expect(listTools).toHaveBeenCalledTimes(1);
+    });
+
+    it('bounds the page walk when a server keeps minting new cursors', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      let call = 0;
+      const listTools = vi.fn(async () => {
+        call++;
+        return {
+          tools: [listed(`tool-${call}`, 'a tool')],
+          nextCursor: `c${call}`,
+        };
+      });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      // Without the cap this walk never terminates.
+      expect(listTools).toHaveBeenCalledTimes(MCP_MAX_TOOL_LIST_PAGES);
+      expect(tools).toHaveLength(MCP_MAX_TOOL_LIST_PAGES);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`after ${MCP_MAX_TOOL_LIST_PAGES} pages`),
+      );
+    });
+
+    it('reports an all-collision server as discovered instead of empty', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      // Every advertised name collides, so nothing survives the conversion.
+      promptServer([], {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [listed('create', 'create A'), listed('create', 'create B')],
+        }),
+      });
+      mockGenAiDiscovery();
+
+      const client = await connectedClient('all-collision-server');
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      expect(snapshot.tools).toEqual([]);
+      // Not "No prompts, tools, or resources found" — the server stays
+      // connected, and the collision warning is what tells the user why.
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("'create' (2 conflicting declarations)"),
+      );
     });
 
     it('preserves App-only tools for the separate App registry', async () => {
