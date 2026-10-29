@@ -16,7 +16,7 @@ import {
   isSupportedArchiveUrl,
   parseGitHubRepoForReleases,
 } from './github.js';
-import { isScopedNpmPackage } from './npm.js';
+import { isNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
 import { resolveNetworkTarget } from './network-policy.js';
@@ -516,8 +516,8 @@ export async function parseInstallSource(
     } catch {
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
-  } else if (isScopedNpmPackage(repo)) {
-    // Priority 3: Scoped npm package (@scope/name, optionally @version)
+  } else if (isNpmPackage(repo)) {
+    // Priority 3: npm package (name or @scope/name, optionally @version)
     installMetadata = {
       source: repo,
       type: 'npm',
