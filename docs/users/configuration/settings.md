@@ -41,6 +41,8 @@ Qwen Code uses JSON settings files for persistent configuration. There are four 
 > [!note]
 >
 > **Administrator files take precedence over path overrides:** `QWEN_CODE_SYSTEM_SETTINGS_PATH` and `QWEN_CODE_SYSTEM_DEFAULTS_PATH` are honored only while no administrator file is installed at its platform default location. On Unix, an entry there counts as installed only while the entry it resolves to, following links, is a root-owned file or directory sitting in a root-owned directory; a planted, dangling, or uninspectable entry does not. On Windows, where directory ownership cannot be verified, no entry counts and the variables are honored per the rule above. Once such a file is installed, both variables are ignored, both layers are read from the platform default directory, and Qwen Code prints a one-time warning per variable that names the variable and the administrator file in effect.
+>
+> **Windows trust limit:** the Windows system layer is not protected against local users. `C:\ProgramData\qwen-code` can be created by an ordinary account (which owns everything it creates there), so a file planted at that location — or named by the path overrides — is honored as system settings, and the gate cannot distinguish it from an administrator-installed one. Do not rely on the system layer on Windows as a trust boundary against other local accounts; treat the directory as writable by any user who can create it.
 
 > [!note]
 >
