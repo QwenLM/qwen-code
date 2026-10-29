@@ -1,0 +1,54 @@
+name: Windows 10 compatible test build
+on:
+  push:
+    branches: [custom-qwen38-agent]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enable pnpm
+        shell: pwsh
+        run: corepack enable
+      - name: Install dependencies
+        shell: pwsh
+        run: corepack pnpm install --frozen-lockfile
+      - name: Build CLI
+        shell: pwsh
+        run: npm run build -- --cli-only
+      - name: Verify packaged prompt
+        shell: pwsh
+        run: |
+          $source = Get-Content packages/core/src/core/system.md -Raw
+          $compiled = Get-Content packages/core/dist/src/core/system.md -Raw
+          if ($source -cne $compiled) { throw "Packaged prompt differs from source" }
+          Write-Host "Custom prompt is packaged unchanged"
+      - name: Verify Windows executable entry
+        shell: pwsh
+        run: |
+          if (!(Test-Path packages/cli/dist/index.js)) { throw "CLI entry missing" }
+          node packages/cli/dist/index.js --version
+      - name: Package Windows portable build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows-test | Out-Null
+          Copy-Item packages/core/dist windows-test/core-dist -Recurse
+          Copy-Item packages/cli/dist windows-test/cli-dist -Recurse
+          Copy-Item packages/core/src/core/system.md windows-test/system.md
+          @'
+          This is a Windows build inspection artifact, not a standalone executable.
+          For execution, install dependencies from the repository and run the CLI.
+          The build checks that the custom system prompt was packaged.
+          '@ | Set-Content windows-test/README.txt
+          Compress-Archive -Path windows-test/* -DestinationPath qwen-windows10-test.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qwen-windows10-test
+          path: qwen-windows10-test.zip
