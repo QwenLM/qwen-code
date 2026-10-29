@@ -6,11 +6,9 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeModelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
@@ -45,6 +43,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
+import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -228,6 +227,13 @@ public class WebShellAgentController {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
         }
+        if (selection == null && request.extensionPins() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Extension packages require a bound Workspace.");
+        }
+        var worktree = SessionWorktreeService.parse(request.worktree(), true);
+        if (selection == null && worktree != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Session worktrees require a bound Workspace.");
+        }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
         // clientId-only contract is asserted here and immediately
@@ -236,10 +242,13 @@ public class WebShellAgentController {
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
-                : service.createWorkspaceSession(tenant.tenantId(),
+                : worktree == null ? service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins())
+                : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), request.idempotencyKey(),
+                        request.agentId(), null, request.title(), null, request.input(), selection,
+                        request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins(), worktree));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -320,20 +329,6 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellOperationRequest request) {
         return lifecycle.getWebShellOperation(tenant.tenantId(),
                 tenant.actorId(), request.sessionId(), request.operationId());
-    }
-
-    @PostMapping("/sessions/cwd/change")
-    public ResponseEntity<WebShellCwdOperation> changeCwd(
-            TenantContext tenant,
-            @Valid @RequestBody WebShellChangeCwdRequest request,
-            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
-        RequestIdFilter.useClientId(httpRequest, httpResponse,
-                request.requestId());
-        return ResponseEntity.accepted().body(
-                lifecycle.admitWebShellCwdChange(tenant.tenantId(),
-                        tenant.actorId(), request.sessionId(),
-                        request.idempotencyKey(), request.cwdRelative(),
-                        request.expectedContextRevision()));
     }
 
     @PostMapping("/session-approval/query")

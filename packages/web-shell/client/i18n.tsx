@@ -1,4 +1,8 @@
 import {
+  MANAGED_EXTENSION_MESSAGES_EN,
+  MANAGED_EXTENSION_MESSAGES_ZH,
+} from './components/managed/managed-extension-messages.js';
+import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
@@ -146,6 +150,14 @@ const EN: Messages = {
   'footnotes.next': 'Next reference',
   'footnotes.citations': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
+  'daemon.connection.paused':
+    'Cannot reach the service. Automatic refresh is paused while reconnecting.',
+  'daemon.connection.authRequired':
+    'Service authentication failed. Check your credentials; automatic refresh is paused.',
+  'daemon.connection.unavailable': 'Cannot reach the service.',
+  'localControl.connectionRetry':
+    'Connection interrupted. Retry to refresh the QR code.',
+  'daemon.connection.retry': 'Retry connection',
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
@@ -252,9 +264,6 @@ const EN: Messages = {
   'managed.phase.created': 'Created',
   'managed.creationSkillsFromSettings':
     'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
-  'managed.creationSkillsManage': 'Manage Skills',
-  'managed.creationSkillsPinned': (v) =>
-    `${v?.count ?? 0} Skills are saved with this creation request.`,
   'managed.creationSkillsSourceChanged':
     'The Skills source changed. Retry with the selected source.',
   'managed.creationSkillsUnavailable':
@@ -270,33 +279,7 @@ const EN: Messages = {
   'managed.workspaceWorkingDirectory': 'Working directory',
   'managed.workspaceWorkingDirectoryDescription':
     'Choose where this session starts within the Workspace. Use . for the Workspace root.',
-  'managed.cwd.change': 'Change directory',
   'managed.cwd.path': 'Directory relative to Workspace root',
-  'managed.cwd.description':
-    'Enter a path relative to the Workspace root. Use . for the root. Future tasks run in the new directory; conversation history is kept.',
-  'managed.cwd.close': 'Close',
-  'managed.cwd.changing': 'Changing directory…',
-  'managed.cwd.confirm': 'Continue confirming',
-  'managed.cwd.unconfirmed':
-    'The directory change is not confirmed yet. Continue confirming the original request.',
-  'managed.cwd.unconfirmedForbidden':
-    'Your account cannot confirm this change. Its result remains unconfirmed, and sending stays blocked until the server settles it or you open a new tab.',
-  'managed.cwd.busy':
-    'Finish the active task, approval or unconfirmed request before changing directory.',
-  'managed.cwd.invalid': 'The directory is invalid or cannot be accessed.',
-  'managed.cwd.conflict':
-    'The current directory has changed. Review it before submitting again.',
-  'managed.cwd.unavailable':
-    'The Workspace is currently unavailable for a directory change.',
-  'managed.cwd.forbidden':
-    'Your account does not have permission to change this directory.',
-  'managed.cwd.storage':
-    'Browser session storage is unavailable. The directory change cannot start safely.',
-  'managed.cwd.failed':
-    'The directory change failed. Review the current directory before trying again.',
-  'managed.cwd.updated': (v) =>
-    `The current directory changed to ${v?.cwd ?? ''}. Confirm this context before submitting.`,
-  'managed.cwd.useCurrent': 'Use the current directory context',
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
@@ -1008,11 +991,12 @@ const EN: Messages = {
   'approval.option.allowAlwaysUser': 'Always allow for this user',
   'approval.option.allowAlwaysServer': 'Always allow for this server',
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
-  'assistant.branch': 'Branch',
-  'assistant.copy': 'Copy',
+  'assistant.branch': 'New chat from here',
+  'assistant.copyContent': 'Copy content',
   'assistant.selectionCopy': 'Copy selection',
   'assistant.copyPlainText': 'Copy plain text',
   'assistant.copyMarkdown': 'Copy Markdown',
+  'assistant.copyMarkdownSource': 'Copy Markdown source',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
   // A workspace agent's reply in a chat session. These render in exported
@@ -1058,6 +1042,8 @@ const EN: Messages = {
   'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
   'composerAdd.trigger': 'Add to message',
   'composerMobile.expand': 'Expand editor',
+  'composerMobile.advancedMode': 'Switch to advanced mode',
+  'composerMobile.simpleMode': 'Switch to simple mode',
   'composerMobile.hideKeyboard': 'Hide keyboard',
   'composerMobile.done': 'Done',
   'composerMobile.photos': 'Photos',
@@ -1917,6 +1903,42 @@ const EN: Messages = {
   'scheduledTasks.gate.hint':
     'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, and only when the gate starts failing. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
   'scheduledTasks.gate.cardPrefix': 'Gate:',
+  'autofixPrWatches.title': 'PR watches',
+  'autofixPrWatches.description':
+    'The /autofix-pr watches of your workspaces: what each round did, and what waits for you.',
+  'autofixPrWatches.empty':
+    'No /autofix-pr watch yet. Run /autofix-pr <PR> in a session to start one.',
+  'autofixPrWatches.loadFailed': 'Could not load the PR watches',
+  'autofixPrWatches.unreadable': (v) =>
+    `Could not read the watch of PR #${v?.pr ?? ''}: ${v?.error ?? ''}`,
+  'autofixPrWatches.phase.merged': 'PR merged — the watch can be stopped',
+  'autofixPrWatches.phase.closed': 'PR closed — the watch can be stopped',
+  'autofixPrWatches.phase.ended': (v) => `Stopped: ${v?.reason ?? ''}`,
+  'autofixPrWatches.phase.unscheduled': 'No scheduled check',
+  'autofixPrWatches.phase.fixing': (v) =>
+    `Fixing in the background (${v?.minutes ?? 0} min)`,
+  'autofixPrWatches.phase.fixingStarting': 'Fixing in the background',
+  'autofixPrWatches.phase.abandonedFix':
+    'A background fix was left behind — the next round redoes it',
+  'autofixPrWatches.phase.watching': 'Watching',
+  'autofixPrWatches.phase.idle': 'Not checked recently',
+  'autofixPrWatches.pushes': (v) => `Pushes ${v?.count ?? 0}/${v?.max ?? 0}`,
+  'autofixPrWatches.lastCheck': (v) => `Last check ${v?.when ?? ''}`,
+  'autofixPrWatches.neverChecked': 'Not checked yet',
+  'autofixPrWatches.lastRound': (v) => `Last round ${v?.when ?? ''}`,
+  'autofixPrWatches.needsHuman': (v) =>
+    `Needs your decision (${v?.count ?? 0})`,
+  'autofixPrWatches.staleTask':
+    'This task no longer drives the watch; it stops at its next fire.',
+  'autofixPrWatches.openSession': 'Open session',
+  'autofixPrWatches.stop': 'Stop watch',
+  'autofixPrWatches.stopHint': (v) =>
+    `Runs /autofix-pr stop ${v?.pr ?? ''} in the session that owns the watch`,
+  'autofixPrWatches.outsideDaemon':
+    'Owned by a session outside this Web Shell (a terminal, perhaps): stop it there.',
+  'autofixPrWatches.stopFailed': 'Could not stop the watch',
+  'autofixPrWatches.noOwner': (v) =>
+    `No session of this Web Shell runs it. In a session of its workspace, /autofix-pr stop ${v?.pr ?? ''} cleans it up, or /autofix-pr resume ${v?.pr ?? ''} starts it again.`,
   'scheduledTasks.gate.notRunYet': 'gate not run yet',
   'scheduledTasks.gate.neverDelivered': 'never',
   'scheduledTasks.gate.lastFailed': 'last run failed',
@@ -2090,6 +2112,7 @@ const EN: Messages = {
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
   'sidebar.sessionSource': 'Session source',
+  'sidebar.archiveSessionSource': 'Archived session source',
   'sidebar.sessionSource.tasks': 'Tasks',
   'sidebar.sessionSource.channels': 'Channels',
   'sidebar.channelType.other': 'Other channels',
@@ -2122,8 +2145,9 @@ const EN: Messages = {
   'sidebar.addWorkspaceTitle': 'Add Workspace',
   'sidebar.addWorkspacePath': 'Directory path',
   'sidebar.addWorkspaceBrowse': 'Browse…',
+  'sidebar.addWorkspaceBrowsing': 'Choosing directory…',
   'sidebar.addWorkspaceBrowseError':
-    'Unable to open the system folder picker. Enter an absolute path instead.',
+    'Unable to open the folder picker. Enter an absolute path instead.',
   'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
   'sidebar.addWorkspaceDisplayNameHint':
     'Shown in Web Shell; the directory path remains the workspace identity.',
@@ -2192,6 +2216,23 @@ const EN: Messages = {
   'workspaceHost.loadingFolders': 'Loading folders from this computer…',
   'workspaceHost.connectionError':
     'Could not load workspace capabilities from this computer.',
+  'workspaceDirectories.title': 'Workspace directories',
+  'workspaceDirectories.description':
+    'Tools can read and edit these directories in addition to the workspace root. New sessions inherit this list.',
+  'workspaceDirectories.warning':
+    'Adding a directory widens file access beyond the workspace root. Only add directories you trust.',
+  'workspaceDirectories.primary': 'Primary',
+  'workspaceDirectories.empty': 'No extra directories.',
+  'workspaceDirectories.add': 'Add directory',
+  'workspaceDirectories.addTitle': 'Add directory to workspace',
+  'workspaceDirectories.addSubmit': 'Add directory',
+  'workspaceDirectories.pathHint':
+    'Enter an absolute path on the machine running this workspace.',
+  'workspaceDirectories.remove': 'Remove directory',
+  'workspaceDirectories.loading': 'Loading directories…',
+  'workspaceDirectories.loadFailed':
+    'Could not load the workspace directories.',
+  'workspaceDirectories.removeFailed': 'Could not remove the directory',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
@@ -2279,11 +2320,13 @@ const EN: Messages = {
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
   'sidebar.goals': 'Goals',
+  'sidebar.prWatches': 'PR watches',
   'sidebar.themeLight': 'Switch to light theme',
   'sidebar.themeDark': 'Switch to dark theme',
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
   'sidebar.showAllSessions': 'Show all',
+  'sidebar.subSessions': (v) => plural(v?.['count'], 'sub-session'),
   'sidebar.collapseProject': 'Collapse project',
   'sidebar.expandProject': 'Expand project',
   'sidebar.search': 'Search sessions',
@@ -2777,6 +2820,8 @@ const EN: Messages = {
   'rewind.confirm': 'Confirm rewind',
   'rewind.empty': 'No rewind snapshots are available for this session.',
   'rewind.failed': (v) => `Failed to rewind session: ${v?.reason ?? ''}`,
+  'rewind.identityUnavailable':
+    'This snapshot has no prompt identity to rewind to.',
   'rewind.loading': 'Loading rewind snapshots...',
   'rewind.promptFallback': (v) => `Prompt ${v?.id ?? ''}`,
   'rewind.rewinding': 'Rewinding...',
@@ -3389,7 +3434,12 @@ const EN: Messages = {
     'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
   'skills.install.error.unsafePath':
     'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
-  'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
+  'skills.install.error.packageTooLarge':
+    'The skill exceeds the installer limit of 32 MiB per file or 64 MiB total.',
+  'skills.install.error.tooManyFiles':
+    'The skill package has too many files (max 2000).',
+  'skills.install.error.zipTooLarge':
+    'The ZIP file must not exceed 7,864,071 bytes.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
     'Could not download the skill from GitHub. Check the URL or authentication and try again.',
@@ -3893,10 +3943,8 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
-  'turn.stoppedAfter': (v) => {
-    const seconds = v?.seconds ?? 0;
-    return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
-  },
+  'turn.stoppedAfter': (v) =>
+    `You cancelled this request after ${v?.duration ?? '0s'}`,
   'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -4599,6 +4647,7 @@ const EN: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
+  ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4665,6 +4714,12 @@ const ZH: Messages = {
   'footnotes.previous': '上一条引用',
   'footnotes.next': '下一条引用',
   'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
+  'daemon.connection.paused': '无法连接服务，自动刷新已暂停，正在尝试恢复。',
+  'daemon.connection.authRequired':
+    '服务认证失败，请检查凭证；自动刷新已暂停。',
+  'daemon.connection.unavailable': '无法连接服务。',
+  'localControl.connectionRetry': '连接已中断，请点击重试刷新二维码。',
+  'daemon.connection.retry': '重试连接',
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
@@ -4762,9 +4817,6 @@ const ZH: Messages = {
   'managed.phase.created': '已创建',
   'managed.creationSkillsFromSettings':
     '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
-  'managed.creationSkillsManage': '管理 Skills',
-  'managed.creationSkillsPinned': (v) =>
-    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
   'managed.creationSkillsSourceChanged':
     'Skills 来源已变化，请按当前选择重试。',
   'managed.creationSkillsUnavailable':
@@ -4780,26 +4832,7 @@ const ZH: Messages = {
   'managed.workspaceWorkingDirectory': '工作目录',
   'managed.workspaceWorkingDirectoryDescription':
     '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
-  'managed.cwd.change': '切换目录',
   'managed.cwd.path': '相对于 Workspace 根目录的路径',
-  'managed.cwd.description':
-    '输入相对于 Workspace 根目录的路径，. 表示根目录。后续任务在新目录执行，对话历史保留。',
-  'managed.cwd.close': '关闭',
-  'managed.cwd.changing': '正在切换目录…',
-  'managed.cwd.confirm': '继续确认',
-  'managed.cwd.unconfirmed': '目录切换结果尚未确认，请继续确认原请求。',
-  'managed.cwd.unconfirmedForbidden':
-    '当前账号无权确认此操作，切换结果仍待确认；在服务器给出最终结果或新开标签页之前，发送将保持禁用。',
-  'managed.cwd.busy': '请先完成正在执行的任务、审批或未确认请求，再切换目录。',
-  'managed.cwd.invalid': '目录无效或无法访问。',
-  'managed.cwd.conflict': '当前目录已变化，请检查后重新提交。',
-  'managed.cwd.unavailable': 'Workspace 当前无法切换目录。',
-  'managed.cwd.forbidden': '当前账号没有切换此目录的权限。',
-  'managed.cwd.storage': '浏览器会话存储不可用，无法安全发起目录切换。',
-  'managed.cwd.failed': '目录切换失败，请检查当前目录后重试。',
-  'managed.cwd.updated': (v) =>
-    `当前目录已变为 ${v?.cwd ?? ''}，请先确认此上下文再提交。`,
-  'managed.cwd.useCurrent': '使用当前目录上下文',
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':
@@ -5175,6 +5208,7 @@ const ZH: Messages = {
   'toolName.cron_create': '创建定时任务',
   'toolName.cron_list': '定时任务列表',
   'toolName.cron_delete': '删除定时任务',
+  'toolName.autofix_pr': 'PR 自动修复',
   'toolName.task_create': '创建任务',
   'toolName.task_update': '更新任务',
   'toolName.task_list': '任务列表',
@@ -5548,11 +5582,12 @@ const ZH: Messages = {
   'approval.option.allowAlwaysUser': '对此用户始终允许',
   'approval.option.allowAlwaysServer': '对此服务始终允许',
   'approval.option.allowAlwaysTool': '对此工具始终允许',
-  'assistant.branch': '分叉',
-  'assistant.copy': '复制',
+  'assistant.branch': '从此处新建对话',
+  'assistant.copyContent': '复制内容',
   'assistant.selectionCopy': '复制所选内容',
   'assistant.copyPlainText': '复制纯文本',
   'assistant.copyMarkdown': '复制 Markdown',
+  'assistant.copyMarkdownSource': '复制 Markdown 源文',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
   'agentMessage.status.failed': '失败',
@@ -5593,6 +5628,8 @@ const ZH: Messages = {
   'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
   'composerAdd.trigger': '添加到消息',
   'composerMobile.expand': '展开编辑',
+  'composerMobile.advancedMode': '切换至高级模式',
+  'composerMobile.simpleMode': '切换至简洁模式',
   'composerMobile.hideKeyboard': '收起键盘',
   'composerMobile.done': '完成',
   'composerMobile.photos': '照片',
@@ -6380,6 +6417,40 @@ const ZH: Messages = {
   'scheduledTasks.gate.hint':
     '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，且只在闸门开始失败时报告。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
   'scheduledTasks.gate.cardPrefix': '闸门：',
+  'autofixPrWatches.title': 'PR 监视',
+  'autofixPrWatches.description':
+    '各工作区的 /autofix-pr 监视：每一轮做了什么，哪些事在等你决定。',
+  'autofixPrWatches.empty':
+    '还没有 /autofix-pr 监视。在会话里运行 /autofix-pr <PR> 即可开始。',
+  'autofixPrWatches.loadFailed': '加载 PR 监视失败',
+  'autofixPrWatches.unreadable': (v) =>
+    `读取 PR #${v?.pr ?? ''} 的监视失败：${v?.error ?? ''}`,
+  'autofixPrWatches.phase.merged': 'PR 已合入，可以停止监视',
+  'autofixPrWatches.phase.closed': 'PR 已关闭，可以停止监视',
+  'autofixPrWatches.phase.ended': (v) => `已停止：${v?.reason ?? ''}`,
+  'autofixPrWatches.phase.unscheduled': '没有定时检查',
+  'autofixPrWatches.phase.fixing': (v) =>
+    `后台修复进行中（${v?.minutes ?? 0} 分钟）`,
+  'autofixPrWatches.phase.fixingStarting': '后台修复进行中',
+  'autofixPrWatches.phase.abandonedFix': '后台修复被中断，下一轮会重做',
+  'autofixPrWatches.phase.watching': '监视中',
+  'autofixPrWatches.phase.idle': '最近没有检查',
+  'autofixPrWatches.pushes': (v) => `推送 ${v?.count ?? 0}/${v?.max ?? 0}`,
+  'autofixPrWatches.lastCheck': (v) => `上次检查 ${v?.when ?? ''}`,
+  'autofixPrWatches.neverChecked': '尚未检查',
+  'autofixPrWatches.lastRound': (v) => `上一轮 ${v?.when ?? ''}`,
+  'autofixPrWatches.needsHuman': (v) => `待你决定（${v?.count ?? 0}）`,
+  'autofixPrWatches.staleTask':
+    '这个任务已不再驱动该监视，下次触发时会自行停止。',
+  'autofixPrWatches.openSession': '打开会话',
+  'autofixPrWatches.stop': '停止监视',
+  'autofixPrWatches.stopHint': (v) =>
+    `在该监视所属的会话里运行 /autofix-pr stop ${v?.pr ?? ''}`,
+  'autofixPrWatches.outsideDaemon':
+    '属于本 Web Shell 之外的会话（例如终端），请在那里停止。',
+  'autofixPrWatches.stopFailed': '停止监视失败',
+  'autofixPrWatches.noOwner': (v) =>
+    `本 Web Shell 中没有会话在运行它。在该工作区的会话里，/autofix-pr stop ${v?.pr ?? ''} 可清理它，/autofix-pr resume ${v?.pr ?? ''} 可重新开始。`,
   'scheduledTasks.gate.notRunYet': '闸门尚未运行',
   'scheduledTasks.gate.neverDelivered': '从未',
   'scheduledTasks.gate.lastFailed': '上次运行失败',
@@ -6542,6 +6613,7 @@ const ZH: Messages = {
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
   'sidebar.sessionSource': '会话来源',
+  'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',
   'sidebar.sessionSource.channels': '频道',
   'sidebar.channelType.other': '其他频道',
@@ -6573,8 +6645,9 @@ const ZH: Messages = {
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
   'sidebar.addWorkspaceBrowse': '浏览…',
+  'sidebar.addWorkspaceBrowsing': '正在选择目录…',
   'sidebar.addWorkspaceBrowseError':
-    '无法打开系统文件夹选择器，请改为输入绝对路径。',
+    '无法打开文件夹选择器，请改为输入绝对路径。',
   'sidebar.addWorkspaceDisplayName': '展示名称（可选）',
   'sidebar.addWorkspaceDisplayNameHint':
     '用于 Web Shell 展示；目录路径仍是工作区身份。',
@@ -6632,6 +6705,21 @@ const ZH: Messages = {
   'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
   'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
   'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
+  'workspaceDirectories.title': '工作区目录',
+  'workspaceDirectories.description':
+    '除工作区根目录外，工具还可以读写这些目录。新建会话会继承该列表。',
+  'workspaceDirectories.warning':
+    '添加目录会扩大工具在工作区根目录之外的文件访问范围，请只添加你信任的目录。',
+  'workspaceDirectories.primary': '主目录',
+  'workspaceDirectories.empty': '暂无额外目录。',
+  'workspaceDirectories.add': '添加目录',
+  'workspaceDirectories.addTitle': '向工作区添加目录',
+  'workspaceDirectories.addSubmit': '添加目录',
+  'workspaceDirectories.pathHint': '请输入运行此工作区的机器上的绝对路径。',
+  'workspaceDirectories.remove': '移除目录',
+  'workspaceDirectories.loading': '正在加载目录…',
+  'workspaceDirectories.loadFailed': '无法加载工作区目录。',
+  'workspaceDirectories.removeFailed': '无法移除该目录',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
   'sidebar.renameWorkspace': '重命名…',
@@ -6711,11 +6799,13 @@ const ZH: Messages = {
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',
   'sidebar.goals': '目标',
+  'sidebar.prWatches': 'PR 监视',
   'sidebar.themeLight': '切换到浅色主题',
   'sidebar.themeDark': '切换到深色主题',
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
   'sidebar.showAllSessions': '展开显示',
+  'sidebar.subSessions': (v) => `${v?.['count'] ?? 0} 个子会话`,
   'sidebar.collapseProject': '收起项目',
   'sidebar.expandProject': '展开项目',
   'sidebar.search': '搜索会话',
@@ -7168,6 +7258,7 @@ const ZH: Messages = {
   'rewind.confirm': '确认回退',
   'rewind.empty': '当前会话没有可回退的快照。',
   'rewind.failed': (v) => `回退会话失败：${v?.reason ?? ''}`,
+  'rewind.identityUnavailable': '该快照没有可回退的 prompt 身份。',
   'rewind.loading': '正在加载可回退的 prompt...',
   'rewind.promptFallback': (v) => `Prompt ${v?.id ?? ''}`,
   'rewind.rewinding': '回退中...',
@@ -7734,7 +7825,10 @@ const ZH: Messages = {
     '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
   'skills.install.error.unsafePath':
     '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
-  'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
+  'skills.install.error.packageTooLarge':
+    '技能超过安装限制：单文件最大 32 MiB，合计最大 64 MiB。',
+  'skills.install.error.tooManyFiles': '技能包文件过多（最多 2000 个）。',
+  'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 7,864,071 字节。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
     '无法从 GitHub 下载技能，请检查地址或认证信息后重试。',
@@ -8188,7 +8282,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
-  'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
+  'turn.stoppedAfter': (v) => `你在 ${v?.duration ?? '0s'} 后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
@@ -8845,6 +8939,7 @@ const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
+  ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

@@ -592,6 +592,20 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(proof.predecessorSequence()).isEqualTo(41);
         assertThat(proof.terminalSequence()).isEqualTo(42);
         assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
+        var journal = baseline.table("ma_session_journal_tx");
+        var activationRow = journal.rows().stream().filter(row -> List.of("installActivation", "renewActivation")
+                .contains(row.text("operation"))).max(java.util.Comparator.comparingLong(row -> row.number("journal_revision"))).orElseThrow();
+        Map<String, byte[]> renewedFields = new java.util.LinkedHashMap<>();
+        activationRow.fields().forEach((field, cell) -> renewedFields.put(field, cell.bytes()));
+        renewedFields.put("activation_lease_until", Long.toString(proof.predecessorActivation().expiresAt()).getBytes(StandardCharsets.UTF_8));
+        renewedFields.put("activation_renewal_seq", Long.toString(proof.predecessorActivation().renewalSequence() + 100).getBytes(StandardCharsets.UTF_8));
+        var renewedRow = WorkspaceCsiApplicationInventory.expectedRow(journal.name(), renewedFields, activationRow.membership());
+        var compactTables = baseline.tables().stream().map(table -> table != journal ? table
+                : new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(),
+                        table.rows().stream().map(row -> row == activationRow ? renewedRow : row).toList())).toList();
+        var compactProof = WorkspaceCsiApplicationHistory.preparedTerminal(WorkspaceCsiApplicationInventory.expectedImage(compactTables), original, body);
+        assertThat(compactProof.predecessorActivation().renewalSequence()).isEqualTo(proof.predecessorActivation().renewalSequence() + 100);
+        assertThat(compactProof.terminalSequence()).isEqualTo(proof.terminalSequence());
         for (var fault : List.of(
                 List.of("ma_resource", "workspace_id", "other"),
                 List.of("ma_resource", "session_scope_key", "b".repeat(64)),
@@ -600,6 +614,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 List.of("ma_resource_ref", "workspace_id", "other"),
                 List.of("ma_resource_ref", "journal_revision", "32"),
                 List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
+                List.of("ma_session_journal_tx", "activation_lease_until", "1"),
                 List.of("ma_session_head", "activation_head_revision", "2"),
                 List.of("ma_session_head", "activation_head_revision", "3"),
                 List.of("ma_session_head", "activation_head_revision", "33"),
@@ -769,8 +784,8 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
-        assertThat(snapshot.tables()).hasSize(32);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(749);
+        assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(824);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -782,6 +797,43 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
+    }
+
+    @Test
+    void sessionWorktreeRowsBlockCsiRetirementInsteadOfBeingOmitted() throws Exception {
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
+                + " VALUES ('tenant', ?, 'workspace', 'storage', ?, ?, ?, 'PREPARING', 1, '{}', 'worktree', 1, 1)",
+                session, "a".repeat(64), "b".repeat(32), ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        var snapshot = inspect();
+        assertThat(snapshot.table("ma_session_worktree").rows()).hasSize(1);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_worktree"));
+    }
+
+    @Test
+    void originalUserMessageRowsRemainOutsideTheNativeFirstLane() throws Exception {
+        jdbc.update("INSERT INTO ma_user_message_queue (tenant_id, session_id) VALUES ('tenant', ?)", session);
+        jdbc.update("INSERT INTO ma_user_message (tenant_id, session_id, message_id, sequence_number, revision,"
+                        + " actor_id, input_json, state) VALUES ('tenant', ?, 'message', 1, 1, 'actor', '[]', 'queued')",
+                session);
+        jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, command_key, actor_id,"
+                        + " request_digest, result_json) VALUES ('tenant', ?, ?, 'actor', ?, '{}')",
+                session, "a".repeat(64), "sha256:" + "b".repeat(64));
+        var before = List.of(
+                jdbc.queryForList("SELECT * FROM ma_user_message_queue"),
+                jdbc.queryForList("SELECT * FROM ma_user_message"),
+                jdbc.queryForList("SELECT * FROM ma_user_message_command"));
+        var snapshot = inspect();
+        for (String table : List.of("ma_user_message_queue", "ma_user_message", "ma_user_message_command")) {
+            assertThat(snapshot.table(table).rows()).hasSize(1)
+                    .allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
+            assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals(table)
+                    && blocker.code().equals("unsupported_first_lane"));
+        }
+        assertThat(List.of(
+                jdbc.queryForList("SELECT * FROM ma_user_message_queue"),
+                jdbc.queryForList("SELECT * FROM ma_user_message"),
+                jdbc.queryForList("SELECT * FROM ma_user_message_command"))).usingRecursiveComparison().isEqualTo(before);
     }
 
     @Test
@@ -1215,7 +1267,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var valueOnly = WorkspaceCsiApplicationInventory.expectedImage(observed.tables());
         var restored = WorkspaceCsiApplicationInventory.restoreCanonical(valueOnly.bytes());
         assertThat(restored.bytes()).isEqualTo(valueOnly.bytes());
-        assertThat(restored.tables()).hasSize(32);
+        assertThat(restored.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
         assertThat(restored.rowCount()).isEqualTo(observed.rowCount());
         assertThat(observed.blockers()).isNotEmpty();
         byte[] trailing = java.util.Arrays.copyOf(valueOnly.bytes(), valueOnly.bytes().length + 1);
@@ -1423,7 +1475,8 @@ class WorkspaceCsiApplicationInventoryTest {
         var result = readKeys(expected, queries);
         assertThat(result.blockers()).isEmpty();
         assertThat(result.bytes()).isEqualTo(expected.bytes());
-        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).hasSize(32);
+        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_")))
+                .hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
         assertThat(queries).noneMatch(sql -> sql.contains("FOR UPDATE"));
         assertThat(queries).anyMatch(sql -> sql.startsWith("SELECT t.* FROM ma_storage_owner t WHERE") && sql.contains("storage_key = ?"));
         assertThat(queries).noneMatch(sql -> sql.contains("physical_key = ?"));

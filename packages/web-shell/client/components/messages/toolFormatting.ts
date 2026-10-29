@@ -44,6 +44,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cron_create: 'CronCreate',
   cron_list: 'CronList',
   cron_delete: 'CronDelete',
+  autofix_pr: 'AutofixPr',
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
@@ -212,6 +213,8 @@ export function truncateText(text: string, max: number): string {
 // bloating the DOM.
 const MAX_DESCRIPTION_LENGTH = 2000;
 
+const GENERATED_UI_TOOL_NAME = 'mcp__generated-ui__generated_ui_show';
+
 export function getToolDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
@@ -219,6 +222,12 @@ export function getToolDescription(
   if (isSkillToolName(tool.toolName)) {
     const skillName = getStringArg(tool.args, 'skill');
     if (skillName) return truncateText(skillName, MAX_DESCRIPTION_LENGTH);
+  }
+  if (tool.toolName === GENERATED_UI_TOOL_NAME) {
+    // The card title says what the view shows; the tool title only repeats
+    // the protocol name.
+    const title = getStringArg(tool.args, 'title');
+    if (title) return truncateText(title, MAX_DESCRIPTION_LENGTH);
   }
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);

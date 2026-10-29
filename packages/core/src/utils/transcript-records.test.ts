@@ -479,6 +479,7 @@ describe('validateTranscriptRecord', () => {
     omni_recall: true,
     session_model: true,
     session_approval_mode: true,
+    session_workflow_mode: true,
     rewind: true,
     agent_bootstrap: true,
     agent_launch_prompt: true,

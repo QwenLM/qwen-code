@@ -208,6 +208,21 @@ describe('model configuration manifest', () => {
   it.each([
     ['deepseek-flash', 'https://api.deepseek.com/v1', ['low', 'high', 'max']],
     [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alibaba-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.aliyun-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alicloudapi.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
       'deepseek-v4.1-flash-1017',
       'https://dashscope.aliyuncs.com/compatible-mode/v1',
       ['low', 'high', 'max'],
@@ -236,6 +251,7 @@ describe('model configuration manifest', () => {
       ).toMatchObject({
         currentValue: 'high',
         options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+        _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
       });
     },
   );

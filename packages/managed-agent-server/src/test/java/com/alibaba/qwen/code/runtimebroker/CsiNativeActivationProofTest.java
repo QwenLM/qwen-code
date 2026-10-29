@@ -42,6 +42,21 @@ class CsiNativeActivationProofTest {
             jsonFixture.path("sessionKey").path("sessionId").textValue());
 
     @Test
+    void compactLeaseMetadataPreservesIdentityAndRejectsPartialOrRegressedEvidence() {
+        var genesis = genesis();
+        var install = activation(transaction(1, genesis.lastRecordUuid()), request(1), genesis, null, resources);
+        var renewed = CsiNativeActivationProof.renewed(install, install.expiresAt() + 60_000, 100L);
+        assertEquals(install.activationId(), renewed.activationId());
+        assertEquals(install.writerGeneration(), renewed.writerGeneration());
+        assertEquals(install.installRef(), renewed.installRef());
+        assertEquals(100, renewed.renewalSequence());
+        rejected(() -> CsiNativeActivationProof.renewed(install, install.expiresAt(), null));
+        rejected(() -> CsiNativeActivationProof.renewed(install, null, 1L));
+        rejected(() -> CsiNativeActivationProof.renewed(install, install.expiresAt() - 1, 1L));
+        rejected(() -> CsiNativeActivationProof.renewed(install, install.expiresAt() + 1, 0L));
+    }
+
+    @Test
     void acceptsCompleteUnmodifiedNativeJsonProducerTransactions() {
         assertEquals(4, jsonFixture.path("cases").size());
         for (JsonNode sample : jsonFixture.path("cases")) {

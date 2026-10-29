@@ -79,13 +79,17 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 ## 生成凭据
 
-`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token 以及 Runtime 凭据密钥。它写出 `config/harness.env`、`config/server.env` 与 `config/application.yml`，权限为 0600；目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径，不打印 secret：
+`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token、Runtime 凭据密钥以及数据库密码。它写出 `config/harness.env`、`config/server.env`、`config/application.yml` 与 `config/mysql-setup.sql`，权限为 0600；目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径，不打印 secret：
 
 ```bash
 bin/qwen-managed-agent-bootstrap
 ```
 
-token 与 digest，以及工具路径所需的 Broker URL 和 token，只写入 `harness.env`：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向该文件，控制面从中读取这些值。若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，或文件中的 Broker token 与 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 同时设置，控制面拒绝启动，因此轮换时只需修改一个文件。生成的 `harness.env` 与 `server.env` 既可直接被 shell source，也可作为 systemd 的 `EnvironmentFile`。systemd 布局下传入 `--directory /etc/qwen-managed-agent`，随后填写 `SPRING_DATASOURCE_PASSWORD`，并把文件属主调整为服务账号。
+token 与 digest，以及工具路径所需的 Broker URL 和 token，只写入 `harness.env`：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向该文件，控制面从中读取这些值。若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，或文件中的 Broker token 与 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 同时设置，控制面拒绝启动，因此轮换时只需修改一个文件。生成的 `harness.env` 与 `server.env` 既可直接被 shell source，也可作为 systemd 的 `EnvironmentFile`。
+
+`mysql-setup.sql` 创建 `qwen_managed_agent` 数据库和 `server.env` 中写明的 `qwen` 账号（`localhost` 与 `127.0.0.1` 各一个），并授予 Flyway 需要的 `performance_schema` 权限。以 MySQL 管理员身份运行一次，例如 `mysql -u root < config/mysql-setup.sql`，然后删除它；密码保存在 `server.env` 中。它遇到第一条失败的语句就停止，因此不会改动已有的数据库或账号。容器中的 MySQL 看到的是网关地址而不是 `127.0.0.1`，此时请为那个主机创建账号。
+
+systemd 布局下，以 root 身份运行并传入 `--directory /etc/qwen-managed-agent --service-user qwen-managed-agent`。此时 `harness.env` 与 `application.yml` 归服务账号所有，`server.env` 为 `0640 root:qwen-managed-agent`，新建的目录为 `0750 root:qwen-managed-agent`，`mysql-setup.sql` 仍归 root。账号不存在、或账号无法进入该目录时，bootstrap 拒绝执行。`server.env` 还会记录 `QWEN_MANAGED_AGENT_SERVICE_USER`，因此即使以 root 身份运行预检，它也会按该账号检查文件访问权限。
 
 ## 预检
 
@@ -95,7 +99,13 @@ token 与 digest，以及工具路径所需的 Broker URL 和 token，只写入 
 bin/qwen-managed-agent-server --check
 ```
 
-检查范围包括 JDK、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
+检查范围包括 JDK、服务账号、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用、上次运行遗留的 Runtime worker，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。
+
+`harness` 行会像第一个 Session 那样与单个配置的 Harness 协商；使用 Harness pool 时，只有在 Session Store 已启用且配置了 binding key 后，才对 pool 的端点跳过，否则报 FAIL。capability digest 不一致、缺少协议或必需的 feature、或者 Harness 缺少某个已配置 Workspace profile 所需的 lifecycle 时报 FAIL；Harness 运行的 Qwen Code 版本与 `manifest.json` 写明的不同，或者 Harness 没有说明版本时报 WARN。端口检查会实际绑定配置地址，`workers` 行会对仍在 Runtime 状态目录中运行的 worker 给出警告，因此应先停止服务。服务运行期间请加上 `--online`：端口相关的行改为检查是否有进程在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。该命令不校验原生 Workspace storage 注册。
+
+## 维护命令
+
+`bin/qwen-managed-agent-admin <command> [arguments]` 通过 Spring Boot 的 `PropertiesLauncher`，从 server jar 运行各个离线维护入口，例如 `storage-registration`、`workspace-migration` 和各条 CSI 命令。不带参数运行可列出所有命令；某条命令不带参数运行会打印它的用法。与 server 启动脚本一样，当 `config/application.yml` 存在且未设置 `SPRING_CONFIG_ADDITIONAL_LOCATION` 时，它会使用该文件。大多数需要连接数据库的命令使用各自的凭据，而不是 `server.env` 中的 `SPRING_DATASOURCE_*`：Workspace 相关命令读取 `W1_JDBC_URL`、`W1_JDBC_USER` 和 `W1_JDBC_PASSWORD`，CSI 相关命令读取 `K2_JDBC_URL`、`K2_JDBC_USER` 和 `K2_JDBC_PASSWORD`。有两个例外：`operator-recovery` 和 `resident-retirement` 会启动服务端的 Spring 配置并使用其数据源，因此从环境变量和 `config/application.yml` 读取 `SPRING_DATASOURCE_URL`、`SPRING_DATASOURCE_USERNAME`、`SPRING_DATASOURCE_PASSWORD` 以及控制面的其他设置；运行它们时需先载入 `server.env`。`csi-protection` 不连接数据库。每条命令都是一个离线流程，各有前提条件，写在相应的文档中；运行前请先满足这些条件。Hosted Shell 恢复流程仍以 `bin/qwen-managed-agent-operator-recovery` 为入口，`bin/qwen-managed-agent-admin operator-recovery` 运行的是同一条命令。
 
 ## systemd
 
@@ -127,7 +137,7 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring、运维自有的 `server.env` 与 `harness.env`，以及精确旧版分发产物。分发产物升级期间不要轮换 credential key。
 4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。随包的控制面 unit 使用 `KillMode=process`，`systemctl stop` 不会终止 Runtime worker；启动新版本前先用 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` 回收。
-5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。旧版分发产物不读取这两个新键，缺少被删除的 token 时也不会启动其 Broker，因此回滚到旧版时要从第 3 步的备份恢复这两个文件。
+5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。旧版分发产物不读取这两个新键，缺少被删除的 token 时也不会启动其 Broker，因此回滚到旧版时要从第 3 步的备份恢复这两个文件。新版发行产物的 `--check` 会在 `workers` 行列出现在仍存活的 worker；请在此处以离线模式运行——服务仍停止、Harness 已启动——因为在线模式下持久模式的 Broker 会让该行 SKIP。
 6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
 

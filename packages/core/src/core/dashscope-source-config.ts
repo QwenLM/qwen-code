@@ -79,3 +79,26 @@ export function withDashScopeSourceConfig<T extends string | undefined>(
   result[DASHSCOPE_SOURCE_CONFIG_HEADER] = value;
   return result;
 }
+
+/**
+ * `headers` without the attribution header, in any casing. Callers hand this —
+ * not the raw `customHeaders` — to the session-header wrapper, whose job is to
+ * decide whether a `${session_id}` placeholder may be expanded and to warn when
+ * the switch is off. A value under this name can never reach the wire, because
+ * the first-party attribution replaces it, so expanding it or warning that it
+ * "will not be sent" describes the wrong thing (#15107 item 2).
+ */
+export function withoutDashScopeSourceConfig<T>(
+  headers: Record<string, T> | undefined,
+): Record<string, T> | undefined {
+  if (!headers) return undefined;
+  const name = DASHSCOPE_SOURCE_CONFIG_HEADER.toLowerCase();
+  const kept = Object.entries(headers).filter(
+    ([key]) => key.toLowerCase() !== name,
+  );
+  // Unchanged input keeps its identity: the wrapper treats an empty result and
+  // `undefined` alike, and most callers have no attribution entry at all.
+  return kept.length === Object.keys(headers).length
+    ? headers
+    : Object.fromEntries(kept);
+}
