@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { writeSync } from 'node:fs';
+import { statSync, writeSync } from 'node:fs';
 import {
   chmod,
   cp,
@@ -32,7 +32,9 @@ import {
   compareVersions,
   configurationFiles,
   environmentFileEntry,
+  execStartArguments,
   execStartPath,
+  formatEnvironmentFile,
   javaFeatureVersion,
   meetsMinimum,
   migrationScripts,
@@ -47,6 +49,8 @@ import {
 
 const SERVER = 'qwen-managed-agent-server';
 const HARNESS = 'qwen-hosted-harness';
+const RESOLVER =
+  '-Dloader.main=com.alibaba.qwen.code.managedagent.preflight.ResolvedConfiguration';
 
 test('reads environment files the way systemd does', () => {
   const values = parseEnvironmentFile(
@@ -109,6 +113,18 @@ test('reads environment files the way systemd does', () => {
   );
 });
 
+test('writes environment files systemd reads back as written', () => {
+  const values = new Map([
+    ['PASSWORD', 'p"w\\x$HOME`id`'],
+    ['QUOTE', "it's"],
+    ['SPACED', '  a  b  '],
+    ['MULTI', 'one\ntwo\\\nthree'],
+    ['HASH', '#not a comment'],
+    ['EMPTY', ''],
+  ]);
+  assert.deepEqual(parseEnvironmentFile(formatEnvironmentFile(values)), values);
+});
+
 test('reads the unit properties systemctl show prints', () => {
   const properties = parseShow(
     'EnvironmentFiles=/a.env (ignore_errors=no)\nEnvironmentFiles=/b.env (ignore_errors=yes)\nUser=svc\n',
@@ -126,6 +142,20 @@ test('reads the unit properties systemctl show prints', () => {
     ),
     '/opt/q/bin/qwen-managed-agent-server',
   );
+  assert.deepEqual(
+    execStartArguments(
+      '{ path=/opt/q/bin/s ; argv[]=/opt/q/bin/s ; ignore_errors=no ; start_time=[n/a] }',
+    ),
+    [],
+  );
+  // "a b" and a then b print alike.
+  assert.equal(
+    execStartArguments(
+      '{ path=/opt/q/bin/s ; argv[]=/opt/q/bin/s a b ; ignore_errors=no }',
+    ),
+    undefined,
+  );
+  assert.equal(execStartArguments(''), undefined);
   assert.deepEqual(
     Object.fromEntries(
       parseEnvironmentAssignments('"A=1 2" B=x C=\\x41\\x20z D=a\\"b'),
@@ -177,6 +207,15 @@ test('reads the datasource, configuration and listener settings', () => {
     database: 'db',
   });
   assert.equal(parseMysqlJdbcUrl('jdbc:mysql://a:1,b:2/db'), undefined);
+  // A % that starts no escape is a URL this command cannot read.
+  assert.equal(
+    parseMysqlJdbcUrl('jdbc:mysql://127.0.0.1/qwen%prod'),
+    undefined,
+  );
+  assert.equal(
+    parseMysqlJdbcUrl('jdbc:mysql://127.0.0.1/qwen%25prod').database,
+    'qwen%prod',
+  );
   assert.equal(parseMysqlJdbcUrl('jdbc:postgresql://a/db'), undefined);
   assert.deepEqual(
     configurationFiles(
@@ -330,6 +369,8 @@ async function rig(t, overrides = {}) {
     scripts: overrides.scripts,
     files: overrides.files,
   });
+  // As root extracts it with umask 077.
+  await chmod(path.join(distribution, 'lib/server.jar'), 0o600);
   for (const tool of ['java', 'node', 'qwen', 'mysqldump']) {
     await executable(path.join(tools, tool));
   }
@@ -398,9 +439,22 @@ async function rig(t, overrides = {}) {
     await writeFile(path.join(etc, `${name}.service`), '[Service]\n');
   }
 
+  // The unified hierarchy, or with cgroupLayout 'v1' systemd's named one.
   const writeCgroups = async () => {
+    const v1 = host.cgroupLayout === 'v1';
+    await rm(cgroups, { recursive: true, force: true });
+    await mkdir(path.join(cgroups, v1 ? 'systemd' : ''), { recursive: true });
+    await writeFile(
+      path.join(cgroups, v1 ? 'systemd/cgroup.procs' : 'cgroup.controllers'),
+      '',
+    );
     for (const [name, unit] of Object.entries(units)) {
-      const directory = path.join(cgroups, 'system.slice', `${name}.service`);
+      const directory = path.join(
+        cgroups,
+        v1 ? 'systemd' : '',
+        'system.slice',
+        `${name}.service`,
+      );
       await rm(directory, { recursive: true, force: true });
       if (unit.procs.length > 0) {
         await mkdir(directory, { recursive: true });
@@ -411,8 +465,6 @@ async function rig(t, overrides = {}) {
       }
     }
   };
-  await writeCgroups();
-
   const host = {
     root,
     current,
@@ -434,7 +486,17 @@ async function rig(t, overrides = {}) {
     workersIgnoreTerm: false,
     responses: {},
     requests: [],
+    // Every systemd-run, with the environment systemd would hand it.
+    services: [],
+    // What the jar resolves, beyond the documented variables.
+    resolved: {},
+    resolveFailure: undefined,
+    stopFails: false,
+    cgroupLayout: 'unified',
+    // An errno the next cgroup.procs read fails with.
+    cgroupError: undefined,
   };
+  await writeCgroups();
   const systemctl = (args) => {
     const [verb, ...rest] = args;
     if (verb === 'show') {
@@ -459,7 +521,11 @@ async function rig(t, overrides = {}) {
     const unit = units[name];
     host.clock += 1;
     if (verb === 'stop') {
-      unit.ActiveState = 'inactive';
+      unit.ActiveState =
+        host.stopFails && name === SERVER ? 'failed' : 'inactive';
+      if (host.stopFails && name === SERVER) {
+        Object.assign(unit, { Result: 'exit-code', ExecMainStatus: '143' });
+      }
       unit.InactiveEnterTimestampMonotonic = String(1000 + host.clock);
       // KillMode=process: the server's workers outlive its main process.
       unit.procs = name === SERVER ? unit.procs.slice(1) : [];
@@ -478,6 +544,14 @@ async function rig(t, overrides = {}) {
     uid: () => 0,
     distribution,
     cgroupRoot: cgroups,
+    readCgroup: async (file) => {
+      if (host.cgroupError) {
+        throw Object.assign(new Error(host.cgroupError), {
+          code: host.cgroupError,
+        });
+      }
+      return readFile(file, 'utf8');
+    },
     bootId: async () => 'boot-1',
     now: () => host.clock * 1000,
     sleep: async (milliseconds) => {
@@ -545,7 +619,51 @@ async function rig(t, overrides = {}) {
         return spawnSync('tar', args, { encoding: 'utf8' });
       }
       if (name === 'systemd-run') {
-        return { status: host.preflightStatus };
+        // systemd reads each environment file in turn, then runs the command.
+        const environment = new Map();
+        const files = [];
+        for (const arg of args) {
+          const file = /^--property=EnvironmentFile=-?(.*)$/.exec(arg)?.[1];
+          if (file) {
+            const text = readFileSyncText(file);
+            files.push({ file, text });
+            for (const [key, value] of parseEnvironmentFile(text)) {
+              environment.set(key, value);
+            }
+          }
+        }
+        const service = { args, environment, files };
+        host.services.push(service);
+        if (!args.includes(RESOLVER)) {
+          return { status: host.preflightStatus };
+        }
+        const jar = args[args.indexOf('-cp') + 1];
+        service.jar = {
+          path: jar,
+          mode: statSync(jar).mode & 0o777,
+          directoryMode: statSync(path.dirname(jar)).mode & 0o777,
+        };
+        if (host.resolveFailure) {
+          return { status: 1, stdout: '', stderr: host.resolveFailure };
+        }
+        // A stand-in for Spring that reads the documented variables only.
+        const mode = (environment.get('QWEN_MANAGED_AGENT_AUTH_MODE') ?? 'auto')
+          .trim()
+          .toLowerCase();
+        const resolved = {
+          runtimeStateDirectory:
+            environment.get('QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY') ?? '',
+          runtimeStateOrigin: 'QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY',
+          authMode: mode === 'auto' ? 'open' : mode,
+          trustedActorHeader:
+            environment.get('QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER') ?? '',
+          ...host.resolved,
+        };
+        return {
+          status: 0,
+          stdout: `WARNING: a JVM line\nqwen-managed-agent-configuration ${JSON.stringify(resolved)}\n`,
+          stderr: '',
+        };
       }
       throw new Error(`unexpected command ${command}`);
     },
@@ -932,6 +1050,11 @@ test('backup records the database, Runtime state and configuration', async (t) =
   );
   assert.match(host.output.join('\n'), /still run; run stop before backup/);
 
+  // The Harness unit's file and its drop-in are configuration too.
+  const dropIn = path.join(host.etc, `${HARNESS}.service.d/override.conf`);
+  await mkdir(path.dirname(dropIn), { recursive: true });
+  await writeFile(dropIn, '[Service]\nTimeoutStopSec=30\n');
+  host.units[HARNESS].DropInPaths = dropIn;
   await host.stop();
   assert.equal(
     await host.upgrade(
@@ -1005,6 +1128,8 @@ test('backup records the database, Runtime state and configuration', async (t) =
     'etc/server.env',
     'etc/harness.env',
     'etc/qwen-managed-agent-server.service',
+    'etc/qwen-hosted-harness.service',
+    'etc/qwen-hosted-harness.service.d/override.conf',
   ]) {
     assert.ok(listed.includes(file), file);
   }
@@ -1095,6 +1220,19 @@ test('install switches the distribution link and keeps the old release', async (
   const { host, target } = await backedUp(t);
   assert.equal(await host.upgrade('install'), 1);
   assert.match(host.output.join('\n'), /install needs --backup/);
+  // A backup of another installed release.
+  const stale = path.join(host.root, 'stale');
+  await cp(target, stale, { recursive: true });
+  const record = JSON.parse(
+    await readFile(path.join(stale, 'backup.json'), 'utf8'),
+  );
+  record.from.version = '0.0.9';
+  await writeFile(path.join(stale, 'backup.json'), JSON.stringify(record));
+  assert.equal(await host.upgrade('install', '--backup', stale), 1);
+  assert.match(
+    host.output.join('\n'),
+    /the backup is of 0.0.9, but 0.1.0 is installed; run backup again/,
+  );
   assert.equal(await host.upgrade('install', '--backup', target), 0);
 
   const releases = `${host.current}-releases`;
@@ -1110,11 +1248,12 @@ test('install switches the distribution link and keeps the old release', async (
   assert.equal((await stat(copied)).mode & 0o777, 0o600);
   assert.deepEqual((await readdir(releases)).sort(), ['0.1.0', '0.2.0']);
 
-  // A second run finds the release installed and the backup spent.
+  // A second run, as after an interrupted session, finds the release
+  // installed and points at start, not at another backup.
   assert.equal(await host.upgrade('install', '--backup', target), 1);
-  assert.match(
-    host.output.join('\n'),
-    /the backup is of 0.1.0, but 0.2.0 is installed/,
+  assert.equal(
+    host.output.at(-1),
+    `install refused: 0.2.0 is already installed at ${host.current}; run start or verify for this release.`,
   );
 });
 
@@ -1247,16 +1386,25 @@ test('start runs the preflight between the Harness and the control plane', async
   );
   assert.equal(host.units[HARNESS].ActiveState, 'active');
   assert.equal(host.units[SERVER].ActiveState, 'inactive');
-  const preflight = host.calls.find(([command]) => command === 'systemd-run');
-  assert.ok(preflight.includes('--uid=svc'));
-  assert.ok(preflight.includes(`--setenv=PATH=${host.tools}`));
-  assert.ok(
-    preflight.includes(`--property=EnvironmentFile=${host.etc}/server.env`),
+  const preflight = host.services.at(-1);
+  assert.ok(preflight.args.includes('--uid=svc'));
+  // Environment= reaches it through a file, read before server.env, and
+  // never through the command line any local user can read.
+  assert.ok(!preflight.args.some((arg) => arg.startsWith('--setenv')));
+  assert.deepEqual(
+    preflight.files.map(({ file }) => path.basename(file)),
+    ['unit.env', 'server.env'],
   );
-  assert.deepEqual(preflight.slice(-2), [
+  assert.equal(preflight.environment.get('PATH'), host.tools);
+  assert.equal(preflight.environment.get('SPRING_DATASOURCE_PASSWORD'), 'p"w');
+  assert.deepEqual(preflight.args.slice(-2), [
     path.join(host.current, 'bin/qwen-managed-agent-server'),
     '--check',
   ]);
+  // The scratch directory goes with the command.
+  await assert.rejects(stat(path.dirname(preflight.files[0].file)), {
+    code: 'ENOENT',
+  });
 
   host.preflightStatus = 0;
   host.responses['GET /actuator/health'] = { status: 'UP' };
@@ -1453,39 +1601,59 @@ test('check reads the options the later phases are given', async (t) => {
 });
 
 test('backup archives the Runtime state directory the server uses', async (t) => {
-  // config/application.yml wins over the variable the command reads.
+  // The server's configuration names another directory than the variable.
   const host = await rig(t);
-  const yaml = path.join(host.current, 'config/application.yml');
   const elsewhere = path.join(host.root, 'state-from-yaml');
   await mkdir(path.join(elsewhere, 'workers'), { recursive: true });
   await writeFile(path.join(elsewhere, 'workers/w2.json'), '{}\n');
-  await writeFile(
-    yaml,
-    `qwen:\n  managed-agent:\n    runtime-broker:\n      state-directory: ${elsewhere}\n`,
-    { mode: 0o600 },
-  );
-  assert.equal(await host.check(), 1);
+  host.resolved = {
+    runtimeStateDirectory: elsewhere,
+    runtimeStateOrigin: 'URL [file:/etc/qwen/runtime.yml] - 4:24',
+  };
+  assert.equal(await host.check(), 0);
   assert.equal(
     rowsOf(host.output)['runtime-state'],
-    `FAIL ${yaml} can set the Runtime state directory, which this command reads only from QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`,
+    `PASS backup archives ${elsewhere} (URL [file:/etc/qwen/runtime.yml] - 4:24)`,
   );
   await host.stop();
   const target = path.join(host.root, 'backup');
   const mysqldump = path.join(host.tools, 'mysqldump');
   assert.equal(
     await host.upgrade('backup', '--to', target, '--mysqldump', mysqldump),
+    0,
+  );
+  const members = spawnSync(
+    'tar',
+    ['-tf', path.join(target, 'runtime-state.tar')],
+    { encoding: 'utf8' },
+  ).stdout;
+  assert.ok(members.includes('./workers/w2.json'), members);
+  assert.ok(!members.includes('./workers/w1.json'), members);
+  const record = JSON.parse(
+    await readFile(path.join(target, 'backup.json'), 'utf8'),
+  );
+  assert.equal(record.runtimeState, elsewhere);
+
+  // A configuration the jar cannot resolve is not one with no state.
+  host.resolveFailure =
+    "WARNING: a JVM line\ncannot resolve the server configuration: Config data resource 'file [/etc/qwen/runtime.yml]' does not exist";
+  const again = path.join(host.root, 'backup-2');
+  assert.equal(
+    await host.upgrade('backup', '--to', again, '--mysqldump', mysqldump),
     1,
   );
   assert.match(
     host.output.join('\n'),
-    /backup refused: .*application.yml can set the Runtime state directory, .*; pass --runtime-state <the directory the server uses>, or none when it keeps no Runtime state, to check and backup\./,
+    /backup refused: cannot resolve the Runtime state directory: cannot resolve the server configuration: Config data resource .*; pass --runtime-state <the directory the server uses>, or none when it keeps no Runtime state, to check and backup\./,
   );
-  await assert.rejects(stat(target), { code: 'ENOENT' });
+  await assert.rejects(stat(again), { code: 'ENOENT' });
+  // --runtime-state stands in for the jar, which then does not run.
+  const runs = host.services.length;
   assert.equal(
     await host.upgrade(
       'backup',
       '--to',
-      target,
+      again,
       '--mysqldump',
       mysqldump,
       '--runtime-state',
@@ -1493,55 +1661,82 @@ test('backup archives the Runtime state directory the server uses', async (t) =>
     ),
     0,
   );
-  assert.ok(
-    spawnSync('tar', ['-tf', path.join(target, 'runtime-state.tar')], {
-      encoding: 'utf8',
-    }).stdout.includes('./workers/w2.json'),
+  assert.equal(host.services.length, runs);
+  assert.equal(
+    JSON.parse(await readFile(path.join(again, 'backup.json'), 'utf8'))
+      .runtimeState,
+    elsewhere,
   );
-  const record = JSON.parse(
-    await readFile(path.join(target, 'backup.json'), 'utf8'),
-  );
-  assert.equal(record.runtimeState, elsewhere);
+});
 
-  // The other places Spring reads it from.
-  for (const [serverEnv, source] of [
+test('check runs the server jar as the unit runs the server', async (t) => {
+  const host = await rig(t);
+  assert.equal(await host.check(), 0);
+  assert.equal(
+    rowsOf(host.output)['runtime-state'],
+    `PASS backup archives ${host.state} (QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY)`,
+  );
+  const [service] = host.services;
+  assert.ok(service.args.includes('--uid=svc'));
+  assert.ok(service.args.includes(`--working-directory=${host.current}`));
+  assert.ok(!service.args.some((arg) => arg.startsWith('--setenv')));
+  // The launcher's default follows the unit's own files.
+  const config = path.join(host.current, 'config/application.yml');
+  assert.deepEqual(
+    service.files.map(({ file }) => path.basename(file)),
+    ['unit.env', 'server.env', 'launcher.env'],
+  );
+  assert.equal(
+    service.environment.get('SPRING_CONFIG_ADDITIONAL_LOCATION'),
+    `file:${config}`,
+  );
+  // This release's jar, copied where the service account can read it, with
+  // the unit's java and no further argument.
+  const java = service.args.indexOf(path.join(host.tools, 'java'));
+  assert.deepEqual(service.args.slice(java + 1), [
+    RESOLVER,
+    '-cp',
+    service.jar.path,
+    'org.springframework.boot.loader.launch.PropertiesLauncher',
+  ]);
+  assert.ok(!service.jar.path.startsWith(host.distribution));
+  assert.equal(service.jar.mode, 0o644);
+  assert.equal(service.jar.directoryMode, 0o711);
+  await assert.rejects(stat(service.jar.path), { code: 'ENOENT' });
+
+  // An empty variable is the launcher's default too; a set one is not.
+  for (const [serverEnv, expected] of [
+    [['SPRING_CONFIG_ADDITIONAL_LOCATION='], 'default'],
     [
-      ['JAVA_OPTS=-Dqwen.managed-agent.runtime-broker.state-directory=/x'],
-      'JAVA_OPTS',
-    ],
-    [
-      ['QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY=/x'],
-      'QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY',
-    ],
-    [
-      ['SPRING_PROFILES_ACTIVE=managed-local'],
-      'the configuration SPRING_PROFILES_ACTIVE selects',
-    ],
-    [
-      ['SPRING_CONFIG_ADDITIONAL_LOCATION=classpath:extra.yml'],
-      'SPRING_CONFIG_ADDITIONAL_LOCATION entry classpath:extra.yml',
-    ],
-    [['JAVA_TOOL_OPTIONS=-Dspring.profiles.active=local'], 'JAVA_TOOL_OPTIONS'],
-    [
-      [`SPRING_APPLICATION_JSON='{"spring":{"config":{"import":"file:/x"}}}'`],
-      'SPRING_APPLICATION_JSON',
-    ],
-    [
-      [
-        `SPRING_APPLICATION_JSON='{"qwen":{"managed-agent":{"runtime-broker":{"state-directory":"/x"}}}}'`,
-      ],
-      'SPRING_APPLICATION_JSON',
+      ['SPRING_CONFIG_ADDITIONAL_LOCATION=file:/etc/qwen/extra.yml'],
+      'file:/etc/qwen/extra.yml',
     ],
   ]) {
     const other = await rig(t, { serverEnv });
-    assert.equal(await other.check(), 1, source);
-    assert.ok(
-      rowsOf(other.output)['runtime-state'].startsWith(
-        `FAIL ${source} can set the Runtime state directory`,
-      ),
-      rowsOf(other.output)['runtime-state'],
+    assert.equal(await other.check(), 0);
+    assert.equal(
+      other.services[0].environment.get('SPRING_CONFIG_ADDITIONAL_LOCATION'),
+      expected === 'default'
+        ? `file:${path.join(other.current, 'config/application.yml')}`
+        : expected,
+      serverEnv[0],
     );
   }
+  await rm(config);
+  host.services = [];
+  assert.equal(await host.check(), 0);
+  assert.ok(
+    !host.services[0].files.some(({ file }) => file.endsWith('launcher.env')),
+  );
+
+  // Arguments systemctl prints joined cannot be passed on faithfully.
+  host.units[SERVER].ExecStart =
+    `{ path=${host.current}/bin/qwen-managed-agent-server ; argv[]=${host.current}/bin/qwen-managed-agent-server --spring.profiles.active=edge ; ignore_errors=no }`;
+  assert.equal(await host.check(), 1);
+  assert.equal(
+    rowsOf(host.output)['runtime-state'],
+    `FAIL cannot resolve the Runtime state directory: ${SERVER} passes arguments to bin/qwen-managed-agent-server, which systemctl does not print exactly`,
+  );
 });
 
 test('backup says when it archives no Runtime state', async (t) => {
@@ -1549,7 +1744,7 @@ test('backup says when it archives no Runtime state', async (t) => {
   assert.equal(await host.check(), 0);
   assert.equal(
     rowsOf(host.output)['runtime-state'],
-    'SKIP no Runtime state directory is configured, so backup archives none',
+    "SKIP the server's configuration names no Runtime state directory, so backup archives none",
   );
   await host.stop();
   const target = path.join(host.root, 'backup');
@@ -1566,7 +1761,7 @@ test('backup says when it archives no Runtime state', async (t) => {
   assert.ok(!(await readdir(target)).includes('runtime-state.tar'));
   assert.ok(
     host.output.includes(
-      'No Runtime state archived: no Runtime state directory is configured, so backup archives none.',
+      "No Runtime state archived: the server's configuration names no Runtime state directory, so backup archives none.",
     ),
   );
 
@@ -1721,123 +1916,11 @@ test('install leaves no partial copy, and an interrupted one is reported', async
   );
 });
 
-test('check names the configuration a file imports or activates', async (t) => {
-  // Spring reads these, and the directory they name, from files this
-  // command never opens.
-  for (const [content, key] of [
-    [
-      'spring:\n  config:\n    import: file:/etc/qwen-managed-agent/runtime.yml\n',
-      'spring.config.import',
-    ],
-    [
-      'spring:\n  config:\n    import:\n      - optional:file:/etc/x.yml\n',
-      'spring.config.import',
-    ],
-    ['spring.config.import: file:/etc/x.yml\n', 'spring.config.import'],
-    [
-      'spring:\n  profiles:\n    active: managed-local\n',
-      'spring.profiles.active',
-    ],
-    ['spring:\n  Profiles:\n    include_: [a]\n', 'spring.profiles.include'],
-    ['spring: {config: {import: "file:/etc/x.yml"}}\n', 'spring.config.import'],
-    [
-      'spring:\n  config: {import: "file:/etc/x.yml"}\n',
-      'spring.config.import',
-    ],
-  ]) {
-    const host = await rig(t);
-    const yaml = path.join(host.current, 'config/application.yml');
-    await writeFile(yaml, content);
-    assert.equal(await host.check(), 1, content);
-    assert.equal(
-      rowsOf(host.output)['runtime-state'],
-      `FAIL ${yaml} (${key}) can set the Runtime state directory, which this command reads only from QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`,
-      content,
-    );
-  }
-
-  // The review's case: the directory is set only in an imported file, and
-  // the variable is unset, so nothing would have been archived.
-  const imported = await rig(t, { state: null });
-  const runtime = path.join(imported.etc, 'runtime.yml');
-  await writeFile(
-    runtime,
-    `qwen:\n  managed-agent:\n    runtime-broker:\n      state-directory: ${imported.state}\n`,
-  );
-  await writeFile(
-    path.join(imported.current, 'config/application.yml'),
-    `spring:\n  config:\n    import: file:${runtime}\n`,
-  );
-  assert.equal(await imported.check(), 1);
-  assert.match(
-    rowsOf(imported.output)['runtime-state'],
-    /^FAIL .*\(spring\.config\.import\)/,
-  );
-  await imported.stop();
-  const target = path.join(imported.root, 'backup');
-  const mysqldump = path.join(imported.tools, 'mysqldump');
-  assert.equal(
-    await imported.upgrade('backup', '--to', target, '--mysqldump', mysqldump),
-    1,
-  );
-  await assert.rejects(stat(target), { code: 'ENOENT' });
-  assert.equal(
-    await imported.upgrade(
-      'backup',
-      '--to',
-      target,
-      '--mysqldump',
-      mysqldump,
-      '--runtime-state',
-      imported.state,
-    ),
-    0,
-  );
-  assert.ok((await readdir(target)).includes('runtime-state.tar'));
-
-  // A properties file that SPRING_CONFIG_ADDITIONAL_LOCATION names.
-  const host = await rig(t);
-  const properties = path.join(host.etc, 'extra.properties');
-  await writeFile(properties, '! a comment\nspring.config.import[0]=file:/x\n');
-  await writeFile(
-    path.join(host.etc, 'server.env'),
-    `${await readFile(path.join(host.etc, 'server.env'), 'utf8')}SPRING_CONFIG_ADDITIONAL_LOCATION=file:${properties}\n`,
-  );
-  assert.equal(await host.check(), 1);
-  assert.ok(
-    rowsOf(host.output)['runtime-state'].startsWith(
-      `FAIL ${properties} (spring.config.import[0]) can set`,
-    ),
-    rowsOf(host.output)['runtime-state'],
-  );
-
-  // Comments, and the same words under other keys, do not count.
-  const quiet = await rig(t);
-  await writeFile(
-    path.join(quiet.current, 'config/application.yml'),
-    [
-      '# spring.config.import: file:/x',
-      'qwen:',
-      '  managed-agent:',
-      '    extensions:',
-      '      allowed-actors: [ops]',
-      '      import: x',
-      'logging:',
-      '  group:',
-      '    web: x',
-      '',
-    ].join('\n'),
-  );
-  assert.equal(await quiet.check(), 0);
-  assert.match(rowsOf(quiet.output)['runtime-state'], /^PASS backup archives /);
-});
-
 test('--runtime-state none backs up a deployment that keeps no state', async (t) => {
+  // The jar cannot resolve the configuration, and the operator knows better.
   const host = await rig(t, { state: null });
-  await writeFile(
-    path.join(host.current, 'config/application.yml'),
-    'spring:\n  profiles:\n    active: reference\n',
-  );
+  host.resolveFailure = 'cannot resolve the server configuration: refused';
+  assert.equal(await host.check(), 1);
   assert.equal(await host.check('--runtime-state', 'none'), 0);
   assert.equal(
     rowsOf(host.output)['runtime-state'],
@@ -1870,4 +1953,342 @@ test('--runtime-state none backs up a deployment that keeps no state', async (t)
       .runtimeState,
     null,
   );
+});
+
+test('stop counts the workers in either cgroup hierarchy and refuses an unreadable one', async (t) => {
+  // cgroup v1 and the hybrid layout: systemd's named hierarchy.
+  const host = await rig(t);
+  host.cgroupLayout = 'v1';
+  await host.system.sleep(0);
+  host.workersIgnoreTerm = true;
+  assert.equal(await host.upgrade('stop', '--timeout', '2'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /Runtime workers still run after 2s \(PID 11\)/,
+  );
+
+  // A procs file that cannot be read is no proof that nothing runs.
+  const other = await rig(t);
+  const procs = path.join(
+    other.root,
+    'cgroup/system.slice',
+    `${SERVER}.service`,
+    'cgroup.procs',
+  );
+  other.system.sleep = async () => {
+    other.clock += 1;
+  };
+  await rm(procs);
+  await mkdir(procs);
+  assert.equal(await other.upgrade('stop'), 1);
+  assert.equal(
+    other.output.at(-1),
+    `stop refused: cannot read ${procs} (EISDIR), so the Runtime workers of ${SERVER} cannot be counted.`,
+  );
+  assert.equal(other.units[HARNESS].ActiveState, 'active');
+
+  // A cgroup that systemd is removing after the kill answers ENODEV.
+  const dying = await rig(t);
+  const kill = dying.system.run;
+  dying.system.run = (command, args, options) => {
+    const result = kill(command, args, options);
+    if (command === 'systemctl' && args[0] === 'kill') {
+      dying.cgroupError = 'ENODEV';
+    }
+    return result;
+  };
+  assert.equal(await dying.upgrade('stop'), 0);
+  assert.equal(dying.units[HARNESS].ActiveState, 'inactive');
+  // Any other error is no proof that a worker that outlived stop is gone.
+  dying.units[SERVER].procs = ['12'];
+  await dying.system.sleep(0);
+  dying.cgroupError = 'EACCES';
+  assert.equal(
+    await dying.upgrade('backup', '--to', path.join(dying.root, 'b')),
+    1,
+  );
+  assert.match(dying.output.at(-1), /cannot read .*cgroup\.procs \(EACCES\)/);
+
+  const bare = await rig(t);
+  bare.system.sleep = async () => {
+    bare.clock += 1;
+  };
+  await rm(path.join(bare.root, 'cgroup'), { recursive: true });
+  await mkdir(path.join(bare.root, 'cgroup'));
+  assert.equal(await bare.upgrade('stop'), 1);
+  assert.match(
+    bare.output.at(-1),
+    /holds neither the unified cgroup hierarchy nor systemd's/,
+  );
+  assert.equal(bare.units[HARNESS].ActiveState, 'active');
+});
+
+test('stop says why the control plane shows as failed', async (t) => {
+  const host = await rig(t);
+  host.stopFails = true;
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(
+    host.output.at(-1),
+    `${SERVER} shows as failed: its unit counts the exit status 143 of a stopped JVM as a failure. This release's unit template adds SuccessExitStatus=143; carry it over before start, then systemctl reset-failed ${SERVER} clears the state.`,
+  );
+  // Any other failure points at the journal.
+  const other = await rig(t);
+  other.stopFails = true;
+  const stop = other.system.run;
+  other.system.run = (command, args, options) => {
+    const result = stop(command, args, options);
+    if (command === 'systemctl' && args[0] === 'stop') {
+      other.units[SERVER].ExecMainStatus = '1';
+    }
+    return result;
+  };
+  assert.equal(await other.upgrade('stop'), 0);
+  assert.equal(
+    other.output.at(-1),
+    `${SERVER} shows as failed (exit-code, status 1); see journalctl -u ${SERVER}. start runs it again.`,
+  );
+});
+
+test('check refuses a new script Flyway would not run', async (t) => {
+  const installedScripts = {
+    'db/migration/V1__managed_schema.sql': 'CREATE TABLE a (id INT);\n',
+    'db/migration/V2__more.sql': 'CREATE TABLE b (id INT);\n',
+  };
+  for (const [added, expected] of [
+    [
+      'V1.5__backport.sql',
+      /^FAIL this release adds V1.5__backport.sql, which does not sort after V2__more.sql, the newest script the installed database ran, so Flyway refuses it/,
+    ],
+    [
+      'V2__again.sql',
+      /^FAIL this release adds V2__again.sql, which does not sort after V2__more.sql/,
+    ],
+    ['V1_10__later.sql', /^FAIL this release adds V1_10__later.sql/],
+    [
+      'V3__later.sql',
+      /^WARN start applies V3__later.sql; only the database backup undoes it/,
+    ],
+    ['V2_1__later.sql', /^WARN start applies V2_1__later.sql/],
+  ]) {
+    const host = await rig(t, {
+      installedScripts,
+      scripts: {
+        ...installedScripts,
+        [`db/migration/${added}`]: 'SELECT 1;\n',
+      },
+    });
+    assert.equal(
+      await host.check(),
+      expected.source.startsWith('^FAIL') ? 1 : 0,
+      added,
+    );
+    assert.match(rowsOf(host.output).database, expected, added);
+  }
+});
+
+test('verify bounds every request and retries a poll the restart failed', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
+  host.responses['GET /v1/agents/sessions/s1'] = { id: 's1' };
+  host.responses['GET /v1/agents/sessions/s1/items'] = { data: [] };
+  host.responses['POST /v1/agents/sessions'] = { id: 's2' };
+  // A Harness that reconnects answers 503 once.
+  const fetch = host.system.fetch;
+  let polls = 0;
+  host.system.fetch = async (url, init) => {
+    if (url.includes('/events')) {
+      polls += 1;
+      if (polls === 1) {
+        host.requests.push({ url, init });
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: async () => ({ error: { message: 'dependency_unavailable' } }),
+        };
+      }
+      host.responses['GET /v1/agents/sessions/s2/events'] = {
+        data: [{ sequence: 1, type: 'turn.completed', terminal: true }],
+      };
+    }
+    return fetch(url, init);
+  };
+  host.requests = [];
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 0);
+  assert.match(
+    rowsOf(host.output).turn,
+    /^PASS Session s2 ended with turn.completed/,
+  );
+  assert.equal(polls, 2);
+  assert.ok(host.requests.length > 0);
+  assert.ok(
+    host.requests.every(({ init }) => init.signal),
+    'every request is bounded',
+  );
+
+  // A 4xx is an answer, not a blip.
+  host.system.fetch = fetch;
+  delete host.responses['GET /v1/agents/sessions/s2/events'];
+  const polled = host.requests.length;
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 1);
+  assert.match(
+    rowsOf(host.output).turn,
+    /^FAIL Session s2: GET .*events.*: 404 missing/,
+  );
+  assert.equal(
+    host.requests.slice(polled).filter(({ url }) => url.includes('/events'))
+      .length,
+    1,
+  );
+
+  // A poll that keeps failing ends at --timeout and names the last failure.
+  host.system.fetch = async (url, init) =>
+    url.includes('/events')
+      ? {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: async () => ({ error: { message: 'dependency_unavailable' } }),
+        }
+      : fetch(url, init);
+  assert.equal(
+    await host.upgrade(
+      'verify',
+      '--tenant',
+      'acme',
+      '--turn',
+      '--timeout',
+      '3',
+    ),
+    1,
+  );
+  assert.equal(
+    rowsOf(host.output).turn,
+    'FAIL Session s2: no terminal event within 3s; the last poll failed: GET /v1/agents/sessions/s2/events?after=0&limit=100: 503 dependency_unavailable',
+  );
+  host.system.fetch = fetch;
+
+  // A control plane that accepts and never answers ends at --timeout.
+  host.hang = true;
+  const started = Date.now();
+  assert.equal(
+    await host.upgrade(
+      'verify',
+      '--tenant',
+      'acme',
+      '--turn',
+      '--timeout',
+      '1',
+    ),
+    1,
+  );
+  assert.ok(Date.now() - started < 8000, `${Date.now() - started}ms`);
+  const rows = rowsOf(host.output);
+  assert.match(rows.health, /^FAIL/);
+  assert.match(
+    rows.session,
+    /^FAIL GET \/v1\/agents\/sessions\?limit=1: .*timeout/i,
+  );
+});
+
+test('verify waits the whole budget for a slow health answer', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // Longer than one probe of start's loop may take.
+  const fetch = host.system.fetch;
+  host.system.fetch = async (url, init) => {
+    if (url.endsWith('/actuator/health')) {
+      await new Promise((resolve) => setTimeout(resolve, 5300));
+      init.signal.throwIfAborted();
+    }
+    return fetch(url, init);
+  };
+  assert.equal(await host.upgrade('verify', '--timeout', '30'), 0);
+  assert.match(rowsOf(host.output).health, /^PASS/);
+});
+
+test('verify reads Sessions as the actor it is given', async (t) => {
+  const { host, target } = await backedUp(t, {
+    serverEnv: ['QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Actor'],
+  });
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // Without an actor the API lists Sessions outside Workspaces only.
+  host.responses['GET /v1/agents/sessions'] = (search, init) =>
+    init.headers['X-Actor'] === 'alice'
+      ? { data: [{ id: 'w1' }] }
+      : { data: [] };
+  host.responses['GET /v1/agents/sessions/w1'] = { id: 'w1' };
+  host.responses['GET /v1/agents/sessions/w1/items'] = { data: [{}] };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 0);
+  assert.deepEqual(
+    [
+      rowsOf(host.output).session,
+      host.output.find((line) => line.includes('fix: pass --actor'))?.trim(),
+    ],
+    [
+      'WARN tenant acme has no Session that a request without an actor reads',
+      'fix: pass --actor <id> to read Workspace Sessions as one of their readers',
+    ],
+  );
+  assert.equal(
+    await host.upgrade('verify', '--tenant', 'acme', '--actor', 'alice'),
+    0,
+  );
+  assert.equal(
+    rowsOf(host.output).session,
+    'PASS read Session w1 and 1 item(s)',
+  );
+  assert.ok(
+    host.requests
+      .filter(({ url }) => url.includes('/w1'))
+      .every(({ init }) => init.headers['X-Actor'] === 'alice'),
+  );
+  assert.equal(await host.upgrade('verify', '--actor', 'alice'), 2);
+
+  // A server that names no actor header takes none.
+  host.resolved = { trustedActorHeader: '' };
+  assert.equal(
+    await host.upgrade('verify', '--tenant', 'acme', '--actor', 'alice'),
+    1,
+  );
+  assert.match(
+    rowsOf(host.output).session,
+    /^FAIL --actor needs a trusted actor header/,
+  );
+});
+
+test('verify takes the auth mode from the configuration the server resolves', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // signed in a configuration file, which no variable shows.
+  host.resolved = { authMode: 'signed' };
+  host.services = [];
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 0);
+  assert.match(
+    rowsOf(host.output).session,
+    /^SKIP the API takes signed requests only/,
+  );
+  assert.ok(!host.requests.some(({ url }) => url.includes('/v1/')));
+  // The installed release is this one, so its own jar runs in place.
+  const resolver = host.services.find(({ args }) => args.includes(RESOLVER));
+  assert.equal(
+    resolver.jar.path,
+    path.join(`${host.current}-releases`, '0.2.0', 'lib/server.jar'),
+  );
+  host.resolveFailure = 'cannot resolve the server configuration: refused';
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 0);
+  assert.equal(
+    rowsOf(host.output).session,
+    "SKIP cannot resolve the API's auth mode: cannot resolve the server configuration: refused",
+  );
+  assert.ok(!host.requests.some(({ url }) => url.includes('/v1/')));
 });

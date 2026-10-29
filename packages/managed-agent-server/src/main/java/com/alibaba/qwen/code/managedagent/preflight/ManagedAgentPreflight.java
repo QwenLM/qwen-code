@@ -1814,7 +1814,7 @@ public final class ManagedAgentPreflight {
                 : line;
     }
 
-    private static String rootMessage(Throwable error) {
+    static String rootMessage(Throwable error) {
         Throwable current = error;
         while (current.getCause() != null) {
             current = current.getCause();

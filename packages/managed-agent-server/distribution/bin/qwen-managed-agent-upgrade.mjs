@@ -70,7 +70,14 @@ const SHOW_PROPERTIES = [
   'DropInPaths',
   'ActiveEnterTimestampMonotonic',
   'InactiveEnterTimestampMonotonic',
+  'Result',
+  'ExecMainStatus',
 ];
+// The class that prints the configuration the server resolves; see
+// ResolvedConfiguration.java.
+const RESOLVER_MAIN =
+  'com.alibaba.qwen.code.managedagent.preflight.ResolvedConfiguration';
+const RESOLVED_PREFIX = 'qwen-managed-agent-configuration ';
 
 const USAGE = `Usage: qwen-managed-agent-upgrade <phase> [options]
 
@@ -80,7 +87,7 @@ Run each phase as root from the new distribution, in this order:
   backup --to <dir>        dump MySQL and archive the Runtime state and configuration
   install --backup <dir>   install this release and switch the distribution link
   start                    start the Harness, run --check, start the control plane
-  verify [--tenant <id>] [--turn]
+  verify [--tenant <id>] [--actor <id>] [--turn]
                            run --check --online and read the API
 
 Options:
@@ -90,10 +97,11 @@ Options:
   --mysqldump <path>       check, backup: mysqldump to run (default mysqldump)
   --skip-database          check, backup: the database is backed up another way
   --runtime-state <dir>    check, backup: the Runtime state directory, or none,
-                           when not only QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY
-                           sets it
+                           instead of the one the server's configuration resolves to
   --server-url <url>       start, verify: control-plane URL (default from server.env)
   --timeout <seconds>      stop, start, verify: how long to wait
+  --actor <id>             verify: read Sessions as this actor, through the server's
+                           trusted actor header
   --turn                   verify: create a Session and run one Turn, which calls the model`;
 
 class Refusal extends Error {}
@@ -238,6 +246,31 @@ export function parseEnvironmentFile(text) {
     push(state === 'value');
   }
   return values;
+}
+
+/**
+ * EnvironmentFile= text that systemd, like parseEnvironmentFile, reads back as
+ * exactly these values: inside double quotes only a backslash, a double
+ * quote, a backtick and a dollar sign need a backslash, and a newline stands
+ * for itself.
+ */
+export function formatEnvironmentFile(entries) {
+  return [...entries]
+    .map(
+      ([key, value]) =>
+        key + '="' + String(value).replace(/[\\"`$]/g, '\\$&') + '"\n',
+    )
+    .join('');
+}
+
+/**
+ * The arguments ExecStart passes after the program, or undefined when the
+ * text systemctl prints cannot tell them apart: it joins the words with
+ * spaces and quotes none of them.
+ */
+export function execStartArguments(value) {
+  const argv = /\bargv\[\]=(.*?) ; /.exec(value ?? '')?.[1];
+  return argv !== undefined && !argv.includes(' ') ? [] : undefined;
 }
 
 /** Splits `systemctl show` output; a property listed more than once keeps every value. */
@@ -392,10 +425,16 @@ export function parseMysqlJdbcUrl(url) {
   if (!match) {
     return undefined;
   }
+  let database;
+  try {
+    database = decodeURIComponent(match[3]);
+  } catch {
+    return undefined;
+  }
   return {
     host: match[1].replace(/^\[|\]$/g, ''),
     port: match[2] ?? '3306',
-    database: decodeURIComponent(match[3]),
+    database,
   };
 }
 
@@ -480,6 +519,7 @@ export function createSystem() {
     bootId: async () =>
       (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim(),
     cgroupRoot: '/sys/fs/cgroup',
+    readCgroup: (file) => readFile(file, 'utf8'),
     // The distribution this script came from: the release being installed.
     distribution: path.dirname(
       path.dirname(realpathSync(fileURLToPath(import.meta.url))),
@@ -620,6 +660,8 @@ async function showUnit(system, name) {
     ].filter(Boolean),
     activeEnter: first('ActiveEnterTimestampMonotonic'),
     inactiveEnter: first('InactiveEnterTimestampMonotonic'),
+    result: first('Result'),
+    execMainStatus: first('ExecMainStatus'),
   };
 }
 
@@ -644,19 +686,44 @@ async function unitEnvironment(unit) {
   return { environment, missing };
 }
 
+// systemd names a unit's cgroup within the hierarchy it manages: the unified
+// one, or on cgroup v1 and the hybrid layout its own named hierarchy.
+async function cgroupHierarchy(system) {
+  const root = system.cgroupRoot;
+  if (await exists(path.join(root, 'cgroup.controllers'))) {
+    return root;
+  }
+  if (await exists(path.join(root, 'systemd', 'cgroup.procs'))) {
+    return path.join(root, 'systemd');
+  }
+  throw new Refusal(
+    `${root} holds neither the unified cgroup hierarchy nor systemd's, so the Runtime workers cannot be counted.`,
+  );
+}
+
 async function processesOf(system, unit) {
   if (!unit.controlGroup) {
     return [];
   }
+  const file = path.join(
+    await cgroupHierarchy(system),
+    unit.controlGroup,
+    'cgroup.procs',
+  );
+  let text;
   try {
-    const text = await readFile(
-      path.join(system.cgroupRoot, unit.controlGroup, 'cgroup.procs'),
-      'utf8',
+    text = await system.readCgroup(file);
+  } catch (error) {
+    // systemd removes a cgroup once its last process exits, and a cgroup
+    // being removed answers ENODEV.
+    if (error.code === 'ENOENT' || error.code === 'ENODEV') {
+      return [];
+    }
+    throw new Refusal(
+      `cannot read ${file} (${error.code ?? error.message}), so the Runtime workers of ${unit.name} cannot be counted.`,
     );
-    return text.split('\n').filter(Boolean);
-  } catch {
-    return [];
   }
+  return text.split('\n').filter(Boolean);
 }
 
 async function readManifest(root) {
@@ -895,6 +962,28 @@ export async function migrationScripts(jar) {
   }
 }
 
+// Flyway's version of V<version>__<description>.sql, as numbers, or
+// undefined for a script that has none.
+function migrationVersion(name) {
+  const version = /^V([^_].*?)__/.exec(name)?.[1].replaceAll('_', '.');
+  if (!version || !/^\d+(\.\d+)*$/.test(version)) {
+    return undefined;
+  }
+  return version.split('.').map(BigInt);
+}
+
+// Flyway compares versions part by part, a missing part counting as 0.
+function compareMigrationVersions(left, right) {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index] ?? 0n;
+    const b = right[index] ?? 0n;
+    if (a !== b) {
+      return a < b ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
 function controlPlaneJar(root, manifest) {
   const component = manifest?.components?.find(
     (each) => each.role === 'control-plane',
@@ -960,6 +1049,32 @@ async function databaseRow({
   const applied = [...after.keys()]
     .filter((each) => before.get(each) !== after.get(each))
     .map(name);
+  // Flyway runs a new versioned script only above the newest one the
+  // database ran, as outOfOrder stays off.
+  const newest = [...before.keys()]
+    .map(name)
+    .filter((each) => migrationVersion(each))
+    .sort((a, b) =>
+      compareMigrationVersions(migrationVersion(a), migrationVersion(b)),
+    )
+    .at(-1);
+  const below = applied.filter(
+    (each) =>
+      newest &&
+      migrationVersion(each) &&
+      compareMigrationVersions(
+        migrationVersion(each),
+        migrationVersion(newest),
+      ) <= 0,
+  );
+  if (below.length > 0) {
+    return row(
+      'database',
+      'FAIL',
+      `this release adds ${below.join(', ')}, which does not sort after ${newest}, the newest script the installed database ran, so Flyway refuses it`,
+      'keep the installed release; migrations out of order are not supported',
+    );
+  }
   return applied.length > 0
     ? row(
         'database',
@@ -1281,91 +1396,6 @@ function requireInstalled(deployment) {
   }
 }
 
-const STATE_VARIABLE = 'QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY';
-// qwen.managed-agent.runtime-broker.state-directory in the spellings Spring's
-// relaxed binding accepts.
-const STATE_PROPERTY = /state[-_]?directory/i;
-const STATE_ENVIRONMENT_NAME = 'qwen.managedagent.runtimebroker.statedirectory';
-// Keys that make Spring read further configuration: an import, or profiles
-// whose files this command does not read.
-const INDIRECT_KEY =
-  /^spring\.(config\.import|profiles\.(active|include|group))(\.|\[|$)/;
-const INDIRECT_PROPERTY =
-  /spring[._-]?config[._-]?import|spring[._-]?profiles[._-]?(active|include|group)/i;
-
-// Relaxed binding ignores case, dashes and underscores within a segment.
-const uniform = (key) => key.toLowerCase().replace(/[-_]/g, '');
-
-/**
- * The keys a configuration file sets, as dotted paths, read line by line:
- * YAML block mappings by indentation, a properties file by its keys. A flow
- * collection that names an indirect key counts as an import.
- */
-export function configurationKeys(text, properties = false) {
-  const keys = [];
-  const stack = [];
-  for (const line of text.split(/\r?\n/)) {
-    if (/^\s*(#|$)/.test(line) || (properties && /^\s*!/.test(line))) {
-      continue;
-    }
-    if (properties) {
-      const key = /^\s*((?:\\.|[^=:\s\\])+)/.exec(line)?.[1];
-      if (key) {
-        keys.push(key.replace(/\\(.)/g, '$1'));
-      }
-      continue;
-    }
-    if (/^(---|\.\.\.)\s*$/.test(line)) {
-      stack.length = 0;
-      continue;
-    }
-    const match =
-      /^(\s*)(?:-\s+)?("[^"]*"|'[^']*'|[^\s:#'"][^:#]*?)\s*:(\s|$)/.exec(line);
-    if (!match) {
-      continue;
-    }
-    const indent = match[1].length;
-    while (stack.length > 0 && stack.at(-1).indent >= indent) {
-      stack.pop();
-    }
-    stack.push({ indent, key: match[2].replace(/^(["'])(.*)\1$/, '$2') });
-    const key = stack.map((each) => each.key).join('.');
-    keys.push(key);
-    // spring: {config: {import: …}} names its keys inside the value.
-    if (
-      /[{[]/.test(line.slice(match[0].length)) &&
-      !INDIRECT_KEY.test(uniform(key))
-    ) {
-      const parent = stack
-        .slice(0, -1)
-        .map((each) => each.key)
-        .join('.');
-      const nested = INDIRECT_PROPERTY.exec(
-        `${parent}.${line.trim().replace(/[\s{}:,"']+/g, '.')}`,
-      );
-      if (nested) {
-        keys.push(nested[0]);
-      }
-    }
-  }
-  return keys;
-}
-
-/** The dotted keys of a JSON document, such as SPRING_APPLICATION_JSON. */
-function jsonKeys(value, prefix = '') {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return [];
-  }
-  return Object.entries(value).flatMap(([key, child]) => {
-    const name = prefix ? `${prefix}.${key}` : key;
-    return [name, ...jsonKeys(child, name)];
-  });
-}
-
-const indirectKeys = (keys) => [
-  ...new Set(keys.map(uniform).filter((key) => INDIRECT_KEY.test(key))),
-];
-
 /** The configuration files the server's launcher hands to Spring. */
 function serverConfigurationFiles(deployment) {
   const locations = deployment.serverEnvironment.get(
@@ -1381,115 +1411,51 @@ function serverConfigurationFiles(deployment) {
 }
 
 /**
- * Where the server keeps its Runtime state. The server's application.yml maps
- * the property to QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY; any other source
- * that sets it wins over that variable, and this command reads none of them,
- * so it names them instead of guessing.
+ * Where the server keeps its Runtime state: the directory its configuration
+ * resolves to, or the one --runtime-state names instead.
  */
-export async function runtimeState(deployment, options) {
+async function runtimeState(system, deployment, options) {
   if (options.runtimeState === 'none') {
     return { none: true };
   }
   if (options.runtimeState) {
     return { directory: options.runtimeState, source: '--runtime-state' };
   }
-  const environment = deployment.serverEnvironment;
-  const elsewhere = [];
-  for (const [name, value] of environment) {
-    if (name.toLowerCase().replaceAll('_', '.') === STATE_ENVIRONMENT_NAME) {
-      elsewhere.push(name);
-    } else if (
-      ['JAVA_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS'].includes(name) &&
-      (STATE_PROPERTY.test(value) || INDIRECT_PROPERTY.test(value))
-    ) {
-      elsewhere.push(name);
-    } else if (name === 'SPRING_APPLICATION_JSON') {
-      let keys;
-      try {
-        keys = jsonKeys(JSON.parse(value));
-      } catch {
-        keys = undefined;
+  const resolved = await resolvedConfiguration(system, deployment);
+  if (resolved.error) {
+    return { unresolved: resolved.error };
+  }
+  return resolved.runtimeStateDirectory
+    ? {
+        directory: resolved.runtimeStateDirectory,
+        source: resolved.runtimeStateOrigin,
       }
-      if (
-        !keys ||
-        STATE_PROPERTY.test(value) ||
-        indirectKeys(keys).length > 0
-      ) {
-        elsewhere.push(name);
-      }
-    } else if (
-      [
-        'SPRING_CONFIG_LOCATION',
-        'SPRING_CONFIG_IMPORT',
-        'SPRING_PROFILES_ACTIVE',
-        'SPRING_PROFILES_INCLUDE',
-      ].includes(name) &&
-      value.trim()
-    ) {
-      elsewhere.push(`the configuration ${name} selects`);
-    }
-  }
-  if (
-    STATE_PROPERTY.test(deployment.server.execStart) ||
-    INDIRECT_PROPERTY.test(deployment.server.execStart)
-  ) {
-    elsewhere.push(`the arguments of ${deployment.server.name}`);
-  }
-  const { files, unread } = serverConfigurationFiles(deployment);
-  elsewhere.push(
-    ...unread.map(
-      (entry) => `SPRING_CONFIG_ADDITIONAL_LOCATION entry ${entry}`,
-    ),
-  );
-  for (const file of files) {
-    let text;
-    try {
-      text = await readFile(file, 'utf8');
-    } catch {
-      continue;
-    }
-    const properties = file.endsWith('.properties');
-    const settings = text
-      .split('\n')
-      .filter((line) => !(properties ? /^\s*[#!]/ : /^\s*#/).test(line))
-      .join('\n');
-    // An import or a profile can set the directory in a file never read here.
-    const indirect = indirectKeys(configurationKeys(text, properties));
-    if (STATE_PROPERTY.test(settings)) {
-      elsewhere.push(file);
-    } else if (indirect.length > 0) {
-      elsewhere.push(`${file} (${indirect.join(', ')})`);
-    }
-  }
-  if (elsewhere.length > 0) {
-    return { elsewhere };
-  }
-  const directory = environment.get(STATE_VARIABLE);
-  return directory ? { directory, source: STATE_VARIABLE } : {};
+    : {};
 }
 
-async function runtimeStateRow(deployment, options) {
-  const state = await runtimeState(deployment, options);
+async function runtimeStateRow(system, deployment, options) {
+  const state = await runtimeState(system, deployment, options);
+  const name = 'runtime-state';
   if (state.none) {
     return row(
-      'runtime-state',
+      name,
       'SKIP',
       'backup archives no Runtime state, as --runtime-state none asks',
     );
   }
-  if (state.elsewhere) {
+  if (state.unresolved) {
     return row(
-      'runtime-state',
+      name,
       'FAIL',
-      `${state.elsewhere.join(', ')} can set the Runtime state directory, which this command reads only from ${STATE_VARIABLE}`,
+      `cannot resolve the Runtime state directory: ${state.unresolved}`,
       'pass --runtime-state <the directory the server uses>, or none when it keeps no Runtime state, to check and backup',
     );
   }
   if (!state.directory) {
     return row(
-      'runtime-state',
+      name,
       'SKIP',
-      `no Runtime state directory is configured, so backup archives none`,
+      "the server's configuration names no Runtime state directory, so backup archives none",
     );
   }
   let directory = false;
@@ -1499,24 +1465,27 @@ async function runtimeStateRow(deployment, options) {
     // Reported below.
   }
   if (directory) {
-    return row(
-      'runtime-state',
-      'PASS',
-      `backup archives ${state.directory} (${state.source})`,
-    );
+    return {
+      ...row(
+        name,
+        'PASS',
+        `backup archives ${state.directory} (${state.source})`,
+      ),
+      directory: state.directory,
+    };
   }
   return state.source === '--runtime-state'
     ? row(
-        'runtime-state',
+        name,
         'FAIL',
         `${state.directory} is not a directory`,
         'pass the directory the server keeps its Runtime state in',
       )
     : row(
-        'runtime-state',
+        name,
         'WARN',
         `${state.directory} (${state.source}) does not exist, so backup archives no Runtime state`,
-        `correct ${STATE_VARIABLE} if the server keeps its Runtime state elsewhere`,
+        `correct ${state.source} if the server keeps its Runtime state elsewhere`,
       );
 }
 
@@ -1552,10 +1521,10 @@ function backupToolsRow(deployment, options) {
 }
 
 /** The rows that decide whether backup can stand for the deployment. */
-async function backupRows(deployment, options) {
+async function backupRows(system, deployment, options) {
   return [
     backupToolsRow(deployment, options),
-    await runtimeStateRow(deployment, options),
+    await runtimeStateRow(system, deployment, options),
   ];
 }
 
@@ -1593,7 +1562,7 @@ async function phaseCheck(system, deployment, options) {
   const rows = await compatibilityRows(system, deployment);
   const backup =
     deployment.problems.length === 0
-      ? await backupRows(deployment, options)
+      ? await backupRows(system, deployment, options)
       : [];
   printRows(
     system,
@@ -1679,6 +1648,15 @@ async function phaseStop(system, deployment, options) {
   system.out(
     `Stopped ${server.name}, its Runtime workers and ${harness.name}.`,
   );
+  if (stopped.activeState === 'failed') {
+    // A JVM stopped by SIGTERM exits 143, which a unit installed before
+    // SuccessExitStatus=143 counts as a failure.
+    system.out(
+      stopped.execMainStatus === '143'
+        ? `${server.name} shows as failed: its unit counts the exit status 143 of a stopped JVM as a failure. This release's unit template adds SuccessExitStatus=143; carry it over before start, then systemctl reset-failed ${server.name} clears the state.`
+        : `${server.name} shows as failed (${stopped.result || 'no result'}, status ${stopped.execMainStatus || 'unknown'}); see journalctl -u ${server.name}. start runs it again.`,
+    );
+  }
   return 0;
 }
 
@@ -1778,14 +1756,14 @@ async function phaseBackup(system, deployment, options) {
   if (!options.to) {
     throw new Refusal('backup needs --to <new empty directory>.');
   }
-  const preconditions = await backupRows(deployment, options);
+  const preconditions = await backupRows(system, deployment, options);
   for (const each of preconditions) {
     if (each.status === 'FAIL') {
       throw new Refusal(`${each.detail}; ${each.fix}.`);
     }
   }
   const [, stateRow] = preconditions;
-  const state = (await runtimeState(deployment, options)).directory;
+  const state = stateRow.directory;
   const directory = path.resolve(options.to);
   const created = !(await exists(directory));
   if (!created && (await readdir(directory)).length > 0) {
@@ -1977,6 +1955,13 @@ export async function staleBackup(system, deployment, directory) {
 
 async function phaseInstall(system, deployment, options) {
   refuseUnless(deployment);
+  // The rename that installs the release is its last step: a second run
+  // finds it done, and start comes next, not another backup.
+  if (deployment.installed?.version === deployment.manifest.version) {
+    throw new Refusal(
+      `${deployment.manifest.version} is already installed at ${deployment.current}; run start or verify for this release.`,
+    );
+  }
   await requireStopped(system, deployment, 'install');
   if (!options.backup) {
     throw new Refusal('install needs --backup <directory backup wrote>.');
@@ -2099,8 +2084,27 @@ async function phaseInstall(system, deployment, options) {
   return 0;
 }
 
-/** Runs the installed launcher's preflight as the service account, with the unit's environment. */
-function preflight(system, deployment, extra) {
+// A directory for the files one command hands to systemd, removed after it.
+async function withScratch(task) {
+  const scratch = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-managed-agent-upgrade-'),
+  );
+  try {
+    // The service account opens a file in it by name; it lists nothing.
+    await chmod(scratch, 0o711);
+    return await task(scratch);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * systemd-run options that run a command the way the server unit runs its
+ * own: as its account, in its working directory, with its environment.
+ * Environment= assignments travel in a file, since every local user can read
+ * a command line. `launcher` adds what the launcher exports before Java runs.
+ */
+async function asServerUnit(deployment, scratch, launcher = new Map()) {
   const { server } = deployment;
   const args = ['--wait', '--pipe', '--collect', '--quiet'];
   if (server.user) {
@@ -2109,26 +2113,128 @@ function preflight(system, deployment, extra) {
   if (server.workingDirectory) {
     args.push(`--working-directory=${server.workingDirectory}`);
   }
-  for (const [key, value] of server.assignments) {
-    args.push(`--setenv=${key}=${value}`);
+  const write = async (name, entries) => {
+    const file = path.join(scratch, name);
+    await writeFile(file, formatEnvironmentFile(entries), { mode: 0o600 });
+    return file;
+  };
+  // systemd applies Environment= first, then each EnvironmentFile= in turn.
+  const files = [];
+  if ([...server.assignments].length > 0) {
+    files.push(await write('unit.env', server.assignments));
   }
-  for (const entry of server.environmentFiles) {
-    args.push(
-      `--property=EnvironmentFile=${entry.optional ? '-' : ''}${entry.path}`,
-    );
-  }
-  args.push(
-    path.join(deployment.current, SERVER_LAUNCHER),
-    '--check',
-    ...extra,
+  files.push(
+    ...server.environmentFiles.map(
+      (entry) => `${entry.optional ? '-' : ''}${entry.path}`,
+    ),
   );
-  const result = system.run('systemd-run', args, { stdio: 'inherit' });
-  return !result.error && result.status === 0;
+  if (launcher.size > 0) {
+    files.push(await write('launcher.env', launcher));
+  }
+  return [
+    ...args,
+    ...files.map((file) => `--property=EnvironmentFile=${file}`),
+  ];
 }
 
-// The probe's own answer, or undefined once the time is up.
-async function waitFor(system, timeoutSeconds, probe) {
-  const deadline = system.now() + timeoutSeconds * 1000;
+/** Runs the installed launcher's preflight as the service account, with the unit's environment. */
+async function preflight(system, deployment, extra) {
+  return withScratch(async (scratch) => {
+    const result = system.run(
+      'systemd-run',
+      [
+        ...(await asServerUnit(deployment, scratch)),
+        path.join(deployment.current, SERVER_LAUNCHER),
+        '--check',
+        ...extra,
+      ],
+      { stdio: 'inherit' },
+    );
+    return !result.error && result.status === 0;
+  });
+}
+
+/**
+ * The settings the server's configuration resolves to, read once per phase:
+ * this release's jar prepares Spring's environment the way the server does,
+ * run as the server unit runs it and with the launcher's default, so imports,
+ * profiles, every configuration file and relaxed names count as they do
+ * there. On a failure, `error` says why.
+ */
+async function resolvedConfiguration(system, deployment) {
+  deployment.resolved ??= await resolveConfiguration(system, deployment);
+  return deployment.resolved;
+}
+
+async function resolveConfiguration(system, deployment) {
+  const { server } = deployment;
+  const args = execStartArguments(server.execStart);
+  if (!args) {
+    return {
+      error: `${server.name} passes arguments to ${SERVER_LAUNCHER}, which systemctl does not print exactly`,
+    };
+  }
+  const java = which('java', deployment.serverEnvironment.get('PATH'));
+  if (!java) {
+    return { error: "no java on the control plane's PATH" };
+  }
+  // The launcher names config/application.yml unless the variable is set
+  // and not empty.
+  const launcher = new Map();
+  const config = path.join(deployment.current, 'config/application.yml');
+  if (
+    !deployment.serverEnvironment.get('SPRING_CONFIG_ADDITIONAL_LOCATION') &&
+    (await isFile(config))
+  ) {
+    launcher.set('SPRING_CONFIG_ADDITIONAL_LOCATION', `file:${config}`);
+  }
+  return withScratch(async (scratch) => {
+    let jar;
+    if (deployment.installed?.version === deployment.manifest.version) {
+      jar = controlPlaneJar(deployment.currentTarget, deployment.installed);
+    } else {
+      // A copy the service account can read wherever the archive was extracted.
+      jar = path.join(scratch, 'server.jar');
+      await copyFile(
+        controlPlaneJar(system.distribution, deployment.manifest),
+        jar,
+      );
+      await chmod(jar, 0o644);
+    }
+    const result = system.run('systemd-run', [
+      ...(await asServerUnit(deployment, scratch, launcher)),
+      java,
+      `-Dloader.main=${RESOLVER_MAIN}`,
+      '-cp',
+      jar,
+      'org.springframework.boot.loader.launch.PropertiesLauncher',
+      ...args,
+    ]);
+    const line = String(result.stdout ?? '')
+      .split('\n')
+      .find((each) => each.startsWith(RESOLVED_PREFIX));
+    if (result.error || result.status !== 0 || !line) {
+      const stderr = String(result.stderr ?? '')
+        .trim()
+        .split('\n');
+      return {
+        error:
+          result.error?.message ??
+          (stderr.find((each) => each.startsWith('cannot resolve')) ||
+            stderr[0] ||
+            `exit ${result.status}`),
+      };
+    }
+    try {
+      return JSON.parse(line.slice(RESOLVED_PREFIX.length));
+    } catch {
+      return { error: `unreadable output: ${line}` };
+    }
+  });
+}
+
+// The probe's own answer, or undefined once the deadline passes.
+async function waitFor(system, deadline, probe) {
   for (;;) {
     const outcome = await probe(Math.max(deadline - system.now(), 1));
     if (outcome !== undefined) {
@@ -2141,14 +2247,15 @@ async function waitFor(system, timeoutSeconds, probe) {
   }
 }
 
-// One probe waits at most this long, so a listener that never answers
-// cannot hold a phase past its --timeout.
+// One probe of a polling loop waits at most this long, so a listener that
+// never answers cannot hold the loop past its --timeout; a request made once
+// waits for the whole budget.
 const PROBE_TIMEOUT_MS = 5000;
 
-async function health(system, baseUrl, budgetMs = PROBE_TIMEOUT_MS) {
+async function health(system, baseUrl, budgetMs, capMs = PROBE_TIMEOUT_MS) {
   try {
     const response = await system.fetch(`${baseUrl}/actuator/health`, {
-      signal: AbortSignal.timeout(Math.min(budgetMs, PROBE_TIMEOUT_MS)),
+      signal: AbortSignal.timeout(Math.min(budgetMs, capMs)),
     });
     const body = await response.json();
     return response.ok && body?.status === 'UP';
@@ -2188,12 +2295,18 @@ async function phaseStart(system, deployment, options) {
   const harnessPort =
     Number(harnessUrl.port) || (harnessUrl.protocol === 'https:' ? 443 : 80);
   const harnessHost = harnessUrl.hostname.replace(/^\[|\]$/g, '');
-  const listening = await waitFor(system, options.timeout, async () => {
-    if ((await showUnit(system, harness.name)).activeState === 'failed') {
-      return false;
-    }
-    return (await system.connect(harnessHost, harnessPort)) ? true : undefined;
-  });
+  const listening = await waitFor(
+    system,
+    system.now() + options.timeout * 1000,
+    async () => {
+      if ((await showUnit(system, harness.name)).activeState === 'failed') {
+        return false;
+      }
+      return (await system.connect(harnessHost, harnessPort))
+        ? true
+        : undefined;
+    },
+  );
   if (listening === false) {
     throw new Refusal(
       `${harness.name} failed before it listened on ${harnessUrl.host}; see journalctl -u ${harness.name}.`,
@@ -2206,7 +2319,7 @@ async function phaseStart(system, deployment, options) {
   }
 
   system.out(`Running ${SERVER_LAUNCHER} --check as ${server.user || 'root'}`);
-  if (!preflight(system, deployment, [])) {
+  if (!(await preflight(system, deployment, []))) {
     throw new Refusal(
       `The preflight failed, so ${server.name} stays stopped; fix its FAIL rows and run start again.`,
     );
@@ -2216,12 +2329,16 @@ async function phaseStart(system, deployment, options) {
   runChecked(system, 'systemctl', ['start', server.name]);
   const baseUrl =
     options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
-  const healthy = await waitFor(system, options.timeout, async (budget) => {
-    if ((await showUnit(system, server.name)).activeState === 'failed') {
-      return false;
-    }
-    return (await health(system, baseUrl, budget)) ? true : undefined;
-  });
+  const healthy = await waitFor(
+    system,
+    system.now() + options.timeout * 1000,
+    async (budget) => {
+      if ((await showUnit(system, server.name)).activeState === 'failed') {
+        return false;
+      }
+      return (await health(system, baseUrl, budget)) ? true : undefined;
+    },
+  );
   if (healthy === false) {
     throw new Refusal(
       `${server.name} failed before it reported UP at ${baseUrl}/actuator/health; see journalctl -u ${server.name}, then run start again.`,
@@ -2239,48 +2356,74 @@ async function phaseStart(system, deployment, options) {
   return 0;
 }
 
-async function api(system, baseUrl, tenant, route, init = {}) {
-  const response = await system.fetch(`${baseUrl}${route}`, {
-    ...init,
-    headers: {
-      'X-Qwen-Tenant-Id': tenant,
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...init.headers,
-    },
-  });
+class ApiError extends Error {
+  constructor(message, transient) {
+    super(message);
+    // A dropped connection, a timeout or a 5xx, which a later poll may pass.
+    this.transient = transient;
+  }
+}
+
+/**
+ * One API request within the client's deadline, and at most `capMs`.
+ * `client` holds the base URL, the tenant, the actor header to send if any,
+ * and the deadline.
+ */
+async function api(system, client, route, init = {}, capMs = Infinity) {
+  const label = `${init.method ?? 'GET'} ${route}`;
+  let response;
+  try {
+    response = await system.fetch(`${client.baseUrl}${route}`, {
+      ...init,
+      signal: AbortSignal.timeout(
+        Math.min(Math.max(client.deadline - system.now(), 1), capMs),
+      ),
+      headers: {
+        'X-Qwen-Tenant-Id': client.tenant,
+        ...(client.actor ? { [client.actor.header]: client.actor.id } : {}),
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...init.headers,
+      },
+    });
+  } catch (error) {
+    throw new ApiError(`${label}: ${error.message}`, true);
+  }
   const body = await response.json().catch(() => undefined);
   if (!response.ok) {
     const reason = body?.error?.message ?? body?.message ?? response.statusText;
-    throw new Error(
-      `${init.method ?? 'GET'} ${route}: ${response.status} ${reason}`,
+    throw new ApiError(
+      `${label}: ${response.status} ${reason}`,
+      response.status >= 500,
     );
   }
   return body;
 }
 
-async function sessionRow(system, baseUrl, tenant) {
+async function sessionRow(system, client) {
   try {
-    const list = await api(
-      system,
-      baseUrl,
-      tenant,
-      '/v1/agents/sessions?limit=1',
-    );
+    const list = await api(system, client, '/v1/agents/sessions?limit=1');
     const session = list?.data?.[0];
     if (!session) {
-      return row(
-        'session',
-        'WARN',
-        `tenant ${tenant} has no Session to read`,
-        'pass a tenant that has one',
-      );
+      // Without an actor the API lists only Sessions outside Workspaces.
+      return client.actor
+        ? row(
+            'session',
+            'WARN',
+            `actor ${client.actor.id} reads no Session of tenant ${client.tenant}`,
+            'pass a tenant and actor that have one',
+          )
+        : row(
+            'session',
+            'WARN',
+            `tenant ${client.tenant} has no Session that a request without an actor reads`,
+            'pass --actor <id> to read Workspace Sessions as one of their readers',
+          );
     }
     const id = encodeURIComponent(session.id);
-    await api(system, baseUrl, tenant, `/v1/agents/sessions/${id}`);
+    await api(system, client, `/v1/agents/sessions/${id}`);
     const items = await api(
       system,
-      baseUrl,
-      tenant,
+      client,
       `/v1/agents/sessions/${id}/items?limit=20`,
     );
     return row(
@@ -2293,10 +2436,10 @@ async function sessionRow(system, baseUrl, tenant) {
   }
 }
 
-async function turnRow(system, baseUrl, tenant, timeout) {
+async function turnRow(system, client, timeout) {
   let session;
   try {
-    session = await api(system, baseUrl, tenant, '/v1/agents/sessions', {
+    session = await api(system, client, '/v1/agents/sessions', {
       method: 'POST',
       headers: {
         'Idempotency-Key': `upgrade-verify-${randomBytes(8).toString('hex')}`,
@@ -2309,13 +2452,26 @@ async function turnRow(system, baseUrl, tenant, timeout) {
     });
     const id = encodeURIComponent(session.id);
     let after = 0;
-    const terminal = await waitFor(system, timeout, async () => {
-      const page = await api(
-        system,
-        baseUrl,
-        tenant,
-        `/v1/agents/sessions/${id}/events?after=${after}&limit=100`,
-      );
+    let lastError;
+    const terminal = await waitFor(system, client.deadline, async () => {
+      let page;
+      try {
+        page = await api(
+          system,
+          client,
+          `/v1/agents/sessions/${id}/events?after=${after}&limit=100`,
+          {},
+          PROBE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        // A restarted Harness's 503 or a proxy's 502 passes; a 4xx does not.
+        if (!error.transient) {
+          throw error;
+        }
+        lastError = error;
+        return undefined;
+      }
+      lastError = undefined;
       for (const event of page?.data ?? []) {
         after = Math.max(after, Number(event.sequence) || after);
         if (event.terminal) {
@@ -2328,7 +2484,7 @@ async function turnRow(system, baseUrl, tenant, timeout) {
       return row(
         'turn',
         'FAIL',
-        `Session ${session.id}: no terminal event within ${timeout}s`,
+        `Session ${session.id}: no terminal event within ${timeout}s${lastError ? `; the last poll failed: ${lastError.message}` : ''}`,
       );
     }
     return /fail|error|cancel/i.test(terminal.type)
@@ -2364,7 +2520,7 @@ async function phaseVerify(system, deployment, options) {
     `Running ${SERVER_LAUNCHER} --check --online as ${server.user || 'root'}`,
   );
   rows.push(
-    preflight(system, deployment, ['--online'])
+    (await preflight(system, deployment, ['--online']))
       ? row('preflight', 'PASS', '--check --online passed')
       : row(
           'preflight',
@@ -2375,24 +2531,19 @@ async function phaseVerify(system, deployment, options) {
   );
   const baseUrl =
     options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
+  const budget = options.timeout * 1000;
+  // start has waited for UP already, so one probe that may take the whole
+  // budget tells a slow answer from a wrong one.
   rows.push(
-    (await health(system, baseUrl, options.timeout * 1000))
+    (await health(system, baseUrl, budget, budget))
       ? row('health', 'PASS', `${baseUrl}/actuator/health is UP`)
       : row('health', 'FAIL', `${baseUrl}/actuator/health is not UP`),
   );
-  const signed =
-    (deployment.serverEnvironment.get('QWEN_MANAGED_AGENT_AUTH_MODE') ??
-      'auto') === 'signed';
-  if (signed) {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        'the API takes signed requests only',
-        'read a Session through the ingress',
-      ),
-    );
-  } else if (!options.tenant) {
+  const ingress = 'read a Session through the ingress';
+  const resolved = options.tenant
+    ? await resolvedConfiguration(system, deployment)
+    : undefined;
+  if (!options.tenant) {
     rows.push(
       row(
         'session',
@@ -2401,12 +2552,48 @@ async function phaseVerify(system, deployment, options) {
         'pass --tenant <id> to read an existing Session',
       ),
     );
+  } else if (resolved.error) {
+    rows.push(
+      row(
+        'session',
+        'SKIP',
+        `cannot resolve the API's auth mode: ${resolved.error}`,
+        ingress,
+      ),
+    );
+  } else if (resolved.authMode !== 'open') {
+    rows.push(
+      row(
+        'session',
+        'SKIP',
+        resolved.authMode === 'signed'
+          ? 'the API takes signed requests only'
+          : `the API's auth mode is ${resolved.authMode}`,
+        ingress,
+      ),
+    );
+  } else if (options.actor && !resolved.trustedActorHeader) {
+    rows.push(
+      row(
+        'session',
+        'FAIL',
+        '--actor needs a trusted actor header, which the server does not name',
+        'set QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER, or leave --actor out',
+      ),
+    );
   } else {
-    rows.push(await sessionRow(system, baseUrl, options.tenant));
+    const client = {
+      baseUrl,
+      tenant: options.tenant,
+      actor: options.actor && {
+        header: resolved.trustedActorHeader,
+        id: options.actor,
+      },
+      deadline: system.now() + budget,
+    };
+    rows.push(await sessionRow(system, client));
     if (options.turn) {
-      rows.push(
-        await turnRow(system, baseUrl, options.tenant, options.timeout),
-      );
+      rows.push(await turnRow(system, client, options.timeout));
     }
   }
   printRows(
@@ -2444,6 +2631,7 @@ export async function runUpgrade(argv, system = createSystem()) {
         'server-url': { type: 'string' },
         timeout: { type: 'string' },
         tenant: { type: 'string' },
+        actor: { type: 'string' },
         turn: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -2469,8 +2657,8 @@ export async function runUpgrade(argv, system = createSystem()) {
     system.err('--timeout takes a positive number of seconds.');
     return 2;
   }
-  if (values.turn && !values.tenant) {
-    system.err('--turn needs --tenant.');
+  if ((values.turn || values.actor) && !values.tenant) {
+    system.err(`--${values.turn ? 'turn' : 'actor'} needs --tenant.`);
     return 2;
   }
   const options = {
@@ -2488,6 +2676,7 @@ export async function runUpgrade(argv, system = createSystem()) {
     serverUrl: values['server-url']?.replace(/\/+$/, ''),
     timeout,
     tenant: values.tenant,
+    actor: values.actor,
     turn: values.turn,
   };
   try {

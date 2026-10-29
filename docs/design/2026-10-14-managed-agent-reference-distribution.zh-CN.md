@@ -88,7 +88,7 @@ LICENSE
 
 运维人员先校验 `SHA256SUMS.txt`，解压产物并读取 `manifest.json`，安装精确兼容的 Qwen CLI/Harness，配置 MySQL 和既有 server 环境，启动 `qwen serve --profile hosted-harness`，再运行 bundle 中的 server 启动脚本。`/actuator/health` 是启动门禁。
 
-在已接受的单控制面拓扑中，升级使用一次停止准入窗口：保留数据库、Runtime credential key 和 durable Runtime state 并完成备份；停止入口流量、server 和 Harness；核验新产物及其兼容性 manifest；启动匹配的 Harness；再启动新 server，由 Flyway 向前迁移。只有健康检查和一个新的无工具 Turn 成功后才恢复流量。数据库不支持降级；发生 migration 后如需回滚，必须在接收新写入前恢复升级前的数据库与状态备份。在 systemd 布局下，`bin/qwen-managed-agent-upgrade` 分阶段执行这些步骤，参见[升级命令设计](2026-10-25-managed-agent-upgrade-command.zh-CN.md)。
+在已接受的单控制面拓扑中，升级使用一次停止准入窗口：保留数据库、Runtime credential key 和 durable Runtime state 并完成备份；停止入口流量、server 和 Harness；核验新产物及其兼容性 manifest；启动匹配的 Harness；再启动新 server，由 Flyway 向前迁移。只有健康检查和一个新的无工具 Turn 成功后才恢复流量。数据库不支持降级；发生 migration 后如需回滚，必须在接收新写入前恢复升级前的数据库与状态备份。在 systemd 布局下，`bin/qwen-managed-agent-upgrade` 分阶段执行停止、备份、安装、启动和验证，并把留给运维的步骤（例如停止入口流量、安装 Harness）打印在对应位置，参见[升级命令设计](2026-10-25-managed-agent-upgrade-command.zh-CN.md)。
 
 ## 失败语义
 

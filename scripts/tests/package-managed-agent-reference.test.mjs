@@ -429,6 +429,8 @@ test('ships systemd units with the documented kill modes', async () => {
   );
 
   assert.match(server, /^KillMode=process$/m);
+  // A JVM stopped by SIGTERM exits 143; without this the stopped unit fails.
+  assert.match(server, /^SuccessExitStatus=143$/m);
   assert.match(server, /^StateDirectory=qwen-managed-agent$/m);
   assert.match(
     server,
