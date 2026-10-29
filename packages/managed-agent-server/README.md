@@ -296,6 +296,11 @@ reclaim anything. If the database check fails, capacity remains skipped.
 - Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
 
+MySQL is the supported database family; full integration CI uses MySQL 8.4.
+MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
+Existing dialect handling remains in place; this change does not reject
+connections that previously worked or introduce a catalog migration.
+
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
 dual-path development entry below). It supports durable no-tool Sessions and
