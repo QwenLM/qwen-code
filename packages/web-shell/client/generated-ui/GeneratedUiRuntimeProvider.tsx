@@ -19,6 +19,7 @@ import {
   McpAppToolsContext,
 } from '../mcpAppHostContext';
 import {
+  GeneratedUiSummary,
   McpAppRuntime,
   type McpAppDisplay,
 } from '../components/messages/McpApp';
@@ -234,7 +235,9 @@ export function GeneratedUiSlot({
         </>
       ) : !attached ? (
         <div className="p-3 text-sm text-muted-foreground">
-          <div className="whitespace-pre-wrap">{display.fallbackText}</div>
+          <div className="whitespace-pre-wrap">
+            <GeneratedUiSummary display={display} />
+          </div>
           <p>
             {t(
               elsewhere

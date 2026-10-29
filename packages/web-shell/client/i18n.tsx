@@ -3434,7 +3434,12 @@ const EN: Messages = {
     'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
   'skills.install.error.unsafePath':
     'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
-  'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
+  'skills.install.error.packageTooLarge':
+    'The skill exceeds the installer limit of 32 MiB per file or 64 MiB total.',
+  'skills.install.error.tooManyFiles':
+    'The skill package has too many files (max 2000).',
+  'skills.install.error.zipTooLarge':
+    'The ZIP file must not exceed 7,864,071 bytes.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
     'Could not download the skill from GitHub. Check the URL or authentication and try again.',
@@ -7820,7 +7825,10 @@ const ZH: Messages = {
     '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
   'skills.install.error.unsafePath':
     '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
-  'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
+  'skills.install.error.packageTooLarge':
+    '技能超过安装限制：单文件最大 32 MiB，合计最大 64 MiB。',
+  'skills.install.error.tooManyFiles': '技能包文件过多（最多 2000 个）。',
+  'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 7,864,071 字节。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
     '无法从 GitHub 下载技能，请检查地址或认证信息后重试。',

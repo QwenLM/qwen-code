@@ -83,6 +83,20 @@ export const plugin: ChannelPlugin = {
         description: 'DingTalk IDs used by Allowlist and Pairing policies',
       },
       {
+        key: 'quotePrivateReply',
+        label: 'Quote Private Replies',
+        kind: 'boolean',
+        description:
+          'Quote the originating direct message in the final response. Disabled by default',
+      },
+      {
+        key: 'quoteGroupReply',
+        label: 'Quote Group Replies',
+        kind: 'boolean',
+        description:
+          'Quote the originating group message in the final response. Disabled by default',
+      },
+      {
         key: 'watchTodos',
         label: 'Watch Native Todos',
         kind: 'boolean',
@@ -121,11 +135,14 @@ export const plugin: ChannelPlugin = {
       ) {
         return 'DWS channels require approvalMode "default", "plan", or "yolo".';
       }
-      if (
-        config['watchTodos'] !== undefined &&
-        typeof config['watchTodos'] !== 'boolean'
-      ) {
-        return 'DWS watchTodos must be a boolean.';
+      for (const field of [
+        'watchTodos',
+        'quotePrivateReply',
+        'quoteGroupReply',
+      ] as const) {
+        if (config[field] !== undefined && typeof config[field] !== 'boolean') {
+          return `DWS ${field} must be a boolean.`;
+        }
       }
       for (const field of ['startReaction', 'endReaction'] as const) {
         if (config[field] !== undefined && typeof config[field] !== 'string') {
