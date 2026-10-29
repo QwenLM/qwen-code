@@ -36,9 +36,20 @@ const createUIState = (overrides: Partial<UIState>): UIState =>
     ...overrides,
   }) as UIState;
 
-const dialogTree = (uiState: UIState) => (
+const dialogTree = (uiState: UIState, uiActions: Partial<UIActions> = {}) => (
   <UIStateContext.Provider value={uiState}>
-    <UIActionsContext.Provider value={{} as UIActions}>
+    <UIActionsContext.Provider
+      value={
+        {
+          auth: {
+            closeAuthDialog: vi.fn(),
+            handleProviderSubmit: vi.fn(),
+            onAuthError: vi.fn(),
+          },
+          ...uiActions,
+        } as unknown as UIActions
+      }
+    >
       <DialogManager addItem={vi.fn()} terminalWidth={100} />
     </UIActionsContext.Provider>
   </UIStateContext.Provider>
@@ -47,8 +58,11 @@ const dialogTree = (uiState: UIState) => (
 const renderDialogManager = (
   uiState: UIState,
   config: Partial<Config>,
+  uiActions: Partial<UIActions> = {},
 ): ReturnType<typeof renderWithProviders> =>
-  renderWithProviders(dialogTree(uiState), { config: config as Config });
+  renderWithProviders(dialogTree(uiState, uiActions), {
+    config: config as Config,
+  });
 
 describe('DialogManager', () => {
   // The picker's list comes from the hook, which re-reads the style
@@ -126,6 +140,34 @@ describe('DialogManager', () => {
         expect(lastFrame()).toContain('Token Plan');
         expect(lastFrame()).toContain('› 1. Update all');
       });
+    });
+  });
+
+  describe('auth dialog', () => {
+    it('passes the constrained listDialogHeight into the auth dialog budget', async () => {
+      const terminalHeight = 14;
+      const { lastFrame } = renderDialogManager(
+        createUIState({
+          terminalHeight,
+          mainAreaWidth: 36,
+          auth: {
+            isAuthDialogOpen: true,
+          } as unknown as UIState['auth'],
+        }),
+        {
+          getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+          getAuthType: vi.fn().mockReturnValue(undefined),
+        },
+      );
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame() ?? '';
+          expect(frame).toContain('Qwen');
+          expect(frame.split('\n').length).toBeLessThanOrEqual(terminalHeight);
+        },
+        { timeout: 5000 },
+      );
     });
   });
 });
