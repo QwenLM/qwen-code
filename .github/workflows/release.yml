@@ -463,10 +463,10 @@ jobs:
     # Cancelled runs stay cancelled; completed validation fails closed.
     if: |-
       ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
-    permissions: { contents: 'read' }
+    permissions:
+      contents: 'read'
     steps:
       - *restore_release_workspace
-
       - name: 'Verify quality results'
         env:
           STATIC_RESULT: '${{ needs.quality_static.result }}'
