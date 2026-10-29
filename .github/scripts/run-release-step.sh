@@ -384,17 +384,24 @@ BODY
     # good (#15705). Bot authorship is a hard requirement: a human may have
     # filed the same title to track the flakiness, and closing their issue
     # would discard that follow-up.
+    #
+    # Shared with the VSCode companion and Chrome extension release workflows
+    # (#15840), which file their own issues: they pass FAILURE_TITLE_PREFIX and
+    # RELEASE_VERSION because their titles and version outputs differ from
+    # release.yml's.
+    release_version="${RELEASE_VERSION:-${RELEASE_TAG:-unknown}}"
+    title_prefix="${FAILURE_TITLE_PREFIX:-Release Failed for }"
     existing_issue="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
-        --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
+        --search "\"${title_prefix}${release_version}\" in:title" \
         --limit 30 \
         --json number,url,labels,author,title \
-      | jq -c --arg tag "${RELEASE_TAG}" \
-        '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
+      | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
+        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
     )"
     if [[ -z "${existing_issue}" ]]; then
-      echo "No workflow-owned release-failure issue is open for ${RELEASE_TAG}; nothing to reconcile."
+      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
       exit 0
     fi
     issue_number="$(jq -r '.number' <<< "${existing_issue}")"
@@ -403,10 +410,10 @@ BODY
     cat > "${body_file}" <<BODY
 The release completed successfully on a later attempt of this run, so the failure this issue reported is no longer current.
 
-Release tag: ${RELEASE_TAG}
+Release tag: ${release_version}
 Run: ${DETAILS_URL} (attempt ${RUN_ATTEMPT:-unknown})
 
-Closing as not planned. Reopen if the ${RELEASE_TAG} artifacts later prove incomplete.
+Closing as not planned. Reopen if the ${release_version} artifacts later prove incomplete.
 BODY
     gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" || {
       echo "::warning::Failed to comment on ${issue_url}; closing regardless."
