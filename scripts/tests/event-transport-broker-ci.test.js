@@ -54,6 +54,11 @@ const gateConstant = (name) =>
   new RegExp(`static final String ${name} = "([^"]+)";`).exec(gate)?.[1];
 
 describe('EventTransport broker gates CI', () => {
+  it('uses the HZ runner proxy only for distribution downloads', () => {
+    expect(step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY)
+      .toContain("startsWith(runner.name, 'ecs-qwen-hz')");
+  });
+
   it('runs the gate profile and checks that the gate class ran', () => {
     const run = step('Verify the EventTransport broker gates').run;
     expect(run).toContain('-Pevent-transport-broker-gates');

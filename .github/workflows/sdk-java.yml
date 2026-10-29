@@ -1788,6 +1788,7 @@ jobs:
         env:
           RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
           RMQ_CACHE_DIR: '${{ runner.temp }}/rocketmq-dist'
+          RMQ_DOWNLOAD_PROXY: "${{ startsWith(runner.name, 'ecs-qwen-hz') && 'http://127.0.0.1:7890' || '' }}"
           RMQ_EXTRA_GROUPS: 'qwen-transport-gate-oracle'
           RMQ_NORMAL_TOPIC: 'qwen-managed-events-normal'
           RMQ_NORMAL_GROUPS: 'qwen-transport-gate-normal-probe'
@@ -2120,6 +2121,7 @@ jobs:
         env:
           RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
           RMQ_CACHE_DIR: '${{ runner.temp }}/rocketmq-dist'
+          RMQ_DOWNLOAD_PROXY: "${{ startsWith(runner.name, 'ecs-qwen-hz') && 'http://127.0.0.1:7890' || '' }}"
           RMQ_EXTRA_GROUPS: 'qwen-transport-gate-oracle'
         run: 'scripts/rocketmq-lite-broker.sh start'
       - name: 'Verify the EventTransport multi-node gates'

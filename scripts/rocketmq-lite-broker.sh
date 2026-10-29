@@ -85,6 +85,20 @@ java_env() {
   export JAVA_OPT_EXT="-Xms${RMQ_HEAP} -Xmx${RMQ_HEAP} -Duser.home=${RMQ_WORK_DIR}/home"
 }
 
+download_file() {
+  local url="$1" output="$2"
+  if [ -n "${RMQ_DOWNLOAD_PROXY:-}" ]; then
+    log "downloading through the configured proxy: ${url}"
+    if curl -fsSL --proxy "${RMQ_DOWNLOAD_PROXY}" --noproxy '' \
+      --connect-timeout 10 --max-time 180 -o "${output}" "${url}"; then
+      return 0
+    fi
+    rm -f "${output}"
+    log "proxy download failed; trying the normal route"
+  fi
+  curl -fsSL --retry 3 -o "${output}" "${url}"
+}
+
 download() {
   mkdir -p "${RMQ_CACHE_DIR}"
   local zip="${RMQ_CACHE_DIR}/${DIST_NAME}.zip"
@@ -93,8 +107,8 @@ download() {
   if [ ! -s "${zip}" ] || [ ! -s "${sum}" ]; then
     for base in "https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}" \
       "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}"; do
-      if curl -fsSL --retry 3 -o "${zip}.part" "${base}/${DIST_NAME}.zip" &&
-        curl -fsSL --retry 3 -o "${sum}" "${base}/${DIST_NAME}.zip.sha512"; then
+      if download_file "${base}/${DIST_NAME}.zip" "${zip}.part" &&
+        download_file "${base}/${DIST_NAME}.zip.sha512" "${sum}"; then
         mv "${zip}.part" "${zip}"
         break
       fi

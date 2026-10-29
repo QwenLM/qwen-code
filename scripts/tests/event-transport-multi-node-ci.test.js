@@ -42,6 +42,11 @@ const scriptDefault = (name) =>
   new RegExp(`^${name}="\\$\\{${name}:-([^}]*)\\}"$`, 'm').exec(script)?.[1];
 
 describe('EventTransport multi-node gates CI', () => {
+  it('uses the HZ runner proxy only for distribution downloads', () => {
+    expect(step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY)
+      .toContain("startsWith(runner.name, 'ecs-qwen-hz')");
+  });
+
   it('runs the gate profile with every coordinate the gate requires', () => {
     const run = verify().run;
     expect(run).toContain('-Pevent-transport-multi-node-gates');
