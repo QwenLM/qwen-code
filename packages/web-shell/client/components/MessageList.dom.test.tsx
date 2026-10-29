@@ -6451,10 +6451,11 @@ describe('MessageList — turn collapse (DOM)', () => {
   );
 
   it('resumes follow after switching sessions while paused', async () => {
+    let scrollHeight = 1200;
     let scrollTop = 600;
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
-      value: 1200,
+      get: () => scrollHeight,
     });
     Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
       configurable: true,
@@ -6464,7 +6465,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       configurable: true,
       get: () => scrollTop,
       set: (value: number) => {
-        scrollTop = Math.max(0, Math.min(value, 600));
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
       },
     });
     const transcriptA = [userMsg('u1'), asstMsg('a1')];
@@ -6499,13 +6500,21 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
     await nextFrame();
     expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    rerenderMessages(c, [...sessionB, asstMsg('a3')], {
+      sessionKey: 'session-b',
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(1200);
   });
 
   it('resumes follow after switching sessions without a replay', async () => {
+    let scrollHeight = 1200;
     let scrollTop = 600;
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
-      value: 1200,
+      get: () => scrollHeight,
     });
     Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
       configurable: true,
@@ -6515,7 +6524,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       configurable: true,
       get: () => scrollTop,
       set: (value: number) => {
-        scrollTop = Math.max(0, Math.min(value, 600));
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
       },
     });
     const transcriptA = [userMsg('u1'), asstMsg('a1')];
@@ -6543,7 +6552,64 @@ describe('MessageList — turn collapse (DOM)', () => {
     rerenderMessages(c, sessionB, { sessionKey: 'session-b' });
     await nextFrame();
     expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    rerenderMessages(c, [...sessionB, asstMsg('a3')], {
+      sessionKey: 'session-b',
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(1200);
   });
+
+  it.each(['disclosure', 'turn toggle'])(
+    'keeps following a new session after an old %s callback was queued',
+    (action) => {
+      vi.useFakeTimers();
+      resizeObserversFireOnObserve = false;
+      let scrollHeight = 1200;
+      let scrollTop = 600;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+        },
+      });
+      const c = mount(
+        action === 'disclosure'
+          ? [userMsg('u1'), thinkingMsg('t1')]
+          : [userMsg('u1'), toolMsg('g1'), asstMsg('a1')],
+        undefined,
+        { sessionKey: 'session-a' },
+      );
+      act(() => vi.advanceTimersByTime(500));
+      click(action === 'disclosure' ? disclosure(c, 't1') : toggle(c, 'u1'));
+      // Reuse the user id so the new-user scroll cannot bypass the queued
+      // recheck and conceal a stale reading pause.
+      const sessionB = [userMsg('u1'), asstMsg('a2')];
+      scrollHeight = 1800;
+      rerenderMessages(c, sessionB, { sessionKey: 'session-b' });
+      expect(scrollTop).toBe(1200);
+
+      // Content can grow before its next render. An old animation timer
+      // must not interpret that geometry as a new user reading pause.
+      scrollHeight = 2400;
+      act(() => vi.advanceTimersByTime(500));
+      rerenderMessages(c, [...sessionB, asstMsg('a3')], {
+        sessionKey: 'session-b',
+      });
+      act(() => vi.advanceTimersByTime(500));
+      expect(scrollTop).toBe(1800);
+    },
+  );
 
   it('finishes cooldown following unless the user scrolls up', () => {
     resizeObserversFireOnObserve = false;

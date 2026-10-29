@@ -3947,6 +3947,21 @@ export const MessageList = memo(
     // session switch below and the /clear effect; each caller keeps its
     // remaining resets at the call site.
     const resetSessionScopedViewState = useCallback(() => {
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        pendingFollowRecheckFrame.current = undefined;
+      }
+      pendingFollowRecheck.current = false;
+      if (turnLayoutAnimationTimer.current !== undefined) {
+        window.clearTimeout(turnLayoutAnimationTimer.current);
+        turnLayoutAnimationTimer.current = undefined;
+      }
+      turnLayoutTransitionStarted.current = false;
+      turnLayoutRowTops.current.clear();
+      for (const animation of turnLayoutAnimations.current) {
+        animation.cancel();
+      }
+      turnLayoutAnimations.current = [];
       followPausedByUserRef.current = false;
       pendingPaginationTurnCompares.current.clear();
       setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
