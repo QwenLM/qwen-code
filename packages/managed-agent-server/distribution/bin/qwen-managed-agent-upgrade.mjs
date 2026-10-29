@@ -2455,15 +2455,16 @@ async function resolveConfiguration(system, deployment) {
 }
 
 /**
- * Whether a unit start started has exited: it failed, or it waits to be run
- * again, which the shipped units' Restart=on-failure does instead of failing.
- * A start from inactive begins with no restarts.
+ * Whether a unit start started has exited since `started`, how it showed
+ * right after the start: it failed, waits to be run again, which the shipped
+ * units' Restart=on-failure does instead of failing, or was run again. The
+ * restarts count from that start, so a counter it did not reset is no exit.
  */
-function exitedSinceStart(unit) {
+function exitedSinceStart(unit, started) {
   return (
     unit.activeState === 'failed' ||
     unit.subState === 'auto-restart' ||
-    unit.restarts > 0
+    unit.restarts > started.restarts
   );
 }
 
@@ -2532,6 +2533,7 @@ async function phaseStart(system, deployment, options) {
     );
     runChecked(system, 'systemctl', ['restart', harness.name]);
   }
+  const harnessStarted = await showUnit(system, harness.name);
   const harnessUrl = new URL(
     deployment.serverEnvironment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
       'http://127.0.0.1:4170',
@@ -2543,7 +2545,9 @@ async function phaseStart(system, deployment, options) {
     system,
     system.now() + options.timeout * 1000,
     async () => {
-      if (exitedSinceStart(await showUnit(system, harness.name))) {
+      if (
+        exitedSinceStart(await showUnit(system, harness.name), harnessStarted)
+      ) {
         return false;
       }
       return (await system.connect(harnessHost, harnessPort))
@@ -2571,13 +2575,16 @@ async function phaseStart(system, deployment, options) {
 
   system.out(`Starting ${server.name}`);
   runChecked(system, 'systemctl', ['start', server.name]);
+  const serverStarted = await showUnit(system, server.name);
   const baseUrl =
     options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
   const healthy = await waitFor(
     system,
     system.now() + options.timeout * 1000,
     async (budget) => {
-      if (exitedSinceStart(await showUnit(system, server.name))) {
+      if (
+        exitedSinceStart(await showUnit(system, server.name), serverStarted)
+      ) {
         return false;
       }
       return (await health(system, baseUrl, budget)) ? true : undefined;

@@ -69,7 +69,7 @@
   - 执行：
     1. 启动 Harness（之前某次 `start` 留下正在运行的 Harness 时改为重启），并等待其端口就绪。
     2. 通过 `systemd-run`，按 unit 的用户、工作目录和环境运行已安装版本的 `--check`。unit 的 `Environment=` 赋值写进一个 `0600` 的环境文件传入，而不是放在 `systemd-run` 的命令行上，因为每个本地用户都能读到命令行。
-    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 退出时会被停止并报告：显示 `failed`、处于 `auto-restart` 等待，或 `NRestarts` 不为零，都算退出，因为分发的 unit 使用 `Restart=on-failure`，进程退出后 systemd 会重新运行它，而不是让它停在失败状态。重启后本能起来的 unit 也是如此：运行新版本迁移的这次启动中出现了退出，应先读日志再信任该版本，而不是在重试时放行。先探测健康再看 unit 也改变不了这一点，因为轮询每秒一次，而 `RestartSec=5s` 会让退出的 unit 在 `auto-restart` 中停留 5 秒。到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
+    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 退出时会被停止并报告：显示 `failed`、处于 `auto-restart` 等待，或 `NRestarts` 比刚启动时多，都算退出，因为分发的 unit 使用 `Restart=on-failure`，进程退出后 systemd 会重新运行它，而不是让它停在失败状态。重启后本能起来的 unit 也是如此：运行新版本迁移的这次启动中出现了退出，应先读日志再信任该版本，而不是在重试时放行。先探测健康再看 unit 也改变不了这一点，因为轮询每秒一次，而 `RestartSec=5s` 会让退出的 unit 在 `auto-restart` 中停留 5 秒。到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
 - **`verify`**
   - 前置条件：两个 unit 都在运行。
   - 执行：

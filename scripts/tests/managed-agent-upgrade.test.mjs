@@ -540,7 +540,8 @@ async function rig(t, overrides = {}) {
       Object.assign(unit, {
         ActiveState: 'active',
         SubState: 'running',
-        NRestarts: '0',
+        // systemd 257 resets the counter on a manual stop and start.
+        NRestarts: host.keepRestarts ? (unit.NRestarts ?? '0') : '0',
       });
       unit.ActiveEnterTimestampMonotonic = String(1000 + host.clock);
       unit.procs = ['30'];
@@ -1815,6 +1816,37 @@ test('start gives up when the control plane never reports UP', async (t) => {
     /exited before it reported UP at .*, and is stopped now/,
   );
   assert.equal(host.units[SERVER].ActiveState, 'inactive');
+});
+
+test('start counts the restarts from its own start', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  // A counter that a manual start leaves as it was, from earlier exits.
+  host.keepRestarts = true;
+  host.units[SERVER].NRestarts = '7';
+  host.units[HARNESS].NRestarts = '3';
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  host.calls = [];
+  host.requests = [];
+  assert.equal(await host.upgrade('start'), 0, host.output.join('\n'));
+  assert.ok(host.requests.some(({ url }) => url.endsWith('/actuator/health')));
+  assert.ok(
+    !host.calls.some(
+      ([command, verb]) => command === 'systemctl' && verb === 'stop',
+    ),
+  );
+
+  // One more than the start left is still an exit.
+  assert.equal(await host.upgrade('stop'), 0);
+  host.responses['GET /actuator/health'] = () => {
+    host.units[SERVER].NRestarts = '8';
+    return { status: 'DOWN' };
+  };
+  assert.equal(await host.upgrade('start', '--timeout', '300'), 1);
+  assert.match(
+    host.output.at(-1),
+    /exited before it reported UP at .*, and is stopped now/,
+  );
 });
 
 test('a health probe that never answers ends at the timeout', async (t) => {
