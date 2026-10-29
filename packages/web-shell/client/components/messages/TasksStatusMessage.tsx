@@ -1,10 +1,17 @@
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionWorkflowTasksStatus,
 } from '@qwen-code/sdk/daemon';
+import { CheckIcon, CopyIcon } from 'lucide-react';
 import { isSessionDisconnectedError } from '../../utils/sessionErrors';
 import {
   computeAgentTreeInfo,
@@ -19,7 +26,9 @@ import {
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import { useI18n } from '../../i18n';
+import { writeClipboardText } from '../../utils/clipboard';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
@@ -34,6 +43,7 @@ import {
   sanitizeControlChars,
 } from './toolFormatting';
 import { Badge } from '../ui/badge';
+import { Button } from '../ui/button';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -381,6 +391,8 @@ export function TasksStatusMessage({
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const documentMode = useTranscriptRenderMode() === 'document';
   const actions = useActions();
   const shouldIncludeWorkflows =
@@ -408,6 +420,7 @@ export function TasksStatusMessage({
   const [actionError, setActionError] = useState<string | null>(null);
   const panelIdRef = useRef(`tasks-${Math.random().toString(36).slice(2)}`);
   const refreshInFlightRef = useRef(false);
+  const pausedRef = useRef(false);
   const expectedSessionIdRef = useRef(message.snapshot.sessionId);
   expectedSessionIdRef.current = message.snapshot.sessionId;
   const initialDetailStatusRef = useRef<{
@@ -439,9 +452,17 @@ export function TasksStatusMessage({
   const blockingIds = useMemo(() => computeUserBlockingIds(tasks), [tasks]);
 
   useEffect(() => {
+    if (!available) {
+      pausedRef.current = true;
+      return;
+    }
     if (documentMode || !isOpen) return;
     const refresh = () => {
-      if (refreshInFlightRef.current) return;
+      if (
+        (availability && availability.getSnapshot() !== 'available') ||
+        refreshInFlightRef.current
+      )
+        return;
       refreshInFlightRef.current = true;
       const requestedSessionId = expectedSessionIdRef.current;
       loadTasks()
@@ -457,7 +478,12 @@ export function TasksStatusMessage({
           setRefreshError(false);
         })
         .catch((error: unknown) => {
-          if (expectedSessionIdRef.current !== requestedSessionId) return;
+          if (
+            expectedSessionIdRef.current !== requestedSessionId ||
+            isDaemonUnavailableError(error) ||
+            (availability && availability.getSnapshot() !== 'available')
+          )
+            return;
           if (isSessionDisconnectedError(error)) {
             setRefreshError(false);
             return;
@@ -469,9 +495,13 @@ export function TasksStatusMessage({
           refreshInFlightRef.current = false;
         });
     };
+    if (pausedRef.current) {
+      pausedRef.current = false;
+      refresh();
+    }
     const id = setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [documentMode, isOpen, loadTasks, onTasksChange]);
+  }, [availability, available, documentMode, isOpen, loadTasks, onTasksChange]);
 
   useEffect(() => {
     if (selectedIndex >= 0) return;
@@ -1317,12 +1347,21 @@ export function ShellTaskDetail({
   task: DaemonSessionShellTaskStatus;
   actions?: DaemonSessionActions;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const contextActions = useActions();
   const actions = providedActions ?? contextActions;
   const [currentTask, setCurrentTask] = useState(task);
   const [busy, setBusy] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [runtime, setRuntime] = useState<DaemonSessionShellTaskRuntime | null>(
+    null,
+  );
+  const [runtimeLoaded, setRuntimeLoaded] = useState(false);
+  const [runtimeFailed, setRuntimeFailed] = useState(false);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [runtimeRefreshKey, setRuntimeRefreshKey] = useState(0);
+  const lastTaskIdRef = useRef(currentTask.id);
 
   useEffect(() => {
     setCurrentTask((current) =>
@@ -1336,10 +1375,79 @@ export function ShellTaskDetail({
 
   useEffect(() => {
     setActionError(null);
+    setStopRequested(false);
   }, [task.id, task.status]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let pending = false;
+    const taskIdChanged = lastTaskIdRef.current !== currentTask.id;
+    lastTaskIdRef.current = currentTask.id;
+    if (taskIdChanged) {
+      setRuntime(null);
+      setRuntimeLoaded(false);
+      setRuntimeFailed(false);
+    }
+    const load = async () => {
+      if (pending) return;
+      pending = true;
+      setRuntimeLoading(true);
+      try {
+        if (stopRequested && currentTask.status === 'running') {
+          try {
+            const snapshot = await actions.getTasks({ silent: true });
+            if (cancelled) return;
+            const updatedTask = snapshot.tasks.find(
+              (candidate): candidate is DaemonSessionShellTaskStatus =>
+                candidate.kind === 'shell' && candidate.id === currentTask.id,
+            );
+            if (updatedTask && updatedTask.status !== 'running') {
+              setCurrentTask(updatedTask);
+              return;
+            }
+          } catch (error: unknown) {
+            if (cancelled) return;
+            console.warn(
+              '[web-shell] failed to refresh stopping shell task:',
+              error,
+            );
+          }
+        }
+        const result = await actions.getTaskRuntime(currentTask.id);
+        if (cancelled) return;
+        setRuntime(result.runtime);
+        setRuntimeFailed(false);
+        setRuntimeLoaded(true);
+      } catch {
+        if (cancelled) return;
+        setRuntimeFailed(true);
+        setRuntimeLoaded(true);
+      } finally {
+        pending = false;
+        if (!cancelled) setRuntimeLoading(false);
+      }
+    };
+    void load();
+    if (currentTask.status !== 'running') {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    actions,
+    currentTask.id,
+    currentTask.status,
+    runtimeRefreshKey,
+    stopRequested,
+  ]);
+
   const handleCancel = useCallback(async () => {
-    if (busy || currentTask.status !== 'running') return;
+    if (busy || stopRequested || currentTask.status !== 'running') return;
     setActionError(null);
     setBusy(true);
     try {
@@ -1348,33 +1456,14 @@ export function ShellTaskDetail({
         setActionError(t('tasks.alreadyStopped'));
         return;
       }
-      setCurrentTask({
-        ...currentTask,
-        status: 'cancelled',
-        endTime: Date.now(),
-      });
-      try {
-        const snapshot = await actions.getTasks();
-        const updatedTask = snapshot.tasks.find(
-          (candidate): candidate is DaemonSessionShellTaskStatus =>
-            candidate.kind === 'shell' && candidate.id === currentTask.id,
-        );
-        if (updatedTask && updatedTask.status !== 'running') {
-          setCurrentTask(updatedTask);
-        }
-      } catch (error: unknown) {
-        console.warn(
-          '[web-shell] failed to refresh stopped shell task:',
-          error,
-        );
-      }
+      setStopRequested(true);
     } catch (error: unknown) {
       console.warn('[web-shell] failed to cancel shell task:', error);
       setActionError(t('tasks.cancelFailed'));
     } finally {
       setBusy(false);
     }
-  }, [actions, busy, currentTask, t]);
+  }, [actions, busy, currentTask, stopRequested, t]);
 
   return (
     <div className={styles.monitorDetail}>
@@ -1395,48 +1484,99 @@ export function ShellTaskDetail({
               <button
                 type="button"
                 className={styles.monitorStopButton}
-                disabled={busy}
+                disabled={busy || stopRequested}
                 onClick={() => void handleCancel()}
               >
-                {busy ? t('common.loading') : t('tasks.action.stop')}
+                {busy || stopRequested
+                  ? t('common.loading')
+                  : t('tasks.action.stop')}
               </button>
             )}
           </div>
         </div>
-        <pre className={styles.monitorCommand}>{currentTask.command}</pre>
+        <div className={styles.monitorCommandSection}>
+          <div className={styles.monitorSectionHeader}>
+            <div className={styles.monitorSectionLabel}>
+              {t('tasks.detail.command')}
+            </div>
+            <CopyValueButton
+              value={currentTask.command}
+              label={t('tasks.detail.command')}
+            />
+          </div>
+          <pre className={styles.monitorCommand}>{currentTask.command}</pre>
+        </div>
         {actionError && (
           <div className={styles.monitorActionError}>{actionError}</div>
         )}
-        <div className={styles.monitorMetrics}>
-          <MonitorMetric
-            label={t('tasks.detail.runtime')}
+        <div className={styles.monitorInlineMetrics}>
+          <InlineMetric
+            label={t('tasks.detail.startedAt')}
+            value={formatClockTime(currentTask.startTime, language)}
+          />
+          <InlineMetric
+            label={t('tasks.detail.endedAt')}
+            value={
+              currentTask.endTime !== undefined
+                ? formatClockTime(currentTask.endTime, language)
+                : '—'
+            }
+          />
+          <InlineMetric
+            label={t('tasks.detail.totalDuration')}
             value={formatRuntime(currentTask.runtimeMs)}
           />
-          {currentTask.pid !== undefined && (
-            <MonitorMetric
-              label={t('tasks.detail.pid')}
-              value={String(currentTask.pid)}
-            />
-          )}
-          {currentTask.exitCode !== undefined && (
-            <MonitorMetric
-              label={t('tasks.detail.exitCode')}
-              value={String(currentTask.exitCode)}
-            />
-          )}
         </div>
+        {(currentTask.pid !== undefined ||
+          currentTask.exitCode !== undefined) && (
+          <div className={styles.monitorInlineMetrics}>
+            {currentTask.pid !== undefined && (
+              <InlineMetric
+                label={t('tasks.detail.pid')}
+                value={String(currentTask.pid)}
+              />
+            )}
+            {currentTask.exitCode !== undefined && (
+              <InlineMetric
+                label={t('tasks.detail.exitCode')}
+                value={String(currentTask.exitCode)}
+              />
+            )}
+          </div>
+        )}
+        {currentTask.status === 'running' &&
+          runtime?.memoryBytes !== undefined && (
+            <div className={styles.monitorInlineMetrics}>
+              <InlineMetric
+                label={t('tasks.detail.residentMemory')}
+                value={formatBytes(runtime.memoryBytes)}
+              />
+            </div>
+          )}
       </div>
       <div className={styles.shellFields}>
         <div className={styles.monitorCommandSection}>
-          <div className={styles.monitorSectionLabel}>
-            {t('tasks.detail.workingDir')}
+          <div className={styles.monitorSectionHeader}>
+            <div className={styles.monitorSectionLabel}>
+              {t('tasks.detail.workingDir')}
+            </div>
+            <CopyValueButton
+              value={currentTask.cwd}
+              label={t('tasks.detail.workingDir')}
+            />
           </div>
           <div className={styles.shellFieldValue}>{currentTask.cwd}</div>
         </div>
         {currentTask.outputFile && (
           <div className={styles.monitorCommandSection}>
-            <div className={styles.monitorSectionLabel}>
-              {t('tasks.detail.outputFile')}
+            <div className={styles.monitorSectionHeader}>
+              <div className={styles.monitorSectionLabel}>
+                {t('tasks.detail.outputFile')}
+              </div>
+              <CopyValueButton
+                value={currentTask.outputFile}
+                label={t('tasks.detail.outputFile')}
+              />
             </div>
             <div className={styles.shellFieldValue}>
               {currentTask.outputFile}
@@ -1444,6 +1584,75 @@ export function ShellTaskDetail({
           </div>
         )}
       </div>
+      {runtimeLoaded && (
+        <div className={styles.monitorCommandSection}>
+          <div
+            className={`${styles.monitorSectionLabel} ${styles.shellOutputLabel}`}
+          >
+            {t('tasks.detail.output')}
+            {runtime?.outputBytes !== undefined && (
+              <span className={styles.shellSectionMeta}>
+                {t('tasks.detail.outputSize', {
+                  size: formatBytes(runtime.outputBytes),
+                })}
+                {runtime.outputModifiedAt !== undefined && (
+                  <>
+                    {' · '}
+                    {t('tasks.detail.lastWrite')}{' '}
+                    {formatClockTime(runtime.outputModifiedAt, language)}
+                  </>
+                )}
+              </span>
+            )}
+          </div>
+          {runtime?.outputTail ? (
+            <>
+              <pre className={styles.shellOutput}>{runtime.outputTail}</pre>
+              {runtime.outputTailTruncated && (
+                <div className={styles.shellOutputHint}>
+                  {t('tasks.detail.outputTruncated')}
+                </div>
+              )}
+            </>
+          ) : runtimeFailed || runtime?.outputError ? (
+            <div className={styles.shellFieldValue}>
+              {t('tasks.detail.outputUnavailable')}
+            </div>
+          ) : runtime === null ? (
+            <div className={styles.shellFieldValue}>
+              {t('tasks.detail.runtimeUnavailable')}
+            </div>
+          ) : (
+            <div className={styles.shellFieldValue}>
+              {t(
+                currentTask.status === 'running'
+                  ? 'tasks.detail.outputEmpty'
+                  : 'tasks.detail.outputNone',
+              )}
+            </div>
+          )}
+          {runtime?.outputTail && runtime.outputError && (
+            <div className={styles.shellOutputHint}>
+              {t('tasks.detail.outputPartial')}
+            </div>
+          )}
+          {(runtimeFailed || runtime?.outputError) && (
+            <div role="status">
+              {runtimeFailed &&
+                runtime?.outputTail &&
+                t('tasks.detail.outputRefreshFailed')}
+              <Button
+                variant="outline"
+                size="xs"
+                disabled={runtimeLoading}
+                onClick={() => setRuntimeRefreshKey((key) => key + 1)}
+              >
+                {t(runtimeLoading ? 'common.loading' : 'common.retry')}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       {currentTask.error && (
         <div className={`${styles.monitorError} ${styles.shellError}`}>
           <div className={styles.monitorSectionLabel}>
@@ -1453,6 +1662,85 @@ export function ShellTaskDetail({
         </div>
       )}
     </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatClockTime(timestamp: number, language: string): string {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(timestamp)) return '—';
+  return date.toDateString() === new Date().toDateString()
+    ? date.toLocaleTimeString(language)
+    : date.toLocaleString(language);
+}
+
+/**
+ * Tab title for a shell task. The full command is unreadable once the tab
+ * truncates it, so use the executable's basename (`/opt/homebrew/.../mariadbd`
+ * becomes `mariadbd`) and fall back to the first line.
+ */
+export function shellTaskPanelTitle(command: string): string {
+  const firstLine = command.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  const tokens = firstLine.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+  let index = 0;
+  while (
+    index < tokens.length &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index]!)
+  ) {
+    index++;
+  }
+  const executable = tokens[index]?.replace(/^['"]|['"]$/g, '');
+  if (!executable) return firstLine || command;
+  return executable.split('/').filter(Boolean).pop() ?? executable;
+}
+
+function CopyValueButton({ value, label }: { value: string; label: string }) {
+  const { t } = useI18n();
+  const [copied, flash] = useCopiedFlash(1500);
+  const handleCopy = useCallback(async () => {
+    try {
+      await writeClipboardText(value);
+      flash();
+    } catch {
+      // Clipboard access can be denied outside a secure context.
+    }
+  }, [value, flash]);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      className={styles.shellCopyButton}
+      title={t('common.copy')}
+      aria-label={`${t('common.copy')} ${label}`}
+      onClick={() => void handleCopy()}
+    >
+      {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+      <span className="sr-only" role="status">
+        {copied ? t('copy.toClipboard', { label }) : ''}
+      </span>
+    </Button>
+  );
+}
+
+function InlineMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <span className={styles.monitorInlineMetric}>
+      <span className={styles.monitorInlineLabel}>{label}</span>
+      <span className={styles.monitorInlineValue}>{value}</span>
+    </span>
   );
 }
 

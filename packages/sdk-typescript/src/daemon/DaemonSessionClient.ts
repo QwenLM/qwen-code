@@ -24,9 +24,12 @@ import type {
   DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionBtwStreamEvent,
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionAttachmentData,
@@ -63,6 +66,7 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -296,13 +300,27 @@ export class DaemonSessionClient {
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
+  private generatedUiReadGeneration = 0;
+  private generatedUiRevocationRevision = 0;
+  private readonly generatedUiRevocationListeners = new Set<
+    (revision: number) => void
+  >();
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly attachmentCache = new Map<
     string,
-    { pending: Promise<DaemonSessionAttachmentData>; size: number }
+    {
+      pending: Promise<DaemonSessionAttachmentData>;
+      size: number;
+      attachmentId: string;
+    }
   >();
   private attachmentCacheBytes = 0;
+  private readonly attachmentCacheSignalIds = new WeakMap<
+    AbortSignal,
+    number
+  >();
+  private nextAttachmentCacheSignalId = 0;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -314,6 +332,7 @@ export class DaemonSessionClient {
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
     this.session = { ...opts.session };
+    this.updateGeneratedUi(this.session.generatedUi);
     const context = (opts.session as { context?: { kind?: unknown } }).context;
     this.restoreStrategy =
       opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
@@ -341,6 +360,24 @@ export class DaemonSessionClient {
       opts.maxPendingPromptsPerSession === undefined
         ? opts.client.maxPendingPromptsPerSession
         : normalizePendingPromptLimit(opts.maxPendingPromptsPerSession);
+  }
+
+  /** Replays the latest confirmed denial so late subscribers cannot miss it. */
+  subscribeGeneratedUiRevocation(listener: (revision: number) => void) {
+    this.generatedUiRevocationListeners.add(listener);
+    if (this.generatedUiRevocationRevision > 0)
+      listener(this.generatedUiRevocationRevision);
+    return () => {
+      this.generatedUiRevocationListeners.delete(listener);
+    };
+  }
+
+  private updateGeneratedUi(status: DaemonSession['generatedUi']) {
+    this.session.generatedUi = status;
+    if (status?.version !== 1 || status.enabled !== false) return;
+    const revision = ++this.generatedUiRevocationRevision;
+    for (const listener of this.generatedUiRevocationListeners)
+      listener(revision);
   }
 
   /**
@@ -448,7 +485,7 @@ export class DaemonSessionClient {
       historyAnchorRecordId,
       replayDegraded,
     });
-    await result.hydrateReplaySnapshot();
+    await result.hydrateReplaySnapshot(req.signal);
     return result;
   }
 
@@ -801,9 +838,11 @@ export class DaemonSessionClient {
       }),
     );
     if (removed) {
-      const cached = this.attachmentCache.get(attachmentId);
-      this.attachmentCache.delete(attachmentId);
-      this.attachmentCacheBytes -= cached?.size ?? 0;
+      for (const [key, cached] of this.attachmentCache) {
+        if (cached.attachmentId !== attachmentId) continue;
+        this.attachmentCache.delete(key);
+        this.attachmentCacheBytes -= cached.size;
+      }
     }
     return removed;
   }
@@ -836,6 +875,7 @@ export class DaemonSessionClient {
    */
   private async reattach(): Promise<void> {
     if (this.reattaching) return this.reattaching;
+    const generatedUiGeneration = ++this.generatedUiReadGeneration;
     // Send no clientId so the bridge issues a fresh registration rather than
     // validating the stale one. Keep the original context explicit: workspace
     // restore resolves by cwd, while standalone restore must use its dedicated
@@ -880,7 +920,10 @@ export class DaemonSessionClient {
           this.session.worktreeState = session.worktreeState;
         }
       }
-      // Refresh only the client identity; leave the SSE cursor and ACP state intact.
+      // Refresh attachment identity and capabilities without moving the SSE cursor.
+      if (generatedUiGeneration === this.generatedUiReadGeneration) {
+        this.updateGeneratedUi(session.generatedUi);
+      }
       this.session.clientId = session.clientId;
     });
     try {
@@ -973,11 +1016,54 @@ export class DaemonSessionClient {
     configId: 'reasoning_effort',
     value: ReasoningSelection,
     opts?: { persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setConfigOption(
+    configId: 'workflow_mode',
+    value: 'on' | 'off',
+  ): Promise<DaemonSessionConfigOptionResult>;
+  async setConfigOption(
+    configId: 'reasoning_effort' | 'workflow_mode',
+    value: ReasoningSelection | 'on' | 'off',
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
-    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
-      clientId: this.clientId,
-      persist: opts?.persist,
-    });
+    if (configId === 'workflow_mode') {
+      if ((value !== 'on' && value !== 'off') || opts !== undefined) {
+        throw new Error(
+          'Workflow mode requires on/off and does not accept persist',
+        );
+      }
+      return this.client.setSessionConfigOption(
+        this.sessionId,
+        configId,
+        value,
+        { clientId: this.clientId },
+      );
+    }
+    return this.client.setSessionConfigOption(
+      this.sessionId,
+      configId,
+      value as ReasoningSelection,
+      {
+        clientId: this.clientId,
+        persist: opts?.persist,
+      },
+    );
+  }
+
+  getMessageGroups(): Promise<DaemonMessageGroupsSnapshot> {
+    return this.client.getMessageGroups(this.sessionId);
+  }
+
+  deleteMessageGroups(
+    snapshot: string,
+    groupIds: string[],
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.client.deleteMessageGroups(
+      this.sessionId,
+      snapshot,
+      groupIds,
+      this.clientId,
+    );
   }
 
   getRewindSnapshots(): Promise<{
@@ -1027,6 +1113,16 @@ export class DaemonSessionClient {
   ): AsyncGenerator<DaemonSessionGenerationEvent> {
     return this.client.generateSessionContent(this.sessionId, prompt, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  btwStream(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+    return this.client.streamSessionBtw(this.sessionId, question, {
+      ...opts,
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -1178,8 +1274,43 @@ export class DaemonSessionClient {
     });
   }
 
-  context(): Promise<DaemonSessionContextStatus> {
-    return this.client.sessionContext(this.sessionId, this.clientId);
+  async context(): Promise<DaemonSessionContextStatus> {
+    const generation = ++this.generatedUiReadGeneration;
+    try {
+      const status = await this.client.sessionContext(
+        this.sessionId,
+        this.clientId,
+      );
+      if (generation === this.generatedUiReadGeneration) {
+        const value = status.state._meta?.['generatedUi'];
+        let generatedUi: DaemonSession['generatedUi'];
+        if (
+          status.v === 1 &&
+          status.sessionId === this.sessionId &&
+          value &&
+          typeof value === 'object' &&
+          !Array.isArray(value) &&
+          'version' in value &&
+          value.version === 1 &&
+          'enabled' in value &&
+          typeof value.enabled === 'boolean'
+        ) {
+          generatedUi = {
+            version: 1,
+            enabled: value.enabled,
+            ...('reason' in value && typeof value.reason === 'string'
+              ? { reason: value.reason }
+              : {}),
+          };
+        }
+        this.updateGeneratedUi(generatedUi);
+      }
+      return status;
+    } catch (error) {
+      if (generation === this.generatedUiReadGeneration)
+        this.session.generatedUi = undefined;
+      throw error;
+    }
   }
 
   status(): Promise<DaemonSessionSummary> {
@@ -1198,6 +1329,14 @@ export class DaemonSessionClient {
 
   tasks(): Promise<DaemonSessionTasksStatus> {
     return this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
+    return this.client.sessionTaskRuntime(
+      this.sessionId,
+      taskId,
+      this.clientId,
+    );
   }
 
   agents(signal?: AbortSignal): Promise<DaemonSessionAgentsStatus> {
@@ -1451,7 +1590,7 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
-        const hydratedEvent = await this.hydrateEvent(event);
+        const hydratedEvent = await this.hydrateEvent(event, opts.signal);
         this._dispatchTurnEvent(hydratedEvent);
         yield hydratedEvent;
         if (event.id !== undefined) {
@@ -1467,27 +1606,30 @@ export class DaemonSessionClient {
     }
   }
 
-  private async hydrateReplaySnapshot(): Promise<void> {
+  private async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
     this.replaySnapshot.compactedReplay = await Promise.all(
       this.replaySnapshot.compactedReplay.map(
-        async (event) => await this.hydrateEvent(event),
+        async (event) => await this.hydrateEvent(event, signal),
       ),
     );
     this.replaySnapshot.liveJournal = await Promise.all(
       this.replaySnapshot.liveJournal.map(
-        async (event) => await this.hydrateEvent(event),
+        async (event) => await this.hydrateEvent(event, signal),
       ),
     );
   }
 
-  private async hydrateEvent(event: DaemonEvent): Promise<DaemonEvent> {
+  private async hydrateEvent(
+    event: DaemonEvent,
+    signal?: AbortSignal,
+  ): Promise<DaemonEvent> {
     if (!event.data || typeof event.data !== 'object') return event;
     const data = event.data as Record<string, unknown>;
     if (event.type === 'session_update') {
       const update = data['update'];
       if (update && typeof update === 'object' && !Array.isArray(update)) {
         const content = (update as Record<string, unknown>)['content'];
-        const hydrated = await this.hydrateBlock(content);
+        const hydrated = await this.hydrateBlock(content, signal);
         if (hydrated === content) return event;
         return {
           ...event,
@@ -1495,7 +1637,7 @@ export class DaemonSessionClient {
         };
       }
       const content = data['content'];
-      const hydrated = await this.hydrateBlock(content);
+      const hydrated = await this.hydrateBlock(content, signal);
       if (hydrated === content) return event;
       return { ...event, data: { ...data, content: hydrated } };
     }
@@ -1515,7 +1657,7 @@ export class DaemonSessionClient {
             return Array.isArray(record['content'])
               ? {
                   ...record,
-                  content: await this.hydrateContent(record['content']),
+                  content: await this.hydrateContent(record['content'], signal),
                 }
               : item;
           }),
@@ -1526,44 +1668,63 @@ export class DaemonSessionClient {
 
   private async hydrateContent(
     content: readonly unknown[],
+    signal?: AbortSignal,
   ): Promise<PromptContentBlock[]> {
     return await Promise.all(
-      content.map(async (block) => await this.hydrateBlock(block)),
+      content.map(async (block) => await this.hydrateBlock(block, signal)),
     );
   }
 
-  private async hydrateBlock(block: unknown): Promise<PromptContentBlock> {
+  // Pending reads are shared only within the same cancellation scope.
+  private attachmentCacheKey(
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): string {
+    if (!signal) return `ambient:${attachmentId}`;
+    let signalId = this.attachmentCacheSignalIds.get(signal);
+    if (signalId === undefined) {
+      signalId = this.nextAttachmentCacheSignalId++;
+      this.attachmentCacheSignalIds.set(signal, signalId);
+    }
+    return `signal:${signalId}:${attachmentId}`;
+  }
+
+  private async hydrateBlock(
+    block: unknown,
+    signal?: AbortSignal,
+  ): Promise<PromptContentBlock> {
     if (!isSessionAttachmentReference(block)) {
       return block as PromptContentBlock;
     }
     if (block.type === 'resource') return block;
-    let cached = this.attachmentCache.get(block.attachmentId);
+    const cacheKey = this.attachmentCacheKey(block.attachmentId, signal);
+    let cached = this.attachmentCache.get(cacheKey);
     if (cached) {
-      this.attachmentCache.delete(block.attachmentId);
-      this.attachmentCache.set(block.attachmentId, cached);
+      this.attachmentCache.delete(cacheKey);
+      this.attachmentCache.set(cacheKey, cached);
     } else {
       const pending = this.withClientIdSelfHeal(() =>
         this.client.readSessionAttachment(this.sessionId, block.attachmentId, {
           ...(this.clientId ? { clientId: this.clientId } : {}),
+          ...(signal ? { signal } : {}),
         }),
       );
-      cached = { pending, size: block.size };
-      this.attachmentCache.set(block.attachmentId, cached);
+      cached = { pending, size: block.size, attachmentId: block.attachmentId };
+      this.attachmentCache.set(cacheKey, cached);
       this.attachmentCacheBytes += block.size;
       while (
         this.attachmentCache.size > MAX_ATTACHMENT_CACHE_ENTRIES ||
         this.attachmentCacheBytes > MAX_ATTACHMENT_CACHE_BYTES
       ) {
-        const oldestId = this.attachmentCache.keys().next().value;
-        if (oldestId === undefined) break;
-        const evicted = this.attachmentCache.get(oldestId);
-        this.attachmentCache.delete(oldestId);
+        const oldestKey = this.attachmentCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        const evicted = this.attachmentCache.get(oldestKey);
+        this.attachmentCache.delete(oldestKey);
         this.attachmentCacheBytes -= evicted?.size ?? 0;
       }
       void pending.catch(() => {
-        if (this.attachmentCache.get(block.attachmentId)?.pending !== pending)
-          return;
-        this.attachmentCache.delete(block.attachmentId);
+        if (this.attachmentCache.get(cacheKey)?.pending !== pending) return;
+        this.attachmentCache.delete(cacheKey);
         this.attachmentCacheBytes -= block.size;
       });
     }

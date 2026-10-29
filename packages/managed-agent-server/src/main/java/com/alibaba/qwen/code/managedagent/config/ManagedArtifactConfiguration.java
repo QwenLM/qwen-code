@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -9,19 +9,19 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.concurrent.ScheduledFuture;
 
 @Configuration
 public class ManagedArtifactConfiguration {
-    @Bean
-    @ConditionalOnMissingBean(name = "taskScheduler")
-    public ThreadPoolTaskScheduler taskScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return builder.build();
+    @Bean(defaultCandidate = false)
+    public ThreadPoolTaskScheduler managedAgentScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.threadNamePrefix("managed-agent-").build();
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedArtifactScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("managed-artifact-").build();
     }
@@ -32,9 +32,38 @@ public class ManagedArtifactConfiguration {
      * not share the one-thread default pool with the message materializer
      * and the dispatch and lifecycle recovery ticks.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedAutomationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("managed-automation-").build();
+    }
+
+    /**
+     * The automation scanner's row pool (#15418): a scan tick submits one
+     * task per candidate row and joins them before returning, so the tick
+     * holds the scheduler's thread for the whole pass. That is why this is
+     * a second bean — scanning on its own `managedAutomationScheduler`
+     * would deadlock the tick on the pool's only thread, and a bigger
+     * scheduler pool would park a thread per pending join. Pool shutdown
+     * never interrupts row tasks, but does not wait for their completion or
+     * guarantee it before JVM exit. Claims are durable and later ticks
+     * re-drive a lost answer. A tick caught mid-join is still bounded by the
+     * application's shutdown phase.
+     */
+    @Bean(defaultCandidate = false)
+    public ThreadPoolTaskExecutor automationScannerExecutor(
+            ManagedAgentProperties properties) {
+        // With automation off the positive-count validation stays out, so a
+        // dormant value must still boot: the JDK refuses a 0-size pool, and
+        // the pool goes unused while the scanner is off.
+        int threads = Math.max(1, properties.getAutomation()
+                .getScannerThreads());
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(threads);
+        executor.setMaxPoolSize(threads);
+        executor.setThreadNamePrefix("automation-scan-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(0);
+        return executor;
     }
 
     /**
@@ -44,7 +73,7 @@ public class ManagedArtifactConfiguration {
      * would hold off the message materializer and every recovery tick for
      * that long.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler replayFloorScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("replay-floor-").build();
     }
@@ -56,7 +85,7 @@ public class ManagedArtifactConfiguration {
      * Unconditional — the @Scheduled wiring binds by name at context
      * refresh whether or not the broker lane is on.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler childRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("child-relay-").build();
     }
@@ -66,9 +95,14 @@ public class ManagedArtifactConfiguration {
      * relay, its page runs sequential harness calls on two Sessions per
      * message, which must stall neither that relay nor the recoveries.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler messageRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("message-relay-").build();
+    }
+
+    @Bean(defaultCandidate = false)
+    public ThreadPoolTaskScheduler wakeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("wake-recovery-").build();
     }
 
     /**
@@ -76,9 +110,14 @@ public class ManagedArtifactConfiguration {
      * for up to the Git timeout each, which must stall neither the relay
      * nor the shared recoveries.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler childWorkspaceScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler sessionWorktreeScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("session-worktree-").build();
     }
 
     /**
@@ -86,7 +125,7 @@ public class ManagedArtifactConfiguration {
      * the one-thread default scheduler would delay turn recovery by a whole
      * pass whenever a materialization stalls.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler messageMaterializerScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("message-materialize-").build();
     }
@@ -112,7 +151,7 @@ public class ManagedArtifactConfiguration {
      * the tick: a deployment with the Broker off must not pay for an idle
      * scheduler thread.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public ThreadPoolTaskScheduler runtimeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {

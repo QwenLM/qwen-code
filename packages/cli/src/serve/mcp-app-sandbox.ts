@@ -77,7 +77,7 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>html,body,iframe{box-sizing:border-box;width:100%;height:100%;margin:0;border:0;background:transparent}</style>
+    <style>html,body,iframe{box-sizing:border-box;width:100%;height:100%;margin:0;border:0;background:transparent}html,body{overflow:hidden}iframe{display:block}</style>
   </head>
   <body>
     <script>
@@ -88,7 +88,9 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
         let pendingHtml;
         const inner = document.createElement('iframe');
         inner.setAttribute('sandbox', 'allow-scripts allow-forms allow-same-origin');
-        inner.style.cssText = 'width:100%;height:100%;border:0;background:transparent';
+        // Block display avoids the inline baseline gap that made the proxy page
+        // a few pixels taller than its frame and gave it its own scrollbars.
+        inner.style.cssText = 'display:block;width:100%;height:100%;border:0;background:transparent';
         document.body.appendChild(inner);
 
         window.addEventListener('message', (event) => {

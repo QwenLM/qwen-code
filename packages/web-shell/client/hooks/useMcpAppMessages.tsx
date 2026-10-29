@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  McpAppMessageRequest,
-  McpAppMessages,
+import {
+  MCP_APP_MESSAGE_REVIEW_META,
+  type McpAppMessageRequest,
+  type McpAppMessages,
 } from '../mcpAppHostContext';
 import type { DaemonSessionOwnerSnapshot } from '../daemon/session/types';
 import {
@@ -98,7 +99,15 @@ export function useMcpAppMessages(host: MessageHost) {
         (previous &&
           (isPending(previous.phase) || previous.phase === 'unknown'))
       ) {
-        return Promise.resolve({ isError: true });
+        // Refused before review: nothing was sent.
+        return Promise.resolve({
+          isError: true,
+          _meta: {
+            [MCP_APP_MESSAGE_REVIEW_META]: input.signal.aborted
+              ? 'cancelled'
+              : 'failed',
+          },
+        });
       }
       return new Promise((resolve) => {
         const controller = new AbortController();
@@ -135,7 +144,19 @@ export function useMcpAppMessages(host: MessageHost) {
           },
           settle: () => {
             request.cleanup();
-            resolve(request.phase === 'accepted' ? {} : { isError: true });
+            resolve(
+              request.phase === 'accepted'
+                ? {}
+                : request.phase === 'cancelled' ||
+                    request.phase === 'expired' ||
+                    request.phase === 'failed'
+                  ? // None reached the session, so the App can say nothing was sent.
+                    {
+                      isError: true,
+                      _meta: { [MCP_APP_MESSAGE_REVIEW_META]: request.phase },
+                    }
+                  : { isError: true },
+            );
           },
           finish: (phase, error) => {
             if (!isPending(request.phase) && request.phase !== 'unknown')
@@ -277,6 +298,66 @@ export function useMcpAppMessages(host: MessageHost) {
   };
 }
 
+interface GeneratedUiParameters {
+  title: string;
+  inputs: Array<{ id: string; value: string; checked: boolean }>;
+  rejectedEvents: number;
+}
+
+/**
+ * Reads the parameter message the built-in Generated UI App sends, so the
+ * review can show the values first. Anything else keeps the generic layout:
+ * the table folds the message text away, so only the bundled server counts,
+ * not any App that claims its resource URI.
+ */
+export function readGeneratedUiParameters(
+  review: Pick<McpAppMessageRequest, 'requiredFeature' | 'text'>,
+): GeneratedUiParameters | undefined {
+  if (review.requiredFeature !== 'generated-ui') return undefined;
+  const start = review.text.indexOf('\n{');
+  if (start < 0) return undefined;
+  let message: unknown;
+  try {
+    message = JSON.parse(review.text.slice(start + 1));
+  } catch {
+    return undefined;
+  }
+  if (!message || typeof message !== 'object') return undefined;
+  const { kind, title, snapshot, rejectedEvents } = message as Record<
+    string,
+    unknown
+  >;
+  const inputs =
+    snapshot && typeof snapshot === 'object'
+      ? (snapshot as Record<string, unknown>)['inputs']
+      : undefined;
+  if (
+    kind !== 'qwen.generated-ui.parameters' ||
+    typeof title !== 'string' ||
+    typeof rejectedEvents !== 'number' ||
+    !Number.isSafeInteger(rejectedEvents) ||
+    rejectedEvents < 0 ||
+    !inputs ||
+    typeof inputs !== 'object'
+  ) {
+    return undefined;
+  }
+  const rows: GeneratedUiParameters['inputs'] = [];
+  for (const [id, input] of Object.entries(inputs)) {
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      typeof (input as Record<string, unknown>)['value'] !== 'string' ||
+      typeof (input as Record<string, unknown>)['checked'] !== 'boolean'
+    ) {
+      return undefined;
+    }
+    const { value, checked } = input as { value: string; checked: boolean };
+    rows.push({ id, value, checked });
+  }
+  return { title, inputs: rows, rejectedEvents };
+}
+
 function McpAppMessageReview({
   review,
   onSend,
@@ -287,32 +368,99 @@ function McpAppMessageReview({
   onClose(): void;
 }) {
   const { t } = useI18n();
+  const parameters = readGeneratedUiParameters(review);
+  const details = (
+    <>
+      <dl className="grid gap-1 break-all text-xs text-muted-foreground">
+        <div>
+          {t('mcpApp.message.server')}: {review.serverName}
+        </div>
+        <div>
+          {t('mcpApp.message.resource')}: {review.resourceUri}
+        </div>
+        <div>
+          {t('mcpApp.message.session')}: {review.sessionId}
+        </div>
+      </dl>
+      <pre
+        className="max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-sm"
+        tabIndex={0}
+      >
+        {review.text}
+      </pre>
+    </>
+  );
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-xl" showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>{t('mcpApp.message.title')}</DialogTitle>
+          <DialogTitle>
+            {t(
+              parameters
+                ? 'mcpApp.generatedUi.reviewTitle'
+                : 'mcpApp.message.title',
+            )}
+          </DialogTitle>
           <DialogDescription>
-            {t('mcpApp.message.description')}
+            {parameters
+              ? t('mcpApp.generatedUi.reviewDescription', {
+                  title: parameters.title,
+                })
+              : t('mcpApp.message.description')}
           </DialogDescription>
         </DialogHeader>
-        <dl className="grid gap-1 break-all text-xs text-muted-foreground">
-          <div>
-            {t('mcpApp.message.server')}: {review.serverName}
-          </div>
-          <div>
-            {t('mcpApp.message.resource')}: {review.resourceUri}
-          </div>
-          <div>
-            {t('mcpApp.message.session')}: {review.sessionId}
-          </div>
-        </dl>
-        <pre
-          className="max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-sm"
-          tabIndex={0}
-        >
-          {review.text}
-        </pre>
+        {parameters ? (
+          <>
+            {parameters.rejectedEvents > 0 && (
+              <p className="text-sm text-destructive">
+                {t('mcpApp.generatedUi.rejectedEvents', {
+                  count: parameters.rejectedEvents,
+                })}
+              </p>
+            )}
+            {parameters.inputs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {t('mcpApp.generatedUi.noParameters')}
+              </p>
+            ) : (
+              <div className="max-h-[40vh] overflow-auto rounded-md border">
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">
+                        {t('mcpApp.generatedUi.parameter')}
+                      </th>
+                      <th className="px-3 py-2 text-left font-medium">
+                        {t('mcpApp.generatedUi.value')}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {parameters.inputs.map((input) => (
+                      <tr key={input.id} className="border-t">
+                        <td className="px-3 py-1.5 font-mono text-xs break-all">
+                          {input.id}
+                        </td>
+                        <td className="px-3 py-1.5 break-all">
+                          {input.checked ? '✓ ' : ''}
+                          {input.value}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <details className="text-sm">
+              <summary className="cursor-pointer text-muted-foreground">
+                {t('mcpApp.generatedUi.fullMessage')}
+              </summary>
+              <div className="mt-2 grid gap-2">{details}</div>
+            </details>
+          </>
+        ) : (
+          details
+        )}
         <p role="status">{t(`mcpApp.message.${review.phase}`)}</p>
         {review.promptId && (
           <p className="break-all text-xs text-muted-foreground">
@@ -333,7 +481,11 @@ function McpAppMessageReview({
             )}
           </Button>
           {review.phase === 'reviewing' && (
-            <Button onClick={onSend}>{t('mcpApp.message.send')}</Button>
+            <Button onClick={onSend}>
+              {t(
+                parameters ? 'mcpApp.generatedUi.send' : 'mcpApp.message.send',
+              )}
+            </Button>
           )}
         </DialogFooter>
       </DialogContent>

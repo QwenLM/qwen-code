@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer;
+import com.alibaba.qwen.code.managedagent.event.LiteTopicEventTransport;
+import com.alibaba.qwen.code.managedagent.event.LiteTopicPublicEventTransport;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer;
-import com.alibaba.qwen.code.managedagent.service.LiteTopicEventTransport;
-import com.alibaba.qwen.code.managedagent.service.LiteTopicPublicEventTransport;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import com.alibaba.qwen.code.managedagent.service.OwnerSubscriptions;
-import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator;
-import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.session.OwnerSubscriptions;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientException;
@@ -101,14 +101,14 @@ public class EventTransportConfiguration {
     }
 
     @Bean
-    public TransportConsumerStore transportConsumerStore(JdbcTemplate jdbc) {
+    public TransportConsumerStore transportConsumerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         return new TransportConsumerStore(jdbc);
     }
 
     @Bean(destroyMethod = "close")
     public LiteTopicPublicEventTransport liteTopicPublicEventTransport(
             Producer producer, ClientServiceProvider provider,
-            ManagedAgentProperties properties, ObjectMapper objectMapper,
+            ManagedAgentProperties properties, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             TransportConsumerStore store) {
         return new LiteTopicPublicEventTransport(producer, provider,
                 properties.getEventTransport().getTopic(), objectMapper,
@@ -188,7 +188,7 @@ public class EventTransportConfiguration {
      * Owner reconciliation runs on its own thread: it calls the broker, and
      * must never delay the one-thread default scheduler's recovery ticks.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler eventTransportScheduler(
             ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("event-transport-")

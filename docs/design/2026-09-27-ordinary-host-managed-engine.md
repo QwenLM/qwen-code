@@ -58,8 +58,9 @@ ownership, sharing, cleanup and session-isolation requirements, as the host
 decision asked before implementation, and splits M5 into three parts; the
 first, M5a, is implemented in #13167, the second, M5b, in #13291, and the
 third, M5c, in #13352, below under "physical stop". The M6 section below is
-the design of the last slice; it registers and enables nothing, and neither of
-its two code slices is implemented. The M2
+the design of the last slice; its registration and workspace-change
+acknowledgement are implemented in #14483, with the review fixes in #14488.
+The M2
 update is based on `afb911a3c8`, the M5 update on `f3bf699476`, the M5b
 update on `1a5aae80d9`, and the M5c update on `2c591ecc08`.
 
@@ -242,8 +243,10 @@ The B2d invariants hold. In addition:
 
 M1 to M4 are implemented and retained; M2, M4, M5a, M5b and M5c landed
 ahead of the priority review described in Status without registering the
-engine. Only M6 remains unimplemented; its design is specified below, and the
-exit checks below do not schedule its implementation. Reference commits
+engine. M6 is implemented in #14483; the review fixes are in #14488, the
+workspace-change tests in #14525 and #14554, and the end-to-end pass found
+and fixed the Managed restore refusal in #14688. Reference
+commits
 describe the original port; the linked host decision supersedes the old
 in-process M2 approach.
 
@@ -254,7 +257,7 @@ in-process M2 approach.
 | **M3 — strict configuration snapshot** (#12883)                       | A read-only snapshot of the configuration inputs of the compatibility contract, as the M3 section refines them: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every settings layer, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and the requested approval mode; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                                                                                                                                                                                                       | `a836081466`, `306cf17546`, `d48161bc4a`                                                                                                                                                        |
 | **M4 — Managed Session log recording** (#12935)                       | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                                                                             | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                                                                                                                                                                                                     | `e98cda5c95`, `1ed806ca85`, `f501d9694d`                                                                                                                                                        |
 | **M5 — Runtime-backed tools** (M5a: #13167; M5b: #13291; M5c: #13352) | A session-exclusive local Runtime worker launched by the Managed child lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes and waits for their process groups to exit; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                          | Tool file writes and Shell processes run only in the worker; host-side worker provisioning and session recording remain allowed. Cancellation has physical-stop evidence; a crash of the child or the worker leaves no Shell process group the ledger cannot name (except the holes the M5c section accepts: the spawn-to-pid-callback window, the setsid/daemonize residual, and ledger tampering by a Shell running with the worker's own permissions); an unprovable stop keeps the engine quarantined while a reaper retries it; a lost result blocks the session. | `7786edd123`, `5dde5c8dd7`, `174e072ac4`                                                                                                                                                        |
-| **M6 — the engine** (design only)                                     | The Managed channel factory (the M2 host, M5 tools, M3 revalidation), the workspace-change acknowledgement the host lacks and a check of the other extension methods the Bridge calls on a Managed channel (session close, user language, resource snapshot), which the host already answers, the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                            | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session.                                                                                                                                                                                   | `824e92d84f`, `306cf17546`                                                                                                                                                                      |
+| **M6 — the engine** (implemented in #14483)                           | The Managed channel factory (the M2 host, M5 tools, M3 revalidation), the workspace-change acknowledgement the host lacks and a check of the other extension methods the Bridge calls on a Managed channel (session close, user language, resource snapshot), which the host already answers, the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                            | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session.                                                                                                                                                                                   | `824e92d84f`, `306cf17546`                                                                                                                                                                      |
 
 M2 and M3 are independent of each other. M4 and M5 need M2 for the host that
 drives them; the M4 recording itself landed first (see the M4 section). M6
@@ -1281,10 +1284,11 @@ unsafe: registration without the acknowledgement turns every workspace control
 change into a quarantine, and the acknowledgement has no production caller
 without registration.
 
-**Status: design only.** No production caller builds the engine in this
-revision, and the Managed host does not answer
-`qwen/control/workspace/change` yet; the two code slices land in their own
-changes.
+**Status: implemented in #14483.** The engine is registered at every paired
+runtime and the Managed host answers `qwen/control/workspace/change`. The
+review fixes are in #14488; the workspace-change tests are in #14525 and
+#14554, and the end-to-end pass found and fixed the Managed restore refusal
+in #14688.
 
 #### M6a: registration and compatibility
 

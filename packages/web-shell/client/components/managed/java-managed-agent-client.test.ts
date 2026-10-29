@@ -23,6 +23,174 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('sends Session file locators without a caller-selected Workspace or cwd', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await client.queryWorkspaceFiles({
+      sessionId: 'session-a',
+      directory: '.',
+    });
+    await client.readWorkspaceFile({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+    });
+    await client.uploadWorkspaceFile(
+      {
+        sessionId: 'session-a',
+        path: 'file.txt',
+        expectedScopeRevision: 'scope',
+        uploadId: 'upload-id',
+      },
+      new Blob(['text']),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      sessionId: 'session-a',
+      directory: '.',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+    });
+    expect(
+      Object.fromEntries(
+        new URL(String(fetchImpl.mock.calls[2][0])).searchParams,
+      ),
+    ).toEqual({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+      uploadId: 'upload-id',
+    });
+  });
+
+  it('uploads raw bytes to the authenticated Workspace route and queries the same upload ID', async () => {
+    const result = {
+      scopeRevision: 'scope',
+      uploadId: 'upload-id',
+      path: 'folder/你好.pdf',
+      sizeBytes: 4,
+      sha256: 'a'.repeat(64),
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({
+        authorization: 'Bearer scoped',
+        'content-type': 'application/json',
+      }),
+      fetch: fetchImpl,
+    });
+    const request = {
+      workspaceId: 'workspace',
+      cwdRelative: 'src',
+      path: result.path,
+      expectedScopeRevision: 'scope',
+      uploadId: result.uploadId,
+    };
+    const data = new Blob([new Uint8Array([0, 255, 128, 1])]);
+    const signal = new AbortController().signal;
+    expect(await client.uploadWorkspaceFile(request, data, signal)).toEqual(
+      result,
+    );
+    const [url, init] = fetchImpl.mock.calls[0];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe(
+      '/gateway/api/agent/web-shell/v1/workspaces/files/upload',
+    );
+    expect(Object.fromEntries(parsed.searchParams)).toEqual(request);
+    expect(init?.body).toBe(data);
+    expect(init?.signal).toBe(signal);
+    expect(init?.credentials).toBe('include');
+    expect(new Headers(init?.headers).get('content-type')).toBe(
+      'application/octet-stream',
+    );
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    await client.queryWorkspaceFileUpload(result.uploadId, signal);
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/files/uploads/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      uploadId: result.uploadId,
+    });
+  });
+
+  it('renames through the authenticated WebShell POST using the original key and signal', async () => {
+    const result = { sessionId: 's1', title: 'Confirmed', replayed: false };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const abort = new AbortController();
+    const request = {
+      sessionId: 's1',
+      title: 'Confirmed',
+      idempotencyKey: 'original',
+    };
+    expect(await client.renameSession(request, abort.signal)).toEqual(result);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/sessions/rename',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
+
+  it('does not treat an accepted or refused rename as confirmed', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ sessionId: 's1', title: 'Unconfirmed' }, 202),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'session_operation_forbidden',
+              message: 'Forbidden',
+            },
+          },
+          403,
+        ),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const request = {
+      sessionId: 's1',
+      title: 'Name',
+      idempotencyKey: 'original',
+    };
+    await expect(client.renameSession(request)).rejects.toMatchObject({
+      status: 202,
+      code: 'session_rename_unconfirmed',
+    });
+    await expect(client.renameSession(request)).rejects.toMatchObject({
+      status: 403,
+      code: 'session_operation_forbidden',
+    });
+  });
+
   it('uses authorized Workspace registration POST routes without putting credentials in request bodies', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -1086,6 +1254,9 @@ describe('JavaManagedAgentClient', () => {
         turnId: 'p1',
         status: 'accepted',
         replayed: false,
+        operationId: 'cancel-1',
+        admissionStage: 'java_durable',
+        deliveryState: 'pending',
       }),
     );
     const client = new JavaManagedAgentClient({

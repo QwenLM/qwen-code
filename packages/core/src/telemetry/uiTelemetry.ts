@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -116,10 +117,24 @@ export interface ModelMetrics extends ModelMetricsCore {
   bySource: Record<string, ModelMetricsCore>;
 }
 
+/**
+ * Model totals for the daemon stats route. Generation timing lives here, not
+ * in `ModelMetrics`, because `models` is also written to managed usage records
+ * whose model entries are validated against a closed set of keys.
+ */
+export interface StatsModelMetrics extends ModelMetricsCore {
+  generation?: GenerationMetrics;
+}
+
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
   /** Provider-normalized model totals exposed by the daemon stats route. */
-  statsModels?: Record<string, ModelMetricsCore>;
+  statsModels?: Record<string, StatsModelMetrics>;
+  /** Per-event output estimates; absent for models restored from raw-only history. */
+  billableOutputTokens?: Record<
+    string,
+    { total: number; bySource: Record<string, number> }
+  >;
   generation?: GenerationMetrics;
   /**
    * Per-instance subagent metadata (invocation id → business name + agent
@@ -206,6 +221,20 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
       clone.statsModels,
     );
   }
+  if (clone.billableOutputTokens) {
+    clone.billableOutputTokens = Object.assign(
+      Object.create(null) as NonNullable<
+        SessionMetrics['billableOutputTokens']
+      >,
+      clone.billableOutputTokens,
+    );
+    for (const model of Object.values(clone.billableOutputTokens)) {
+      model.bySource = Object.assign(
+        Object.create(null) as Record<string, number>,
+        model.bySource,
+      );
+    }
+  }
   return clone;
 };
 
@@ -215,6 +244,9 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   totalFail: 0,
   byName: {},
 });
+
+/** Shortest generation window that counts toward output speed. */
+const MIN_THROUGHPUT_WINDOW_MS = 100;
 
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
@@ -229,14 +261,23 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
     event.input_token_count > 0
       ? event.input_token_count
       : event.cached_content_token_count;
-  const thoughtsIncludedInOutput =
-    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
   return (
     input +
     event.output_token_count +
-    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
   );
 };
+
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },
@@ -354,6 +395,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
@@ -399,6 +441,9 @@ export class UiTelemetryService extends EventEmitter {
       ...createInitialMetrics(),
       models,
     }).models;
+    // Raw history has no per-event convention. Never replace its full estimate
+    // with an authoritative count containing only subsequent live requests.
+    delete metrics.billableOutputTokens;
     this.#sessionMetrics.set(sessionId, metrics);
     this.#closedSessions.delete(sessionId);
   }
@@ -619,6 +664,13 @@ export class UiTelemetryService extends EventEmitter {
         ? event.input_token_count
         : event.cached_content_token_count;
     const normalizedTotalTokens = getEventTotalTokenCount(event);
+    const billable = metrics.billableOutputTokens?.[event.model];
+    if (billable) {
+      const output = getEventBillableOutputTokens(event);
+      const source = event.subagent_name ?? MAIN_SOURCE;
+      billable.total += output;
+      billable.bySource[source] = (billable.bySource[source] ?? 0) + output;
+    }
     const accumulate = (
       bucket: ModelMetricsCore,
       prompt: number,
@@ -649,29 +701,45 @@ export class UiTelemetryService extends EventEmitter {
       );
     }
 
+    const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
-      event.ttft_ms === undefined ||
-      !Number.isFinite(event.ttft_ms) ||
-      event.ttft_ms < 0 ||
+      ttftMs === undefined ||
+      !Number.isFinite(ttftMs) ||
+      ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    const generation =
-      metrics.generation ??
-      (metrics.generation = createInitialGenerationMetrics());
-    const generationDurationMs = Math.max(0, event.duration_ms - event.ttft_ms);
+    const accumulateGeneration = (generation: GenerationMetrics) => {
+      generation.timedRequests++;
+      generation.totalTtftMs += ttftMs;
+      // A window this short means the output arrived in a burst, so dividing
+      // the whole response's tokens by it reads as thousands of tokens/s.
+      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
+        generation.totalGenerationDurationMs += generationDurationMs;
+        generation.totalThroughputOutputTokens += event.output_token_count;
+      }
+    };
 
-    generation.timedRequests++;
-    generation.totalTtftMs += event.ttft_ms;
-    if (generationDurationMs > 0) {
-      generation.totalGenerationDurationMs += generationDurationMs;
-      generation.totalThroughputOutputTokens += event.output_token_count;
+    const generation = (metrics.generation ??=
+      createInitialGenerationMetrics());
+    accumulateGeneration(generation);
+    if (statsModelMetrics) {
+      accumulateGeneration(
+        (statsModelMetrics.generation ??= createInitialGenerationMetrics()),
+      );
     }
     generation.last = {
       model: event.model,
-      ttftMs: event.ttft_ms,
+      ttftMs,
       generationDurationMs,
       outputTokens: event.output_token_count,
     };
@@ -837,6 +905,13 @@ export class UiTelemetryService extends EventEmitter {
   ): ModelMetrics {
     if (!metrics.models[modelName]) {
       metrics.models[modelName] = createInitialModelMetrics();
+      const billable = (metrics.billableOutputTokens ??= Object.create(
+        null,
+      ) as NonNullable<SessionMetrics['billableOutputTokens']>);
+      billable[modelName] = {
+        total: 0,
+        bySource: Object.create(null) as Record<string, number>,
+      };
     }
     return metrics.models[modelName];
   }
@@ -844,10 +919,10 @@ export class UiTelemetryService extends EventEmitter {
   #getOrCreateStatsModelMetrics(
     metrics: SessionMetrics,
     modelName: string,
-  ): ModelMetricsCore {
+  ): StatsModelMetrics {
     const statsModels = (metrics.statsModels ??= Object.create(null) as Record<
       string,
-      ModelMetricsCore
+      StatsModelMetrics
     >);
     return (statsModels[modelName] ??= createInitialModelMetricsCore());
   }

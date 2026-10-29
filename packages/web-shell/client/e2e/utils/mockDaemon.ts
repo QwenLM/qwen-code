@@ -308,6 +308,7 @@ export function createWebShellDaemonScenario(
       'session_permission_vote',
       'session_scope_override',
       'session_source_metadata',
+      'session_btw_stream',
       'workspace_settings',
       'workspace_voice',
     ],
@@ -886,6 +887,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
+    /^\/session\/[^/]+\/btw\/stream(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
@@ -1037,7 +1039,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
     return true;
-  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw(?:\/stream)?\/?$/.test(path))
+    return true;
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  )
+    return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
@@ -1244,7 +1252,7 @@ async function handleDaemonRoute(
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
-    await json(route, { ok: true, healthy: true });
+    await json(route, { status: 'ok' });
     return;
   }
   if (method === 'GET' && path === '/capabilities') {
@@ -1965,6 +1973,28 @@ async function handleDaemonRoute(
       { url: 'https://github.com/example/repo/pull/42', number: 42 },
       201,
     );
+    return;
+  }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/stream\/?$/.test(path)) {
+    const requestId = (body as Record<string, unknown>)['requestId'];
+    const answer = scenario.btwAnswer ?? 'A side answer.';
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: ['answer', 'done']
+        .map(
+          (type) =>
+            `event: ${type}\ndata: ${JSON.stringify({ v: 1, type, requestId, answer })}\n\n`,
+        )
+        .join(''),
+    });
+    return;
+  }
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  ) {
+    await route.fulfill({ status: 204 });
     return;
   }
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {

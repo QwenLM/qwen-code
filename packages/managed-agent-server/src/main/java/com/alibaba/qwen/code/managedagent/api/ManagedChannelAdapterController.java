@@ -1,15 +1,16 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.ChannelInstanceView;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.ClaimRequest;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.ClaimResponse;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.DeliveryView;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.InboundAdmission;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.InboundEventRequest;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.ReceiptRequest;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.RegisterChannelRequest;
-import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.ResendResponse;
-import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.ChannelInstanceView;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.ClaimRequest;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.ClaimResponse;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.DeliveryView;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.InboundAdmission;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.InboundEventRequest;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.ReceiptRequest;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.RegisterChannelRequest;
+import com.alibaba.qwen.code.managedagent.channel.ChannelAdapterModels.ResendResponse;
+import com.alibaba.qwen.code.managedagent.channel.ManagedChannelService;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.PathVariable;

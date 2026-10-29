@@ -246,9 +246,11 @@ it('retries with the typed token, stores it per tab, and creates no connection',
     'good',
   );
   expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
-  expect(fetch.mock.calls[1][1].headers).toEqual({
-    Authorization: 'Bearer good',
-  });
+  expect(new Headers(fetch.mock.calls[1][1].headers)).toEqual(
+    new Headers({
+      Authorization: 'Bearer good',
+    }),
+  );
 });
 it('clears a rejected stored token after tokenless access succeeds', async () => {
   persistDaemonToken('wrong', 'http://daemon.test');
@@ -391,68 +393,57 @@ it('asks before probing a daemon this browser has not connected to', async () =>
   expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
   expect(container.textContent).toContain('Connected');
 });
-it.each(['queued retry', 'in-flight response'])(
-  'retires the old target on address editing with a %s',
-  async (phase) => {
-    vi.useFakeTimers();
-    let finishProbe:
-      | ((response: ReturnType<typeof stubResponse>) => void)
-      | undefined;
-    const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
-    if (phase === 'queued retry') {
-      fetch.mockRejectedValueOnce(new Error('Failed to fetch'));
-    } else {
-      fetch.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishProbe = resolve;
-          }),
-      );
-    }
-    const onChangeTarget = vi.fn();
-    vi.stubGlobal('fetch', fetch);
-    await mount(
-      'boot-secret',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      onChangeTarget,
-    );
-    const signal = fetch.mock.calls[0][1].signal as AbortSignal;
+it('retires the old target on address editing after a failed probe', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Failed to fetch'))
+    .mockResolvedValue(stubResponse({ status: 200 }));
+  const onChangeTarget = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    'boot-secret',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    onChangeTarget,
+  );
+  const signal = fetch.mock.calls[0][1].signal as AbortSignal;
+  // The rejected first probe reveals the form, so the operator can edit the
+  // address before the automatic retry fires.
+  expect(container.querySelector('form')).not.toBeNull();
 
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value',
-      )!.set!.call(addressInput(), window.location.origin);
-      addressInput().dispatchEvent(new Event('input', { bubbles: true }));
-      finishProbe?.(stubResponse({ status: 200 }));
-    });
-    await act(async () => {
-      vi.advanceTimersByTime(12_000);
-    });
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(addressInput(), window.location.origin);
+    addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(12_000);
+  });
 
-    expect(signal.aborted).toBe(true);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain('Connection paused');
-    expect(container.textContent).toContain(window.location.origin);
-    expect(container.textContent).not.toContain('Connected boot-secret');
-    expect(tokenInput().value).toBe('');
-    expect(
-      sessionStorage.getItem('qwen-daemon-token:http://daemon.test'),
-    ).toBeNull();
-    expect(sessionStorage.getItem('qwen-daemon-target-confirmed')).toBeNull();
-    expect(onChangeTarget).not.toHaveBeenCalled();
+  expect(signal.aborted).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('Connection paused');
+  expect(container.textContent).toContain(window.location.origin);
+  expect(container.textContent).not.toContain('Connected boot-secret');
+  expect(tokenInput().value).toBe('');
+  expect(
+    sessionStorage.getItem('qwen-daemon-token:http://daemon.test'),
+  ).toBeNull();
+  expect(sessionStorage.getItem('qwen-daemon-target-confirmed')).toBeNull();
+  expect(onChangeTarget).not.toHaveBeenCalled();
 
-    await act(submitForm);
-    expect(onChangeTarget).toHaveBeenCalledWith(
-      window.location.origin,
-      undefined,
-    );
-    expect(fetch).toHaveBeenCalledTimes(1);
-  },
-);
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    window.location.origin,
+    undefined,
+  );
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
 // "Return to local workspaces" retires the target exactly the way editing the
 // address does, so it has to retire the probe loop too: assigning a new URL does
 // not stop the JS event loop, and the document stays live until the navigation
@@ -507,6 +498,41 @@ it('keeps tokenless loopback access working', async () => {
   await mount();
   expect(container.textContent).toBe('Connected ');
 });
+it('holds back the credential form while the desktop verifies its boot token', async () => {
+  vi.stubGlobal('__TAURI__', { core: { invoke: vi.fn() } });
+  const fetch = hangingFetch();
+  vi.stubGlobal('fetch', fetch);
+  await mount('boot-secret');
+  // The desktop hands the gate a fresh token on the URL; painting the form
+  // for that first round trip flashes a login screen at startup.
+  expect(container.textContent).toContain('Connecting');
+  expect(container.querySelector('form')).toBeNull();
+  expect(tokenInput()).toBeNull();
+  expect(addressInput()).toBeNull();
+});
+
+it('holds back the credential form during a browser boot probe', async () => {
+  const fetch = hangingFetch();
+  vi.stubGlobal('fetch', fetch);
+  await mount('boot-secret');
+  expect(container.textContent).toContain('Connecting');
+  expect(container.querySelector('form')).toBeNull();
+  expect(tokenInput()).toBeNull();
+  expect(addressInput()).toBeNull();
+});
+
+it('reveals the credential form when the desktop boot token is rejected', async () => {
+  vi.stubGlobal('__TAURI__', { core: { invoke: vi.fn() } });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount('stale');
+  expect(container.textContent).toContain('Invalid or expired token');
+  expect(container.querySelector('form')).not.toBeNull();
+  expect(tokenInput().value).toBe('');
+});
+
 it('times out a hung probe and re-probes without a click', async () => {
   vi.useFakeTimers();
   const fetch = hangingFetch();
@@ -842,9 +868,11 @@ it('keeps a token typed during an automatic retry when that retry is rejected', 
   // The retry re-probes the credential the gate started with, so the 401 is a
   // verdict about that one — never about the value just typed.
   for (const call of fetch.mock.calls) {
-    expect((call[1] as RequestInit).headers).toEqual({
-      Authorization: 'Bearer stale-token',
-    });
+    expect(new Headers((call[1] as RequestInit).headers)).toEqual(
+      new Headers({
+        Authorization: 'Bearer stale-token',
+      }),
+    );
   }
   expect(tokenInput().value).toBe('fresh-token');
 });
@@ -992,9 +1020,11 @@ it('trims a whitespace-padded typed token before probing and persisting', async 
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'padded-token',
   );
-  expect(fetch.mock.calls[1][1].headers).toEqual({
-    Authorization: 'Bearer padded-token',
-  });
+  expect(new Headers(fetch.mock.calls[1][1].headers)).toEqual(
+    new Headers({
+      Authorization: 'Bearer padded-token',
+    }),
+  );
 });
 
 it('lets a manual retry supersede an armed auto-retry', async () => {

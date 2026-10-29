@@ -1,18 +1,19 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitResource;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -71,6 +72,7 @@ class ManagedSessionMessageStoreTest {
     private ManagedAgentService agents;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     private final CommitResource input = hookResource("child-input",
@@ -595,7 +597,7 @@ class ManagedSessionMessageStoreTest {
             String message, ThrowingCallable commit) {
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode()).as(label).isEqualTo(code);
                     if (message != null) {
                         assertThat(error.getStatus()).as(label)

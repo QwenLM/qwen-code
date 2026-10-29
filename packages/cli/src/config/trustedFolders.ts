@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import type { WorkflowAncestorTrustProvider } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   atomicWriteFileSync,
   createDebugLogger,
@@ -26,6 +27,7 @@ import {
   resolveTrustDecision,
   resolveTrustRule,
 } from './trust-precedence.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
@@ -159,10 +161,15 @@ export function resetTrustedFoldersForTesting(): void {
 }
 
 export function loadTrustedFolders(): LoadedTrustedFolders {
-  if (loadedTrustedFolders) {
-    return loadedTrustedFolders;
-  }
+  loadedTrustedFolders ??= readTrustedFoldersFile(false);
+  return loadedTrustedFolders;
+}
 
+export function loadTrustedFoldersFresh(): LoadedTrustedFolders {
+  return readTrustedFoldersFile(true);
+}
+
+function readTrustedFoldersFile(validateRules: boolean): LoadedTrustedFolders {
   const errors: TrustedFoldersError[] = [];
   let userConfig: Record<string, TrustLevel> = {};
 
@@ -172,7 +179,9 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
   try {
     if (fs.existsSync(userPath)) {
       const content = fs.readFileSync(userPath, 'utf-8');
-      userConfig = parseJsoncObject(content) as Record<string, TrustLevel>;
+      const parsed = parseJsoncObject(content);
+      if (validateRules) assertTrustedFoldersConfig(parsed);
+      userConfig = parsed as Record<string, TrustLevel>;
     }
   } catch (error: unknown) {
     errors.push({
@@ -185,11 +194,39 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
     });
   }
 
-  loadedTrustedFolders = new LoadedTrustedFolders(
+  return new LoadedTrustedFolders(
     { path: userPath, config: userConfig },
     errors,
   );
-  return loadedTrustedFolders;
+}
+
+export function createLocalWorkflowAncestorTrustProvider(
+  settings: Settings,
+): WorkflowAncestorTrustProvider {
+  return async (ancestorDirs, canonicalTargetDir) => {
+    if (!isFolderTrustEnabled(settings)) {
+      return ancestorDirs.map(isWorkflowAncestorDirectorySafe);
+    }
+    if (ideContextStore.get()?.workspaceState?.isTrusted === false) {
+      return ancestorDirs.map(() => false);
+    }
+    const folders = loadTrustedFoldersFresh();
+    if (folders.errors.length > 0) {
+      debugLogger.warn(
+        'Workflow ancestor trust denied: invalid trusted folders snapshot:',
+        folders.errors
+          .map((error) => `${error.path}: ${error.message}`)
+          .join('; '),
+      );
+      return ancestorDirs.map(() => false);
+    }
+    if (folders.isPathTrusted(canonicalTargetDir) !== true) {
+      return ancestorDirs.map(() => false);
+    }
+    return ancestorDirs.map(
+      (directory) => folders.isPathTrusted(directory) === true,
+    );
+  };
 }
 
 export function saveTrustedFolders(
