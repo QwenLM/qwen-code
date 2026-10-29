@@ -114,12 +114,14 @@ class ManagedAgentServerIntegrationTest {
     private ManagedAgentStore store;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
     private SessionEventHub eventHub;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @AfterEach

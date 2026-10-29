@@ -6,6 +6,9 @@ import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-reac
 import { I18nProvider } from '../../i18n';
 import { getDaemonToken, persistDaemonToken } from '../../config/daemon';
 
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const summaryReport = {
@@ -230,17 +233,20 @@ function mount(
   language: 'en' | 'zh-CN' = 'en',
   onChangeTarget?: (daemonOrigin: string, token?: string) => void,
   standalone = true,
+  availability?: ReturnType<typeof offlineDaemon>['availability'],
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <StandaloneContext.Provider value={standalone}>
-        <I18nProvider language={language}>
-          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
-        </I18nProvider>
-      </StandaloneContext.Provider>,
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <StandaloneContext.Provider value={standalone}>
+          <I18nProvider language={language}>
+            <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+          </I18nProvider>
+        </StandaloneContext.Provider>
+      </DaemonAvailabilityContext.Provider>,
     );
   });
 }
@@ -307,6 +313,24 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it.each([false, true])(
+    'shows outage and connection repair (cached=%s)',
+    async (cached) => {
+      const report = cached ? summaryReport : undefined;
+      const { availability } = offlineDaemon();
+      try {
+        await availability.check(true);
+        summaryState.report = report;
+        fullState.report = undefined;
+        mount('zh-CN', undefined, true, availability);
+        expect(container!.textContent).toContain('无法连接服务。');
+        expect(container!.querySelector('form')).not.toBeNull();
+      } finally {
+        availability.dispose();
+      }
+    },
+  );
+
   it('does not load status reports for the Connections settings page', () => {
     vi.useFakeTimers();
     mountConnections();
@@ -571,10 +595,11 @@ describe('DaemonStatusDialog', () => {
         await submitConnect(token);
         expect(fetchMock).toHaveBeenCalledWith(
           'http://localhost:4170/capabilities',
-          expect.objectContaining({
-            headers: { Authorization: 'Bearer bad-token' },
-          }),
+          expect.anything(),
         );
+        expect(
+          new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers),
+        ).toEqual(new Headers({ Authorization: 'Bearer bad-token' }));
         expect(onChangeTarget).not.toHaveBeenCalled();
         expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
         expect(

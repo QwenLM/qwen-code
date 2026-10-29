@@ -1,3 +1,6 @@
+import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
+import { useDaemonAvailability } from './daemon/availability-context.js';
+import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
   beginLocalCommand,
   finishLocalCommand,
@@ -4024,6 +4027,9 @@ export function App({
       ).origin,
     [workspace.baseUrl],
   );
+  const daemonAvailable = useDaemonAvailability() === 'available';
+  const daemonAvailableRef = useRef(daemonAvailable);
+  daemonAvailableRef.current = daemonAvailable;
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -5223,6 +5229,14 @@ export function App({
       SESSION_ATTACHMENT_LIST_FEATURE,
     ) === true;
   useEffect(() => {
+    if (!daemonAvailable) {
+      if (logicalSessionKey) {
+        attachmentRetryCountRef.current.delete(logicalSessionKey);
+      }
+      setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
+      return;
+    }
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
@@ -5339,6 +5353,7 @@ export function App({
     connection.loadingTranscript,
     connection.status,
     attachmentRefreshNonce,
+    daemonAvailable,
     environmentPanelOpen,
     logicalSessionKey,
     transcriptRevision,
@@ -8417,6 +8432,7 @@ export function App({
     connection.capabilities?.features.includes(SESSION_AGENTS_FEATURE) === true;
   useEffect(() => {
     if (
+      !daemonAvailable ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
       !connection.sessionId ||
@@ -8456,7 +8472,9 @@ export function App({
           timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
         }
       } catch (error) {
-        if (disposed || !owner.isCurrent()) return;
+        if (disposed || !owner.isCurrent() || isDaemonUnavailableError(error)) {
+          return;
+        }
         if (consecutiveFailures === 0) {
           console.warn('[web-shell] failed to refresh session agents:', error);
         }
@@ -8482,6 +8500,7 @@ export function App({
     connection.sessionId,
     connection.status,
     environmentNeedsAgents,
+    daemonAvailable,
     logicalSessionKey,
     sessionAgentsSupported,
     sessionOwnerGuard,
@@ -8543,6 +8562,7 @@ export function App({
   );
   useEffect(() => {
     if (
+      !daemonAvailable ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
       !connection.sessionId ||
@@ -8584,6 +8604,7 @@ export function App({
     };
   }, [
     agentTraceActivityKey,
+    daemonAvailable,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
@@ -9198,7 +9219,7 @@ export function App({
     logicalSessionKey,
     sessionWriteBlocked,
   ]);
-  const connected = connection.status === 'connected';
+  const connected = connection.status === 'connected' && daemonAvailable;
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
@@ -12848,6 +12869,7 @@ export function App({
         : undefined,
     connected,
     writeBlocked:
+      !daemonAvailable ||
       sessionWriteBlocked ||
       standaloneWriterBlocked ||
       connection.runtimeStopped,
@@ -13124,6 +13146,14 @@ export function App({
           previous.includes(retry) ? previous : [...previous, retry],
         );
       }
+      if (
+        notice.category === 'connection' &&
+        notice.operation === 'stream' &&
+        !daemonAvailable
+      ) {
+        dismissNotice(notice.id);
+        continue;
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -13136,7 +13166,7 @@ export function App({
       }
       dismissNotice(notice.id);
     }
-  }, [dismissNotice, notices, pushToast, t]);
+  }, [dismissNotice, notices, pushToast, t, daemonAvailable]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -13541,6 +13571,7 @@ export function App({
     ),
     activePanel === 'live' ||
       (activePanel === 'settings' && !liveSidebarEnabled),
+    t,
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
@@ -17972,6 +18003,7 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        if (!daemonAvailableRef.current) return false;
         const admissionAttachment = {
           current: sessionOwnerGuard.capture(),
         };
@@ -19204,6 +19236,10 @@ export function App({
             inputAnnotations: metadata?.inputAnnotations,
           },
         );
+      } else if (!daemonAvailableRef.current) {
+        // Local slash commands above stay reachable during an outage; only
+        // network submissions are gated.
+        return false;
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
@@ -20764,6 +20800,7 @@ export function App({
             workspace.baseUrl,
             workspace.token,
             legacyWorkspaceContextCwd,
+            workspace.client,
           )
         : undefined,
     [
@@ -20771,6 +20808,7 @@ export function App({
       legacyWorkspaceContextCwd,
       workspace.baseUrl,
       workspace.token,
+      workspace.client,
     ],
   );
   // The session an @-mention goes to, with the workspace it lives in: a new
@@ -20877,6 +20915,7 @@ export function App({
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,
+    client: workspace.client,
     sessionApi: sessionAgentsApi,
     ensureSession: ensureAgentMentionSession,
     onSubmit: handleEditorSubmit,
@@ -21026,7 +21065,7 @@ export function App({
       gitStatusWorkspaceCwdRef.current = gitStatusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
-    if (!workspaceGitStatusEnabled) return;
+    if (!workspaceGitStatusEnabled || !daemonAvailable) return;
     let cancelled = false;
     const fetchStatus = () => {
       const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
@@ -21044,8 +21083,10 @@ export function App({
             );
           }
         })
-        .catch(() => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        .catch((err) => {
+          if (!cancelled && !isDaemonUnavailableError(err)) {
+            setSelectedWorkspaceGitStatus(undefined);
+          }
         });
       // Fresh path: resolves when the daemon's recomputation lands, so the
       // enriched counters fill in without depending on SSE — the
@@ -21065,7 +21106,9 @@ export function App({
             }
           })
           .catch((err) => {
-            console.warn('[web-shell] git status fresh path failed:', err);
+            if (!cancelled && !isDaemonUnavailableError(err)) {
+              console.warn('[web-shell] git status fresh path failed:', err);
+            }
           });
       }
     };
@@ -21090,6 +21133,7 @@ export function App({
     connection.gitBranch,
     connection.sessionId,
     workspaceGitStatusEnabled,
+    daemonAvailable,
     isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
@@ -22646,6 +22690,11 @@ export function App({
                     )}
                 </div>
               )}
+              {!artifactPanelFullscreen &&
+                (managedMode ||
+                  !(artifactPanelOpen && useFloatingArtifactPanel)) && (
+                  <DaemonConnectionBanner />
+                )}
               <div
                 ref={contextBodyRef}
                 data-testid="context-body"

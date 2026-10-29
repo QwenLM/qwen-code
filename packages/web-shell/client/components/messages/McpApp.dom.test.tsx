@@ -11,6 +11,7 @@ import {
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
 import { useMcpAppMessages } from '../../hooks/useMcpAppMessages';
+import { I18nProvider } from '../../i18n';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -135,6 +136,12 @@ function renderApp(
     },
   };
 }
+
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
 
 describe('McpApp host lifetime', () => {
   it('advertises messages only for the bound transcript session', () => {
@@ -325,7 +332,7 @@ describe('McpApp host lifetime', () => {
           />,
         ),
       );
-      expect(await pendingMessage).toEqual({ isError: true });
+      expect(await pendingMessage).toEqual(notSent('cancelled'));
       expect(appBridgeMocks.last).toBe(bridge);
       expect(appBridgeMocks.constructed).toBe(constructed);
       expect(container.querySelector('iframe')).toBe(iframe);
@@ -342,7 +349,7 @@ describe('McpApp host lifetime', () => {
       await act(async () =>
         rerender(<BoundApp clientId="client-b" enabled={false} />),
       );
-      expect(await fresh).toEqual({ isError: true });
+      expect(await fresh).toEqual(notSent('cancelled'));
       expect(submit).not.toHaveBeenCalled();
       finishTool({ content: [] });
       await pendingTool;
@@ -540,6 +547,40 @@ describe('McpApp host lifetime', () => {
     expect(appBridgeMocks.close).not.toHaveBeenCalled();
     expect(appBridgeMocks.setHostContext).toHaveBeenCalledWith(
       expect.objectContaining({ theme: WebShellThemeId.Light }),
+    );
+  });
+
+  it('sends the Web Shell language and pushes language changes', async () => {
+    const display = appDisplay();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (language: 'zh-CN' | 'en') => (
+      <I18nProvider language={language}>
+        <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+          <ThemeProvider value={WebShellThemeId.Dark}>
+            <McpApp display={display} />
+          </ThemeProvider>
+        </McpAppHostContext.Provider>
+      </I18nProvider>
+    );
+
+    act(() => root.render(wrap('zh-CN')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { locale: 'zh-CN' },
+    });
+
+    act(() => root.render(wrap('en')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.constructed).toBe(1);
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ locale: 'en' }),
     );
   });
 
