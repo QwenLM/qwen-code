@@ -220,11 +220,14 @@ public class HarnessCoordinator {
 
     public void warmSession(String tenantId, String sessionId) {
         if (!sessionCreateWarm || !runtimeWarmer.isEnabled()
-                || !harness.isWorkspaceFilesAvailable()) {
+                || !harness.isWorkspaceFilesAvailable() || !worktreeReady(tenantId, sessionId)) {
             return;
         }
         executor.execute(() -> {
             try {
+                if (!worktreeReady(tenantId, sessionId)) {
+                    return;
+                }
                 runtimeWarmer.warm(sessionId).whenComplete(
                         (ignored, error) -> {
                             if (error != null) {
@@ -235,6 +238,11 @@ public class HarnessCoordinator {
                 sessionWarmFailed(tenantId, sessionId, error);
             }
         });
+    }
+
+    private boolean worktreeReady(String tenantId, String sessionId) {
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        return worktree == null || "ready".equals(worktree.state());
     }
 
     private static void sessionWarmFailed(String tenantId, String sessionId,
@@ -449,6 +457,10 @@ public class HarnessCoordinator {
             AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (!"CANCELLING".equals(claimed.status())
+                && !worktreeReady(claimed.tenantId(), claimed.sessionId())) {
+            return false;
+        }
         if (!"CANCELLING".equals(claimed.status())
                 && AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(claimed.errorCode())) {
             return observeBlockedHarness(claimed, session, leaseLost);

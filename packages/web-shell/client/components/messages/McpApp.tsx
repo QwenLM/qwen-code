@@ -130,6 +130,9 @@ export function applySandboxCspQuery(
     : sandboxUrl;
 }
 
+// Cards grow with their content up to this height, then scroll inside.
+const MAX_APP_HEIGHT = 960;
+
 // Standard MCP App style variables resolved from the Web Shell tokens the
 // card itself sees, so Apps can match the current theme instead of the
 // operating system's color scheme. Secondary text uses the token that keeps
@@ -165,10 +168,12 @@ function hostStyleVariables(
 
 function mcpAppHostContext(
   theme: ReturnType<typeof useTheme>,
+  locale: string,
   variables?: Record<string, string>,
 ) {
   return {
     theme,
+    locale,
     // Hosts may send any subset of the standard variables.
     ...(variables
       ? {
@@ -180,7 +185,7 @@ function mcpAppHostContext(
     platform: 'web' as const,
     displayMode: 'inline' as const,
     availableDisplayModes: ['inline' as const],
-    containerDimensions: { maxHeight: 640 },
+    containerDimensions: { maxHeight: MAX_APP_HEIGHT },
   };
 }
 
@@ -282,6 +287,9 @@ export function McpAppRuntime({
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
+  const { language } = useI18n();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
@@ -329,6 +337,7 @@ export function McpAppRuntime({
       {
         hostContext: mcpAppHostContext(
           themeRef.current,
+          languageRef.current,
           hostStyleVariables(cardRef.current, themeRef.current),
         ),
       },
@@ -472,7 +481,9 @@ export function McpAppRuntime({
         Number.isFinite(requestedHeight) &&
         (!retained || (retained.isVisible() && requestedHeight > 0))
       ) {
-        setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
+        setHeight(
+          Math.min(MAX_APP_HEIGHT, Math.max(120, Math.ceil(requestedHeight))),
+        );
       }
     };
 
@@ -530,9 +541,13 @@ export function McpAppRuntime({
 
   useEffect(() => {
     bridgeRef.current?.setHostContext(
-      mcpAppHostContext(theme, hostStyleVariables(cardRef.current, theme)),
+      mcpAppHostContext(
+        theme,
+        language,
+        hostStyleVariables(cardRef.current, theme),
+      ),
     );
-  }, [theme]);
+  }, [theme, language]);
 
   if (!display.html || !sandboxUrl) {
     return <div className={styles.fallback}>{display.fallbackText}</div>;

@@ -5,7 +5,7 @@
  */
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { ViewSurface } from './surface.js';
+import { VIEW_BASE_STYLE, ViewSurface } from './surface.js';
 
 function harness(html: string) {
   const frame = document.createElement('iframe');
@@ -17,6 +17,78 @@ function harness(html: string) {
   surface.attach(content, html, 'body { color: black }');
   return { surface, frame, content, onEvent, onError };
 }
+
+describe('view height', () => {
+  it('grows and shrinks with its content within the bounds', () => {
+    const h = harness('<p id="out">Ready</p>');
+    // jsdom lays out nothing; give the frame the width a browser would.
+    Object.defineProperty(h.frame, 'clientWidth', { value: 600 });
+    const body = h.content.body;
+    body.style.margin = '12px';
+    const sized = (height: number) => {
+      body.getBoundingClientRect = () => ({ height }) as DOMRect;
+      h.surface.fit();
+      return h.frame.style.height;
+    };
+    expect(sized(300)).toBe('326px');
+    expect(sized(40)).toBe('80px');
+    expect(sized(5000)).toBe('3600px');
+    body.getBoundingClientRect = () => ({ height: 200 }) as DOMRect;
+    h.surface.apply([{ kind: 'text', id: 'out', value: 'Updated' }]);
+    expect(h.frame.style.height).toBe('226px');
+  });
+});
+
+describe('view height with viewport-sized content', () => {
+  it('does not grow the frame on its own resize', () => {
+    const h = harness('<p id="out">Ready</p>');
+    let width = 600;
+    Object.defineProperty(h.frame, 'clientWidth', { get: () => width });
+    const body = h.content.body;
+    body.style.margin = '12px';
+    // Like body{min-height:100vh}: the body is as tall as the frame.
+    let measured = 0;
+    body.getBoundingClientRect = () => {
+      measured++;
+      return { height: parseFloat(h.frame.style.height) || 0 } as DOMRect;
+    };
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('106px');
+    // Writing the height resizes the frame; that resize is not measured.
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    expect(h.frame.style.height).toBe('106px');
+    expect(measured).toBe(1);
+    // A width change reflows the content, so it is measured again.
+    body.getBoundingClientRect = () => ({ height: 300 }) as DOMRect;
+    width = 400;
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    expect(h.frame.style.height).toBe('326px');
+  });
+
+  it('contains child margins in the measured body', () => {
+    // A first child's margin would otherwise collapse through the body and
+    // escape its measured height.
+    expect(VIEW_BASE_STYLE).toContain('body{margin:12px;display:flow-root;');
+  });
+});
+
+describe('view height before layout', () => {
+  it('does not measure a hidden or zero-width frame', () => {
+    const h = harness('<p id="out">Ready</p>');
+    h.content.body.getBoundingClientRect = () => ({ height: 5000 }) as DOMRect;
+    h.frame.style.height = '';
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('');
+    Object.defineProperty(h.frame, 'clientWidth', { value: 600 });
+    h.frame.hidden = true;
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('');
+    h.frame.hidden = false;
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('3600px');
+  });
+});
 
 describe('host theme in the view document', () => {
   it('pins the color scheme and copies standard style variables', () => {

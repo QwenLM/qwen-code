@@ -545,6 +545,7 @@ class ManagedAgentPropertiesTest {
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
                 "runtime-broker.retention.scan-delay",
+                "session-worktree.scan-delay",
                 "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {

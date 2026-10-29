@@ -150,6 +150,14 @@ const EN: Messages = {
   'footnotes.next': 'Next reference',
   'footnotes.citations': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
+  'daemon.connection.paused':
+    'Cannot reach the service. Automatic refresh is paused while reconnecting.',
+  'daemon.connection.authRequired':
+    'Service authentication failed. Check your credentials; automatic refresh is paused.',
+  'daemon.connection.unavailable': 'Cannot reach the service.',
+  'localControl.connectionRetry':
+    'Connection interrupted. Retry to refresh the QR code.',
+  'daemon.connection.retry': 'Retry connection',
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
@@ -2137,8 +2145,9 @@ const EN: Messages = {
   'sidebar.addWorkspaceTitle': 'Add Workspace',
   'sidebar.addWorkspacePath': 'Directory path',
   'sidebar.addWorkspaceBrowse': 'Browse…',
+  'sidebar.addWorkspaceBrowsing': 'Choosing directory…',
   'sidebar.addWorkspaceBrowseError':
-    'Unable to open the system folder picker. Enter an absolute path instead.',
+    'Unable to open the folder picker. Enter an absolute path instead.',
   'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
   'sidebar.addWorkspaceDisplayNameHint':
     'Shown in Web Shell; the directory path remains the workspace identity.',
@@ -4700,6 +4709,12 @@ const ZH: Messages = {
   'footnotes.previous': '上一条引用',
   'footnotes.next': '下一条引用',
   'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
+  'daemon.connection.paused': '无法连接服务，自动刷新已暂停，正在尝试恢复。',
+  'daemon.connection.authRequired':
+    '服务认证失败，请检查凭证；自动刷新已暂停。',
+  'daemon.connection.unavailable': '无法连接服务。',
+  'localControl.connectionRetry': '连接已中断，请点击重试刷新二维码。',
+  'daemon.connection.retry': '重试连接',
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
@@ -6625,8 +6640,9 @@ const ZH: Messages = {
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
   'sidebar.addWorkspaceBrowse': '浏览…',
+  'sidebar.addWorkspaceBrowsing': '正在选择目录…',
   'sidebar.addWorkspaceBrowseError':
-    '无法打开系统文件夹选择器，请改为输入绝对路径。',
+    '无法打开文件夹选择器，请改为输入绝对路径。',
   'sidebar.addWorkspaceDisplayName': '展示名称（可选）',
   'sidebar.addWorkspaceDisplayNameHint':
     '用于 Web Shell 展示；目录路径仍是工作区身份。',
