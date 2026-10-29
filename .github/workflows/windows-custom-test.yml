@@ -26,17 +26,42 @@ jobs:
       - name: Build Qwen Code
         shell: pwsh
         run: npm run build
-      - name: Bundle Windows test files
+      - name: Build portable bundled CLI
+        shell: pwsh
+        run: npm run bundle
+      - name: Assemble Windows portable application
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path windows-test | Out-Null
-          Copy-Item -Recurse packages/cli/dist windows-test/cli-dist
-          Copy-Item -Recurse packages/core/dist windows-test/core-dist
-          Copy-Item -Recurse .qwen windows-test/.qwen
-          Copy-Item package.json windows-test/package.json
-      - name: Upload Windows test artifact
+          New-Item -ItemType Directory -Force -Path windows-portable | Out-Null
+          Copy-Item -Recurse dist windows-portable/dist
+          $node = (Get-Command node.exe).Source
+          Copy-Item $node windows-portable/node.exe
+          Copy-Item .qwen/system.md windows-portable/system.md
+          Copy-Item .qwen/system.md windows-portable/dist/system.md
+          New-Item -ItemType Directory -Force -Path windows-portable/dist/chunks | Out-Null
+          Copy-Item .qwen/system.md windows-portable/dist/chunks/system.md
+          @'
+          @echo off
+          cd /d "%~dp0"
+          "%~dp0node.exe" "%~dp0dist\\cli.js" %*
+          pause
+          '@ | Set-Content -Encoding ascii windows-portable/Start-Qwen.cmd
+          @'
+          @echo off
+          cd /d "%~dp0"
+          "%~dp0node.exe" "%~dp0dist\\cli.js" %*
+          '@ | Set-Content -Encoding ascii windows-portable/qwen.cmd
+      - name: Verify portable output
+        shell: pwsh
+        run: |
+          if (!(Test-Path windows-portable/node.exe)) { throw "node.exe missing" }
+          if (!(Test-Path windows-portable/dist/cli.js)) { throw "Bundled CLI missing" }
+          if (!(Test-Path windows-portable/dist/system.md)) { throw "Custom system prompt missing" }
+          & windows-portable/node.exe windows-portable/dist/cli.js --version
+          if ($LASTEXITCODE -ne 0) { throw "Portable CLI startup failed" }
+      - name: Upload portable Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: qwen-custom-windows-test
-          path: windows-test/
+          name: qwen-custom-windows-portable
+          path: windows-portable/
           if-no-files-found: error
