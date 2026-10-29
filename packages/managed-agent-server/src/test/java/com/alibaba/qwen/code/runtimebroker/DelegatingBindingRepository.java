@@ -8,10 +8,10 @@ import java.util.List;
  * double only overrides the calls it instruments. New interface methods land
  * here once instead of in every double.
  */
-abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
+public abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     protected final RuntimeBindingRepository delegate;
 
-    DelegatingBindingRepository(RuntimeBindingRepository delegate) {
+    public DelegatingBindingRepository(RuntimeBindingRepository delegate) {
         this.delegate = delegate;
     }
 

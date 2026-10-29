@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.TaskProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -70,6 +70,8 @@ class ManagedExtensionProjectionContractTest {
         // The bodies H6 and H4d added to the projection contract after H4.
         expected.putAll(JSON.convertValue(
                 fixtures.required("additionalRecordBodies"), TreeMap.class));
+        // Release receipts are Store-owned; a Harness cannot submit them.
+        expected.put("hosted_harness_release", null);
         assertEquals(JSON.convertValue(expected, TreeMap.class),
                 JSON.convertValue(bodies, TreeMap.class));
         assertEquals(JSON.convertValue(fixtures.required("taskStates"),

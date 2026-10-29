@@ -6,7 +6,6 @@
 
 import { createHash } from 'node:crypto';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
-import { parseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import type {
@@ -117,6 +116,23 @@ export class ManagedShellResultSession {
     identity: ToolResultExpectedIdentity;
     sink: LocalShellResultCapture;
   }> {
+    const identity = await this.prepareIdentity(request, modelCallId, false);
+    return {
+      identity,
+      sink: new LocalShellResultCapture(
+        this.store,
+        this.captureResources,
+        identity,
+        () => this.assertWritable(),
+      ),
+    };
+  }
+
+  private async prepareIdentity(
+    request: LocalShellCaptureRequest,
+    modelCallId: string,
+    recovering: boolean,
+  ): Promise<ToolResultExpectedIdentity> {
     await this.assertWritable();
     const { reference, capture } = request;
     const key = this.session.authority.sessionHeader.sessionKey;
@@ -129,16 +145,17 @@ export class ManagedShellResultSession {
     ) {
       throw new Error('Tool result belongs to another Session or binding.');
     }
-    const checkpointBytes = await this.session.authority.readCheckpointState();
-    if (!checkpointBytes)
-      throw new Error('Runtime dispatch has no checkpoint.');
-    const checkpoint = parseHarnessCheckpointV1(checkpointBytes);
+    const parsed = await this.session.authority.readParsedCheckpointState();
+    if (!parsed?.ok)
+      throw new Error('Runtime dispatch has no readable checkpoint.');
+    const checkpoint = parsed.checkpoint;
     const item = checkpoint.tools?.items.find(
       (each) => each.executionCallId === capture.executionCallId,
     );
     if (
       checkpoint.continuation.phase !== 'await_runtime' ||
-      checkpoint.identity.activationId !== this.activation.activationId ||
+      (!recovering &&
+        checkpoint.identity.activationId !== this.activation.activationId) ||
       checkpoint.identity.turnId !== capture.turnId ||
       checkpoint.identity.promptId !== reference.promptId ||
       item?.state !== 'in_progress' ||
@@ -158,8 +175,8 @@ export class ManagedShellResultSession {
           event.payload['executionCallId'] === capture.executionCallId &&
           event.sequence <= checkpoint.identity.coveredSequence &&
           event.subject?.type === 'activation' &&
-          event.subject.activationId === this.activation.activationId &&
-          event.subject.epoch === this.activation.epoch,
+          event.subject.activationId === checkpoint.identity.activationId &&
+          (recovering || event.subject.epoch === this.activation.epoch),
       );
     if (!intent) throw new Error('Original tool intent is missing.');
     if (modelCallId !== reference.callId) {
@@ -177,6 +194,11 @@ export class ManagedShellResultSession {
       intent.payload['argsRef'],
       'tool.intent.argsRef',
     );
+    if (recovering && argsRef.kind !== 'managed-tool-args') {
+      throw new Error(
+        'Recovered Shell capture is not a legacy foreground call.',
+      );
+    }
     const originalArgs = JSON.parse(
       (await this.session.resources.read(argsRef)).toString(),
     );
@@ -210,27 +232,13 @@ export class ManagedShellResultSession {
       throw new Error('Original Shell capture identity conflicts.');
     }
     this.prepared.set(capture.executionCallId, encoded);
-    return {
-      identity,
-      sink: new LocalShellResultCapture(
-        this.store,
-        this.captureResources,
-        identity,
-        () => this.assertWritable(),
-      ),
-    };
+    return identity;
   }
 
   private receiptEvent(
     executionCallId: string,
   ): ManagedSessionEvent | undefined {
-    return this.session.authority
-      .eventsInSequenceRange(1, this.session.authority.committedSequence)
-      .find(
-        (event) =>
-          event.kind === 'tool.receipt' &&
-          event.payload['executionCallId'] === executionCallId,
-      );
+    return this.session.authority.committedReceipt(executionCallId);
   }
 
   private async saved(event: ManagedSessionEvent): Promise<SavedOutcome> {
@@ -293,6 +301,40 @@ export class ManagedShellResultSession {
     identity: ToolResultExpectedIdentity,
     candidate: ToolResultEnvelope,
   ): Promise<LocalShellReceipt> {
+    return this.acceptPrepared(identity, candidate, false);
+  }
+
+  async acceptRecoveredCancelled(
+    request: LocalShellCaptureRequest,
+    modelCallId: string,
+    candidate: ToolResultEnvelope | undefined,
+  ): Promise<LocalShellReceipt> {
+    const identity = await this.prepareIdentity(request, modelCallId, true);
+    const original = await this.recorded(identity);
+    if (original) return original;
+    const envelope = parseToolResultEnvelope(candidate);
+    const capture = envelope.capture;
+    if (
+      envelope.executionStatus !== 'cancelled' ||
+      capture?.deliveryStatus !== 'blocked' ||
+      (!capture.manifest &&
+        (capture.captureStatus !== 'unavailable' ||
+          capture.captureReason !== 'producer_lost'))
+    ) {
+      throw new Error('Recovered Shell result is not a blocked cancellation.');
+    }
+    return this.acceptPrepared(
+      identity,
+      { ...envelope, capture: { ...capture, deliveryStatus: 'pending' } },
+      true,
+    );
+  }
+
+  private async acceptPrepared(
+    identity: ToolResultExpectedIdentity,
+    candidate: ToolResultEnvelope,
+    recovering: boolean,
+  ): Promise<LocalShellReceipt> {
     const envelope = parseToolResultEnvelope(candidate);
     if (envelope.capture?.deliveryStatus !== 'pending') {
       throw new Error('Only an unacknowledged Shell result can be accepted.');
@@ -353,22 +395,35 @@ export class ManagedShellResultSession {
           if (!('pages' in entry.body)) {
             throw new Error('Complete Shell stream has no segment pages.');
           }
-          const prefix = await this.store.prefix({
-            captureId: identity.captureId,
-            streamId: entry.streamId,
-          });
-          if (
-            prefix.status !== 'ok' ||
-            !prefix.result.sealed ||
-            prefix.result.byteLength !== entry.byteLength ||
-            prefix.result.digest !== entry.digest ||
-            prefix.result.segmentCount !==
-              entry.body.pages.reduce(
-                (total, page) => total + page.segmentCount,
-                0,
-              )
-          ) {
-            throw new Error('Complete Shell stream is not sealed.');
+          if (!recovering) {
+            const prefix = await this.store.prefix({
+              captureId: identity.captureId,
+              streamId: entry.streamId,
+            });
+            if (
+              prefix.status !== 'ok' ||
+              !prefix.result.sealed ||
+              prefix.result.byteLength !== entry.byteLength ||
+              prefix.result.digest !== entry.digest ||
+              prefix.result.segmentCount !==
+                entry.body.pages.reduce(
+                  (total, page) => total + page.segmentCount,
+                  0,
+                )
+            ) {
+              throw new Error('Complete Shell stream is not sealed.');
+            }
+          } else if (entry.byteLength === 0) {
+            // A restored producer has no in-memory prefix. Range reads
+            // verify its durable seal, including an empty sealed stream.
+            const read = await this.store.readRange({
+              manifestRef,
+              expectedIdentity: identity,
+              streamId: entry.streamId,
+              offset: 0,
+              length: 0,
+            });
+            if (read.status !== 'ok') throw new Error(read.code);
           }
         }
         const hash = createHash('sha256');

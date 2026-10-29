@@ -208,7 +208,7 @@ describe('sidebar brand', () => {
       ),
     ).toBe(true);
     const create = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="New task"]',
+      'button[aria-label="New session"]',
     );
     expect(create).not.toBeNull();
     await act(async () => {

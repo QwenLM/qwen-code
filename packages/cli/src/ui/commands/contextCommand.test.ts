@@ -22,6 +22,7 @@ import {
   resolveSlimmingConfig,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import type { ContextCategoryBreakdown } from '../types.js';
 import {
@@ -384,6 +385,149 @@ describe('collectContextData (contextCommand)', () => {
         (breakdown.unattributed ?? 0)
       );
     }
+
+    it.each([
+      {
+        name: 'unchanged retained catalogs',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'changed pending catalog',
+        retained: ['old'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'compacted history without snapshots',
+        summary:
+          '<state_snapshot>Earlier user work is complete.</state_snapshot>',
+        retained: [],
+        current: 'new',
+        billed: ['new'],
+        total: 0,
+      },
+      {
+        name: 'suppressed retained catalogs',
+        retained: ['old', 'new'],
+        current: '',
+        billed: [],
+        total: 0,
+      },
+      {
+        name: 'a pending version seen before the latest retained version',
+        retained: ['new', 'old'],
+        current: 'new',
+        billed: ['new', 'old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'provider-reported total',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 40_000,
+      },
+    ])(
+      'accounts for memory snapshots once: $name',
+      async ({ retained, current, billed, total, summary }) => {
+        const catalog = (version: string) =>
+          `${version} catalog entry\n`.repeat(version === 'old' ? 17 : 40);
+        const snapshotText = (version: string) =>
+          'Current memory catalog (full snapshot; supersedes all earlier memory catalogs):\n' +
+          catalog(version);
+        const policy = 'Stable auto-memory policy.';
+        const realUser = {
+          text: 'Please inspect my actual request.',
+          partMetadata: { user_note: true },
+        };
+        const reply = 'I inspected the request.';
+        // A user can quote a catalog; only marked parts belong to memory.
+        const quotedCatalog = {
+          text: snapshotText('quoted'),
+          partMetadata: { user_note: true },
+        };
+        const compacted: Content[] = summary
+          ? [
+              { role: 'user', parts: [{ text: summary }] },
+              { role: 'model', parts: [{ text: reply }] },
+            ]
+          : [];
+        const history: Content[] = [
+          prelude,
+          ...compacted,
+          ...retained.flatMap((version): Content[] => [
+            {
+              role: 'user',
+              parts: [
+                realUser,
+                {
+                  text: snapshotText(version),
+                  partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: reply }] },
+          ]),
+          { role: 'user', parts: [realUser, quotedCatalog] },
+        ];
+        const before = structuredClone(history);
+        const getHistoryShallow = vi.fn().mockReturnValue(history);
+        const config = makeChatConfig({ total, history });
+        const chat = config.getLlmClient().getChat();
+        Object.assign(chat, { getHistoryShallow });
+        Object.assign(config, {
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => (current ? catalog(current) : ''),
+        });
+
+        const data = await collectContextData(config, true);
+        const expectedMemory =
+          estimateContextTextTokens(policy) +
+          billed.reduce(
+            (sum, version) =>
+              sum + estimateContextTextTokens(snapshotText(version)),
+            0,
+          );
+        const expectedMessages =
+          (retained.length + 1) * estimateContextTextTokens(realUser.text) +
+          retained.length * estimateContextTextTokens(reply) +
+          estimateContextTextTokens(quotedCatalog.text) +
+          (summary
+            ? estimateContextTextTokens(summary) +
+              estimateContextTextTokens(reply)
+            : 0);
+        expect(data.breakdown.messages).toBe(expectedMessages);
+        expect(data.breakdown.memoryFiles).toBe(expectedMemory);
+        expect(data.memoryFiles).toEqual([
+          { path: t('auto memory'), tokens: expectedMemory },
+        ]);
+        expect(data.breakdown.startupContext).toBe(
+          estimateContextTextTokens(environmentReminder),
+        );
+        expect(data.breakdown.skills).toBe(
+          estimateContextTextTokens(listingReminder),
+        );
+        expect(data.totalTokens).toBe(total);
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            200_000 -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        expect(getHistoryShallow).toHaveBeenCalledWith();
+        expect(chat.getHistory).not.toHaveBeenCalled();
+        expect(history).toEqual(before);
+        expect(history.at(-1)?.parts?.[0]).toBe(realUser);
+        expect(history.at(-1)?.parts?.[1]).toBe(quotedCatalog);
+      },
+    );
 
     it('bills the skill listing as sent under skills and the rest of the prelude as startup context', async () => {
       const data = await collectContextData(

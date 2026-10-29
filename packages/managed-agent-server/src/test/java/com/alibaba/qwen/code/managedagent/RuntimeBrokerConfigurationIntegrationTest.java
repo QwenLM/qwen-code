@@ -1,18 +1,23 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.SecretProtector;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -33,6 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "qwen.managed-agent.runtime-broker.credential-key-id=test-key",
         "qwen.managed-agent.runtime-broker.credential-key="
                 + "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "qwen.managed-agent.runtime-broker.previous-credential-keys.previous-key="
+                + "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
         "qwen.managed-agent.runtime-broker.provisioner=static",
         "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
         "qwen.managed-agent.runtime-broker.workspace-id=workspace",
@@ -53,6 +60,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     @Autowired
     private SecretProtector secretProtector;
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbcTemplate;
     @Autowired
     private org.springframework.context.ApplicationContext context;
@@ -61,7 +69,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     void recoveryTickRunsOnADedicatedScheduler() throws Exception {
         assertThat(context.containsBean("runtimeRecoveryScheduler")).isTrue();
         assertThat(context.getBean("runtimeRecoveryScheduler"))
-                .isNotSameAs(context.getBean("taskScheduler"));
+                .isNotSameAs(context.getBean("managedAgentScheduler"));
         var scheduled = EmbeddedRuntimeBroker.class.getMethod("recoverSavedRuntimes")
                 .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler()).isEqualTo("runtimeRecoveryScheduler");
@@ -80,6 +88,21 @@ class RuntimeBrokerConfigurationIntegrationTest {
         assertThat(columnCount("provision_seed_ciphertext")).isEqualTo(1);
         assertThat(columnCount("runtime_credential_ciphertext")).isEqualTo(1);
         assertThat(columnCount("runtime_token")).isZero();
+    }
+
+    @Test
+    void decryptsCredentialsWrittenWithAConfiguredPreviousKey() {
+        byte[] previousKey = new byte[32];
+        Arrays.fill(previousKey, (byte) 2);
+        byte[] plaintext = "previous-runtime-secret"
+                .getBytes(StandardCharsets.UTF_8);
+        var encrypted = new AesGcmSecretProtector("previous-key", previousKey)
+                .protect("binding-1", plaintext);
+
+        assertThat(secretProtector.unprotect("binding-1", encrypted))
+                .containsExactly(plaintext);
+        assertThat(secretProtector.protect("binding-2", plaintext).getKeyId())
+                .isEqualTo("test-key");
     }
 
     private Integer columnCount(String columnName) {

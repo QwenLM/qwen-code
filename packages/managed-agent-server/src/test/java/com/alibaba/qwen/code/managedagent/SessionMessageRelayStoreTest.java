@@ -1,13 +1,14 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.JournalTurns;
-import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore;
-import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.MessageRow;
-import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore.JournalTurns;
+import com.alibaba.qwen.code.managedagent.persistence.SessionMessageRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.SessionMessageRelayStore.MessageRow;
+import com.alibaba.qwen.code.managedagent.persistence.SessionMessageRelayStore.PendingMessage;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -42,6 +43,7 @@ class SessionMessageRelayStoreTest {
     private ChildResultRelayStore records;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     private void message(String sessionId, String messageId, String state,
@@ -70,8 +72,8 @@ class SessionMessageRelayStoreTest {
                         + " first_sequence)"
                         + " VALUES (?, ?, ?, 'workspace', ?, ?, ?,"
                         + " 'h', 1, ?, 'session', ?, ?, ?)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
-                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(sessionId, domain, recordId), TENANT, sessionId, domain,
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.recordKey(sessionId, domain, recordId), TENANT, sessionId, domain,
                 recordId, resource, state, sequence, sequence);
     }
 
@@ -87,7 +89,7 @@ class SessionMessageRelayStoreTest {
     }
 
     private void session(String sessionId, String status) {
-        String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key, session_scope_key, agent_id, status,"
                         + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 0, 0)"
                         + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId,
@@ -96,7 +98,7 @@ class SessionMessageRelayStoreTest {
     }
 
     private void resource(String sessionId, String resourceId, byte[] bytes) {
-        String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, resourceId), scope,
                 TENANT, sessionId, resourceId, bytes.length, "a".repeat(64), bytes);
@@ -331,7 +333,7 @@ class SessionMessageRelayStoreTest {
         message(sender, "msg_a_second", "planned", outbound("to_child", "r"));
         jdbc.update("UPDATE ma_session_record SET gmt_create = 5"
                 + " WHERE session_scope_key = ?",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(TENANT, sender));
         assertThat(store.findPendingMessages("owner-a", 1_000, 50).stream()
                 .filter(entry -> entry.senderSessionId().equals(sender))
@@ -475,8 +477,8 @@ class SessionMessageRelayStoreTest {
                         + " VALUES (?, ?, ?, 'workspace', ?,"
                         + " 'session_message', 'msg_x', 'h', 1, 'missing',"
                         + " 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, parent),
-                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(parent, "session_message", "msg_x"), TENANT, parent);
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, parent),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.recordKey(parent, "session_message", "msg_x"), TENANT, parent);
         assertThatThrownBy(() -> records.edgeMessages(TENANT, parent,
                 "run-1", UUID.randomUUID().toString()))
                 .isInstanceOf(IllegalStateException.class);

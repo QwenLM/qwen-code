@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.25.2",
+  "version": "0.26.4",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -9,6 +9,7 @@
   "type": "module",
   "workspaces": [
     "packages/*",
+    "packages/cua-driver/typescript",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
@@ -24,6 +25,7 @@
     "integrations/external-context",
     "integrations/external-context-mem0",
     "integrations/test-failure-explorer",
+    "integrations/generated-ui",
     "!packages/desktop",
     "!packages/live-host",
     "!packages/mobile-shell"
@@ -33,7 +35,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.25.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.4"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -45,7 +47,7 @@
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
     "generate:model-catalog": "node --import tsx/esm scripts/generate-model-catalog.ts",
-    "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=4096\" node scripts/build.js",
+    "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=6144\" node scripts/build.js",
     "build-and-start": "npm run build && npm run start",
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
@@ -57,7 +59,10 @@
     "test:ci": "npm run test:ci:workspaces && npm run test:scripts",
     "test:release": "npm run test:release:workspaces && npm run test:scripts",
     "test:release:workspaces": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present -- --coverage.enabled=false",
-    "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
+    "test:standalone:runtimes": "node scripts/test-standalone-runtimes.mjs",
+    "test:standalone:runtimes:ci": "node scripts/test-standalone-runtimes.mjs --ci",
+    "test:scripts": "npm run test:standalone:runtimes:ci && npm run test:scripts:unit --",
+    "test:scripts:unit": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:e2e:managed-agent-server": "tsx scripts/run-managed-agent-server-e2e.ts",
     "test:e2e:managed-session-failover": "tsx scripts/run-managed-agent-server-e2e.ts --session-failover",
@@ -72,6 +77,15 @@
     "test:e2e:managed-harness-restart-approval-deny": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify deny",
     "test:e2e:managed-harness-restart-approval-cancel": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify cancel",
     "test:e2e:managed-harness-restart-approval-expiry": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify expiry",
+    "test:e2e:managed-harness-restart-approval-after-decision": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-decision",
+    "test:e2e:managed-harness-restart-approval-after-prepare": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-prepare",
+    "test:e2e:managed-harness-restart-approval-after-result": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-result",
+    "test:e2e:managed-harness-restart-approval-cleanup-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault cleanup-failed",
+    "test:e2e:managed-harness-restart-approval-decision-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault decision-reply-lost",
+    "test:e2e:managed-harness-restart-approval-admission-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault admission-reply-lost",
+    "test:e2e:managed-harness-restart-approval-load-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault load-reply-lost",
+    "test:e2e:managed-harness-restart-approval-terminal-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-reply-lost",
+    "test:e2e:managed-harness-restart-approval-terminal-write-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-write-failed",
     "test:e2e:managed-harness-restart-continuation-closeout": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify continuation",
     "test:e2e:managed-harness-restart-model-round-failover": "tsx scripts/run-managed-agent-server-e2e.ts --model-round-failover --harness-only",
     "test:e2e:managed-frozen-control-plane-failover": "tsx scripts/run-managed-agent-server-e2e.ts --model-round-failover --frozen-control-plane",
@@ -82,13 +96,14 @@
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
     "test:integration:hosted:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --config ./vitest.hosted.config.ts",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/list_directory.test.ts ./cli/tool-hook-context.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./interactive/workflow-completion.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/agent-loop-parity.test.ts ./cli/acp-agent-loop-parity.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/workflow-ancestor-discovery.test.ts ./cli/daemon-workflow-ancestor-trust.test.ts ./cli/workflow-intent.test.ts ./cli/workflow-mode.test.ts ./cli/acp-workflow-mode.test.ts ./cli/daemon-workflow-intent.test.ts ./cli/daemon-workflow-mode.test.ts ./cli/list_directory.test.ts ./cli/tool-hook-context.test.ts ./cli/tool-hook-updated-input.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-session-cd.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./interactive/workflow-completion.test.ts ./interactive/workflow-intent.test.ts ./interactive/workflow-mode.test.ts ./interactive/mods-tool-middleware.test.ts ./interactive/statusline-parity.test.ts ./interactive/tui-editor-parity.test.ts ./interactive/tui-input-ownership.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts ./sdk-typescript/workflow-intent.test.ts ./sdk-typescript/workflow-mode.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
     "test:integration:cli:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests cli",
     "test:integration:cli:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests cli",
     "test:integration:interactive:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive",
+    "test:integration:interactive:bun-ink:sandbox:none": "cross-env QWEN_E2E_RENDERER=ink QWEN_E2E_RUNTIME=bun QWEN_SANDBOX=false vitest run --root ./integration-tests interactive",
     "test:integration:interactive:opentui:sandbox:none": "cross-env QWEN_E2E_RENDERER=opentui QWEN_SANDBOX=false vitest run --root ./integration-tests interactive",
     "test:integration:interactive:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests interactive",
     "test:terminal-bench": "cross-env VERBOSE=true KEEP_OUTPUT=true vitest run --config ./vitest.terminal-bench.config.ts --root ./integration-tests",
@@ -113,6 +128,7 @@
     "prepare:package": "node scripts/prepare-package.js",
     "package:hosted-installation": "node scripts/build-hosted-installation-assets.js",
     "package:standalone": "node scripts/create-standalone-package.js",
+    "package:managed-runtime": "node scripts/create-managed-runtime-package.js",
     "package:standalone:release": "node scripts/build-standalone-release.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",
@@ -173,6 +189,7 @@
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",
     "@vitest/eslint-plugin": "^1.3.4",
+    "@xterm/addon-unicode11": "0.9.0",
     "@xterm/headless": "^5.5.0",
     "@xterm/xterm": "^6.0.0",
     "cross-env": "^7.0.3",

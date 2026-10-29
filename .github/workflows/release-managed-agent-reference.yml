@@ -10,6 +10,7 @@ on:
       - 'scripts/contract-version-utils.js'
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/tests/package-managed-agent-reference.test.mjs'
+      - 'scripts/tests/managed-agent-upgrade.test.mjs'
       - 'packages/sdk-java/qwencode/**'
       - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
@@ -51,27 +52,10 @@ jobs:
     env:
       MAVEN_VERSION: '3.9.11'
       MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+      MYSQL_CONTAINER: 'qwen-code-reference-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     outputs:
       tag: '${{ steps.version.outputs.tag }}'
       version: '${{ steps.version.outputs.version }}'
-    services:
-      mysql:
-        image: 'mysql:8.4'
-        env:
-          MYSQL_DATABASE: 'qwen_managed_agent'
-          MYSQL_PASSWORD: 'qwen'
-          MYSQL_ROOT_PASSWORD: 'root'
-          MYSQL_USER: 'qwen'
-        ports:
-          # Pool hosts run several jobs at once; a fixed host port collides.
-          - '3306/tcp'
-        # tmpfs keeps the image's data volume from stranding on pool hosts.
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=30
-          --mount type=tmpfs,destination=/var/lib/mysql
     steps:
       - name: 'Resolve experimental version'
         id: 'version'
@@ -230,7 +214,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
@@ -240,8 +224,36 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -260,16 +272,50 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
+      # Pool hosts share one host-wide fs.aio-nr budget across concurrent jobs,
+      # and a mysqld that reserves native AIO contexts can exhaust it and fail
+      # to boot with `io_setup() failed with EAGAIN` (#14416). Service
+      # containers cannot take a command, so MySQL starts here instead, with
+      # native AIO disabled: simulated AIO needs no io_setup() contexts.
+      - name: 'Start MySQL without native AIO'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          docker run --detach --name "${MYSQL_CONTAINER}" \
+            --publish '127.0.0.1::3306' \
+            --mount type=tmpfs,destination=/var/lib/mysql \
+            --env MYSQL_DATABASE='qwen_managed_agent' \
+            --env MYSQL_PASSWORD='qwen' \
+            --env MYSQL_ROOT_PASSWORD='root' \
+            --env MYSQL_USER='qwen' \
+            mysql:8.4 --innodb-use-native-aio=0
+          for attempt in {1..60}; do
+            if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=root --silent >/dev/null 2>&1; then
+              break
+            fi
+            if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
+              docker logs "${MYSQL_CONTAINER}" || true
+              exit 1
+            fi
+            if [[ "${attempt}" == '60' ]]; then
+              docker logs "${MYSQL_CONTAINER}" || true
+              exit 1
+            fi
+            sleep 2
+          done
+          MYSQL_PORT="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${MYSQL_CONTAINER}")"
+          echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"
+
       - name: 'Grant Flyway probe access'
         shell: 'bash'
         run: |-
           set -euo pipefail
-          docker exec "${{ job.services.mysql.id }}" \
+          docker exec "${MYSQL_CONTAINER}" \
             mysql -uroot -proot \
             --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
 
-      - name: 'Test the packager'
-        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
+      - name: 'Test the packager and the upgrade command'
+        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs scripts/tests/managed-agent-upgrade.test.mjs'
 
       - name: 'Build Java components'
         run: |-
@@ -290,6 +336,10 @@ jobs:
         env:
           RELEASE_VERSION: '${{ steps.version.outputs.version }}'
         run: |-
+          # A pool runner can keep RUNNER_TEMP across jobs: a leftover
+          # extracted/ fails the verify step's mkdir, and another PR's
+          # archive would match the upload globs.
+          rm -rf -- "${RUNNER_TEMP}/managed-agent-reference"
           node scripts/package-managed-agent-reference.mjs \
             --version "${RELEASE_VERSION}" \
             --source-revision "${GITHUB_SHA}" \
@@ -298,7 +348,6 @@ jobs:
       - name: 'Verify and boot the exact archive'
         env:
           RELEASE_VERSION: '${{ steps.version.outputs.version }}'
-          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
         shell: 'bash'
         run: |-
           set -euo pipefail
@@ -344,6 +393,21 @@ jobs:
             ${{ runner.temp }}/managed-agent-reference/SHA256SUMS.txt
           if-no-files-found: 'error'
           retention-days: 14
+
+      # The host's docker cleanup service reaps qwen-code-* containers only
+      # after a strict >24h age gate. It fires once a day, and its 30m jitter
+      # spaces consecutive fires 23.5-24.5h apart, so a container the gate
+      # skips at one fire waits for a later one: a cancelled job can strand a
+      # running mysqld for up to ~48.5h.
+      - name: 'Remove the MySQL container'
+        if: '${{ always() }}'
+        shell: 'bash'
+        run: |-
+          set -uo pipefail
+          if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
+            docker rm --force "${MYSQL_CONTAINER}" ||
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48.5h"
+          fi
 
   publish:
     name: 'Publish experimental reference distribution'

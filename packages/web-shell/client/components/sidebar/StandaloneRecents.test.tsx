@@ -71,6 +71,7 @@ describe('StandaloneRecents', () => {
   let root: Root;
 
   beforeEach(() => {
+    window.localStorage.clear();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     mocks.t.mockImplementation((key: string) => key);
     mocks.list.mockReset();
@@ -259,6 +260,91 @@ describe('StandaloneRecents', () => {
       pageSize: 50,
     });
   });
+
+  it.each(['active', 'archived'] as const)(
+    'persists %s collapse across remounts without collapsing the other group',
+    async (archiveState) => {
+      const collapsedTitle =
+        archiveState === 'active' ? 'Active chat' : 'Archived chat';
+      const otherState = archiveState === 'active' ? 'archived' : 'active';
+      const otherTitle =
+        archiveState === 'active' ? 'Archived chat' : 'Active chat';
+      await render({ archiveState, currentSessionId: archiveState });
+      const toggle = () =>
+        container.querySelector<HTMLButtonElement>(
+          `[data-testid="standalone-${archiveState}-group"] > div > button`,
+        )!;
+      await act(async () => toggle().click());
+      expect(container.textContent).not.toContain(collapsedTitle);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe('false');
+      expect(container.textContent).not.toContain(collapsedTitle);
+
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState: otherState });
+      expect(container.textContent).toContain(otherTitle);
+      expect(
+        container
+          .querySelector('[aria-expanded]')
+          ?.getAttribute('aria-expanded'),
+      ).toBe('true');
+
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      await act(async () => toggle().click());
+      expect(
+        window.localStorage.getItem(
+          `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`,
+        ),
+      ).toBe('true');
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(collapsedTitle);
+    },
+  );
+
+  it.each([
+    ['active', false],
+    ['active', true],
+    ['archived', false],
+    ['archived', true],
+  ] as const)(
+    'preserves the %s expanded preference %s when clicking its header during search',
+    async (archiveState, expanded) => {
+      const title = archiveState === 'active' ? 'Active chat' : 'Archived chat';
+      const key = `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`;
+      const toggle = () =>
+        container.querySelector<HTMLButtonElement>(
+          `[data-testid="standalone-${archiveState}-group"] > div > button`,
+        )!;
+      await render({ archiveState });
+      await act(async () => toggle().click());
+      if (expanded) await act(async () => toggle().click());
+      expect(window.localStorage.getItem(key)).toBe(String(expanded));
+
+      await render({ archiveState, searchQuery: archiveState.toUpperCase() });
+      expect(container.textContent).toContain(title);
+      await act(async () => toggle().click());
+      expect(window.localStorage.getItem(key)).toBe(String(expanded));
+      expect(toggle().getAttribute('aria-expanded')).toBe(String(expanded));
+      expect(container.textContent).toContain(title);
+
+      await render({ archiveState, searchQuery: '   ' });
+      expect(toggle().disabled).toBe(false);
+      expect(container.textContent?.includes(title)).toBe(expanded);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe(String(expanded));
+      expect(container.textContent?.includes(title)).toBe(expanded);
+    },
+  );
 
   it('loads only the requested archived group', async () => {
     const { renderSession } = await render({ archiveState: 'archived' });

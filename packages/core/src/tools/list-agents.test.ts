@@ -143,6 +143,16 @@ describe('ListAgentsTool', () => {
       outputFile: '/tmp/agent-blocked.jsonl',
       resumeBlockedReason: 'Transcript does not match.',
     });
+    registry.register({
+      agentId: 'agent-fix',
+      description: 'autofix-pr o/r#7 round',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: 5,
+      abortController: new AbortController(),
+      outputFile: '/tmp/agent-fix.jsonl',
+      messagesBlockedReason: 'A background fix is never continued.',
+    });
 
     const result = await run(tool);
 
@@ -161,6 +171,13 @@ describe('ListAgentsTool', () => {
           status: 'completed',
           can_message: false,
           resume_blocked_reason: 'Transcript does not match.',
+        },
+        {
+          task_id: 'agent-fix',
+          description: 'autofix-pr o/r#7 round',
+          status: 'running',
+          can_message: false,
+          resume_blocked_reason: 'A background fix is never continued.',
         },
       ],
     });

@@ -463,7 +463,66 @@ pub fn send_click_synthesized_active_mods(
     button: &str,
     modifiers: &[&str],
 ) -> Result<()> {
-    send_click_synthesized_mods_impl(target, sx, sy, count, button, modifiers, true)
+    super::keyboard::with_confirmed_foreground(
+        HWND(target as *mut _),
+        "click delivery",
+        || Ok(()),
+        |_, owner| {
+            let (downs, ups) = super::keyboard::modifier_hold_inputs(modifiers);
+            super::user_input::checkpoint()?;
+            unsafe {
+                if !downs.is_empty()
+                    && SendInput(&downs, std::mem::size_of::<INPUT>() as i32) as usize
+                        != downs.len()
+                {
+                    let _ = SendInput(&ups, std::mem::size_of::<INPUT>() as i32);
+                    bail!("SendInput inserted partial modifiers; observe before retrying");
+                }
+            }
+            let result = (|| {
+                for index in 0..count.max(1) {
+                    super::user_input::checkpoint()?;
+                    if !crate::win32::foreground_matches_target_or_owned_window(owner, unsafe {
+                        GetForegroundWindow().0 as u64
+                    }) {
+                        bail!("foreground_lost: target changed; remaining clicks were not sent");
+                    }
+                    let (down, up) = match button {
+                        "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+                        "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+                        _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+                    };
+                    move_cursor_desktop(sx, sy)?;
+                    let events = [down, up].map(|flag| INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dwFlags: flag,
+                                ..Default::default()
+                            },
+                        },
+                    });
+                    let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+                    if sent != 2 {
+                        unsafe {
+                            let _ = SendInput(&events[1..], std::mem::size_of::<INPUT>() as i32);
+                        }
+                        bail!("SendInput inserted partial click; observe before retrying");
+                    }
+                    if index + 1 < count {
+                        sleep(Duration::from_millis(80));
+                    }
+                }
+                Ok(())
+            })();
+            unsafe {
+                if !ups.is_empty() {
+                    let _ = SendInput(&ups, std::mem::size_of::<INPUT>() as i32);
+                }
+            }
+            result
+        },
+    )
 }
 
 fn send_click_synthesized_mods_impl(
@@ -727,167 +786,69 @@ pub fn send_drag_synthesized(
     steps: usize,
     button: &str,
 ) -> Result<()> {
-    let target = HWND(target as *mut _);
-    if target.0.is_null() {
-        bail!("invalid target hwnd");
-    }
-    if let Some(msg) = crate::input::post_message_blocked_by_uipi(target.0 as u64) {
-        bail!(msg);
-    }
-
-    let (down_flag, up_flag) = match button {
-        "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-        "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-        _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-    };
-
-    let (vd_x, vd_y, vd_w, vd_h) = unsafe {
-        (
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
-            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
-            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
-        )
-    };
-    // Same VIRTUALDESK normalization as `send_click_synthesized`; see
-    // `crate::virtualdesk` for the math + the cross-platform unit tests.
-    let norm = |sx: i32, sy: i32| -> (i32, i32) {
-        crate::virtualdesk::to_virtualdesk_absolute(sx, sy, vd_x, vd_y, vd_w, vd_h)
-    };
-    let make_input = |dx: i32, dy: i32, flags| INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx,
-                dy,
-                mouseData: 0,
-                dwFlags: flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-                time: 0,
-                dwExtraInfo: 0,
-            },
+    super::keyboard::with_confirmed_foreground(
+        HWND(target as *mut _),
+        "drag delivery",
+        || Ok(()),
+        |_, owner| {
+            let (down, up) = match button {
+                "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+                "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+                _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            };
+            let event = |flag| INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: flag,
+                        ..Default::default()
+                    },
+                },
+            };
+            super::user_input::checkpoint()?;
+            move_cursor_desktop(sx_from, sy_from)?;
+            unsafe {
+                if SendInput(&[event(down)], std::mem::size_of::<INPUT>() as i32) != 1 {
+                    bail!("SendInput drag press was not accepted");
+                }
+            }
+            let result = (|| {
+                let steps = steps.max(1);
+                for step in 1..=steps {
+                    super::user_input::checkpoint()?;
+                    if !crate::win32::foreground_matches_target_or_owned_window(owner, unsafe {
+                        GetForegroundWindow().0 as u64
+                    }) {
+                        bail!("foreground_lost: drag stopped; observe before retrying");
+                    }
+                    let fraction = step as f64 / steps as f64;
+                    move_cursor_desktop(
+                        sx_from + ((sx_to - sx_from) as f64 * fraction).round() as i32,
+                        sy_from + ((sy_to - sy_from) as f64 * fraction).round() as i32,
+                    )?;
+                    if unsafe {
+                        SendInput(
+                            &[event(MOUSEEVENTF_MOVE)],
+                            std::mem::size_of::<INPUT>() as i32,
+                        )
+                    } != 1
+                    {
+                        bail!("SendInput drag motion was not accepted");
+                    }
+                    sleep(Duration::from_millis(duration_ms / steps as u64));
+                }
+                Ok(())
+            })();
+            let released = unsafe { SendInput(&[event(up)], std::mem::size_of::<INPUT>() as i32) };
+            result.and_then(|()| {
+                if released == 1 {
+                    Ok(())
+                } else {
+                    anyhow::bail!("SendInput drag release was not accepted")
+                }
+            })
         },
-    };
-
-    let steps = steps.max(1);
-    let step_delay_ms = if steps > 1 {
-        duration_ms / steps as u64
-    } else {
-        0
-    };
-
-    unsafe {
-        let prev_fg = GetForegroundWindow();
-        let mut prev_cursor = POINT::default();
-        let _ = GetCursorPos(&mut prev_cursor);
-
-        // Lock-free z-order raise (no focus steal) so the coordinate-routed drag
-        // lands on the target — same technique as send_click_synthesized.
-        // SetForegroundWindow is lock-denied without UIAccess and isn't needed
-        // for pointer input; NoActivateGuard keeps the press from activating it.
-        let _noact = crate::input::NoActivateGuard::arm(target);
-        // Capture whether the target was ALREADY always-on-top so we only demote
-        // below if WE promoted it (else we'd strip a legitimate topmost window).
-        let was_topmost = (GetWindowLongPtrW(target, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0 != 0;
-        let _ = SetWindowPos(
-            target,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-        );
-
-        // 1. Move + press at the start of the drag.
-        let (nfx, nfy) = norm(sx_from, sy_from);
-        let _ = SetCursorPos(sx_from, sy_from);
-        let prelude = [
-            make_input(nfx, nfy, MOUSEEVENTF_MOVE),
-            make_input(nfx, nfy, down_flag),
-        ];
-        let sent = SendInput(&prelude, std::mem::size_of::<INPUT>() as i32);
-        if sent as usize != prelude.len() {
-            if !was_topmost {
-                let _ = SetWindowPos(
-                    target,
-                    HWND_NOTOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-                );
-            }
-            if !prev_fg.0.is_null() && prev_fg != target {
-                let _ = SetWindowPos(
-                    prev_fg,
-                    HWND_TOP,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-                );
-            }
-            let _ = SetCursorPos(prev_cursor.x, prev_cursor.y);
-            bail!(
-                "SendInput drag-prelude inserted {sent}/{} events",
-                prelude.len()
-            );
-        }
-
-        // 2. Interpolate the path. SetCursorPos + MOUSEEVENTF_MOVE in lockstep
-        //    so both the visible cursor and the system input queue track the
-        //    same path — WPF's drag-handler watches GetKeyState during each
-        //    move event.
-        for i in 1..=steps {
-            let t = i as f64 / steps as f64;
-            let x = sx_from + ((sx_to - sx_from) as f64 * t).round() as i32;
-            let y = sy_from + ((sy_to - sy_from) as f64 * t).round() as i32;
-            let (nx, ny) = norm(x, y);
-            let _ = SetCursorPos(x, y);
-            let mv = [make_input(nx, ny, MOUSEEVENTF_MOVE)];
-            let _ = SendInput(&mv, std::mem::size_of::<INPUT>() as i32);
-            if step_delay_ms > 0 {
-                sleep(Duration::from_millis(step_delay_ms));
-            }
-        }
-
-        // 3. Release at the end.
-        let (ntx, nty) = norm(sx_to, sy_to);
-        let release = [make_input(ntx, nty, up_flag)];
-        let _ = SendInput(&release, std::mem::size_of::<INPUT>() as i32);
-
-        // Brief settle, then restore z-order (demote target, restack user's
-        // window — no activation) and the cursor.
-        sleep(Duration::from_millis(40));
-        if !was_topmost {
-            let _ = SetWindowPos(
-                target,
-                HWND_NOTOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            );
-        }
-        if !prev_fg.0.is_null() && prev_fg != target {
-            let _ = SetWindowPos(
-                prev_fg,
-                HWND_TOP,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            );
-        }
-        let _ = SetCursorPos(prev_cursor.x, prev_cursor.y);
-        drop(_noact);
-    }
-
-    Ok(())
+    )
 }
 
 /// Standard wheel notch delta. A `mouseData` value of `±WHEEL_DELTA` is one
@@ -920,6 +881,7 @@ fn wheel_mouse_data(ticks: i32) -> u32 {
 /// delivery follows the cursor, so positioning the cursor is sufficient. The
 /// cursor is restored to its previous position afterward.
 pub fn send_wheel_synthesized(sx: i32, sy: i32, ticks: i32, horizontal: bool) -> Result<()> {
+    super::user_input::checkpoint()?;
     let flag = if horizontal {
         MOUSEEVENTF_HWHEEL
     } else {
@@ -975,8 +937,32 @@ pub fn foreground_window() -> Result<u64> {
 
 /// Move the real OS pointer to a desktop coordinate.
 pub fn move_cursor_desktop(x: i32, y: i32) -> Result<()> {
-    unsafe { SetCursorPos(x, y) }
-        .map_err(|error| anyhow::anyhow!("SetCursorPos({x}, {y}) failed: {error}"))
+    let (dx, dy) = unsafe {
+        crate::virtualdesk::to_virtualdesk_absolute(
+            x,
+            y,
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
+        )
+    };
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                ..Default::default()
+            },
+        },
+    };
+    if unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) } == 1 {
+        Ok(())
+    } else {
+        bail!("SendInput pointer move was not accepted")
+    }
 }
 
 /// Classify a `WM_NCHITTEST` result into the non-client regions where a

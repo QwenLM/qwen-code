@@ -16,6 +16,7 @@ import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
 import { isLegitimateMountRelease } from './hosted-mount-release.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -138,6 +139,7 @@ const proxy = createServer(async (req, res) => {
         req.method === 'POST' &&
         [
           '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
           '/internal/runtime-broker/v1/tool-sessions:active-holds',
         ].includes(url.pathname);
       const holdInventory = harnessScoped && operation === 'active-holds';
@@ -281,13 +283,12 @@ const model = await startFakeOpenAIServer(() => {
     "process.stderr.write('stderr-tail\\n');",
     '});',
   ].join('\n');
-  const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
   return {
     toolCalls: [
       fakeToolCall(
         'run_shell_command',
         {
-          command: quote(process.execPath) + ' -e ' + quote(producer),
+          command: quotePosix(process.execPath) + ' -e ' + quotePosix(producer),
           timeout: 60_000,
         },
         'shell-effect',
