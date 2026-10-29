@@ -145,11 +145,13 @@ class SessionRowLockOrderTest {
             "ResidentWorkspaceRetirementStore.java", "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WakeRecoveryStore.java",
+            "WorkspaceFileStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
             "ManagedToolResultProjector.java", "ManagedUserMessageStore.java",
+            "SessionWorktreeStore.java",
             "WorkspaceCsiApplicationInventory.java",
             "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
             "WorkspaceRecoveryStore.java");
@@ -250,6 +252,11 @@ class SessionRowLockOrderTest {
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
                             Set.of("SessionResourceCollectionCollector.runOnce/0")),
+                    // Value projections and the JDBC row mapper reach neither
+                    // Session locks nor Turn rows.
+                    Map.entry("SessionWorktreeStore.java",
+                            Set.of("Descriptor.worktreeId/0", "Plan.source/0", "Plan.target/1",
+                                    "Row.descriptor/0", "Row.descriptor/1", "SessionWorktreeStore.row/2")),
                     // D7-2's parked registration asks its record whether it
                     // reserved, through a record accessor the parse cannot
                     // resolve.
@@ -422,7 +429,7 @@ class SessionRowLockOrderTest {
                 "bindRecoveredHarness", "recordAdmission",
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
-                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn", "failWorktreeInitialTurns",
                 "failRecoveryBlockedTurn", "markTurnFailureRecovery",
                 "requestRecoveryRecheck",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
@@ -468,7 +475,7 @@ class SessionRowLockOrderTest {
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn",
+                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
                         "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
@@ -534,7 +541,7 @@ class SessionRowLockOrderTest {
     // assertion still green. Pin the boundary on the R2 entry points.
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
-        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
+        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission",
                 "beginContextCompression", "markContextCompressionSubmitted", "markTurnFailureRecovery",
                 "requestRecoveryRecheck")) {

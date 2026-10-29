@@ -115,6 +115,7 @@ export function createJavaManagedAgentProvider(
       planMode?: boolean;
       skills?: import('./managed-agent-provider').ManagedSessionSkill[];
       extensionPins?: import('./managed-extension-types').ManagedExtensionPin[];
+      worktree?: { baseRef?: string };
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -126,6 +127,9 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.worktree === undefined
+          ? {}
+          : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
@@ -802,6 +806,8 @@ export function createJavaManagedAgentProvider(
                 approvalMode,
                 planMode,
                 skills,
+                extensionPins,
+                worktree,
               },
               command,
             ) =>
@@ -814,10 +820,33 @@ export function createJavaManagedAgentProvider(
                   approvalMode,
                   planMode,
                   skills,
+                  extensionPins,
+                  worktree,
                 },
                 command,
               ),
             createSession: createWorkspaceSession,
+          },
+          sessionWorktrees: {
+            options: (request, options) =>
+              client.worktreeOptions(request, options.signal),
+            list: (workspaceId, options) =>
+              client.listSessionWorktrees(workspaceId, options.signal),
+            inspect: (workspaceId, worktreeId, options) =>
+              client.inspectSessionWorktree(
+                workspaceId,
+                worktreeId,
+                options.signal,
+              ),
+            cleanup: (workspaceId, worktreeId, options) =>
+              client.cleanupSessionWorktree(
+                {
+                  workspaceId,
+                  worktreeId,
+                  idempotencyKey: options.idempotencyKey,
+                },
+                options.signal,
+              ),
           },
         }
       : {}),
@@ -1004,6 +1033,7 @@ function toSessionSummary(
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
+    ...(session.worktree ? { worktree: session.worktree } : {}),
     createdAt: session.createdAt,
     admittedAt: session.activeTurn?.submittedAt ?? session.createdAt,
     updatedAt: session.updatedAt,
