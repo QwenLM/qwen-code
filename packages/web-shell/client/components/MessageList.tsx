@@ -131,9 +131,8 @@ export interface MessageListProps {
   onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
   /**
    * Identity of the session whose transcript `messages` show. Block ids are
-   * per-session ordinals, so changing it resets every session-scoped UI state
-   * (the reading pause, collapse overrides, pagination keep-open, pending page
-   * snapshots, the scroll anchor, the settled-stale-message latch).
+   * per-session ordinals, so changing it resets the reading pause, collapse
+   * overrides, pagination keep-open, pending page snapshots and scroll anchor.
    */
   sessionKey?: string;
   transcriptBlockCount?: number;
