@@ -1,80 +1,45 @@
-name: Windows 10 compatible test build
+name: Qwen 3.8 JailBreak Desktop (official UI)
 on:
   workflow_dispatch:
   push:
     branches:
       - custom-qwen38-agent
 concurrency:
-  group: windows-custom-test-${{ github.ref }}
+  group: qwen-desktop-${{ github.ref }}
   cancel-in-progress: true
 permissions:
   contents: read
 jobs:
-  windows-test:
+  desktop-windows:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - name: Enable pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack pnpm --version
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-      - name: Install dependencies
+      - name: Enable pnpm
         shell: pwsh
+        run: corepack enable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install repository dependencies
         run: corepack pnpm install --frozen-lockfile
-      - name: Build Qwen Code
-        shell: pwsh
-        run: npm run build
-      - name: Build portable bundled CLI
-        shell: pwsh
-        run: npm run bundle
-      - name: Assemble Windows portable application
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path windows-portable | Out-Null
-          Copy-Item -Recurse dist windows-portable/dist
-          $node = (Get-Command node.exe).Source
-          Copy-Item $node windows-portable/node.exe
-          Copy-Item .qwen/system.md windows-portable/system.md
-          Copy-Item .qwen/system.md windows-portable/dist/system.md
-          New-Item -ItemType Directory -Force -Path windows-portable/dist/chunks | Out-Null
-          Copy-Item .qwen/system.md windows-portable/dist/chunks/system.md
-          @'
-          @echo off
-          cd /d "%~dp0"
-          "%~dp0node.exe" "%~dp0dist\\cli.js" %*
-          pause
-          '@ | Set-Content -Encoding ascii windows-portable/Start-Qwen.cmd
-          @'
-          @echo off
-          cd /d "%~dp0"
-          "%~dp0node.exe" "%~dp0dist\\cli.js" %*
-          '@ | Set-Content -Encoding ascii windows-portable/qwen.cmd
-      - name: Build Qwen.exe launcher
-        shell: pwsh
-        run: dotnet publish scripts/windows/QwenLauncher.csproj -c Release -r win-x64 -o windows-launcher
-      - name: Install executable launcher
-        shell: pwsh
-        run: Copy-Item windows-launcher/Qwen.exe windows-portable/Qwen.exe
-      - name: Verify portable output
+      - name: Install official desktop dependencies
+        working-directory: packages/desktop
+        run: npm ci
+      - name: Build official Qwen desktop app and bundled runtime
+        working-directory: packages/desktop
+        run: npm run build -- --bundles nsis
+      - name: Verify desktop installer exists
         shell: pwsh
         run: |
-          if (!(Test-Path windows-portable/Qwen.exe)) { throw "Qwen.exe missing" }
-          if (!(Test-Path windows-portable/node.exe)) { throw "node.exe missing" }
-          if (!(Test-Path windows-portable/dist/cli.js)) { throw "Bundled CLI missing" }
-          if (!(Test-Path windows-portable/dist/system.md)) { throw "Custom system prompt missing" }
-          & windows-portable/node.exe windows-portable/dist/cli.js --version
-          if ($LASTEXITCODE -ne 0) { throw "Bundled CLI startup failed" }
-      - name: Upload portable Windows application
+          $files = @(Get-ChildItem packages/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+          if ($files.Count -eq 0) { throw "Official Tauri desktop installer missing" }
+          $files | ForEach-Object { Write-Host $_.FullName }
+      - name: Upload original Qwen desktop installer
         uses: actions/upload-artifact@v4
         with:
           name: Qwen-3.8-JailBreak
-          path: windows-portable/
+          path: packages/desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
