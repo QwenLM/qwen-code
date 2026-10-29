@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
@@ -45,6 +44,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.EventIdentity.Identity;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
@@ -172,6 +172,8 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
+    private final String externalFilesProvider;
+    private final boolean externalForegroundShell;
     private final boolean workspaceShellEnabled;
     private final boolean workspaceChildAgentsEnabled;
     private final boolean managedExtensionExecutionEnabled;
@@ -358,7 +360,10 @@ public class ManagedAgentStore implements AgentStateStore {
         }).toList();
         this.journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
+        this.externalFilesProvider = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(properties.getRuntimeBroker().getProvisioner())
+                ? properties.getRuntimeBroker().getExternalProviderId() : null;
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
+        this.externalForegroundShell = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isTools(properties.getRuntimeBroker().getProvisioner());
         this.workspaceChildAgentsEnabled = properties.admitsPublicChildAgents();
         this.managedExtensionExecutionEnabled = properties.getExtensions().isEnabled() && properties.getManagedExtensions().isEnabled();
         this.lifecycleHandoffMillis = properties.getSessionStore().getWriterLeaseDuration().toMillis();
@@ -379,6 +384,10 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
+        if (externalFilesProvider != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
+                    "External Runtime requires a registered Workspace selection.");
+        }
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
@@ -524,6 +533,16 @@ public class ManagedAgentStore implements AgentStateStore {
             extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        boolean externalWorkspace = isExternalWorkspace(workspace.binding());
+        if (externalFilesProvider != null && !externalWorkspace) {
+            throw workspaceExecutionUnavailable();
+        }
+        if (externalWorkspace) {
+            requireExternalFiles(workspace.binding(), pin.toolProfile());
+            if (pin.hooks() || pin.mcp() || extensionPins != null) {
+                throw workspaceExecutionUnavailable();
+            }
+        }
         boolean sshWorkspace = isSshWorkspace(workspace.binding());
         if (sshWorkspace) {
             requireSshToolProfile(pin.toolProfile());
@@ -537,13 +556,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 throw workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else if (!sshWorkspace) {
+        } else if (!sshWorkspace && !externalWorkspace) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !externalWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
         List<Map<String, Object>> merged = new ArrayList<>();
@@ -1133,6 +1152,20 @@ public class ManagedAgentStore implements AgentStateStore {
             String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
     }
 
+    private boolean isExternalWorkspace(ContextBinding binding) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'EXTERNAL'",
+                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+    }
+
+    private void requireExternalFiles(ContextBinding binding, String profile) {
+        var storage = ExternalStorageRegistrationStore.executionStorage(jdbc, binding.getTenantId(), binding.getStorageId(), false);
+        if (externalFilesProvider == null || storage == null || !externalFilesProvider.equals(storage.providerId())
+                || !binding.getWorkspaceId().equals(storage.tenantWorkspaceId()) || !".".equals(binding.getCwdRelative())
+                || !(WorkspaceToolProfiles.FILES.equals(profile) || externalForegroundShell && workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(profile))) {
+            throw workspaceExecutionUnavailable();
+        }
+    }
+
     private boolean isSshWorkspace(ContextBinding binding) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
                 Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
@@ -1246,7 +1279,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         if (!WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
-                || isSshWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || isSshWorkspace(session.workspace()) || isExternalWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
                 || findChildLineage(tenantId, sessionId) != null) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "MCP management is unavailable.");
         }
@@ -1609,6 +1642,12 @@ public class ManagedAgentStore implements AgentStateStore {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (isExternalWorkspace(session.workspace())) {
+                requireExternalFiles(session.workspace(), session.toolProfile());
+                if (hasMcpServers(session)) {
+                    throw workspaceExecutionUnavailable();
+                }
+            }
             if (isSshWorkspace(session.workspace())) {
                 requireSshToolProfile(session.toolProfile());
                 if (hasMcpServers(session)) {

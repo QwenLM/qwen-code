@@ -27,6 +27,7 @@ public final class LoadHarnessSession {
     private Map<String, Object> publicChildExtensionAgent;
     private boolean stopMessages;
     private boolean foregroundOnly;
+    private boolean fileRewindEnabled = true;
     private String recoveryCleanupPromptId;
     private String cancellationPromptId;
 
@@ -143,12 +144,18 @@ public final class LoadHarnessSession {
         copy.childSnapshots = value && snapshots;
         copy.stopMessages = stopMessages;
         copy.foregroundOnly = foregroundOnly;
+        copy.fileRewindEnabled = fileRewindEnabled;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
         copy.publicChildModelRoute = publicChildModelRoute;
         copy.publicChildExtensionAgent = publicChildExtensionAgent;
         return copy;
+    }
+
+    public LoadHarnessSession withFileRewindEnabled(boolean value) {
+        this.fileRewindEnabled = value;
+        return this;
     }
 
     /** Restates the immutable SSH Session tool restriction on every attachment. */
@@ -168,6 +175,7 @@ public final class LoadHarnessSession {
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
         copy.foregroundOnly = value;
+        copy.fileRewindEnabled = fileRewindEnabled;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
@@ -205,6 +213,7 @@ public final class LoadHarnessSession {
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
         copy.foregroundOnly = foregroundOnly;
+        copy.fileRewindEnabled = fileRewindEnabled;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
@@ -231,6 +240,7 @@ public final class LoadHarnessSession {
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = true;
         copy.foregroundOnly = foregroundOnly;
+        copy.fileRewindEnabled = fileRewindEnabled;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
@@ -370,6 +380,9 @@ public final class LoadHarnessSession {
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (!fileRewindEnabled) {
+            result.put("fileRewindEnabled", false);
         }
         if (foregroundOnly) {
             result.put("foregroundOnly", true);

@@ -17,16 +17,26 @@ public final class ExternalRuntimeKinds {
 
     public static boolean isExternal(String provisionerKind) {
         return ExternalRuntimeProvisioner.KIND.equals(provisionerKind)
-                || ExternalWorkspaceProvisioner.KIND.equals(provisionerKind);
+                || isWorkspace(provisionerKind);
     }
 
     /** Whether the kind binds registered EXTERNAL storage. */
     public static boolean isWorkspace(String provisionerKind) {
-        return ExternalWorkspaceProvisioner.KIND.equals(provisionerKind);
+        return ExternalWorkspaceProvisioner.KIND.equals(provisionerKind)
+                || isFiles(provisionerKind);
+    }
+
+    public static boolean isFiles(String provisionerKind) {
+        return ExternalWorkspaceProvisioner.FILES_KIND.equals(provisionerKind) || isTools(provisionerKind);
+    }
+
+    public static boolean isTools(String provisionerKind) {
+        return ExternalWorkspaceProvisioner.TOOLS_KIND.equals(provisionerKind);
     }
 
     /** The provisioner names an operator can configure today, for messages. */
     public static String supported() {
-        return ExternalRuntimeProvisioner.KIND + " or " + ExternalWorkspaceProvisioner.KIND;
+        return ExternalRuntimeProvisioner.KIND + ", " + ExternalWorkspaceProvisioner.KIND
+                + ", " + ExternalWorkspaceProvisioner.FILES_KIND + " or " + ExternalWorkspaceProvisioner.TOOLS_KIND;
     }
 }

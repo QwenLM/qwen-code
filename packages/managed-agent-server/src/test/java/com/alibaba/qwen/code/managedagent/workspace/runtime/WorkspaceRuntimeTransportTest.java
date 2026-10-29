@@ -88,6 +88,37 @@ class WorkspaceRuntimeTransportTest {
     }
 
     @Test
+    void externalFilesProbePrecedesTheClaimAndAnUncertainInstallRetainsIt() throws Exception {
+        var fixture = externalFilesFixture();
+        when(fixture.http().attest(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        when(fixture.http().installContext(any(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(new IllegalStateException("response lost")));
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture().join())
+                .hasCauseInstanceOf(RuntimeBrokerException.class);
+        var order = inOrder(fixture.http(), fixture.ownership());
+        order.verify(fixture.http()).attest(any(), any(), any());
+        order.verify(fixture.ownership()).claim(any(), any());
+        order.verify(fixture.http()).installContext(any(), any(), any(), any());
+        verify(fixture.ownership(), never()).release(any(), any());
+    }
+
+    @Test
+    void failedExternalProbeAndUnsupportedControlsNeverClaimOrForwardTools() throws Exception {
+        var fixture = externalFilesFixture();
+        when(fixture.http().attest(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable()));
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture().join())
+                .hasCauseInstanceOf(RuntimeBrokerException.class);
+        verify(fixture.ownership(), never()).claim(any(), any());
+        for (Map<String, Object> operation : java.util.List.of(Map.<String, Object>of("kind", "mcp"), Map.<String, Object>of("kind", "hook"),
+                Map.<String, Object>of("kind", "raw-file-history", "action", "rewind"), Map.<String, Object>of("kind", "prepare", "toolName", "run_shell_command"))) {
+            assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), fixture.session(), operation)).isInstanceOf(RuntimeBrokerException.class);
+        }
+        assertThatThrownBy(() -> fixture.transport().releaseMount(fixture.lease(), fixture.session())).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> fixture.transport().reclaimMount(fixture.lease(), fixture.session())).isInstanceOf(RuntimeBrokerException.class);
+        verify(fixture.http(), never()).installContext(any(), any(), any(), any());
+        verify(fixture.http(), never()).control(any(), any(), any());
+    }
+
+    @Test
     void v2AcknowledgementUsesTheReleasedOriginalSshSessionWithoutReclaimingStorage() throws Exception {
         var fixture = fixture();
         var original = fixture.runtime();
@@ -326,6 +357,18 @@ class WorkspaceRuntimeTransportTest {
     }
 
     private static Fixture sshAcquisitionFixture() throws Exception {
+        return acquisitionFixture("ssh-process");
+    }
+
+    private static Fixture externalFilesFixture() throws Exception {
+        var fixture = acquisitionFixture(com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.FILES_KIND);
+        var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+        when(fixture.resolver().externalStorage(binding)).thenReturn(new com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry.RegisteredExternalStorage(
+                "provider", "volume", 1, binding.getWorkspaceId(), "/external/workspace", fixture.session().getScope().getCanonicalCwd()));
+        return fixture;
+    }
+
+    private static Fixture acquisitionFixture(String kind) throws Exception {
         var fixture = fixture();
         var original = fixture.runtime();
         var oldScope = fixture.session().getScope();
@@ -333,9 +376,9 @@ class WorkspaceRuntimeTransportTest {
                 oldScope.getCanonicalCwd(), oldScope.getCapabilityDigest(), "session");
         var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
                 fixture.session().getTurnKind(), scope);
-        var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), "ssh-process", original.getRequest().getStorageId());
+        var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), kind, original.getRequest().getStorageId());
         var runtime = new RuntimeBindingRecord(original.getBindingId(), request, original.getProvisionSeed(), original.getGeneration(),
-                RuntimeBindingRecord.State.READY, original.getLease(), new RuntimeResourceHandle("ssh-process", 1, Map.of("fixture", true)),
+                RuntimeBindingRecord.State.READY, original.getLease(), new RuntimeResourceHandle(kind, 1, Map.of("fixture", true)),
                 3, false, null, null, 0, 1, null, Instant.now(), Instant.now());
         var record = new RuntimeSessionRecord(session, runtime.getBindingId(), runtime.getGeneration(),
                 RuntimeSessionRecord.State.READY, 1, Instant.now());

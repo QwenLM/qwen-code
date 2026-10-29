@@ -11,6 +11,17 @@ class HostedAgentDefinitionRequestTest {
     private static final String SESSION = "22222222-2222-4222-8222-222222222222";
 
     @Test
+    void externalFileRewindRestrictionSurvivesEveryLoadCopy() {
+        assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION).build().toJson().containsKey("fileRewindEnabled"));
+        assertEquals(false, CreateHarnessSession.builder().harnessSessionId(SESSION).fileRewindEnabled(false).build().toJson().get("fileRewindEnabled"));
+        var original = new LoadHarnessSession(SESSION).withFileRewindEnabled(false);
+        for (var load : java.util.List.of(original, original.withChildWorkspaces(true), original.withForegroundOnly(true),
+                original.forLifecycle("close", 1), original.withStoppedMessages())) {
+            assertEquals(false, load.toJson().get("fileRewindEnabled"));
+        }
+    }
+
+    @Test
     void initialExtensionSelectionSurvivesCreateAndEveryLoadCopy() {
         var selection = Map.<String, Object>of("operationId", SESSION, "actorKey", "a".repeat(64),
                 "expectedRevision", 0, "extensions", java.util.List.of());

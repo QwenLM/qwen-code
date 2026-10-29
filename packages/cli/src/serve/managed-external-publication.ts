@@ -24,6 +24,7 @@ import {
   managedRuntimeNoStore,
   managedRuntimeJsonBody,
   handleManagedRuntimeJsonError,
+  nameManagedRuntimeIncarnation,
 } from './managed-runtime-attestation-contract.js';
 import {
   parseManagedToolReference,
@@ -40,7 +41,13 @@ const PREFIX = '/internal/managed-runtime/v2/publication:';
 const READ_BYTES = 32 * 1024;
 const CLOSED = 'Managed Runtime publication is closed.';
 export const EXTERNAL_PUBLICATION_ROUTES = Object.freeze(
-  ['begin', 'read', 'stop-drained'].map((key) =>
+  [
+    'begin',
+    'read',
+    'stop-drained',
+    'files-stop-drained',
+    'tools-stop-drained',
+  ].map((key) =>
     Object.freeze({
       key,
       method: 'POST',
@@ -98,6 +105,9 @@ export class ManagedExternalPublication
   private sealed = false;
   private stopped = false;
   private drainProof?: ManagedSessionDurableRef;
+  private filesDrainProof?: ManagedSessionDurableRef;
+  private filesStopped = false;
+  private stopMode?: 'legacy' | 'files' | 'tools';
   private readonly proofResources: LocalManagedSessionResourceStore;
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -357,6 +367,8 @@ export class ManagedExternalPublication
   }
 
   async stopDrained(executor: ManagedToolExecutor) {
+    if (this.boot.externalFiles) return { state: 'unknown' as const };
+    this.selectStopMode('legacy');
     this.sealed = true;
     executor.sealAdmission(this.retirementId);
     return this.serialize(async () => {
@@ -417,12 +429,92 @@ export class ManagedExternalPublication
     });
   }
 
+  private selectStopMode(mode: 'legacy' | 'files' | 'tools'): void {
+    if (this.stopMode !== undefined && this.stopMode !== mode)
+      throw new Error(CLOSED);
+    this.stopMode = mode;
+  }
+
+  async stopFilesDrained(executor: ManagedToolExecutor) {
+    return this.stopExternalDrained(executor, false);
+  }
+
+  async stopToolsDrained(executor: ManagedToolExecutor) {
+    return this.stopExternalDrained(executor, true);
+  }
+
+  private async stopExternalDrained(
+    executor: ManagedToolExecutor,
+    shell: boolean,
+  ) {
+    if (
+      this.boot.externalFiles !== 'external-files/1' ||
+      (this.boot.externalShell === true) !== shell
+    )
+      return { state: 'unknown' as const };
+    this.selectStopMode(shell ? 'tools' : 'files');
+    this.sealed = true;
+    executor.sealAdmission(this.retirementId);
+    return this.serialize(async () => {
+      if (this.channels.size > 0)
+        return {
+          state: 'undrained' as const,
+          channels: [...this.channels.keys()],
+        };
+      try {
+        if (!this.filesDrainProof) {
+          if (!this.filesStopped) {
+            await executor.retireExternalFiles(this.retirementId);
+            this.filesStopped = true;
+          }
+          this.filesDrainProof = await this.proofResources.publish(
+            shell ? 'external-tools-retirement' : 'external-files-retirement',
+            Buffer.from(
+              JSON.stringify({
+                proofVersion: 1,
+                type: shell ? 'tools-stop-drained' : 'files-stop-drained',
+                profile: shell ? 'external-tools/1' : 'external-files/1',
+                tenantId: this.boot.tenantId,
+                workspaceId: this.boot.workspaceId,
+                workspaceGeneration: this.boot.workspaceGeneration,
+                storageId: this.boot.storageId,
+                storage: this.boot.storage,
+                runtimeInstanceId: this.boot.runtimeInstanceId,
+                runtimeIncarnation: this.boot.runtimeIncarnation,
+                provisionRequestId: this.boot.provisionRequestId,
+                capabilityDigest: this.boot.capabilityDigest,
+                leaseId: this.boot.leaseId,
+                epoch: this.boot.epoch,
+                retirementId: this.retirementId,
+                retiredAt: new Date().toISOString(),
+                filesOnly: !shell,
+                ...(shell ? { foregroundShell: true } : {}),
+                unreleasedSessions: 0,
+                pendingInvocations: 0,
+                channels: [],
+              }),
+            ),
+          );
+        }
+        const bytes = await this.proofResources.read(this.filesDrainProof);
+        return {
+          state: 'drained' as const,
+          proof: this.filesDrainProof,
+          proofBytes: bytes.toString('base64'),
+        };
+      } catch {
+        return { state: 'unknown' as const };
+      }
+    });
+  }
+
   register(app: Application, executor: ManagedToolExecutor): void {
     for (const route of EXTERNAL_PUBLICATION_ROUTES) {
       app.post(
-        route.path,
+        route.path.replace(':', '\\:'),
         managedRuntimeNoStore,
         authorizeManagedRuntime(this.boot),
+        nameManagedRuntimeIncarnation(this.boot),
         managedRuntimeJsonBody(route.requestBodyLimitBytes),
         async (req: Request, res: Response) => {
           try {
@@ -489,7 +581,11 @@ export class ManagedExternalPublication
                 throw new Error(CLOSED);
               res.json({
                 protocolVersion: 2,
-                ...(await this.stopDrained(executor)),
+                ...(route.key === 'tools-stop-drained'
+                  ? await this.stopToolsDrained(executor)
+                  : route.key === 'files-stop-drained'
+                    ? await this.stopFilesDrained(executor)
+                    : await this.stopDrained(executor)),
               });
             }
           } catch {

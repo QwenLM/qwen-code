@@ -24,6 +24,7 @@ final class WorkspaceRuntimeResolver {
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore authority;
     private final SshWorkspaceService ssh;
+    private final String externalFilesProvider;
     private final com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
@@ -37,6 +38,8 @@ final class WorkspaceRuntimeResolver {
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties, SshWorkspaceService ssh) {
         this.ssh = ssh;
+        this.externalFilesProvider = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(properties.getRuntimeBroker().getProvisioner())
+                ? properties.getRuntimeBroker().getExternalProviderId() : null;
         this.managedExtensions = properties.getManagedExtensions();
         if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
             throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
@@ -106,6 +109,16 @@ final class WorkspaceRuntimeResolver {
             authority.authorizeLifecycle(session, lifecycle);
         }
         ContextBinding binding = session.workspace();
+        var external = authority.externalStorage(binding);
+        if (external != null) {
+            if (hook || externalFilesProvider == null || !externalFilesProvider.equals(external.providerId())
+                    || !binding.getWorkspaceId().equals(external.tenantWorkspaceId()) || !".".equals(binding.getCwdRelative())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
+                    Long.toString(binding.getWorkspaceGeneration()), external.mountRoot(),
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+        }
         if (ssh != null && ssh.runtimeStorage(binding) != null) {
             if (hook && !managedExtensions.isEnabled()) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -342,6 +355,10 @@ final class WorkspaceRuntimeResolver {
             }
         }
         return false;
+    }
+
+    com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry.RegisteredExternalStorage externalStorage(ContextBinding binding) {
+        return authority.externalStorage(binding);
     }
 
     ContextBinding savedBinding(String sessionId) {

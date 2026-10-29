@@ -61,6 +61,11 @@ public final class ExternalHttpRuntimeClient implements ExternalRuntimeClient {
         return post(OBSERVE_PATH, request);
     }
 
+    @Override
+    public CompletionStage<Map<String, Object>> retire(Map<String, Object> request) {
+        return post("retire", request);
+    }
+
     private CompletionStage<Map<String, Object>> post(String path, Map<String, Object> body) {
         HttpRequest request;
         try {

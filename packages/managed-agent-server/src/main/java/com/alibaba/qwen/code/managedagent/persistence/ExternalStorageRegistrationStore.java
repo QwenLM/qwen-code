@@ -27,7 +27,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     private final TransactionTemplate transaction;
     // Strict parsing (duplicate/unknown/trailing rejection) lives at the controller
     // boundary; this mapper only encodes/decodes payloads this store produced itself.
-    private final ObjectMapper json = new ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     public ExternalStorageRegistrationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
         this.jdbc = jdbc;
@@ -37,6 +37,51 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
 
     public record Receipt(String registrationId, String storageKind,
             ExternalStorageRegistration registration, long registeredAt) {
+    }
+
+    public record WorkspacePublication(String workspaceId, long workspaceGeneration, String storageId) {
+    }
+
+    public WorkspacePublication publishWorkspace(String tenant, String key, String storageId,
+            String providerId, long revision, String actorId, String displayName) {
+        if (tenant == null || !tenant.matches("[A-Za-z0-9._:-]{1,128}")
+                || key == null || !key.matches("[A-Za-z0-9._:-]{1,128}")
+                || storageId == null || providerId == null || actorId == null || actorId.isBlank()
+                || actorId.length() > 512 || displayName == null || displayName.isBlank() || displayName.length() > 512) {
+            throw new RuntimeBrokerException(400, "invalid_external_workspace", "Invalid external Workspace publication.", false);
+        }
+        WorkspaceStorageKindGuard.requireFreshTransaction();
+        String requestKey = "publish:" + key;
+        String digest = ManagedSchemaKeys.key(storageId, providerId, Long.toString(revision), actorId, displayName);
+        return transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
+            var prior = ManagedReceipts.find(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, requestKey, true);
+            if (prior != null) {
+                if (!digest.equals(prior.requestDigest())) {
+                    throw conflict("idempotency_conflict");
+                }
+                return decode(prior.resultJson(), WorkspacePublication.class);
+            }
+            var storage = executionStorage(jdbc, tenant, storageId, true);
+            if (storage == null || !providerId.equals(storage.providerId()) || revision != storage.registrationRevision()
+                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ? AND (workspace_id = ? OR storage_id = ?)",
+                            Long.class, tenant, storageId, storageId) != 0) {
+                throw conflict("external_workspace_conflict");
+            }
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
+                    + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')", tenant, storageId, storageId, displayName,
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
+                    com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
+                    tenant, storageId, ManagedWorkspaceRegistry.actorKey(tenant, actorId));
+            long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
+            WorkspacePublication result = new WorkspacePublication(storageId, 1, storageId);
+            ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, requestKey,
+                    digest, "PUBLISH_EXTERNAL_WORKSPACE", null, null, null, "COMPLETED", null, null, now);
+            jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", encode(result),
+                    ManagedSchemaKeys.receiptKey(NAMESPACE, tenant, ReceiptScope.TENANT, tenant, requestKey));
+            return result;
+        });
     }
 
     public Receipt registerExternalStorage(String tenant, String idempotencyKey,
@@ -128,6 +173,25 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     @Override
     public Optional<RegisteredExternalStorage> find(String tenant,
             String tenantWorkspaceId) {
+        return registered(jdbc, tenant, tenantWorkspaceId, false);
+    }
+
+    public static RegisteredExternalStorage executionStorage(JdbcTemplate jdbc, String tenant,
+            String storage, boolean lock) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'EXTERNAL'",
+                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0) {
+            return null;
+        }
+        return registered(jdbc, tenant, storage, lock).orElseThrow(WorkspaceExecutionStore::unavailable);
+    }
+
+    static String ownerKey(RegisteredExternalStorage storage) {
+        return new ExternalStorageRegistration.ExternalStorageIdentity(storage.providerId(), storage.physicalKey(),
+                storage.registrationRevision()).ownerKey();
+    }
+
+    private static Optional<RegisteredExternalStorage> registered(JdbcTemplate jdbc, String tenant,
+            String tenantWorkspaceId, boolean lock) {
         if (tenant == null || tenant.isEmpty() || tenantWorkspaceId == null
                 || tenantWorkspaceId.isEmpty()) {
             throw new RuntimeBrokerException(400,
@@ -138,15 +202,21 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 tenantWorkspaceId);
         List<Map<String, Object>> rows;
         try {
-            rows = jdbc.queryForList(
+            rows = jdbc.query(
                     "SELECT s.registration_json, s.registration_revision,"
-                            + " s.physical_key, o.mount_root"
-                            + " FROM ma_storage s JOIN ma_storage_owner o"
+                            + " s.physical_key, s.tenant_id, s.storage_id, o.mount_root, o.mount_revision,"
+                            + " o.storage_kind AS owner_kind, o.tenant_id AS owner_tenant, o.storage_id AS owner_storage"
+                            + " FROM ma_storage s LEFT JOIN ma_storage_owner o"
                             + " ON o.storage_key = s.physical_key"
                             + " WHERE s.alias_key = ?"
                             + " AND s.storage_kind = 'EXTERNAL'"
-                            + " AND s.registration_state = 'REGISTERED'",
-                    aliasKey);
+                            + " AND s.registration_state = 'REGISTERED'" + (lock ? " FOR UPDATE" : ""),
+                    (result, index) -> {
+                        var row = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(result);
+                        row.put("owner_tenant", result.getString("owner_tenant"));
+                        row.put("owner_storage", result.getString("owner_storage"));
+                        return row;
+                    }, aliasKey);
         } catch (RuntimeException failure) {
             // A read that did not complete proves nothing about the registration,
             // so it must not bury a recoverable placement: retry it.
@@ -177,6 +247,11 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 || !registration.identity().ownerKey()
                         .equals(String.valueOf(row.get("physical_key")))
                 || registration.identity().registrationRevision() != number.longValue()
+                || !tenant.equals(row.get("tenant_id")) || !tenant.equals(row.get("owner_tenant"))
+                || !tenantWorkspaceId.equals(row.get("storage_id")) || !tenantWorkspaceId.equals(row.get("owner_storage"))
+                || !"EXTERNAL".equals(row.get("owner_kind"))
+                || !(row.get("mount_revision") instanceof Number mountRevision)
+                || number.longValue() != mountRevision.longValue()
                 || !registration.alias().mountRoot()
                         .equals(String.valueOf(row.get("mount_root")))) {
             throw registrationMismatch();
@@ -201,17 +276,17 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 "External Runtime provider is unavailable.", true);
     }
 
-    private String encode(Object value) {
+    private static String encode(Object value) {
         try {
-            return json.writeValueAsString(value);
+            return JSON.writeValueAsString(value);
         } catch (JsonProcessingException error) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
 
-    private <T> T decode(String value, Class<T> type) {
+    private static <T> T decode(String value, Class<T> type) {
         try {
-            return json.readValue(value, type);
+            return JSON.readValue(value, type);
         } catch (JsonProcessingException | IllegalArgumentException error) {
             throw WorkspaceExecutionStore.unavailable();
         }

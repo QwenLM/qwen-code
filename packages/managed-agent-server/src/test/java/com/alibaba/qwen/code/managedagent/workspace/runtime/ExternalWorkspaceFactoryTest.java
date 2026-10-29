@@ -47,6 +47,18 @@ class ExternalWorkspaceFactoryTest {
     }
 
     @Test
+    void theFilesKindHasItsOwnDrainedStopCapabilityAndRequiresTheRegistry() {
+        try (RuntimeProvisioner provisioner = EmbeddedRuntimeBroker.provisioner(
+                broker(ExternalWorkspaceProvisioner.FILES_KIND), new HttpRuntimeTransport(), EMPTY)) {
+            assertEquals(ExternalWorkspaceProvisioner.FILES_KIND, provisioner.kind());
+            assertTrue(provisioner.supportsDrainedStop());
+            assertFalse(provisioner.supportsKind(ExternalWorkspaceProvisioner.KIND));
+        }
+        assertThrows(IllegalStateException.class, () -> EmbeddedRuntimeBroker.provisioner(
+                broker(ExternalWorkspaceProvisioner.FILES_KIND), new HttpRuntimeTransport(), null));
+    }
+
+    @Test
     void theWorkspaceKindRefusesToStartWithoutItsRegistry() {
         var error = assertThrows(IllegalStateException.class, () -> EmbeddedRuntimeBroker
                 .provisioner(broker(ExternalWorkspaceProvisioner.KIND), new HttpRuntimeTransport(), null));

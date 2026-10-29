@@ -272,7 +272,12 @@ export async function startManagedRuntimeAttestationWorker(
   const boot = externalBoot
     ? parseManagedContextBoot(
         Object.fromEntries(
-          Object.entries(externalBoot).filter(([key]) => key !== 'storage'),
+          Object.entries(externalBoot).filter(
+            ([key]) =>
+              key !== 'storage' &&
+              key !== 'externalFiles' &&
+              key !== 'externalShell',
+          ),
         ),
       )
     : resolved.version === 3
@@ -346,6 +351,8 @@ export async function startManagedRuntimeAttestationWorker(
           : (externalMount ?? csiMount),
         ledger,
         sshRuntime !== undefined || externalBoot !== undefined,
+        externalBoot?.externalFiles === 'external-files/1',
+        externalBoot?.externalShell === true,
       );
       sshRuntime?.register(app, boot, executor);
     } else {
@@ -406,8 +413,8 @@ export async function startManagedRuntimeAttestationWorker(
               ...MANAGED_TOOL_RESULT_ROUTES,
               ...(sshRuntime ? [sshRuntime.route] : []),
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
-              ...(!capturePublisher &&
-              !publication &&
+              ...((externalBoot?.externalShell === true ||
+                (!capturePublisher && !publication)) &&
               (boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
                 boot.managedExtensions !== undefined)
                 ? [PUBLICATION_INSTALL_ROUTE]

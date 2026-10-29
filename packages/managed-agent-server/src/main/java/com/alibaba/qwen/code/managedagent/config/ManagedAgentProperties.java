@@ -438,7 +438,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !residentFiles && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !residentFiles && !ExternalRuntimeKinds.isFiles(runtimeBroker.getProvisioner()) && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
@@ -564,7 +564,16 @@ public class ManagedAgentProperties implements EnvironmentAware {
         if (!ExternalRuntimeKinds.isExternal(provisioner)) {
             return;
         }
-        if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
+        boolean externalFiles = ExternalRuntimeKinds.isFiles(provisioner);
+        boolean externalTools = ExternalRuntimeKinds.isTools(provisioner);
+        if (externalFiles && (!harness.isWorkspaceFilesEnabled() || !externalTools && harness.isWorkspaceShellEnabled() || managedExtensions.isEnabled())) {
+            throw new IllegalStateException("External files Runtime requires Workspace files without Shell or managed extensions");
+        }
+        if (externalTools && (!harness.isWorkspaceShellEnabled() || !toolPublication.isEnabled() || !artifacts.isEnabled()
+                || StringUtils.isBlank(toolPublication.getServiceBaseUrl()) || !toolPublication.getServiceBaseUrl().startsWith("https://"))) {
+            throw new IllegalStateException("External tools Runtime requires foreground Shell and an HTTPS tool publication service");
+        }
+        if ((!externalFiles && harness.isWorkspaceFilesEnabled()) || (!externalTools && harness.isWorkspaceShellEnabled())
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())

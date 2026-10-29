@@ -29,6 +29,8 @@ export interface ManagedExternalStorage {
 
 export interface ManagedExternalContextBoot extends ManagedContextBoot {
   readonly storage: ManagedExternalStorage;
+  readonly externalFiles?: 'external-files/1';
+  readonly externalShell?: true;
 }
 
 function canonicalPath(value: unknown): value is string {
@@ -85,7 +87,19 @@ export async function readManagedExternalBoot(
 ): Promise<ManagedExternalContextBoot> {
   try {
     const object = value as Record<string, unknown>;
-    const { storage: rawStorage, ...context } = object;
+    const {
+      storage: rawStorage,
+      externalFiles,
+      externalShell,
+      ...context
+    } = object;
+    if (
+      externalShell !== undefined &&
+      (externalShell !== true || externalFiles !== 'external-files/1')
+    )
+      throw new Error(INVALID);
+    if (externalFiles !== undefined && externalFiles !== 'external-files/1')
+      throw new Error(INVALID);
     const boot = parseManagedContextBoot(context);
     const storage = parseStorage(rawStorage);
     if (
@@ -147,7 +161,12 @@ export async function readManagedExternalBoot(
     } finally {
       await handle.close();
     }
-    const admitted = Object.freeze({ ...boot, storage });
+    const admitted = Object.freeze({
+      ...boot,
+      storage,
+      ...(externalFiles === undefined ? {} : { externalFiles }),
+      ...(externalShell === undefined ? {} : { externalShell }),
+    });
     directories.set(admitted, directory);
     return admitted;
   } catch {

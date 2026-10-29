@@ -21,8 +21,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.EOFException;
 import java.math.BigDecimal;
@@ -33,7 +35,9 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1369,6 +1373,90 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         }
     }
 
+    public CompletionStage<Map<String, Object>> stopExternalFiles(RuntimeBindingRecord saved,
+            ExternalStorageRegistry.RegisteredExternalStorage storage) {
+        var seed = saved.getProvisionSeed();
+        boolean shell = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isTools(saved.getRequest().getProvisionerKind());
+        String stop = shell ? "tools-stop-drained" : "files-stop-drained";
+        return post(saved.getLease(), "/internal/managed-runtime/v2/publication:" + stop,
+                JsonCodec.encode(Map.of("protocolVersion", 2, "channel", "all")), 64 * 1024,
+                seed.getGatewayIncarnation(), requestTimeout, Map.of(
+                        "X-Qwen-Managed-Runtime-Incarnation", seed.getGatewayIncarnation(),
+                        "X-Qwen-Managed-Storage-Revision", Long.toString(storage.registrationRevision())))
+                .thenApply(bytes -> {
+                    verifyExternalStopProof(saved, storage, ManagedContextProtocol.parse(bytes));
+                    return ManagedContextProtocol.parse(bytes);
+                });
+    }
+
+    public static Instant verifyExternalStopProof(RuntimeBindingRecord saved,
+            ExternalStorageRegistry.RegisteredExternalStorage storage, Map<String, Object> envelope) {
+        try {
+            var seed = saved.getProvisionSeed();
+            var scope = saved.getRequest().getScope();
+            boolean shell = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isTools(saved.getRequest().getProvisionerKind());
+            String stop = shell ? "tools-stop-drained" : "files-stop-drained";
+            var answer = envelope;
+            if (!answer.keySet().equals(Set.of("protocolVersion", "state", "proof", "proofBytes"))
+                    || !Integer.valueOf(2).equals(answer.get("protocolVersion"))
+                    || !"drained".equals(answer.get("state"))
+                    || !(answer.get("proof") instanceof Map<?, ?> ref)
+                    || !ref.keySet().equals(V3_MANIFEST_REF_FIELDS)
+                    || !(shell ? "external-tools-retirement" : "external-files-retirement").equals(ref.get("kind"))
+                    || !Integer.valueOf(1).equals(ref.get("schemaVersion"))
+                    || !(ref.get("resourceId") instanceof String resourceId)
+                    || !java.util.UUID.fromString(resourceId).toString().equals(resourceId)
+                    || !(answer.get("proofBytes") instanceof String encoded)) {
+                throw new IllegalArgumentException();
+            }
+            byte[] proofBytes = Base64.getDecoder().decode(encoded);
+            if (proofBytes.length > BODY_LIMIT_BYTES || !Base64.getEncoder().encodeToString(proofBytes).equals(encoded)
+                    || !Long.valueOf(proofBytes.length).equals(BrokerValues.exactLong(ref.get("byteLength")))
+                    || !DigestUtils.sha256Hex(proofBytes).equals(ref.get("digest"))) {
+                throw new IllegalArgumentException();
+            }
+            var proof = ManagedContextProtocol.parse(proofBytes);
+            Map<String, Object> expected = new LinkedHashMap<>();
+            expected.put("proofVersion", 1);
+            expected.put("type", stop);
+            expected.put("profile", shell ? "external-tools/1" : "external-files/1");
+            expected.put("tenantId", scope.getTenantId());
+            expected.put("workspaceId", scope.getWorkspaceId());
+            expected.put("workspaceGeneration", scope.getWorkspaceGeneration());
+            expected.put("storageId", saved.getRequest().getStorageId());
+            expected.put("storage", Map.of("kind", "external", "physicalKey", storage.physicalKey(),
+                    "aliasPath", storage.aliasPath(), "mountRoot", storage.mountRoot(),
+                    "registrationRevision", storage.registrationRevision()));
+            expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+            expected.put("runtimeIncarnation", seed.getGatewayIncarnation());
+            expected.put("provisionRequestId", seed.getProvisionRequestId());
+            expected.put("capabilityDigest", scope.getCapabilityDigest());
+            expected.put("leaseId", seed.getLeaseId());
+            expected.put("epoch", seed.getEpoch());
+            expected.put("filesOnly", !shell);
+            if (shell) {
+                expected.put("foregroundShell", true);
+            }
+            expected.put("unreleasedSessions", 0);
+            expected.put("pendingInvocations", 0);
+            expected.put("channels", List.of());
+            String retirementId = (String) proof.get("retirementId");
+            if (!java.util.UUID.fromString(retirementId).toString().equals(retirementId)) {
+                throw new IllegalArgumentException();
+            }
+            expected.put("retirementId", retirementId);
+            Instant stopped = Instant.parse((String) proof.get("retiredAt"));
+            expected.put("retiredAt", proof.get("retiredAt"));
+            if (!BrokerValues.sameJsonMap(expected, proof) || stopped.isAfter(Instant.now().plusSeconds(30))) {
+                throw new IllegalArgumentException();
+            }
+            return stopped;
+        } catch (RuntimeException invalid) {
+            throw new RuntimeBrokerException(503, "external_files_stop_unconfirmed",
+                    "External files retirement is unconfirmed.", true);
+        }
+    }
+
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             byte[] encoded, int responseLimit) {
         return post(lease, path, encoded, responseLimit, null);
@@ -1390,7 +1478,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             byte[] encoded, int responseLimit, String expectedIncarnation, Duration timeout) {
-        HttpRequest httpRequest = HttpRequest.newBuilder(
+        return post(lease, path, encoded, responseLimit, expectedIncarnation, timeout, Map.of());
+    }
+
+    private CompletionStage<byte[]> post(RuntimeLease lease, String path,
+            byte[] encoded, int responseLimit, String expectedIncarnation, Duration timeout,
+            Map<String, String> headers) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(
                 endpoint(lease).resolve(path))
                 .timeout(timeout)
                 .header("Authorization", "Bearer " + lease.getToken())
@@ -1399,8 +1493,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
                 .header("X-Qwen-Managed-Lease-Epoch",
                         Long.toString(lease.getEpoch()))
-                .POST(HttpRequest.BodyPublishers.ofByteArray(encoded))
-                .build();
+                .POST(HttpRequest.BodyPublishers.ofByteArray(encoded));
+        headers.forEach(builder::header);
+        HttpRequest httpRequest = builder.build();
         CompletableFuture<byte[]> result = new CompletableFuture<>();
         CompletableFuture<HttpResponse<BoundedBody>> exchange = client
                 .sendAsync(httpRequest,

@@ -216,6 +216,19 @@ class ExternalRuntimeConfigurationTest {
         assertTrue(error.getMessage().contains("scratch Sessions only"), error.getMessage());
     }
 
+    @Test
+    void filesKindAdmitsOnlyFilesAndKeepsLiveQualificationExplicit() {
+        var properties = properties(com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.FILES_KIND);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setToken("harness-token-for-tests");
+        properties.validateExternalRuntime();
+        assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.toolPathCheck(properties).status());
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThrows(IllegalStateException.class, properties::validateExternalRuntime);
+    }
+
     private static ManagedAgentProperties scratchProperties() {
         return properties(ExternalRuntimeProvisioner.KIND);
     }
