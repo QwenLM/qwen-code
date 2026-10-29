@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
@@ -11,11 +11,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import org.junit.jupiter.api.Test;
 
 import java.net.HttpURLConnection;
@@ -40,9 +42,9 @@ class EmbeddedRuntimeBrokerTest {
         // slow-but-healthy runtime is cut mid-wait and never converges.
         long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
         assertThat(stepCallTimeoutMillis)
-                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
         assertThat(stepCallTimeoutMillis)
-                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
     }
 
     private static final String SESSION_ID =
@@ -445,6 +447,35 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
+    void constructsAnExternalScratchProvisionerForAValidConfiguration()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setProvisioner(ExternalRuntimeProvisioner.KIND);
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setExternalProviderUrl("http://127.0.0.1:9");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+
+        try (EmbeddedRuntimeBroker broker = broker(mock(ManagedAgentStore.class),
+                properties)) {
+            assertThat(provisionerOf(broker).kind())
+                    .isEqualTo(ExternalRuntimeProvisioner.KIND);
+        }
+    }
+
+    @Test
+    void refusesAnExternalScratchConfigurationWithoutAProviderUrl()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setProvisioner(ExternalRuntimeProvisioner.KIND);
+        properties.getRuntimeBroker().setIsolationClass("session");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("External Runtime provider URL");
+    }
+
+    @Test
     void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
         ManagedAgentProperties properties = properties();
         properties.getRuntimeBroker().setHost("0.0.0.0");
@@ -527,6 +558,14 @@ class EmbeddedRuntimeBrokerTest {
         return (RuntimeBrokerService) field.get(broker);
     }
 
+    private static RuntimeProvisioner provisionerOf(EmbeddedRuntimeBroker broker)
+            throws Exception {
+        java.lang.reflect.Field field = EmbeddedRuntimeBroker.class
+                .getDeclaredField("localProvisioner");
+        field.setAccessible(true);
+        return (RuntimeProvisioner) field.get(broker);
+    }
+
     @Test
     void childWorkspacesAreOffByDefaultAndNeedWorkspaceMounts() throws Exception {
         try (EmbeddedRuntimeBroker broker = broker(mock(ManagedAgentStore.class), properties())) {
@@ -551,7 +590,7 @@ class EmbeddedRuntimeBrokerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("need Git");
         properties.getRuntimeBroker().setChildWorkspaceGit("git");
-        var probe = new com.alibaba.qwen.code.managedagent.service.ChildWorktreeGit("git",
+        var probe = new com.alibaba.qwen.code.managedagent.workspace.ChildWorktreeGit("git",
                 java.time.Duration.ofSeconds(30));
         try {
             probe.requireSupportedVersion();
@@ -599,7 +638,7 @@ class EmbeddedRuntimeBrokerTest {
                 new InMemoryRuntimeBindingRepository(),
                 new InMemoryRuntimeSessionRepository(),
                 new InMemoryToolExecutionRepository(),
-                mock(com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore.class));
+                mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.class));
     }
 
     private static ManagedAgentProperties properties() throws Exception {

@@ -67,6 +67,10 @@ export interface ResponsesApiRequest {
   truncation?: ResponsesApiTruncation;
   previous_response_id?: string;
   prompt_cache_key?: string;
+  prompt_cache_options?: {
+    mode?: 'implicit' | 'explicit';
+    ttl?: '30m' | '12h';
+  };
   reasoning?: ResponsesApiReasoning;
   text?: ResponsesApiTextControls;
   service_tier?: ResponsesApiServiceTier;
@@ -111,6 +115,7 @@ export type ResponsesApiContentPart =
 export interface ResponsesApiTextPart {
   type: 'input_text';
   text: string;
+  prompt_cache_breakpoint?: { mode: 'explicit'; ttl?: '30m' | '12h' };
 }
 
 export interface ResponsesApiImagePart {
@@ -129,7 +134,7 @@ export interface ResponsesApiFunctionCallItem {
 export interface ResponsesApiFunctionCallOutputItem {
   type: 'function_call_output';
   call_id: string;
-  output: string;
+  output: string | ResponsesApiContentPart[];
 }
 
 export interface ResponsesApiCustomToolCallItem {

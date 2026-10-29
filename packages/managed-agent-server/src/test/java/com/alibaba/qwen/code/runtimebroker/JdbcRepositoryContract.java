@@ -1,12 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+
+import javax.sql.DataSource;
 
 import java.math.BigDecimal;
 import java.net.URI;
@@ -29,7 +26,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
-import javax.sql.DataSource;
+
+import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Contract for the JDBC repositories. It is public so that
@@ -37,8 +41,9 @@ import javax.sql.DataSource;
  */
 public final class JdbcRepositoryContract {
     private static final Instant START = Instant.parse(
-            "2026-09-20T00:00:00Z");
-    private static final Instant HEALTH = START.plusSeconds(30);
+            "2026-09-20T00:00:00.123Z");
+    private static final Instant HEALTH = Instant.parse(
+            "2026-09-20T00:00:30.456Z");
 
     private JdbcRepositoryContract() {
     }
@@ -57,6 +62,7 @@ public final class JdbcRepositoryContract {
         verifyExecution(dataSource, prefix);
         verifyExecutionFences(dataSource, prefix);
         verifyExecutionForgeries(dataSource, prefix);
+        verifyBackgroundProcesses(dataSource, prefix + "-holds");
         ExecutionTakeoverContract.verify(new JdbcToolExecutionRepository(dataSource), prefix + "-takeover-scan");
         verifyLeaseDeadlines(dataSource, prefix);
         RuntimeRecoveryContract.verify(new JdbcRuntimeBindingRepository(dataSource, protector(prefix)),
@@ -527,6 +533,78 @@ public final class JdbcRepositoryContract {
     private static RuntimeScope scope(String tenant) {
         return new RuntimeScope(tenant, "workspace", "generation",
                 "/workspace", "capability", "session");
+    }
+
+    /**
+     * The durable scan that rediscovers hold rows after a Broker restart
+     * carries both hold families (#13889 review R1-47). Paging one row at a
+     * time also pins the cursor rule: a page whose rows are all settled
+     * non-hold rows must advance, or the scan stops before the other
+     * family.
+     */
+    private static void verifyBackgroundProcesses(DataSource dataSource,
+            String prefix) {
+        var bindings = new JdbcRuntimeBindingRepository(dataSource,
+                protector(prefix));
+        var sessions = new JdbcRuntimeSessionRepository(dataSource);
+        var executions = new JdbcToolExecutionRepository(dataSource);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, prefix);
+        String shell = admitHoldRow(bindings, sessions, executions, fixture,
+                "shell", "background_v3_process", false);
+        String monitor = admitHoldRow(bindings, sessions, executions, fixture,
+                "monitor", "background_v3_monitor", false);
+        for (int index = 0; index < 3; index++) {
+            admitHoldRow(bindings, sessions, executions, fixture,
+                    "settled-" + index, "background_v3_process", true);
+        }
+        // A PREPARED non-hold row survives the SQL state window but not the
+        // family filter, so a page can be fully filtered at the row level
+        // (#13930 R1-47 verification).
+        fixture.prepare("filler-4");
+        java.util.Set<String> found = new java.util.LinkedHashSet<>();
+        String after = null;
+        for (int page = 0; page < 20; page++) {
+            List<ToolExecutionRecord> batch = executions
+                    .findBackgroundProcesses(fixture.session, after, 1);
+            if (batch.isEmpty()) {
+                break;
+            }
+            assertEquals(1, batch.size());
+            found.add(batch.getFirst().getExecutionCallId());
+            after = batch.getFirst().getExecutionCallId();
+        }
+        assertEquals(Set.of(shell, monitor), found);
+    }
+
+    private static String admitHoldRow(RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions,
+            RuntimeRecoveryContract.Fixture fixture, String suffix,
+            String dispatchMode, boolean settle) {
+        ToolExecutionRecord invocation = fixture.prepare(suffix);
+        executions.settlePrepared(invocation,
+                Map.of("state", "exited", "executionStatus", "success"),
+                Instant.now());
+        String harness = fixture.session.getSession().getHarnessSessionId();
+        String runtime = fixture.session.getRuntimeSessionId();
+        String processId = invocation.getExecutionCallId() + ":process";
+        ToolExecutionRecord process = ToolExecutionRecord.prepared(processId,
+                processId, fixture.binding.getBindingId(),
+                fixture.binding.getGeneration(), harness, runtime, "turn",
+                suffix, "digest",
+                Map.of("dispatchMode", dispatchMode, "processOf",
+                        invocation.getExecutionCallId(), "sessionId", runtime,
+                        "promptId", "turn", "callId", suffix,
+                        "argsDigest", "digest"));
+        ToolExecutionRecord admitted = bindings.admitExecution(sessions,
+                executions, process);
+        if (settle) {
+            executions.settlePrepared(admitted,
+                    Map.of("state", "exited", "executionStatus", "success"),
+                    Instant.now());
+        }
+        return processId;
     }
 
     private static SecretProtector protector(String prefix) {

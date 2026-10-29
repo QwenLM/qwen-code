@@ -8,7 +8,10 @@ import { isDeepStrictEqual } from 'node:util';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { hasImagePayloadReferences } from '@qwen-code/qwen-code-core/services/image-payload-references.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import {
+  HOSTED_MODEL_REQUEST_BYTES,
+  parseHostedRecoveryResource,
+} from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -69,7 +72,7 @@ export async function publishHostedModelRequest(
   request: HostedModelRequest,
 ): Promise<ManagedSessionDurableRef | undefined> {
   const bytes = Buffer.from(JSON.stringify(request));
-  if (bytes.length > 64 * 1024) return undefined;
+  if (bytes.length > HOSTED_MODEL_REQUEST_BYTES) return undefined;
   return session.resources.publish('hosted-model-request', bytes);
 }
 
@@ -100,6 +103,7 @@ async function readHostedModelRequest(
   const raw = parseHostedRecoveryResource(
     await session.resources.read(ref),
     session.authority.sessionHeader.sessionKey,
+    ref.kind,
   );
   if (raw['promptId'] !== promptId) return undefined;
   const saved = raw as unknown as HostedModelRequest;
@@ -129,7 +133,15 @@ async function readHostedModelRequest(
     saved.sourceActivation.epoch < 1 ||
     !saved.prepared ||
     Object.keys(saved.prepared).length !==
-      6 + (Object.hasOwn(saved.prepared, 'allowPersistentRetry') ? 1 : 0) ||
+      6 +
+        (Object.hasOwn(saved.prepared, 'allowPersistentRetry') ? 1 : 0) +
+        (Object.hasOwn(saved.prepared, 'contextPrefixLength') ? 1 : 0) ||
+    (Object.hasOwn(saved.prepared, 'contextPrefixLength') &&
+      (!Number.isSafeInteger(saved.prepared.contextPrefixLength) ||
+        saved.prepared.contextPrefixLength! < 0 ||
+        saved.prepared.contextPrefixLength! > 5 ||
+        saved.prepared.contextPrefixLength! >
+          saved.prepared.history?.length)) ||
     (Object.hasOwn(saved.prepared, 'allowPersistentRetry') &&
       typeof saved.prepared.allowPersistentRetry !== 'boolean') ||
     !Array.isArray(saved.prepared.history) ||

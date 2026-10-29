@@ -1,31 +1,33 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
 
-class ManagedCsiAcknowledgementProtocolTest {
-    static Map<String, Object> fixtures() throws Exception {
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class ManagedCsiAcknowledgementProtocolTest {
+    public static Map<String, Object> fixtures() throws Exception {
         return ManagedCsiProtocol.parseAcknowledgement(Files.readAllBytes(
                 Path.of("../cli/src/serve/contracts/managed-csi-worker-ack-v1.fixtures.json")));
     }
 
     @SuppressWarnings("unchecked")
-    static Map<String, Object> map(Object value) {
+    public static Map<String, Object> map(Object value) {
         return (Map<String, Object>) value;
     }
 
-    static Map<String, Object> with(Map<String, Object> original, String field, Object value) {
+    public static Map<String, Object> with(Map<String, Object> original, String field, Object value) {
         var changed = new LinkedHashMap<>(original);
         changed.put(field, value);
         return changed;
@@ -38,13 +40,13 @@ class ManagedCsiAcknowledgementProtocolTest {
                 (String) context.get("capabilityDigest"), (String) context.get("isolationClass"));
     }
 
-    static RuntimeLease lease(Map<String, Object> boot, URI endpoint) {
+    public static RuntimeLease lease(Map<String, Object> boot, URI endpoint) {
         var context = map(boot.get("context"));
         return new RuntimeLease((String) context.get("runtimeInstanceId"), endpoint, (String) context.get("token"),
                 (String) context.get("leaseId"), BrokerValues.exactLong(context.get("epoch")));
     }
 
-    static RuntimeSession session(Map<String, Object> fixture) {
+    public static RuntimeSession session(Map<String, Object> fixture) {
         var response = map(fixture.get("response"));
         return new RuntimeSession((String) map(response.get("captureIdentity")).get("sessionId"),
                 (String) map(response.get("reference")).get("sessionId"), "continuation", scope(map(fixture.get("boot"))));

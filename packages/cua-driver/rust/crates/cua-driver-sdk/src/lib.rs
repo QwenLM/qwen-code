@@ -48,6 +48,18 @@ use runtime::RuntimeOptions;
 use service_session::ServiceSessionClient;
 use worker::{ActionCompletion, PrivateWorkerClient};
 
+/// Host event-loop liveness only; this does not expose desktop state.
+#[uniffi::export]
+pub fn native_ui_needs_pump() -> bool {
+    runtime::native_ui_needs_pump()
+}
+
+/// Constructor-scoped declaration by a host that services the native UI loop.
+#[uniffi::export]
+pub fn set_native_ui_host_available(available: bool) -> bool {
+    runtime::set_native_ui_host_available(available)
+}
+
 fn host_sessions_json_for_prefix(runtime_prefix: &str) -> Value {
     let sessions = cua_driver_core::session::list_session_snapshots_with_prefix(
         runtime_prefix,
@@ -1799,7 +1811,19 @@ fn normalize_result(tool: &str, raw: Value) -> Result<ToolResult, DriverError> {
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let action = if !is_error && cua_driver_core::action_record::is_action_tool(tool) {
+    let app_action =
+        structured.is_some_and(|value| value.get("computer_use") == Some(&serde_json::json!(1)));
+    if !is_error && app_action {
+        serde_json::from_value::<cua_driver_contract::computer_use::AppActionOutput>(
+            structured.unwrap().clone(),
+        )
+        .and_then(|value| value.validate().map_err(serde::de::Error::custom))
+        .map_err(|error| DriverError::Protocol {
+            reason: format!("{tool} returned an invalid Computer Use acknowledgement: {error}"),
+        })?;
+    }
+    let action = if !is_error && !app_action && cua_driver_core::action_record::is_action_tool(tool)
+    {
         let structured = structured.ok_or_else(|| DriverError::Protocol {
             reason: format!("{tool} response omitted ActionResult"),
         })?;
@@ -2084,9 +2108,11 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        for published in EXPORTED_TOOL_NAMES {
-            assert!(names.contains(published), "missing {published}");
+        for spec in cua_driver_contract::computer_use::tools() {
+            assert!(names.contains(spec.name), "missing {}", spec.name);
         }
+        assert!(!names.contains("start_recording"));
+        assert!(!names.contains("get_browser_state"));
 
         driver.shutdown().await.unwrap();
         driver.shutdown().await.unwrap();
@@ -2848,6 +2874,13 @@ mod tests {
             DriverError::Protocol { reason }
                 if reason.contains("omitted ActionResult")
         ));
+    }
+
+    #[test]
+    fn generic_app_action_acknowledgement_does_not_claim_a_legacy_action_effect() {
+        let result = normalize_result("click", serde_json::json!({"content":[{"type":"text","text":"Sent but not confirmed."}],"structuredContent":{"computer_use":1,"sent":true}})).unwrap();
+        assert!(result.action.is_none());
+        assert_eq!(result.text, "Sent but not confirmed.");
     }
 
     #[tokio::test]

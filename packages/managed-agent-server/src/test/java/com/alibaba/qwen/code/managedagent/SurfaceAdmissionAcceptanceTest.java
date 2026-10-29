@@ -7,17 +7,17 @@ import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -29,6 +29,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -61,6 +62,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -143,6 +145,7 @@ class SurfaceAdmissionAcceptanceTest {
     private MockMvc mvc;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -266,7 +269,7 @@ class SurfaceAdmissionAcceptanceTest {
                         + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
                         + " 'run-retained', ?, 1, 'resource-retained',"
                         + " 'child_agent', 'running', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "f".repeat(64));
         String key = nextKey();
@@ -318,13 +321,12 @@ class SurfaceAdmissionAcceptanceTest {
                         + " 'run-settled', ?, 1, 'resource-settled',"
                         + " 'child_agent', 'completed', 'session',"
                         + " 'consumed', 1, 2)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "b".repeat(64));
         // The task view reads a child task's committed body for its child
         // Session link (#13746 F2), so the list probes need one.
-        String scope = com.alibaba.qwen.code.managedagent.store
-                .ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, session);
         byte[] body = "{\"childSessionId\":null}".getBytes(
                 StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,"
@@ -371,6 +373,38 @@ class SurfaceAdmissionAcceptanceTest {
     void belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
             throws Exception {
         switch (entry.ruleClass()) {
+            case SESSION_WORKTREE -> {
+                expect(entry, null, 401, "actor_required");
+                if (entry.template().endsWith("/options")) {
+                    expect(entry, STRANGER, 404, "workspace_not_found");
+                    expect(entry, READER, 403, "workspace_forbidden");
+                } else {
+                    expect(entry, STRANGER, 404, "worktree_not_found");
+                }
+            }
+            case SESSION_EXTENSION_READER -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expectAdmitted(entry, READER);
+            }
+            case SESSION_EXTENSION_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "session_operation_forbidden");
+                expect(entry, OPERATOR, 409, "unsupported_feature");
+                expect(entry, OWNER_RANK, 409, "unsupported_feature");
+            }
+            case WORKSPACE_EXTENSION_READER -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "extension_package_not_found");
+                expectAdmitted(entry, READER);
+            }
+            case WORKSPACE_EXTENSION_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "extension_package_not_found");
+                expect(entry, READER, 403, "extension_management_forbidden");
+                expect(entry, OPERATOR, 403, "extension_management_forbidden");
+            }
             case WORKSPACE_CREATE -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, "workspace_not_found");
@@ -448,19 +482,29 @@ class SurfaceAdmissionAcceptanceTest {
                 if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
                     expect(entry, OPERATOR, 202, "action_response");
                     expect(entry, OWNER_RANK, 202, "action_response");
-                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)) {
+                } else if (entry.capabilities().contains(Capability.MCP_MANAGEMENT)) {
+                    if (entry == SurfaceRegistry.PUBLIC_MCP_MANAGEMENT || entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                        expectAdmitted(entry, OPERATOR);
+                        expectAdmitted(entry, OWNER_RANK);
+                    } else {
+                        expect(entry, OPERATOR, 409, "unsupported_feature");
+                        expect(entry, OWNER_RANK, 409, "unsupported_feature");
+                    }
+                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)) {
                     expect(entry, OPERATOR, 409, "unsupported_feature");
                     expect(entry, OWNER_RANK, 409, "unsupported_feature");
                 } else {
                     expect(entry, OPERATOR, 409, "workspace_unavailable");
                     expect(entry, OWNER_RANK, 409, "workspace_unavailable");
                 }
-                // The anonymous answer is pinned on every cell: the cwd
-                // routes name the missing principal up front, the rest
-                // stay invisible so an unauthenticated caller learns
-                // nothing about the bound Session.
-                boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE);
+                // Anonymous requests follow each operation family's
+                // declared identity and visibility rules.
+                boolean actorRequired = entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_QUERY)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_COMMAND);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -489,6 +533,12 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, null, (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? 401 : 404,
                         (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? "actor_required"
                                 : "session_not_found");
+            }
+            case WORKSPACE_FILES -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, entry.capabilities().contains(
+                        Capability.WORKSPACE_FILES_UPLOAD_QUERY)
+                        ? "workspace_upload_not_found" : "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
@@ -526,6 +576,7 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -716,17 +767,6 @@ class SurfaceAdmissionAcceptanceTest {
                 + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
-        mvc.perform(post("/api/agent/web-shell/v1/sessions/cwd/change")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .principal(actor(tenant, OWNER))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionId\":\"" + bound
-                                + "\",\"idempotencyKey\":\"" + nextKey()
-                                + "\",\"cwdRelative\":\"sub\","
-                                + "\"expectedContextRevision\":1}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("workspace_unavailable"));
         // Action respond by the recorded owner is admitted.
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
                         + pendingAction + "/responses")
@@ -749,17 +789,6 @@ class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"idempotencyKey\":\"" + nextKey()
                                 + "\"}"))
                 .andExpect(status().isAccepted());
-        // The legacy arm of cwd is bound-only: a domain refusal.
-        mvc.perform(post("/v1/agents/sessions/" + legacy + "/cwd")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", nextKey())
-                        .principal(actor(tenant, OWNER))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"cwd_relative\":\"sub\","
-                                + "\"expected_context_revision\":1}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code")
-                        .value("unsupported_feature"));
         // The legacy arm of respond: the recorded owner answers. The
         // carrying Session is fresh: an accepted response parks an
         // ACTION_RESPONSE operation that must not shadow later probes.
@@ -1331,10 +1360,11 @@ class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
-                    STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, PUB_FINISHED,
+                    STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
+                    STORE_SNAPSHOT_GET, STORE_SNAPSHOT_PAGES, PUB_FINISHED,
                     PUB_ADMISSION_PREPARE, PUB_RECEIPT_VERIFY,
                     PUB_RANGE -> 403;
             case PUB_OPERATION_GET -> 404;
@@ -1451,7 +1481,9 @@ class SurfaceAdmissionAcceptanceTest {
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
-        variables.put("operationId", "op_0000000000000000");
+        variables.put("operationId", (entry.capabilities().contains(Capability.MCP_MANAGEMENT) || entry.capabilities().contains(Capability.EXTENSION_CONFIG_GET)
+                || entry.capabilities().contains(Capability.EXTENSION_CONFIG_APPLY))
+                ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
         variables.put("taskId", entry.capabilities().contains(
                 Capability.TASK_CANCEL) ? settledTask
                 : "task_0000000000000000");
@@ -1469,6 +1501,10 @@ class SurfaceAdmissionAcceptanceTest {
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
         variables.put("workspaceId", "ws");
+        variables.put("worktreeId", "worktree-probe");
+        variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
+        variables.put("packageRevision", "1");
+        variables.put("packageDigest", digest());
         variables.put("agentId", "agent-missing");
         variables.put("automationId", automation);
         variables.put("channelId", "channel-missing");
@@ -1476,6 +1512,7 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
         variables.put("resourceId", "resource-0000000000000000");
+        variables.put("snapshotId", "snapshot-probe");
         variables.put("publicationId", "publication-0000000000000000");
         variables.put("streamId", "stdout");
         variables.put("kind", "stdout.raw");
@@ -1489,6 +1526,30 @@ class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
+            query.add("workspaceId=workspace");
+            query.add("cwdRelative=.");
+            query.add("path=file.txt");
+            query.add("expectedScopeRevision=" + digest());
+            query.add("uploadId=11111111-1111-4111-8111-111111111111");
+        }
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
+            String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            query.add("manifest=" + manifest);
+            if ("POST".equals(entry.method())) {
+                query.add("packageDigest=" + digest());
+            }
+            if (entry.surface() == Surface.WEBSHELL) {
+                query.add("workspaceId=ws");
+            }
+        } else if (entry.surface() == Surface.PUBLIC
+                && (entry.capabilities().contains(Capability.EXTENSION_GET)
+                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE))) {
+            query.add("packageDigest=" + digest());
+        }
         if (path.startsWith("/internal/managed-tool-publications/")
                 && !path.endsWith("/grants")) {
             query.add("workspaceId=ws");
@@ -1497,20 +1558,26 @@ class SurfaceAdmissionAcceptanceTest {
                 && "GET".equals(entry.method())) {
             query.add("workspaceId=ws");
         }
+        if (path.endsWith("/transactions:lookup")) {
+            query.add("operation=session.create");
+            query.add("commandId=command-genesis");
+        }
         if (!query.isEmpty()) {
             path += "?" + String.join("&", query);
         }
         MockHttpServletRequestBuilder request = switch (entry.method()) {
             case "GET" -> get(path);
             case "PATCH" -> patch(path);
+            case "PUT" -> put(path);
             case "DELETE" -> delete(path);
             default -> post(path);
         };
         request.header(TenantContextFilter.HEADER, headerTenant);
-        if ("POST".equals(entry.method()) || "PATCH".equals(entry.method())) {
+        if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE);
+                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
             request.content(bodyFor(entry, headerTenant, session));
@@ -1535,7 +1602,7 @@ class SurfaceAdmissionAcceptanceTest {
             request.principal(actor(headerTenant, actor));
         }
         if (!"GET".equals(entry.method())
-                && entry.surface() == Surface.PUBLIC) {
+                && (entry.surface() == Surface.PUBLIC || entry.capabilities().contains(Capability.EXTENSION_PUBLISH))) {
             request.header("Idempotency-Key", nextKey());
         }
         return request;
@@ -1543,9 +1610,38 @@ class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
+                || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
+            String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
+                    + "\"instanceId\":\"pod-probe\",\"bootId\":\"boot-probe\",\"placementEpoch\":1";
+            return "{" + scope + (entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP
+                    ? ",\"operationId\":\"release-probe\",\"journalRevision\":1,\"commitProof\":{\"lastCommitSequence\":1,"
+                            + "\"committedPrefixHash\":\"" + "a".repeat(64) + "\"}" : "") + "}";
+        }
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
+            case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
+                    + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
+                    + "\"expectedCommittedSequence\":0}";
+            case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
+            case EXTENSION_CONFIG_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case EXTENSION_CONFIG_APPLY -> {
+                if (entry == SurfaceRegistry.PUBLIC_SESSION_EXTENSIONS_APPLY) {
+                    yield "{\"expectedConfigRevision\":0,\"extensions\":[]}";
+                }
+                if (entry == SurfaceRegistry.WEBSHELL_SESSION_EXTENSIONS_APPLY) {
+                    yield "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"extensions-probe\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}";
+                }
+                yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
+            }
+            case EXTENSION_LIST -> "{\"workspaceId\":\"ws\"}";
+            case EXTENSION_GET -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case EXTENSION_SETTINGS_GET -> "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\"}";
+            case EXTENSION_SETTINGS_SET -> publicSurface ? "{\"expectedRevision\":0,\"values\":{}}"
+                    : "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"idempotencyKey\":\"settings-probe\",\"expectedRevision\":0,\"values\":{}}";
+            case EXTENSION_OPERATION -> "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"
@@ -1559,16 +1655,25 @@ class SurfaceAdmissionAcceptanceTest {
                             + "\",\"sessionId\":\"" + session
                             + "\",\"input\":[{\"type\":\"text\","
                             + "\"text\":\"probe\"}]}";
-            case SESSION_RENAME -> "{\"title\":\"probe\"}";
-            case SESSION_CWD_CHANGE -> publicSurface
-                    ? "{\"cwd_relative\":\"probe\","
-                            + "\"expected_context_revision\":1}"
+            case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
+                            + "\"idempotencyKey\":\"" + nextKey() + "\"}";
+            case SESSION_CONTEXT_COMPRESSION -> publicSurface
+                    ? "{\"expected_compaction_revision\":0}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
-                            + nextKey() + "\",\"cwdRelative\":\"probe\","
-                            + "\"expectedContextRevision\":1}";
+                            + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
-            case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_COMMAND -> publicSurface
+                    ? "{\"action\":\"resume\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"" + nextKey()
+                            + "\",\"command\":{\"action\":\"resume\"}}";
+            case SESSION_RECOVERY_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RECOVERY_RECHECK -> publicSurface
+                    ? "{\"turnId\":\"turn_0000000000000000\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1611,9 +1716,22 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
+            case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
+            case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_APPROVAL, SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case MCP_MANAGEMENT -> {
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
+                    yield "{\"sessionId\":\"" + session + "\"}";
+                }
+                if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT_OPERATION) {
+                    yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
+                }
+                yield "{" + (publicSurface ? "" : "\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"mcp-management\",")
+                        + "\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
+            }
             case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
@@ -1727,7 +1845,7 @@ class SurfaceAdmissionAcceptanceTest {
         jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
                 + " session_id, action_id, action_version, state, options_json, gmt_create)"
                 + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(tenant, session),
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, session),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session, "action", action),
                 action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,
@@ -1810,17 +1928,16 @@ class SurfaceAdmissionAcceptanceTest {
          */
         @Bean
         @Primary
-        com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector
+        com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector
                 acceptanceProjector(
-                        ManagedToolResultStore store, JdbcTemplate jdbc,
+                        ManagedToolResultStore store,
+                        @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                         org.springframework.beans.factory.ObjectProvider<
                                 ToolPublicationDataStore> publications,
-                        com.alibaba.qwen.code.managedagent.store
-                        .ManagedArtifactReader reader,
+                        com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader reader,
                         ManagedArtifactPolicy acceptancePolicy,
                         ManagedAgentProperties properties) {
-            return new com.alibaba.qwen.code.managedagent.store
-                    .ManagedToolResultProjector(store, jdbc, publications,
+            return new com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector(store, jdbc, publications,
                             reader, acceptancePolicy, properties) {
                 @Override
                 public void tick() {
@@ -1833,15 +1950,15 @@ class SurfaceAdmissionAcceptanceTest {
          * writer credential flows through the same code the service mounts.
          */
         @Bean
-        ToolPublicationStore acceptancePublicationGrants(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationStore acceptancePublicationGrants(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ManagedSessionStore sessions) {
             return new ToolPublicationStore(jdbc, manager, sessions,
                     mock(ToolExecutionRepository.class),
                     mock(RuntimeBindingRepository.class),
                     new ToolPublicationStore.Capacity(1024L * 1024 * 1024,
-                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4),
-                    false);
+                            1024L * 1024 * 1024, 1024L * 1024 * 1024, 4));
         }
 
         /**
@@ -1850,8 +1967,9 @@ class SurfaceAdmissionAcceptanceTest {
          * artifact route family — live in this boot.
          */
         @Bean
-        ToolPublicationDataStore acceptancePublicationData(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationDataStore acceptancePublicationData(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ManagedSessionStore sessions,
                 ToolPublicationObjectStore acceptanceObjects) {
@@ -1869,8 +1987,9 @@ class SurfaceAdmissionAcceptanceTest {
          * beans.
          */
         @Bean
-        ToolPublicationController acceptanceToolPublication(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationController acceptanceToolPublication(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ToolPublicationDataStore acceptancePublicationData,
                 ManagedSessionStore sessions,
@@ -1884,7 +2003,7 @@ class SurfaceAdmissionAcceptanceTest {
     }
 
     static java.util.Map<String, Object> reservedRegistration(
-            com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Intent intent, String tenant) {
+            com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore.Intent intent, String tenant) {
         java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
                 "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
         var marker = new java.util.LinkedHashMap<String, Object>(identity);

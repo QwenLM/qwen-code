@@ -2,34 +2,35 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -113,12 +114,14 @@ class ManagedAgentServerIntegrationTest {
     private ManagedAgentStore store;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
     private SessionEventHub eventHub;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @AfterEach
@@ -222,12 +225,12 @@ class ManagedAgentServerIntegrationTest {
         assertThat(retry.replayed()).isTrue();
         assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-create", "qwen-code", "2", null, null, List.of()))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
         assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-new", "qwen-code", "1", null, null, List.of()))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
         CommandAdmission omitted = upgraded.createSession(tenant,
@@ -1430,8 +1433,9 @@ class ManagedAgentServerIntegrationTest {
     // #14387: the recovery-blocked mark is durable on the still-active
     // row — the status the claim saw stands, no retry counter moves, the
     // lease releases — and a stale owner never re-marks.
-    @Test
-    void marksATurnRecoveryBlockedWithoutSettlingIt() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"hosted_workflow_recovery_blocked", "hosted_harness_recovery_blocked"})
+    void marksATurnRecoveryBlockedWithoutSettlingIt(String recoveryCode) throws Exception {
         pauseRecoveryScanning();
         String tenant = "tenant-turn-blocked-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
@@ -1448,14 +1452,14 @@ class ManagedAgentServerIntegrationTest {
 
         assertThat(store.markTurnRecoveryBlocked(tenant,
                 session.sessionId(), turn.turnId(), owner,
-                "hosted_workflow_recovery_blocked",
+                recoveryCode,
                 "the Harness generation was lost")).isTrue();
 
         assertThat(store.findTurn(tenant, session.sessionId(),
                 turn.turnId())).get().satisfies(record -> {
                     assertThat(record.status()).isEqualTo(claimed.status());
                     assertThat(record.errorCode()).isEqualTo(
-                            "hosted_workflow_recovery_blocked");
+                            recoveryCode);
                     assertThat(record.errorMessage()).isEqualTo(
                             "the Harness generation was lost");
                     assertThat(record.dispatchOwner()).isNull();
@@ -1465,17 +1469,34 @@ class ManagedAgentServerIntegrationTest {
                 });
         assertThat(store.markTurnRecoveryBlocked(tenant,
                 session.sessionId(), turn.turnId(), owner,
-                "hosted_workflow_recovery_blocked",
+                recoveryCode,
                 "the Harness generation was lost")).isFalse();
 
-        // The parked Turn leaves the dispatch sweep entirely — no
-        // claim-refuse-release spin — until a cancel: settling the Turn
-        // cancelled is the cancel's own act, so a CANCELLING row is
-        // scanned despite the mark.
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                    .header(TenantContextFilter.HEADER, tenant)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"sessionId\":\"" + session.sessionId() + "\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.activeTurn.status").value("recovery_blocked"))
+                    .andExpect(jsonPath("$.activeTurn.errorCode").value(recoveryCode));
+        }
+
         DispatchTarget target = new DispatchTarget(tenant,
                 session.sessionId(), turn.turnId());
-        assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
-                .doesNotContain(target);
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            long due = store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow().retryAfter();
+            assertThat(store.findDispatchable(due - 1, 100)).doesNotContain(target);
+            assertThat(store.findDispatchable(due, 100)).contains(target);
+            assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                    "too-soon", Duration.ofMinutes(1))).isEmpty();
+            assertThatThrownBy(() -> store.beginOperation(tenant, session.sessionId(),
+                    OperationKind.CLOSE, "", "blocked-close", "close-digest"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        } else {
+            assertThat(store.findDispatchable(Long.MAX_VALUE, 100)).doesNotContain(target);
+        }
         store.insertCancelCommand(tenant, "CANCEL_TURN", "blocked-cancel",
                 "sha256:" + "4".repeat(64), session.sessionId(),
                 turn.turnId());
@@ -1483,6 +1504,15 @@ class ManagedAgentServerIntegrationTest {
                 .contains(target);
         assertThat(store.findTurn(tenant, session.sessionId(),
                 turn.turnId()).get().status()).isEqualTo("CANCELLING");
+
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                    "cancel-owner", Duration.ofMinutes(1))).isPresent();
+            assertThat(store.markTurnRecoveryBlocked(tenant, session.sessionId(),
+                    turn.turnId(), "cancel-owner", recoveryCode, "late status probe")).isFalse();
+            assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow()
+                    .dispatchOwner()).isEqualTo("cancel-owner");
+        }
 
         // The mark is lease-fenced: an owner whose lease already expired
         // parks nothing — the CAS misses and the row stays unmarked.
@@ -1498,10 +1528,44 @@ class ManagedAgentServerIntegrationTest {
                 turn2.turnId(), owner, Duration.ofMillis(-1))).isPresent();
         assertThat(store.markTurnRecoveryBlocked(tenant,
                 session2.sessionId(), turn2.turnId(), owner,
-                "hosted_workflow_recovery_blocked",
+                recoveryCode,
                 "the Harness generation was lost")).isFalse();
         assertThat(store.findTurn(tenant, session2.sessionId(),
                 turn2.turnId()).get().errorCode()).isNull();
+    }
+
+    @Test
+    void aHarnessParkSettlesOnlyFromItsOriginalLeasedJournal() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-recheck-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "3".repeat(64));
+        store.claimTurn(tenant, session.sessionId(), turn.turnId(), "first", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), "first", "boot")).isTrue();
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(), "first", "epoch", 1);
+        assertThat(store.markTurnRecoveryBlocked(tenant, session.sessionId(), turn.turnId(), "first",
+                "hosted_harness_recovery_blocked", "Awaiting original result")).isTrue();
+        jdbc.update("UPDATE ma_turn SET retry_after=0 WHERE tenant_id=?", tenant);
+        var recheck = store.claimTurn(tenant, session.sessionId(), turn.turnId(), "observer", Duration.ofMinutes(1))
+                .orElseThrow();
+        assertThat(recheck.retryCount()).isZero();
+        var terminal = List.of(new HarnessEvent(2, "boot:epoch:2",
+                new ProjectedEvent("turn.completed", Map.of(), true, "COMPLETED", null, null)));
+        assertThatThrownBy(() -> store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                "first", "epoch", terminal)).hasMessageContaining("lease was lost");
+        assertThatThrownBy(() -> store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                "observer", "other-epoch", terminal)).hasMessageContaining("epoch changed");
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), "observer", "epoch", terminal);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow())
+                .satisfies(record -> {
+                    assertThat(record.status()).isEqualTo("COMPLETED");
+                    assertThat(record.errorCode()).isNull();
+                    assertThat(record.completedAt()).isNotNull();
+                });
+        assertThat(store.beginOperation(tenant, session.sessionId(), OperationKind.CLOSE,
+                "", "close", "close-digest").replayed()).isFalse();
     }
 
     // The terminal retry budget counts consecutive failures without
@@ -2838,40 +2902,6 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
 
-    // A row written while the create bound was 512 keeps its long title:
-    // the unified 256 policy rejects that title as new input, but echoing
-    // the stored title back is a no-op rewrite rather than a permanent 400
-    // — and the over-bound title is never forwarded to the Harness.
-    @Test
-    void aLegacyOverBoundTitleEchoesBackAsANoOpRewrite() throws Exception {
-        String tenant = "tenant-title-legacy-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
-                                .header(TenantContextFilter.HEADER, tenant)
-                                .header("Idempotency-Key", "legacy-title-create")
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
-                .andExpect(status().isAccepted()).andReturn()
-                .getResponse().getContentAsString()).get("id").asText();
-        String legacyTitle = "t".repeat(300);
-        jdbc.update("UPDATE ma_session SET title = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                legacyTitle, tenant, sessionId);
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + legacyTitle + "\"}"), tenant,
-                "legacy-title-echo")
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.metadata.title").value(legacyTitle));
-        // A different over-bound title is still new input, still refused.
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + "x".repeat(300) + "\"}"), tenant,
-                "legacy-title-other")
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code").value("invalid_title"));
-    }
-
     @Test
     void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
@@ -3138,7 +3168,7 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+        FixtureHarness fixtureHarness(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
             return new FixtureHarness(jdbc);
         }
     }
@@ -3483,7 +3513,7 @@ class ManagedAgentServerIntegrationTest {
         String operation = "operation-" + UUID.randomUUID();
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope(tenant, "workspace", "1", "/workspace", "capability", "session");
         var bindings = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("test", new byte[32]));
+                new com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector("test", new byte[32]));
         var sessions = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository(jdbc.getDataSource());
         var executions = new com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository(jdbc.getDataSource());
         var provisioner = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,

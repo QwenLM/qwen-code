@@ -698,6 +698,19 @@ async fn handle_proxy_request(
             Err(e) => Response::error(id, -32602, format!("Invalid params: {e}")),
             Ok(call) => {
                 if let Err(error) = authorize_tool_call(&call.name, &call.args) {
+                    if cua_driver_contract::computer_use::is_app_call(&call.name, &call.args) {
+                        return Response::ok(
+                            id,
+                            serde_json::to_value(
+                                cua_driver_core::protocol::ToolResult::computer_use_error(
+                                    "permission_denied",
+                                    error.to_string(),
+                                    false,
+                                ),
+                            )
+                            .expect("serializable tool result"),
+                        );
+                    }
                     return Response::error(id, -32603, error.to_string());
                 }
                 forward_tool_call(

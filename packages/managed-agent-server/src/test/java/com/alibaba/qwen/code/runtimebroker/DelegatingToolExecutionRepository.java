@@ -96,7 +96,7 @@ abstract class DelegatingToolExecutionRepository
     }
 
     @Override
-    public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+    public List<ToolHoldRow> findHoldRowsByHarnessSession(
             String harnessSessionId, String afterExecutionCallId,
             int limit) {
         return delegate.findHoldRowsByHarnessSession(harnessSessionId,

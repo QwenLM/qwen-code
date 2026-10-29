@@ -66,6 +66,9 @@ const mocks = vi.hoisted(() => {
 vi.mock('@opentui/react', async () => {
   const React = await import('react');
   return {
+    useAppContext: (
+      await import('../../test-utils/opentui-catalog.js')
+    ).catalogAppContext(mocks.state.keyboardHandlers),
     // opentui registers one stable listener per hook instance (useEffectEvent)
     // on an emitter that fires for every listener, so each mounted list sees
     // each key and its own `focused` flag decides whether it acts.

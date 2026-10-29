@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -84,6 +85,51 @@ const renderBlock = (der: Buffer): string => {
 // 22.0: there the loader oracle answers `legacy` and the inspection throws,
 // so suites that drive the real oracle skip instead of failing.
 const loaderOracleAvailable = typeof tls.getCACertificates === 'function';
+
+/**
+ * What the loader takes from `contents`, asked of this suite's own Node.
+ *
+ * A second, independent request of the same oracle on purpose: it lets a
+ * shape whose verdict is not the same on every build compare the module
+ * against the loader instead of against one build's habit. The BOM shapes are
+ * the ones that need it — linux/x64 takes a BOM in the header section while
+ * linux/arm64 refuses it with `PEM routines::bad base64 decode`, at the same
+ * Node patch and OpenSSL version (measured directly on both arches for
+ * v22.23.2 and v22.23.4), so hard-coding either verdict makes the suite
+ * architecture-dependent.
+ */
+const loaderBlocks = (contents: string): string[] | undefined => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-expected-'));
+  try {
+    const file = path.join(dir, 'expected.pem');
+    fs.writeFileSync(file, contents, { mode: 0o600 });
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--no-deprecation',
+        '--input-type=commonjs',
+        '-e',
+        `const tls = require('node:tls');
+         process.stdout.write(JSON.stringify(tls.getCACertificates('extra')));`,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, NODE_EXTRA_CA_CERTS: file },
+        timeout: 10_000,
+      },
+    );
+    if (result.status !== 0) {
+      throw new Error(`the loader oracle failed: ${result.stderr}`);
+    }
+    const blocks: unknown = JSON.parse(result.stdout);
+    if (!Array.isArray(blocks) || !blocks.every((b) => typeof b === 'string')) {
+      throw new Error('the loader oracle answered outside its contract');
+    }
+    return blocks.length > 0 ? blocks.map((b) => b.trimEnd()) : undefined;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+};
 
 describe.skipIf(!loaderOracleAvailable)('extractCertificateBlocks', () => {
   it('ignores NODE_OPTIONS that only affect eval-based oracle children', () => {
@@ -324,7 +370,9 @@ describe.skipIf(!loaderOracleAvailable)('extractCertificateBlocks', () => {
         '-----END CERTIFICATE-----\uFEFF',
       ),
     ]) {
-      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+      // The loader is the oracle, and its BOM verdict is build-specific: take
+      // whatever this Node answers, and hold the module to it.
+      expect(extractCertificateBlocks(file)).toEqual(loaderBlocks(file));
     }
   });
 
@@ -481,16 +529,13 @@ describe.skipIf(!loaderOracleAvailable)('extractCertificateBlocks', () => {
   });
 
   it('takes a block whose header section is empty', () => {
-    // Oracle: authorized=true for both an empty line and a BOM-only line
-    // directly after BEGIN — the loader splits the block there and reads the
-    // rest as data. The BOM-only line is the loader's own separator, not a
-    // body line, which is why it must not be judged as base64.
+    // Both an empty line and a BOM-only line directly after BEGIN split the
+    // block there, and the rest is read as data. The BOM-only line is judged
+    // by the loader, not by us: x64 takes it and arm64 refuses it, so the
+    // expectation is the loader's own answer for this build.
     for (const separator of ['', '\uFEFF']) {
-      expect(
-        extractCertificateBlocks(
-          `-----BEGIN CERTIFICATE-----\n${separator}\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n`,
-        ),
-      ).toEqual([ROOT_PEM.trim()]);
+      const file = `-----BEGIN CERTIFICATE-----\n${separator}\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n`;
+      expect(extractCertificateBlocks(file)).toEqual(loaderBlocks(file));
     }
   });
 
