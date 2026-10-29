@@ -22,11 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Uses its own disposable empty application catalog. */
 class WorkspaceCreationSchemaMySqlIT {
     @Test
-    void preservesUnverifiedCleanupCoverageWhileUpgradingV12() {
+    void preservesUnverifiedCleanupCoverageAcrossRestart() {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var source = database.source();
-            Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
-                    .target("12").load().migrate();
+            Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
             var jdbc = new JdbcTemplate(source);
             jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id,"
                     + " harness_session_id, workspace_id, session_id, storage_version, state,"
@@ -41,7 +40,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     + " workspace_id, session_id, resource_id, kind, schema_version, byte_length,"
                     + " sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
                     + " VALUES ('resource', 'scope', 'tenant', 'workspace', 'session', 'descriptor',"
-                    + " 'hosted-turn-cleanup', 1, 0, ?, 'MYSQL_INLINE', ?, 'legacy', 'REFERENCED', 1)",
+                    + " 'hosted-turn-cleanup', 1, 0, ?, 'MYSQL_INLINE', ?, 'published', 'REFERENCED', 1)",
                     org.apache.commons.codec.digest.DigestUtils.sha256Hex(new byte[0]), new byte[0]);
             jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                     + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
@@ -53,26 +52,23 @@ class WorkspaceCreationSchemaMySqlIT {
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(14, ManagedSchema.schemaVersion(source));
+            assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgradedHead = jdbc.queryForMap("SELECT * FROM ma_session_head");
             assertThat(upgradedHead).containsEntry("cleanup_head_revision", null);
-            upgradedHead.remove("cleanup_head_revision");
             assertThat(upgradedHead).usingRecursiveComparison().isEqualTo(head);
             var upgradedReference = jdbc.queryForMap("SELECT * FROM ma_resource_ref");
             assertThat(upgradedReference).containsEntry("runtime_binding_key", null);
-            upgradedReference.remove("runtime_binding_key");
             assertThat(upgradedReference).usingRecursiveComparison().isEqualTo(reference);
         }
     }
 
     @Test
-    void addsSshRegistrationAfterPublishedApprovalSelectionWithoutChangingHistory() {
+    void preservesApprovalSelectionAndHistoryAcrossRestart() {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var source = database.source();
             Flyway.configure()
                     .dataSource(source)
                     .locations(ManagedSchema.FLYWAY_LOCATION)
-                    .target("6")
                     .load()
                     .migrate();
             var jdbc = new JdbcTemplate(source);
@@ -83,12 +79,15 @@ class WorkspaceCreationSchemaMySqlIT {
                     + "payload_digest,status,approval_mode,approval_revision,gmt_create,gmt_modified)"
                     + " VALUES ('tenant','session','turn','prompt','[]','digest',"
                     + "'COMPLETED','auto-edit',2,1,1)");
+            String rules = "{\"allow\":[\"Read\"],\"ask\":[],\"deny\":[]}";
+            jdbc.update("UPDATE ma_session SET selected_approval_mode='auto', permission_rules_json=?", rules);
+            jdbc.update("UPDATE ma_turn SET approval_mode='auto', permission_rules_json=?", rules);
             var session = jdbc.queryForMap("SELECT * FROM ma_session");
             var turn = jdbc.queryForMap("SELECT * FROM ma_turn");
             var history = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
             var lastInstalledRank = jdbc.queryForObject(
                     "SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
-            assertEquals(6, ManagedSchema.schemaVersion(source));
+            assertEquals(1, ManagedSchema.schemaVersion(source));
 
             Flyway.configure()
                     .dataSource(source)
@@ -97,12 +96,13 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(14, ManagedSchema.schemaVersion(source));
+            assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
-            assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
+            assertThat(upgradedSession).containsEntry("plan_enabled", false)
+                    .containsEntry("public_child_agents_version", 0);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
             assertThat(upgradedTurn).containsKey("plan_enabled");
-            assertThat(upgradedTurn.remove("plan_enabled")).isNull();
+            assertThat(upgradedTurn).containsEntry("plan_enabled", null);
             assertThat(upgradedSession)
                     .usingRecursiveComparison().isEqualTo(session);
             assertThat(upgradedTurn)
@@ -110,18 +110,17 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(history, jdbc.queryForList("SELECT * FROM flyway_schema_history"
                     + " WHERE installed_rank <= ? ORDER BY installed_rank", lastInstalledRank));
             assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM flyway_schema_history"
-                    + " WHERE version='7' AND success=TRUE", Integer.class));
+                    + " WHERE version='1' AND success=TRUE", Integer.class));
         }
     }
 
     @Test
-    void addsTurnCommandKindsOverACatalogAlreadyHoldingEveryEarlierKind() {
+    void preservesOperationKindsAndRejectsUnknownKinds() {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var source = database.source();
             Flyway.configure()
                     .dataSource(source)
                     .locations(ManagedSchema.FLYWAY_LOCATION)
-                    .target("7")
                     .load()
                     .migrate();
             var jdbc = new JdbcTemplate(source);
@@ -135,7 +134,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(14, ManagedSchema.schemaVersion(source));
+            assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgraded = jdbc.queryForMap("SELECT * FROM ma_operation");
             assertThat(upgraded.keySet()).containsAll(existing.keySet());
             upgraded.keySet().retainAll(existing.keySet());
@@ -148,7 +147,7 @@ class WorkspaceCreationSchemaMySqlIT {
     }
 
     @Test
-    void upgradesPublishedCatalogsWithoutChangingExistingRows() throws Exception {
+    void preservesReceiptsAndModelConstraintsAcrossRestart() throws Exception {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var source = database.source();
             try (var connection = source.getConnection();
@@ -170,23 +169,9 @@ class WorkspaceCreationSchemaMySqlIT {
                         + "'prompt','[]','digest','COMPLETED',1,1)");
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
-            try (var connection = source.getConnection()) {
-                executeResource(connection, ManagedSchema.PRIVATE_AUTHORITY);
-                assertThrows(
-                        SQLException.class, () -> receipt(connection, "not-yet", "WORKSPACE_CREATE"));
-            }
-            assertEquals(2, ManagedSchema.schemaVersion(source));
-            try (var connection = source.getConnection()) {
-                executeResource(connection, ManagedSchema.SESSION_LIST);
-            }
-            assertEquals(3, ManagedSchema.schemaVersion(source));
-            try (var connection = source.getConnection()) {
-                executeResource(connection, ManagedSchema.WORKSPACE_CREATION);
-            }
-            assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(14, ManagedSchema.schemaVersion(source));
+            assertEquals(1, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

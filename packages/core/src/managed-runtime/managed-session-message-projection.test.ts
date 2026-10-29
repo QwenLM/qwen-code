@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -47,16 +48,6 @@ afterEach(async () => {
   temporaryDirectories.clear();
 });
 
-function ref(kind = 'managed-test'): ManagedSessionDurableRef {
-  return {
-    resourceId: 'res-1',
-    kind,
-    schemaVersion: 1,
-    byteLength: 4,
-    digest: DIGEST,
-  };
-}
-
 function command(operation: string, commandId: string) {
   return { operation, commandId, sessionKey, contentDigest: DIGEST };
 }
@@ -94,14 +85,20 @@ async function createHarness(): Promise<Harness> {
     transcriptPath,
   });
   const authority = await LocalManagedSessionAuthority.open({
-    lease,
+    journal: LocalJsonlManagedSessionJournalStore.fromLease(lease, sessionKey),
     sessionKey,
     cwd: projectRoot,
     version: 'test',
     resources: store,
     create: {
-      definitionRef: ref('managed-definition'),
-      rootSnapshotRef: ref('managed-root'),
+      definitionRef: await store.publish(
+        'managed-session-definition',
+        Buffer.from('{}'),
+      ),
+      rootSnapshotRef: await store.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}'),
+      ),
       createdBy: 'daemon',
     },
   });
@@ -128,7 +125,7 @@ async function createHarness(): Promise<Harness> {
           phase: 'active',
           leaseDurationMs: 60_000,
           expiresAt: 2,
-          installRef: ref(),
+          installRef: await store.publish('managed-test', Buffer.from('test')),
           boundaryRef: null,
         },
       },
@@ -428,10 +425,11 @@ describe('managed session message projection', () => {
         'utf8',
       ),
     );
-    const scan = await readManagedSessionLog(
-      harness.transcriptPath,
+    const scan = await readManagedSessionLog({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
       sessionKey,
-    );
+    });
     const event = parseManagedSessionEvent({
       v: 1,
       sequence: scan.committed + 1,
@@ -499,10 +497,11 @@ describe('managed session message projection', () => {
       'managed-file_history',
       Buffer.from('null', 'utf8'),
     );
-    const scan = await readManagedSessionLog(
-      harness.transcriptPath,
+    const scan = await readManagedSessionLog({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
       sessionKey,
-    );
+    });
     const event = parseManagedSessionEvent({
       v: 1,
       sequence: scan.committed + 1,
@@ -629,10 +628,11 @@ describe('managed session message projection', () => {
     await harness.close();
     // The writer refuses this event, so it is spliced into the committed log
     // the way a writer from before that fence could have left it.
-    const scan = await readManagedSessionLog(
-      harness.transcriptPath,
+    const scan = await readManagedSessionLog({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
       sessionKey,
-    );
+    });
     const event = parseManagedSessionEvent({
       v: 1,
       sequence: scan.committed + 1,
@@ -711,10 +711,11 @@ describe('managed session message projection', () => {
     } finally {
       await harness.close();
     }
-    const scan = await readManagedSessionLog(
-      harness.transcriptPath,
+    const scan = await readManagedSessionLog({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
       sessionKey,
-    );
+    });
 
     await expect(
       projectManagedSessionTitleInfo({ scan, resources: harness.store }),
@@ -855,7 +856,10 @@ describe('managed session message projection', () => {
         transcriptPath: harness.transcriptPath,
       });
       const reopened = await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: '/workspace',
         version: 'test',
@@ -869,14 +873,18 @@ describe('managed session message projection', () => {
         expect(await reopened.readCheckpointState()).toEqual(
           withState ? state : undefined,
         );
-        expect(await fs.readFile(harness.transcriptPath)).toEqual(before);
+        const afterOpen = await fs.readFile(harness.transcriptPath);
+        expect(afterOpen.includes('managed_session_snapshot_base_v1')).toBe(
+          true,
+        );
+        expect(afterOpen.equals(before)).toBe(false);
         const sink = new ManagedSessionRecordSink(
           reopened,
           harness.store,
           () => HOLDS,
         );
         await sink.write(branch);
-        expect(await fs.readFile(harness.transcriptPath)).toEqual(before);
+        expect(await fs.readFile(harness.transcriptPath)).toEqual(afterOpen);
         await expect(
           sink.write({ ...branch, parentUuid: 'changed' }),
         ).rejects.toThrow(/different content/);
@@ -1067,7 +1075,10 @@ describe('managed session message projection', () => {
       try {
         await expect(
           LocalManagedSessionAuthority.open({
-            lease,
+            journal: LocalJsonlManagedSessionJournalStore.fromLease(
+              lease,
+              sessionKey,
+            ),
             sessionKey,
             cwd: '/workspace',
             version: 'test',
@@ -1124,10 +1135,11 @@ describe('managed session message projection', () => {
     } finally {
       await harness.close();
     }
-    const scan = await readManagedSessionLog(
-      harness.transcriptPath,
+    const scan = await readManagedSessionLog({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
       sessionKey,
-    );
+    });
     const marker = {
       transactionId: 'historical-batch',
       commandId: 'historical-batch',
@@ -1193,7 +1205,10 @@ describe('managed session message projection', () => {
         transcriptPath: harness.transcriptPath,
       });
       const reopened = await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: '/workspace',
         version: 'test',
@@ -1309,7 +1324,10 @@ describe('managed session message projection', () => {
       sessionKey,
     });
     const reopened = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',

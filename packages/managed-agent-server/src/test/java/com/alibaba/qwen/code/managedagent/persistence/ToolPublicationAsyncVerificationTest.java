@@ -62,7 +62,7 @@ public class ToolPublicationAsyncVerificationTest {
     void setup() {
         DataSource source = dataSource();
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        fixture = PublicationJournalFixture.create(source, true);
+        fixture = PublicationJournalFixture.create(source);
         fixture.reserve();
         key = fixture.binding.path("sessionKey");
         bucket = new Bucket();
@@ -119,7 +119,7 @@ public class ToolPublicationAsyncVerificationTest {
         var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
                 "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
                 "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
-        fixture = PublicationJournalFixture.create(source, true, registration);
+        fixture = PublicationJournalFixture.create(source, registration);
         fixture.reserve();
         fixture.store.verifyDispatch(fixture.executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
@@ -182,7 +182,7 @@ public class ToolPublicationAsyncVerificationTest {
         var bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("other-replica-key", new byte[32]));
         var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
-                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10), true);
+                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10));
         var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
                 Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
@@ -203,7 +203,7 @@ public class ToolPublicationAsyncVerificationTest {
         var bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("other-replica-key", new byte[32]));
         var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
-                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10), true);
+                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10));
         var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
                 Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
@@ -295,7 +295,6 @@ public class ToolPublicationAsyncVerificationTest {
                 .withPropertyValues("qwen.managed-agent.tool-publication.enabled=true",
                         "qwen.managed-agent.tool-publication.service-base-url=https://test.invalid",
                         "qwen.managed-agent.tool-publication.async-verification-enabled=" + asyncEnabled,
-                        "qwen.managed-agent.tool-publication.journal-head-authorization=true",
                         "qwen.managed-agent.tool-publication.execution-bytes=104857600",
                         "qwen.managed-agent.tool-publication.session-bytes=104857600",
                         "qwen.managed-agent.tool-publication.tenant-bytes=104857600",
@@ -306,8 +305,8 @@ public class ToolPublicationAsyncVerificationTest {
                         "qwen.managed-agent.tool-publication.claim-timeout=2s",
                         "qwen.managed-agent.tool-publication.max-verification-timeout=25m",
                         "qwen.managed-agent.tool-publication.verification-bytes-per-second=16777216")
-                .withBean(org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
-                .withBean(PlatformTransactionManager.class, () -> fixture.manager)
+                .withBean("managedJdbcTemplate", org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
+                .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> fixture.manager)
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
                 .withBean(ManagedSessionStore.class, () -> fixture.sessions)
                 .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)
@@ -321,7 +320,6 @@ public class ToolPublicationAsyncVerificationTest {
                     var settings = context.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                             .getToolPublication();
                     assertThat(settings.isAsyncVerificationEnabled()).isEqualTo(asyncEnabled);
-                    assertThat(settings.isJournalHeadAuthorization()).isTrue();
                     assertThat(settings.getVerificationConcurrency()).isEqualTo(3);
                     await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                             assertThat(status("restart").path("state").asText()).isEqualTo("SUCCEEDED"));

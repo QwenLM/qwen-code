@@ -31,6 +31,14 @@ import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+import {
+  parseHostedMcpServers,
+  type HostedMcpServerPin,
+} from './hosted-mcp-definitions.js';
+
+export interface HostedPublishedMcpServer extends HostedMcpServerPin {
+  readonly transport: 'stdio' | 'streamable-http' | 'sse';
+}
 
 import type {
   ManagedHookControl,
@@ -40,6 +48,11 @@ import type {
   ManagedMonitorControl,
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
@@ -118,9 +131,11 @@ export class HostedWorkspaceBrokerExecutionUnresolved extends Error {
 }
 
 export class HostedWorkspaceBroker {
+  private extensionBinding?: { runtimeBindingId: string; generation: string };
   private readonly baseUrl: URL;
   private leaseAcquired = false;
   private capability?: string;
+  private capabilityResolution?: Promise<void>;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -203,6 +218,48 @@ export class HostedWorkspaceBroker {
     if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
+  async resolveCapabilities(): Promise<void> {
+    if (this.capability !== undefined) return;
+    await (this.capabilityResolution ??= this.harnessRequest(
+      '/runtimes:capabilities',
+      {},
+    )
+      .then((response) => this.readRuntime(response))
+      .catch((cause: unknown) => {
+        this.capabilityResolution = undefined;
+        throw cause;
+      }));
+  }
+
+  async mcpDefinitions(
+    originalOwner = false,
+  ): Promise<readonly HostedPublishedMcpServer[]> {
+    const response = await this.harnessRequest(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/mcp-definitions`,
+      originalOwner ? { runtimeSessionId: this.runtimeSessionId } : {},
+    );
+    const servers = response['servers'];
+    if (!Array.isArray(servers) || servers.length > 128)
+      throw new Error('Invalid published MCP definitions.');
+    const identities = new Set<string>();
+    return servers.map((value: unknown) => {
+      const server = object(value);
+      const { transport, ...pin } = server;
+      const [parsed] = parseHostedMcpServers([pin]);
+      const identity = `${parsed.serverId}\0${parsed.serverRevision}`;
+      if (
+        !['stdio', 'streamable-http', 'sse'].includes(String(transport)) ||
+        identities.has(identity)
+      )
+        throw new Error('Invalid published MCP definition.');
+      identities.add(identity);
+      return {
+        ...parsed,
+        transport: transport as HostedPublishedMcpServer['transport'],
+      };
+    });
+  }
+
   async authorizeLifecycle(): Promise<void> {
     if (this.options.lifecycleAuthority?.())
       await this.request('/runtimes:authorize-lifecycle', {});
@@ -244,6 +301,10 @@ export class HostedWorkspaceBroker {
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST &&
         !(
           scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
           scope['isolationClass'] === 'workspace'
@@ -334,6 +395,56 @@ export class HostedWorkspaceBroker {
         'Hosted Workspace Broker did not reserve a fresh execution.',
       );
     return id;
+  }
+
+  /**
+   * A reservation that may already be settled: the managed automation gate
+   * derives its call id from the occurrence, so a retried fire prepares the
+   * same key again. The Broker answers a terminal record under that key
+   * with the identical reference as that record, and this reads its settled
+   * result back instead of refusing the non-fresh state as `prepare` does.
+   */
+  async prepareReplayable(
+    callId: string,
+    digest: string,
+  ): Promise<{
+    executionCallId: string;
+    settled?: ManagedToolResultPayload;
+  }> {
+    const reservation = {
+      idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
+      turnId: this.identity.runtimeSessionId,
+      toolCallId: callId,
+      requestDigest: digest,
+      reference: {
+        sessionId: this.identity.runtimeSessionId,
+        promptId: this.identity.runtimeSessionId,
+        callId,
+        argsDigest: digest,
+      },
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request('/executions:prepare', reservation);
+    } catch (cause) {
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request('/executions:prepare', reservation);
+    }
+    const id = response['executionCallId'];
+    if (typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/u.test(id))
+      throw new Error('Hosted Workspace Broker did not name the execution.');
+    const status = object(response['status']);
+    if (status['state'] === 'prepared') return { executionCallId: id };
+    if (status['state'] === 'settled') {
+      return { executionCallId: id, settled: settledResult(status) };
+    }
+    throw new Error(
+      'Hosted Workspace Broker answered a reservation that is neither fresh nor settled.',
+    );
   }
 
   async prepareV3(
@@ -584,6 +695,25 @@ export class HostedWorkspaceBroker {
     await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
   }
 
+  /**
+   * Requests a cancel and answers the execution's state as the Broker holds
+   * it afterwards: a terminal record stays as it settled, so the answer can
+   * be the receipt of a run the cancel came too late for.
+   */
+  async cancelReading(
+    id: string,
+  ): Promise<{ state: string; settled?: ManagedToolResultPayload }> {
+    const response = await this.request(
+      `/executions/${encodeURIComponent(id)}:cancel`,
+      {},
+    );
+    const status = object(response['status']);
+    const state = String(status['state']);
+    return state === 'settled'
+      ? { state, settled: settledResult(status) }
+      : { state };
+  }
+
   async control(
     operation: ManagedMcpControl,
   ): Promise<ManagedMcpOperationView> {
@@ -624,6 +754,59 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime Hook response identity is invalid.');
     return result as unknown as ManagedHookOperationView;
+  }
+
+  async extensionControl(
+    operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    const envelope = await this.request(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,
+      {
+        operation,
+        ...(this.extensionBinding
+          ? {
+              expectedRuntimeBindingId: this.extensionBinding.runtimeBindingId,
+              expectedRuntimeGeneration: this.extensionBinding.generation,
+            }
+          : {}),
+      },
+      true,
+      8 * 1024 * 1024,
+    );
+    this.readRuntime(envelope);
+    this.extensionBinding = {
+      runtimeBindingId: this.runtime!.bindingId,
+      generation: this.runtime!.generation,
+    };
+    const result = object(envelope['result']);
+    if (result['operationId'] !== operation.operationId)
+      throw new Error('Runtime extension response identity is invalid.');
+    return result;
+  }
+
+  async extensionCommand(
+    operation: import('@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js').ManagedExtensionCommandControl,
+  ): Promise<Record<string, unknown>> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.operationId ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime extension command response is invalid.');
+    return result;
+  }
+
+  expectExtensionRuntime(expected: {
+    runtimeBindingId: string;
+    generation: string;
+  }): void {
+    this.extensionBinding = expected;
   }
 
   /**
@@ -930,6 +1113,7 @@ export class HostedWorkspaceBroker {
     path: string,
     body?: Record<string, unknown>,
     harnessScoped = false,
+    maximumResponseBytes = 2 * 1024 * 1024,
   ): Promise<Record<string, unknown>> {
     const url = new URL(`/internal/runtime-broker/v1${path}`, this.baseUrl);
     const fields = {
@@ -971,7 +1155,7 @@ export class HostedWorkspaceBroker {
         const chunk = await reader.read();
         if (chunk.done) break;
         length += chunk.value.length;
-        if (length > 2 * 1024 * 1024) {
+        if (length > maximumResponseBytes) {
           await reader.cancel();
           throw new Error('Runtime Broker response exceeds its limit.');
         }
@@ -1002,6 +1186,25 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/** The settled result of an execution status, in Tool v2's shape. */
+function settledResult(
+  status: Record<string, unknown>,
+): ManagedToolResultPayload {
+  const result = object(status['result']);
+  if (
+    !['success', 'error', 'cancelled', 'not_started'].includes(
+      String(result['executionStatus']),
+    ) ||
+    (result['responseParts'] !== undefined &&
+      !Array.isArray(result['responseParts']))
+  )
+    throw new Error('Runtime execution result is invalid.');
+  return {
+    ...result,
+    responseParts: result['responseParts'] ?? [],
+  } as unknown as ManagedToolResultPayload;
 }
 
 /**

@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -28,7 +29,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private final org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications;
     private final org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results;
 
-    public WorkspaceProfileLifecycleVerifier(JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
+    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
             org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results) {
         this.jdbc = jdbc;
         this.records = new ManagedExtensionRecordStore(jdbc);
@@ -79,42 +80,50 @@ public class WorkspaceProfileLifecycleVerifier {
 
     void verifyResources(OperationRecord operation, List<RuntimeBindingRecord> bindings, String profile) {
         verifyEffects(operation);
+        verifyMcpResources(operation, bindings);
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
-            Map<String, RuntimeBindingRecord> originals = bindings.stream().collect(Collectors.toMap(
-                    RuntimeBindingRecord::getBindingId, Function.identity()));
-            for (JsonNode configuration : records.listRecords(operation.tenantId(), operation.sessionId(), "mcp_configuration")) {
-                JsonNode runtime = configuration.path("run").path("runtime");
-                if ("not_started_proven".equals(configuration.path("run").path("execution").asText()) && runtime.isNull()) {
-                    continue;
-                }
-                RuntimeBindingRecord binding = originals.get(runtime.path("runtimeBindingId").asText());
-                long generation;
-                try {
-                    generation = Long.parseLong(runtime.path("generation").asText());
-                } catch (NumberFormatException invalid) {
-                    throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
-                }
-                if (binding == null || generation < 1 || generation > binding.getGeneration()) {
-                    unsettled();
-                }
-                if (!"released".equals(configuration.path("releaseState").asText())
-                        && (generation != binding.getGeneration() || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding))) {
-                    unsettled();
-                }
-                var owners = jdbc.queryForList("SELECT binding_id, runtime_generation, session_state FROM ma_runtime_session"
-                        + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ? FOR UPDATE",
-                        operation.tenantId(), operation.sessionId(), configuration.path("runtimeSessionId").asText());
-                if (owners.size() != 1 || !binding.getBindingId().equals(owners.getFirst().get("binding_id"))
-                        || ((Number) owners.getFirst().get("runtime_generation")).longValue() != generation
-                        || !"RELEASED".equals(owners.getFirst().get("session_state"))) {
-                    unsettled();
-                }
-            }
             return;
         }
         if (!WorkspaceToolProfiles.SHELL.equals(profile)) {
             unsettled();
         }
+        verifyShellResources(operation);
+    }
+
+    private void verifyMcpResources(OperationRecord operation, List<RuntimeBindingRecord> bindings) {
+        Map<String, RuntimeBindingRecord> originals = bindings.stream().collect(Collectors.toMap(
+                RuntimeBindingRecord::getBindingId, Function.identity()));
+        for (JsonNode configuration : records.listRecords(operation.tenantId(), operation.sessionId(), "mcp_configuration")) {
+            JsonNode runtime = configuration.path("run").path("runtime");
+            if ("not_started_proven".equals(configuration.path("run").path("execution").asText()) && runtime.isNull()) {
+                continue;
+            }
+            RuntimeBindingRecord binding = originals.get(runtime.path("runtimeBindingId").asText());
+            long generation;
+            try {
+                generation = Long.parseLong(runtime.path("generation").asText());
+            } catch (NumberFormatException invalid) {
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+            }
+            if (binding == null || generation < 1 || generation > binding.getGeneration()) {
+                unsettled();
+            }
+            if (!"released".equals(configuration.path("releaseState").asText())
+                    && (generation != binding.getGeneration() || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding))) {
+                unsettled();
+            }
+            var owners = jdbc.queryForList("SELECT binding_id, runtime_generation, session_state FROM ma_runtime_session"
+                    + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ? FOR UPDATE",
+                    operation.tenantId(), operation.sessionId(), configuration.path("runtimeSessionId").asText());
+            if (owners.size() != 1 || !binding.getBindingId().equals(owners.getFirst().get("binding_id"))
+                    || ((Number) owners.getFirst().get("runtime_generation")).longValue() != generation
+                    || !"RELEASED".equals(owners.getFirst().get("session_state"))) {
+                unsettled();
+            }
+        }
+    }
+
+    private void verifyShellResources(OperationRecord operation) {
         Map<String, ToolExecutionRecord> executions = executions(operation).stream()
                 .collect(Collectors.toMap(ToolExecutionRecord::getExecutionCallId, Function.identity()));
         var backgroundCalls = backgroundCalls(operation);
@@ -122,7 +131,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
                 ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
                 .collect(Collectors.groupingBy(ManagedToolResultStore.Source::executionCallId));
-        var fileInputs = nativeFileInputs(operation);
+        var inlineInputs = nativeInlineInputs(operation);
         for (ToolExecutionRecord execution : executions.values()) {
             if (!execution.isSettled()) {
                 unsettled();
@@ -134,7 +143,7 @@ public class WorkspaceProfileLifecycleVerifier {
             if (sources.isEmpty() && "deferred".equals(execution.getReference().get("dispatchMode"))
                     && execution.getReference().get("runtimeProtocol") == null
                     && execution.getReference().get("publicationId") == null
-                    && fileInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest())) {
+                    && inlineInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest())) {
                 continue;
             }
             if (sources.size() != 1) {
@@ -265,7 +274,7 @@ public class WorkspaceProfileLifecycleVerifier {
         return calls;
     }
 
-    private java.util.Set<String> nativeFileInputs(OperationRecord operation) {
+    private java.util.Set<String> nativeInlineInputs(OperationRecord operation) {
         var inputs = new java.util.HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
                 + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
@@ -284,7 +293,7 @@ public class WorkspaceProfileLifecycleVerifier {
             byte[] payload = input.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8);
             JsonNode call = ToolPublicationContract.readJson(payload);
             if (call.size() == 2 && call.path("input").isObject()
-                    && List.of("read_file", "write_file", "edit", "glob").contains(call.path("toolName").asText())) {
+                    && List.of("read_file", "write_file", "edit", "glob", "web_fetch", "managed_mcp_call").contains(call.path("toolName").asText())) {
                 inputs.add(input.path("runtimeSessionId").textValue() + ":sha256:" + ToolPublicationContract.sha256(payload));
             }
         }

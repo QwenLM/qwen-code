@@ -481,14 +481,12 @@ class HostedMcpReplyLossIT {
     }
 
     private int storageHolders(SessionRef session) {
-        String binding = jdbc.queryForObject(
-                "SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?"
-                        + " AND isolation_key = ?",
-                String.class, tenant, session.id());
-        return jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?"
-                        + " AND holder_key IS NOT NULL",
-                Integer.class, binding);
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session s"
+                + " JOIN ma_runtime_binding b ON s.binding_id = b.binding_id"
+                + " AND s.runtime_generation = b.runtime_generation"
+                + " WHERE s.tenant_id = ? AND b.tenant_id = ? AND"
+                + " s.harness_session_id = ? AND s.execution_storage_key IS NOT NULL",
+                Integer.class, tenant, tenant, session.id());
     }
 
     private List<ProxyCall> prepareCalls() {

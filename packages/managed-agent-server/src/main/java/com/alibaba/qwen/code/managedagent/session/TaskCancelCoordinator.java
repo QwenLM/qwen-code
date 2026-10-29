@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -132,7 +133,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     public TaskCancelCoordinator(AgentStateStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
             ObjectProvider<RuntimeBrokerService> broker,
-            ExecutorService executor, Clock clock,
+            @Qualifier("managedAgentExecutor") ExecutorService executor, @Qualifier("managedAgentClock") Clock clock,
             ManagedAgentProperties properties) {
         this(store, records, harness, broker.getIfAvailable(), executor,
                 clock, properties,
@@ -187,7 +188,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
         });
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recover() {
         for (OperationTarget target : store.findDeliverableTaskCancels(

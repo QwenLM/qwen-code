@@ -1,5 +1,10 @@
 # Cua Driver Browser Tool Implementation Plan
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 ## Status
 
 - **State:** Browser-tool v2 roadmap implemented locally; acceptance evidence recorded in the implementation journal
