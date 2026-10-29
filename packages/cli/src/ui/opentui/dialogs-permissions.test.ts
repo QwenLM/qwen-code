@@ -207,6 +207,19 @@ describe('permissionScopeItems row width', () => {
     expect(row).toContain('settings.json');
     expect(getCachedStringWidth(row)).toBeLessThanOrEqual(57);
   });
+
+  it.each([43, 34, 31])(
+    'keeps a %i-column row inside its budget',
+    (rowColumns) => {
+      process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+      const row = formatScopeRow(
+        permissionScopeItems(rowColumns)[1]!,
+        rowColumns,
+      );
+
+      expect(getCachedStringWidth(row)).toBeLessThanOrEqual(rowColumns);
+    },
+  );
 });
 
 describe('formatScopeRow', () => {

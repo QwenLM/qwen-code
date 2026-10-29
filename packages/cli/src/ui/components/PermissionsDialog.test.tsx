@@ -139,4 +139,24 @@ describe('permissionScopeItems row width', () => {
     expect(row).toContain('settings.json');
     expect(getCachedStringWidth(row)).toBeLessThanOrEqual(60);
   });
+
+  it.each([43, 34, 31])(
+    'keeps the row inside a %i-column budget',
+    (rowColumns) => {
+      process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+      const item = permissionScopeItems(rowColumns)[1]!;
+      const row = `${item.label}${' '.repeat(SCOPE_LABEL_GAP)}${item.description}`;
+
+      // The fallback used to be emitted whatever the row could hold, so the
+      // renderer's clip — not this budget — decided whether the name survived.
+      expect(getCachedStringWidth(row)).toBeLessThanOrEqual(rowColumns);
+    },
+  );
+
+  it('keeps the file name once the bare name fits the row', () => {
+    process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+    const item = permissionScopeItems(43)[1]!;
+
+    expect(item.description).toContain('settings.json');
+  });
 });

@@ -12,7 +12,11 @@ import {
 } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
-import { getCachedStringWidth, sanitizeTerminalLine } from './textUtils.js';
+import {
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  truncateToWidth,
+} from './textUtils.js';
 
 export const SCOPE_LABEL_GAP = 4;
 export const SAVED_IN_TEMPLATE = 'Saved in {{path}}';
@@ -80,12 +84,21 @@ function savedSettingsPath(label: string, rowWidth: number): string {
   // file name.
   const widthOverhead =
     getCachedStringWidth(settingsPath) - settingsPath.length;
-  const shortened = shortenPath(
-    settingsPath,
-    Math.max(10, budget - Math.max(0, widthOverhead)),
-  );
+  const pathBudget = budget - Math.max(0, widthOverhead);
+  const shortened =
+    pathBudget >= 10 ? shortenPath(settingsPath, pathBudget) : '';
   const name = settingsPath.slice(settingsPath.lastIndexOf(nodePath.sep) + 1);
   // shortenPath always keeps the first segment, which can crowd out the file
   // name this row exists to show; keep the name alone when that happens.
-  return shortened.includes(name) ? shortened : `...${nodePath.sep}${name}`;
+  if (shortened.includes(name)) {
+    return shortened;
+  }
+  const nameOnly = `...${nodePath.sep}${name}`;
+  if (getCachedStringWidth(nameOnly) <= budget) {
+    return nameOnly;
+  }
+  // Not even the bare name fits. Bound the description to the row anyway: an
+  // overlong fallback is clipped by the renderer, which then decides what
+  // survives instead of this budget.
+  return truncateToWidth(nameOnly, budget);
 }
