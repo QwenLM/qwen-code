@@ -103,6 +103,15 @@ vi.mock('./QueuedMessageDisplay.js', () => ({
   },
 }));
 
+const modBand = vi.hoisted(() => ({ current: undefined as unknown }));
+vi.mock('../hooks/use-mod-band.js', () => ({
+  useModBand: () => modBand.current,
+}));
+
+vi.mock('../FeedbackDialog.js', () => ({
+  FeedbackDialog: () => <Text>FeedbackDialog</Text>,
+}));
+
 // Mock contexts
 vi.mock('../contexts/OverflowContext.js', () => ({
   OverflowProvider: ({ children }: { children: React.ReactNode }) => children,
@@ -393,6 +402,35 @@ describe('Composer', () => {
       // This test verifies that the component receives the correct prop
       const output = lastFrame();
       expect(output).toContain('InputPrompt'); // Verify basic Composer rendering
+    });
+  });
+
+  describe('Mod band', () => {
+    it('draws the band between the survey and the prompt, only while the input shows', () => {
+      modBand.current = {
+        tree: { type: 'Text', children: ['☀ Clear 12%'] },
+        owner: 'token-weather',
+        revision: 1,
+      };
+      try {
+        const { lastFrame } = renderComposer(
+          createMockUIState({ isFeedbackDialogOpen: true, terminalHeight: 24 }),
+        );
+        const output = lastFrame()!;
+        expect(output.indexOf('FeedbackDialog')).toBeLessThan(
+          output.indexOf('☀ Clear 12%'),
+        );
+        expect(output.indexOf('☀ Clear 12%')).toBeLessThan(
+          output.indexOf('InputPrompt'),
+        );
+        expect(
+          renderComposer(createMockUIState({ isInputActive: false }))
+            .lastFrame()!
+            .includes('☀'),
+        ).toBe(false);
+      } finally {
+        modBand.current = undefined;
+      }
     });
   });
 

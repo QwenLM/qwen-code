@@ -22,7 +22,14 @@
  * handling is per-case.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type {
   ApprovalMode,
@@ -30,6 +37,8 @@ import type {
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
+import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -84,6 +93,7 @@ import {
   type ExtensionsStatusMessage,
   type ExtensionsTab,
   type ExtensionRow,
+  type OpenTuiExtensionsDialogProps,
 } from './dialogs-extensions.js';
 import {
   OpenTuiMcpDialog,
@@ -109,15 +119,17 @@ import {
   OpenTuiDiffDialog,
   OpenTuiEditorDialog,
   OpenTuiResumeDialog,
-  OpenTuiRewindDialog,
   OpenTuiSubagentCreateDialog,
   OpenTuiSubagentListDialog,
   OpenTuiTrustDialog,
 } from './dialogs-misc.js';
+import { OpentuiRewindSelector, type RestoreOption } from './session-rewind.js';
+import type { RewindTurn } from './session-rewind-model.js';
 import { OpenTuiHooksDialog } from './dialogs-hooks.js';
 
 export interface OpenTuiDialogMountProps {
   request: OpenTuiDialogRequest;
+  extensionRefreshState?: ExtensionRefreshState;
   host: OpenTuiAppHost;
   config: Config;
   settings: LoadedSettings;
@@ -133,6 +145,8 @@ export interface OpenTuiDialogMountProps {
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
   statusLineState?: StatusLineState;
+  rewindTurns?: readonly RewindTurn[];
+  onRewind?: (turn: RewindTurn, option: RestoreOption) => Promise<void>;
   /** Row budget of the popup region, handed to every dialog leg — the legs
    * that window a body (model, theme, approval mode, settings, effort,
    * output style, the permission rule and directory lists, the hooks and
@@ -219,7 +233,10 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const [extDiscoverFilter, setExtDiscoverFilter] = useState<string | null>(
     null,
   );
-  const reloadExtensions = () => setExtRows(buildExtensionRows(config));
+  const reloadExtensions = useCallback(
+    () => setExtRows(buildExtensionRows(config)),
+    [config],
+  );
   const reportExtension = (
     message: string,
     level: string,
@@ -266,19 +283,25 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         ).then(settle);
         break;
       case 'update':
-        void applyExtensionUpdate(config, name).then(settle);
-        break;
-      case 'mark-update':
-        void applyExtensionUpdateCheck(config, name).then((state) => {
-          setExtBusy(false);
-          if (state) setExtStatus({ type: 'info', text: 'Update available.' });
+        return applyExtensionUpdate(config, name).then((result) => {
+          settle(result);
+          return result.changed ? ('up-to-date' as const) : undefined;
         });
-        break;
+      case 'mark-update':
+        return applyExtensionUpdateCheck(config, name).then((result) => {
+          setExtBusy(false);
+          setExtStatus({
+            type: result.state === 'error' ? 'error' : 'info',
+            text: result.message,
+          });
+          return result.state;
+        });
       default: {
         const exhaustive: never = action;
         void exhaustive;
       }
     }
+    return undefined;
   };
 
   // --- model dialog error (kept open on failed selection) -----------------
@@ -528,6 +551,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return (
         <OpenTuiDeleteDialog
           config={config}
+          logger={host.logger}
           settings={settings}
           onClose={onClose}
           notify={(text, level) => reportResult(null, text, level)}
@@ -565,7 +589,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       const rowsByTab: Partial<Record<ExtensionsTab, readonly ExtensionRow[]>> =
         { installed: extRows };
       return (
-        <OpenTuiExtensionsDialog
+        <OpenTuiExtensionCatalogMount
+          config={config}
+          request={request}
+          host={host}
+          extensionRefreshState={props.extensionRefreshState}
+          onCatalogStatus={setExtStatus}
+          onCatalogChanged={reloadExtensions}
           onClose={onClose}
           status={extStatus}
           busy={extBusy}
@@ -576,10 +606,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           onRowAction={(row, action) =>
             runExtensionAction(row.key, action as ExtensionDetailAction)
           }
-          onDetailAction={(row, action, arg) => {
-            runExtensionAction(row.key, action, arg);
-            return undefined;
-          }}
+          onDetailAction={(row, action, arg) =>
+            runExtensionAction(row.key, action, arg)
+          }
         />
       );
     }
@@ -619,15 +648,18 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       );
 
     case 'rewind':
-      // The real turn-scoped rewind selector needs the host's committed turn
-      // list + a rewind action that is not part of the command-host surface;
-      // Batch 5 mounts the self-contained placeholder (Batch 6 wires the
-      // full selector into the shell transcript).
       return (
-        <OpenTuiRewindDialog
-          settings={settings}
-          onClose={onClose}
+        <OpentuiRewindSelector
           availableTerminalHeight={props.availableTerminalHeight}
+          turns={props.rewindTurns ?? []}
+          fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+          getDiffStats={(promptId) =>
+            config.getFileHistoryService().getDiffStats(promptId)
+          }
+          onRewind={async (turn, option) => {
+            await props.onRewind?.(turn, option);
+          }}
+          onCancel={onClose}
         />
       );
 
@@ -792,4 +824,83 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       );
     }
   }
+}
+
+function OpenTuiExtensionCatalogMount({
+  config,
+  request,
+  host,
+  extensionRefreshState,
+  onCatalogStatus,
+  onCatalogChanged,
+  ...dialogProps
+}: OpenTuiExtensionsDialogProps & {
+  config: Config;
+  request: OpenTuiDialogRequest;
+  host: OpenTuiAppHost;
+  extensionRefreshState?: ExtensionRefreshState;
+  onCatalogStatus: (status: ExtensionsStatusMessage | null) => void;
+  onCatalogChanged: () => void;
+}) {
+  const cwd = config.getTargetDir();
+  const session = config.getSessionId();
+  const manager = config.getExtensionManager();
+  const owner = useMemo(
+    () => ({ request, config, cwd, session, manager }),
+    [request, config, cwd, session, manager],
+  );
+  const latest = useRef(owner);
+  latest.current = owner;
+  const mounted = useRef(true);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const isCurrent = useCallback(
+    () =>
+      mounted.current &&
+      latest.current === owner &&
+      config.getTargetDir() === owner.cwd &&
+      config.getSessionId() === owner.session &&
+      config.getExtensionManager() === owner.manager,
+    [owner, config],
+  );
+  const revision = useRef({ owner, value: 0 });
+  if (revision.current.owner !== owner)
+    revision.current = { owner, value: revision.current.value + 1 };
+  const reload = useCallback(async () => {
+    if (!isCurrent()) throw new Error(t('Extension installation cancelled.'));
+    const revision = extensionRefreshState?.notifyExtensionsReloadStarted();
+    try {
+      await reloadPluginsRuntime({
+        config,
+        reloadCommands: async () => {
+          if (!isCurrent())
+            throw new Error(t('Extension installation cancelled.'));
+          await host.reloadCommands();
+        },
+      });
+      if (!isCurrent()) throw new Error(t('Extension installation cancelled.'));
+      extensionRefreshState?.clearExtensionsChanged(revision);
+    } catch (error) {
+      extensionRefreshState?.markExtensionsReloadFailed(undefined, revision);
+      throw error;
+    }
+  }, [config, host, extensionRefreshState, isCurrent]);
+  return (
+    <OpenTuiExtensionsDialog
+      key={revision.current.value}
+      {...dialogProps}
+      catalog={{
+        manager,
+        cwd,
+        isCurrent,
+        reload,
+        onStatus: onCatalogStatus,
+        onChanged: onCatalogChanged,
+      }}
+    />
+  );
 }

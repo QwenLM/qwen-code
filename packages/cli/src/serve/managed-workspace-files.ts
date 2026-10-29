@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 
+export const MAX_WORKSPACE_UPLOAD_BYTES = 8 * 1024 * 1024;
+
 export class WorkspaceFileError extends Error {
   constructor(readonly code: string) {
     super('Workspace file request is unavailable.');
@@ -40,6 +42,65 @@ export function workspaceFilePath(value: unknown): string {
   return value;
 }
 
+export interface SessionWorkspaceFileScope {
+  sessionId: string;
+  contextDigest: string;
+  worktreeId: string;
+  worktreeRevision: number;
+  cwdRelative: string;
+  worktreeRootIdentity: { device: string; inode: string };
+}
+
+// Only the trusted local Java-to-Node stdin protocol carries this scope.
+export function sessionWorkspaceFileScope(
+  value: unknown,
+  cwdRelative: unknown,
+): SessionWorkspaceFileScope | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    refuse('invalid_request');
+  const scope = value as Record<string, unknown>;
+  const keys = [
+    'sessionId',
+    'contextDigest',
+    'worktreeId',
+    'worktreeRevision',
+    'cwdRelative',
+    'worktreeRootIdentity',
+  ];
+  if (
+    Object.keys(scope).length !== keys.length ||
+    keys.some((key) => !(key in scope)) ||
+    typeof scope['sessionId'] !== 'string' ||
+    !/^[A-Za-z0-9._:-]{1,128}$/.test(scope['sessionId']) ||
+    typeof scope['contextDigest'] !== 'string' ||
+    !/^sha256:[a-f0-9]{64}$/.test(scope['contextDigest']) ||
+    typeof scope['worktreeId'] !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(scope['worktreeId']) ||
+    !Number.isSafeInteger(scope['worktreeRevision']) ||
+    Number(scope['worktreeRevision']) < 1 ||
+    typeof cwdRelative !== 'string' ||
+    scope['cwdRelative'] !== cwdRelative
+  )
+    refuse('invalid_request');
+  const prefix = `.qwen-managed-worktrees/${scope['worktreeId']}`;
+  if (cwdRelative !== prefix && !cwdRelative.startsWith(`${prefix}/`))
+    refuse('invalid_path');
+  workspaceFilePath(cwdRelative.slice(prefix.length + 1) || '.');
+  const identity = scope['worktreeRootIdentity'];
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity))
+    refuse('invalid_request');
+  const fields = identity as Record<string, unknown>;
+  if (
+    Object.keys(fields).length !== 2 ||
+    !['device', 'inode'].every(
+      (key) => typeof fields[key] === 'string' && /^\d+$/.test(fields[key]),
+    )
+  )
+    refuse('invalid_request');
+  return scope as unknown as SessionWorkspaceFileScope;
+}
+
 function signature(stat: BigIntStats): string {
   return [
     stat.dev,
@@ -51,17 +112,17 @@ function signature(stat: BigIntStats): string {
   ].join(':');
 }
 
-export async function readWorkspaceFiles(
+export async function workspaceFileDirectories(
   root: string,
   cwdRelative: string,
-  value: unknown,
   expected: { device: string; inode: string },
-): Promise<Record<string, unknown>> {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    refuse('invalid_request');
-  const request = value as Record<string, unknown>;
-  if (request['protocolVersion'] !== 1) refuse('unsupported');
-  const cwd = workspaceFilePath(cwdRelative);
+  sessionScope?: SessionWorkspaceFileScope,
+) {
+  const scope = sessionWorkspaceFileScope(sessionScope, cwdRelative);
+  const cwd = scope?.cwdRelative ?? workspaceFilePath(cwdRelative);
+  const worktreeRoot = scope
+    ? path.join(root, '.qwen-managed-worktrees', scope.worktreeId)
+    : undefined;
   const anchors = new Map<string, string>();
   async function directory(relative: string): Promise<string> {
     const segments = relative === '.' ? [] : relative.split('/');
@@ -77,6 +138,13 @@ export async function readWorkspaceFiles(
           String(stat.ino) !== expected.inode)
       )
         refuse();
+      if (
+        scope &&
+        current === worktreeRoot &&
+        (String(stat.dev) !== scope.worktreeRootIdentity.device ||
+          String(stat.ino) !== scope.worktreeRootIdentity.inode)
+      )
+        refuse('changed');
       const prior = anchors.get(current);
       const identity = [stat.dev, stat.ino, stat.birthtimeNs].join(':');
       if (prior && prior !== identity) refuse('changed');
@@ -98,11 +166,35 @@ export async function readWorkspaceFiles(
   const base = await directory(cwd);
   const rooted = (relative: string) =>
     cwd === '.' ? relative : relative === '.' ? cwd : `${cwd}/${relative}`;
+  return {
+    base,
+    directory: (relative: string) => directory(rooted(relative)),
+    verify,
+  };
+}
+
+export async function readWorkspaceFiles(
+  root: string,
+  cwdRelative: string,
+  value: unknown,
+  expected: { device: string; inode: string },
+  sessionScope?: SessionWorkspaceFileScope,
+): Promise<Record<string, unknown>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    refuse('invalid_request');
+  const request = value as Record<string, unknown>;
+  if (request['protocolVersion'] !== 1) refuse('unsupported');
+  const { base, directory, verify } = await workspaceFileDirectories(
+    root,
+    cwdRelative,
+    expected,
+    sessionScope,
+  );
   if (request['operation'] === 'read') {
     const relative = workspaceFilePath(request['path']);
     if (relative === '.') refuse('invalid_path');
     const parent = path.posix.dirname(relative);
-    await directory(rooted(parent));
+    await directory(parent);
     const filename = path.join(base, relative);
     const handle = await fs.open(
       filename,
@@ -175,7 +267,7 @@ export async function readWorkspaceFiles(
   const queue = [{ relative, depth: 0 }];
   while (queue.length) {
     const next = queue.shift()!;
-    const dir = await directory(rooted(next.relative));
+    const dir = await directory(next.relative);
     const stream = await fs.opendir(dir);
     for await (const entry of stream) {
       if (++scanned > 4096 || Date.now() > deadline || entries.length >= 50) {
@@ -218,5 +310,11 @@ export async function readWorkspaceFiles(
     }
   }
   await verify();
-  return { protocolVersion: 1, directory: relative, entries, truncated };
+  return {
+    protocolVersion: 1,
+    directory: relative,
+    entries,
+    truncated,
+    maxUploadBytes: MAX_WORKSPACE_UPLOAD_BYTES,
+  };
 }

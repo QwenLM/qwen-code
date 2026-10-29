@@ -226,6 +226,34 @@ export function useManagedSession(
           planMode: previous.planMode,
         };
       }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.worktree?.revision ?? 0) > (incoming.worktree?.revision ?? 0)
+      ) {
+        next = {
+          ...next,
+          worktree: previous.worktree,
+          workspace: next.workspace
+            ? { ...next.workspace, state: previous.workspace?.state }
+            : previous.workspace,
+          ...(previous.worktree?.state === 'ready'
+            ? {}
+            : {
+                planModeSupported: false,
+                capabilities: {
+                  ...next.capabilities,
+                  canSend: false,
+                  canRename: false,
+                  workspaceTurns: false,
+                  childAgents: false,
+                  modelChange: false,
+                  contextCompression: false,
+                  approvalModeChange: false,
+                  inputAttachments: false,
+                },
+              }),
+        };
+      }
       summaryRef.current = next;
       return next;
     },
@@ -646,7 +674,16 @@ export function useManagedSession(
               ...current,
               events: mergeManagedEvents(current.events, [event]),
             }));
-            if (event.type === 'context_changed') {
+            if (
+              event.type === 'context_changed' ||
+              (provider.recovery &&
+                [
+                  'completed',
+                  'cancelled',
+                  'failed',
+                  'runtime_released',
+                ].includes(event.type))
+            ) {
               void refreshSummary().catch((error: unknown) =>
                 failed(error, 'session'),
               );

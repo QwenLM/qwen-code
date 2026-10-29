@@ -129,9 +129,11 @@ class EventTransportBrokerGate {
     private MessageMaterializer materializer;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
+    @Qualifier("managedAgentClock")
     private Clock clock;
 
     @Autowired
@@ -719,9 +721,9 @@ class EventTransportBrokerGate {
                         "qwen.managed-agent.event-transport.topic=" + topic,
                         "qwen.managed-agent.event-transport.capability-probe-group="
                                 + probeGroup)
-                .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
-                .withBean(Clock.class, Clock::systemUTC)
-                .withBean(ObjectMapper.class, ObjectMapper::new)
+                .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> mock(JdbcTemplate.class))
+                .withBean("managedAgentClock", Clock.class, Clock::systemUTC)
+                .withBean("managedAgentObjectMapper", ObjectMapper.class, ObjectMapper::new)
                 .withBean(HarnessConnector.class,
                         () -> mock(HarnessConnector.class))
                 .withBean(MessageMaterializer.class,

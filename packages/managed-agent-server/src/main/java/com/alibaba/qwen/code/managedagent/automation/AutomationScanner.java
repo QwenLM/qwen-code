@@ -10,7 +10,9 @@ import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.Sche
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.time.ZoneId;
@@ -22,6 +24,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.FutureTask;
 import java.util.function.Supplier;
 
 /**
@@ -31,7 +36,12 @@ import java.util.function.Supplier;
  * fence, derives the slots of the window since the covered watermark on
  * the host tz database, records one decision per slot — fired, skipped or
  * missed, by the overlap and catch-up policies — and fires an occurrence as
- * one idempotent Harness operation whose claim row was durable first. A
+ * one idempotent Harness operation whose claim row was durable first. Rows
+ * are worked on a bounded pool, so one slow gated fire does not stall the
+ * other definitions' rows within a tick; each row claims itself at task
+ * start and leases from the claim time (#15418). The tick still joins its
+ * rows before returning, so one slow row delays the next tick for every
+ * definition the node works (#15667). A
  * claim whose answer was lost is re-driven by later ticks with bounded
  * backoff and, past the bound, recorded unknown — never guessed; a scanner
  * that lost its lease cannot move the ledger. See
@@ -53,6 +63,11 @@ public class AutomationScanner {
     public static final String REASON_REVISION_STALE = "revision_stale";
     public static final String REASON_DEFINITION_RETIRED = "definition_retired";
     public static final String REASON_ANSWER_UNOBTAINABLE = "answer_unobtainable";
+    /** The gate probe withheld the fire (docs/design/2026-10-22-managed-automation-gate.md). */
+    public static final String REASON_GATE_QUIET = "gate_quiet";
+    public static final String REASON_GATE_FAILED = "gate_failed";
+    public static final String REASON_GATE_BLOCKED = "gate_blocked";
+    public static final String REASON_GATE_UNKNOWN = "gate_unknown";
     /** The fire route's refusal codes a retry can never change (R3-11). */
     private static final Set<String> DEFINITIVE_REFUSALS = Set.of(
             "invalid_automation_operation", "automation_mode_disabled",
@@ -63,23 +78,33 @@ public class AutomationScanner {
     private final ManagedAgentProperties.Automation settings;
     private final Supplier<Long> clock;
     private final String owner;
+    private final Executor executor;
 
     @Autowired
     public AutomationScanner(AutomationLedgerStore store,
-            HarnessConnector harness,
-            ManagedAgentProperties properties) {
+            HarnessConnector harness, ManagedAgentProperties properties,
+            @Qualifier("automationScannerExecutor")
+                    ThreadPoolTaskExecutor pool) {
         this(store, harness, properties.getAutomation(),
-                System::currentTimeMillis, "automation-" + UUID.randomUUID());
+                System::currentTimeMillis, "automation-" + UUID.randomUUID(),
+                pool.getThreadPoolExecutor());
     }
 
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
             Supplier<Long> clock, String owner) {
+        this(store, harness, settings, clock, owner, Runnable::run);
+    }
+
+    AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
+            ManagedAgentProperties.Automation settings,
+            Supplier<Long> clock, String owner, Executor executor) {
         this.store = store;
         this.harness = harness;
         this.settings = settings;
         this.clock = clock;
         this.owner = owner;
+        this.executor = executor;
     }
 
     @Scheduled(scheduler = "managedAutomationScheduler", fixedDelayString =
@@ -98,22 +123,101 @@ public class AutomationScanner {
 
     /** One tick at {@code now}; answers how many occurrences fired. */
     public int tick(long now) {
-        int fired = 0;
+        // Rows go to a bounded pool, one task per candidate: a gated fire
+        // can hold the Harness relay for tens of seconds and a serial tick
+        // made one slow definition delay every definition on the node
+        // (#15418). Work stays per-row: a row's claim — and the lease it
+        // takes from the claim time — happens inside its own task, so a
+        // queued task never holds an expiring lease, and two tasks racing
+        // one row meet the same atomic claim guard two nodes do. The tick
+        // joins before returning, so fixedDelay still never overlaps ticks.
+        Map<FutureTask<Integer>, ScheduleRow> pending = new LinkedHashMap<>();
+        Set<String> submitted = new HashSet<>();
         for (ScheduleRow row : store.findArmed(now, SCAN_LIMIT)) {
-            fired += claimed(row, now, true);
+            pending.put(new FutureTask<>(() -> claimed(row, now, true)), row);
+            // The same NUL separator the store's composite keys use: no
+            // tenant or schedule id character set has to keep this safe.
+            submitted.add(row.tenantId() + '\0' + row.scheduleId());
         }
         // Claims whose answer was lost belong to live definitions whether
         // or not they are still armed: a disabled definition's manual run
-        // is re-driven here.
+        // is re-driven here. An armed row holding one fires its re-drive in
+        // the same task, so it appears in this loop once.
         for (ScheduleRow row : store.findFiringSchedules(now, SCAN_LIMIT)) {
-            fired += claimed(row, now, false);
+            if (submitted.add(row.tenantId() + '\0' + row.scheduleId())) {
+                pending.put(new FutureTask<>(() -> claimed(row, now, false)), row);
+            }
+        }
+        for (FutureTask<Integer> task : pending.keySet()) {
+            executor.execute(task);
+        }
+        int fired = 0;
+        Throwable failure = null;
+        int additionalFailures = 0;
+        List<String> failureSample = new ArrayList<>();
+        for (Map.Entry<FutureTask<Integer>, ScheduleRow> task : pending.entrySet()) {
+            try {
+                fired += task.getKey().get();
+            } catch (InterruptedException error) {
+                // Context close interrupted the join: any acquired claims
+                // remain durable. Stop joining instead of parking the
+                // shutdown behind the relay's timeouts.
+                Thread.currentThread().interrupt();
+                if (failure == null) {
+                    failure = error;
+                }
+                break;
+            } catch (ExecutionException error) {
+                // Join every task before reporting one failure: the rows
+                // are independent, and a tick must never return with work
+                // still owed to the caller's lease accounting.
+                if (failure == null) {
+                    failure = error.getCause();
+                } else {
+                    additionalFailures++;
+                }
+                if (failureSample.size() < 3) {
+                    ScheduleRow row = task.getValue();
+                    // The sample is the only record of an additional
+                    // failure, so a message-less one must still name
+                    // itself instead of rendering "failure=null".
+                    Throwable cause = error.getCause();
+                    String detail = cause.getMessage() != null
+                            ? cause.getMessage()
+                            : cause.getClass().getName();
+                    failureSample.add("tenant=" + row.tenantId()
+                            + " schedule=" + row.scheduleId()
+                            + " failure=" + detail);
+                }
+            }
+        }
+        if (additionalFailures > 0) {
+            LOG.warn("automation scan had additionalObservedTaskFailures={}"
+                    + " submitted={} sample={} (an interrupted join stops early;"
+                    + " the count excludes the rethrown first failure,"
+                    + " the sample includes it)",
+                    additionalFailures, pending.size(), failureSample);
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure instanceof RuntimeException error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IllegalStateException(failure);
         }
         return fired;
     }
 
     private int claimed(ScheduleRow row, long now, boolean deriveSlots) {
+        // The lease runs from the claim itself, not from the tick's start:
+        // a long tick — up to the pool's depth times the fire's hold —
+        // must never hand out an already-expired lease another node can
+        // take the moment it is written.
+        long claimNow = clock.get();
         long fence = store.claim(row.tenantId(), row.scheduleId(), owner,
-                now + settings.getLease().toMillis(), now);
+                claimNow + settings.getLease().toMillis(), claimNow);
         if (fence < 0) {
             return 0;
         }
@@ -441,9 +545,10 @@ public class AutomationScanner {
         body.put("occurrenceKey", occurrence.occurrenceKey());
         body.put("trigger", occurrence.trigger());
         body.put("firedAt", now);
+        Map<String, Object> answer;
         try {
-            harness.runAutomationOperation(row.tenantId(), row.sessionId(),
-                    body);
+            answer = harness.runAutomationOperation(row.tenantId(),
+                    row.sessionId(), body);
         } catch (DaemonHttpException error) {
             String code = errorCode(error);
             if ("automation_revision_stale".equals(code)) {
@@ -498,6 +603,43 @@ public class AutomationScanner {
                 return false;
             }
             throw error;
+        }
+        // A gated definition answers how its probe decided: only a delivery
+        // claimed a run; every other outcome settles the slot skipped under
+        // its own reason, with the detail. The definition's gate status
+        // moves once the occurrence is settled, so a settle that fails and is
+        // re-driven does not count its replayed answer twice.
+        if (answer != null && answer.get("gate") instanceof Map<?, ?> gate) {
+            String outcome = String.valueOf(gate.get("outcome"));
+            String detail = gate.get("detail") instanceof String text
+                    ? text : null;
+            if (!AutomationLedgerStore.GATE_DELIVERED.equals(outcome)) {
+                String reason = switch (outcome) {
+                    case AutomationLedgerStore.GATE_QUIET -> REASON_GATE_QUIET;
+                    case AutomationLedgerStore.GATE_UNKNOWN ->
+                        REASON_GATE_UNKNOWN;
+                    case AutomationLedgerStore.GATE_BLOCKED ->
+                        REASON_GATE_BLOCKED;
+                    default -> REASON_GATE_FAILED;
+                };
+                if (store.settleOccurrence(row.tenantId(), row.scheduleId(),
+                        occurrence.occurrenceKey(),
+                        AutomationLedgerStore.OUTCOME_SKIPPED, reason, detail,
+                        owner, fence, now)) {
+                    store.recordGateOutcome(row,
+                            occurrence.definitionRevision(), owner, fence,
+                            outcome, detail, now);
+                }
+                return false;
+            }
+            boolean fired = store.settleOccurrence(row.tenantId(),
+                    row.scheduleId(), occurrence.occurrenceKey(),
+                    AutomationLedgerStore.OUTCOME_FIRED, null, owner, fence, now);
+            if (fired) {
+                store.recordGateOutcome(row, occurrence.definitionRevision(),
+                        owner, fence, outcome, detail, now);
+            }
+            return fired;
         }
         return store.settleOccurrence(row.tenantId(), row.scheduleId(),
                 occurrence.occurrenceKey(), AutomationLedgerStore.OUTCOME_FIRED,
