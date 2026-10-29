@@ -258,6 +258,10 @@ describe('settingsWriter', () => {
       region: 'global',
       baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
     });
+    // model.baseUrl must follow the selected region, not the China default.
+    expect(settings.model).toMatchObject({
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+    });
   });
 
   type ModelSettings = {
@@ -311,9 +315,28 @@ describe('settingsWriter', () => {
   it('preserves sibling model settings when writing api-key providers', () => {
     writeCliManagedModelSettings();
 
+    // A non-default URL so the assertion below can only pass by reading the
+    // map — the fallback literal would satisfy it otherwise.
     writeModelProvidersConfig({
       apiKey: 'manual-key',
-      modelProviders: { 'gpt-4o': 'https://api.openai.com/v1' },
+      modelProviders: { 'gpt-4o': 'https://gateway.example/v1' },
+      activeModel: 'gpt-4o',
+    });
+
+    expect(readModelSettings()).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://gateway.example/v1',
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
+  it('falls back to the default baseUrl when the active model is absent from the map', () => {
+    writeCliManagedModelSettings();
+
+    writeModelProvidersConfig({
+      apiKey: 'manual-key',
+      modelProviders: { 'qwen3.5-plus': 'https://dashscope.example/v1' },
       activeModel: 'gpt-4o',
     });
 
