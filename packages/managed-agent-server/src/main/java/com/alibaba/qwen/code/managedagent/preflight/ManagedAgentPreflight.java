@@ -11,10 +11,13 @@ import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
+import org.flywaydb.core.api.FlywayException;
+import org.flywaydb.core.api.MigrationVersion;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
@@ -1477,19 +1480,7 @@ public final class ManagedAgentPreflight {
                                 + "performance_schema.user_variables_by_thread"
                                 + " to the datasource user");
             }
-            String schema = schemaVersion(connection);
-            String expected = expectedSchemaVersion();
-            if (expected != null && schema != null
-                    && !expected.equals(schema)) {
-                return new Check("database", Status.FAIL,
-                        "schema=" + schema + " but the manifest expects "
-                                + expected,
-                        "install the distribution that matches the database");
-            }
-            return new Check("database", Status.PASS,
-                    "schema=" + (schema == null ? "not migrated yet" : schema)
-                            + "; performance_schema grant ok",
-                    null);
+            return schemaCheck(connection, expectedSchemaVersion());
         } catch (SQLException error) {
             return new Check("database", Status.FAIL,
                     url + ": " + error.getMessage(),
@@ -1601,6 +1592,64 @@ public final class ManagedAgentPreflight {
                                 + "performance_schema.user_variables_by_thread")) {
             result.next();
         }
+    }
+
+    interface SchemaValidation {
+        void run() throws SQLException;
+    }
+
+    // An older schema is what an upgrade looks like until its first start,
+    // which migrates it forward; only a newer one cannot be served. A schema at
+    // this release's version is held to the same validation the server runs
+    // at startup: until the first formal release, a release may change its
+    // baseline in place.
+    static Check schemaCheck(String schema, String expected,
+            SchemaValidation validation) {
+        if (expected != null && schema != null && !expected.equals(schema)) {
+            int order;
+            try {
+                order = MigrationVersion.fromVersion(schema)
+                        .compareTo(MigrationVersion.fromVersion(expected));
+            } catch (FlywayException error) {
+                order = 1;
+            }
+            if (order > 0) {
+                return new Check("database", Status.FAIL,
+                        "schema=" + schema + " but the manifest expects "
+                                + expected,
+                        "install the distribution that matches the database;"
+                                + " a database downgrade is unsupported");
+            }
+            if (order < 0) {
+                return new Check("database", Status.WARN,
+                        "schema=" + schema + "; the first start migrates it to "
+                                + expected + ", which only a database backup"
+                                + " undoes",
+                        "back up the database before starting this"
+                                + " distribution");
+            }
+        }
+        if (schema != null) {
+            try {
+                validation.run();
+            } catch (SQLException error) {
+                return new Check("database", Status.FAIL,
+                        "schema=" + schema + " does not match this"
+                                + " distribution: " + error.getMessage(),
+                        "start this distribution on a new, empty database, or"
+                                + " keep the release that created this one");
+            }
+        }
+        return new Check("database", Status.PASS,
+                "schema=" + (schema == null ? "not migrated yet" : schema)
+                        + "; performance_schema grant ok",
+                null);
+    }
+
+    /** The database row for a reachable database: its schema, held to the server's validation. */
+    static Check schemaCheck(Connection connection, String expected) {
+        return schemaCheck(schemaVersion(connection), expected,
+                () -> ManagedSchema.validate(connection));
     }
 
     private static String schemaVersion(Connection connection) {
@@ -1765,7 +1814,7 @@ public final class ManagedAgentPreflight {
                 : line;
     }
 
-    private static String rootMessage(Throwable error) {
+    static String rootMessage(Throwable error) {
         Throwable current = error;
         while (current.getCause() != null) {
             current = current.getCause();

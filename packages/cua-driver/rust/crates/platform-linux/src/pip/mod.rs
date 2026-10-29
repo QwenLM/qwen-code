@@ -1,12 +1,9 @@
-use pip_preview::{PipBackend, PipBackendFactory, PipConfig};
+//! Native window previews are currently unavailable on Linux.
 
-pub struct LinuxPipBackendFactory;
-
-impl PipBackendFactory for LinuxPipBackendFactory {
-    fn start(&self, _cfg: &PipConfig) -> anyhow::Result<Box<dyn PipBackend>> {
-        Err(anyhow::anyhow!(
-            "PiP preview is not yet implemented on Linux — track \
-             trycua/cua follow-up issue for status"
-        ))
-    }
+pub fn initialize(config: &pip_preview::PipConfig) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !config.enabled,
+        "Window previews are not supported on Linux."
+    );
+    Ok(())
 }

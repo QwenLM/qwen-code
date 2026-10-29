@@ -28,7 +28,7 @@ import { Spinner } from '../ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 type InstallSource = 'github' | 'folder' | 'zip';
-const MAX_SKILL_ZIP_BYTES = 6 * 1024 * 1024;
+const MAX_SKILL_ZIP_BYTES = 7_864_071;
 
 function installErrorMessage(
   error: unknown,
@@ -71,7 +71,9 @@ function installErrorMessage(
   if (code === 'invalid_skill_package')
     return withDetail(t('skills.install.error.invalidPackage'));
   if (code === 'skill_package_too_large')
-    return withDetail(t('skills.install.error.zipTooLarge'));
+    return withDetail(t('skills.install.error.packageTooLarge'));
+  if (code === 'skill_too_many_files')
+    return withDetail(t('skills.install.error.tooManyFiles'));
   if (code === 'invalid_skill_folder')
     return withDetail(t('skills.install.error.invalidFolder'));
   if (code === 'github_api_failed' || code === 'github_skill_download_failed')

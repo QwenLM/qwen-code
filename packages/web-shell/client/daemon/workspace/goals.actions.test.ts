@@ -7,9 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
-// `listGoals`/`clearGoal` use raw global fetch (like the scheduled-task
-// methods), so stub fetch and assert path, method, auth header, response
-// normalization and error handling.
+// Stub the native HTTP implementation and verify route, authentication,
+// response normalization and error handling.
 function makeActions(token?: string) {
   return createDaemonWorkspaceActions({
     getClient: () => ({}) as never,
@@ -42,8 +41,7 @@ describe('goals workspace actions', () => {
   });
 
   const initOf = (call: unknown[]) => call[1] as RequestInit;
-  const headersOf = (init: RequestInit) =>
-    (init.headers ?? {}) as Record<string, string>;
+  const headersOf = (init: RequestInit) => new Headers(init.headers);
 
   describe('listGoals', () => {
     it('GETs /goals and returns the goals with the dropped count', async () => {
@@ -59,7 +57,7 @@ describe('goals workspace actions', () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('/goals');
       expect(initOf(fetchMock.mock.calls[0]).method ?? 'GET').toBe('GET');
-      expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+      expect(headersOf(init).get('authorization')).toBe('Bearer tok');
     });
 
     it('drops legacy rows without snapshots and counts them', async () => {
@@ -121,7 +119,7 @@ describe('goals workspace actions', () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('/session/a%2Fb%20c/goal/clear');
       expect(initOf(fetchMock.mock.calls[0]).method).toBe('POST');
-      expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+      expect(headersOf(init).get('authorization')).toBe('Bearer tok');
     });
 
     it('reuses the same daemon route a `/goal clear` in chat takes', async () => {
@@ -155,8 +153,8 @@ describe('goals workspace actions', () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('/session/a%2Fb%20c/goal');
       expect(initOf(fetchMock.mock.calls[0]).method).toBe('POST');
-      expect(headersOf(init)['Authorization']).toBe('Bearer tok');
-      expect(headersOf(init)['Content-Type']).toBe('application/json');
+      expect(headersOf(init).get('authorization')).toBe('Bearer tok');
+      expect(headersOf(init).get('content-type')).toBe('application/json');
       expect(initOf(fetchMock.mock.calls[0]).body).toBe(
         JSON.stringify(request),
       );

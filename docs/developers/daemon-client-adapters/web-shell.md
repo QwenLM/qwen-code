@@ -6,6 +6,37 @@ Web chat and web terminal clients should consume `qwen serve` through the
 daemon HTTP/SSE APIs and render a client-side transcript. Native local TUI,
 channel, and IDE integrations keep their existing default paths for now.
 
+## Interface terminology
+
+This terminology update covers the sidebar workspace heading and workspace
+creation/management labels, ordinary session-creation actions (including the
+workspace overview and shared Managed workspace row action), the Recent heading,
+and the workspace Memory scope. On these surfaces, the labels use
+**Workspaces / 工作区**, **New session / 新建会话**, and **Recent / 最近**;
+a single directory-backed entry uses **Workspace / 工作区**. The Memory scope
+uses **Workspace / 工作区级**, retaining the Chinese scope-level suffix.
+
+This is not a product-wide terminology migration. Existing Managed-agent page
+copy and registration-dialog copy (including 工作空间), the session-source
+**Tasks / 任务** tab, workspace execution hints, offline-host hints, and other
+session help text retain their existing wording. Agent, Skills, Workflow, MCP,
+and approval scope labels are outside this update. Scheduled tasks, todo items,
+agent/tool executions, external services' projects, and Git worktrees retain
+their domain meanings. The **No-workspace sessions / 无工作区会话** group
+retains its name and placement; its naming and hierarchy are separate follow-up
+work.
+
+Existing translation keys, SDK/API fields, stored identifiers, configuration
+keys, and runtime logic are unchanged. Label-derived DOM values do change,
+including dialog `aria-label`, `data-web-shell-dialog-title`, and button
+accessible names. Automation matching the old text must update its selectors;
+for example, the dialog title is now **Add workspace**, not **Add Workspace**.
+The sidebar trigger, dialog heading, and non-browse submit button all use
+**Add workspace**; scope text-based dialog selectors to
+`[data-web-shell-dialog]` to distinguish them from the background trigger.
+The Recent heading and its region name continue to share the same translation
+key; a separate descriptive region label is outside this copy-only update.
+
 ## Shared UI Contract
 
 Use the TypeScript SDK daemon UI exports as the common boundary:

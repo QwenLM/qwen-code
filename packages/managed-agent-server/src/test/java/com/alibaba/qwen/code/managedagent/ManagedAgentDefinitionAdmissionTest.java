@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -69,7 +70,7 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private ObjectMapper mapper;
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired
     private ManagedAgentStore store;
     @Autowired
@@ -77,6 +78,7 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private ManagedAgentDefinitionStore definitions;
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Test

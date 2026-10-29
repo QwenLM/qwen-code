@@ -2,6 +2,8 @@
 
 [English](2026-10-20-sdk-java-fair-lock-queue.md) | [简体中文](2026-10-20-sdk-java-fair-lock-queue.zh-CN.md)
 
+Database integration now runs on MySQL only. References below to the former MariaDB integration site retain historical measurements; its unchanged lock, cache write-back and budget rules apply to the retained MySQL job. See the [current database verification scope](managed-runtime-broker-jdbc.md#database-verification-scope).
+
 ## Problem
 
 `.github/workflows/sdk-java.yml` serializes every self-hosted Maven step on one

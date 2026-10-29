@@ -1,3 +1,6 @@
+import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
+import { useDaemonAvailability } from './daemon/availability-context.js';
+import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
   beginLocalCommand,
   finishLocalCommand,
@@ -547,6 +550,7 @@ import {
 import {
   WebShellCustomizationProvider,
   type WebShellCustomization,
+  type WebShellWorkspaceDirectoryPicker,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -1304,9 +1308,9 @@ export interface WebShellSidebarOptions {
   showLive?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
-  /** Customize the primary navigation area (new task button, custom entries). */
+  /** Customize the primary navigation area (new session button, custom entries). */
   primaryNav?: WebShellSidebarPrimaryNavOptions;
-  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  /** Whether to hide the "Workspaces" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
@@ -1477,6 +1481,8 @@ export interface WebShellProps {
   ) => void;
   /** Open a workspace file in the embedding host instead of WebShell preview. */
   onWorkspaceFileOpen?: (path: string) => void;
+  /** Select a directory on the connected daemon. Overrides native picking without registering or trusting the path. */
+  onPickWorkspaceDirectory?: WebShellWorkspaceDirectoryPicker;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
   /** Open context usage details in the host instead of the built-in panel. */
@@ -2833,11 +2839,12 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 
 function serializeModelSwitchSummary(
   summary: ModelSwitchSummary,
+  displayName: string,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   return t('model.usingModel', {
     isRuntime: summary.isRuntime ? 1 : 0,
-    modelId: summary.modelId,
+    modelId: displayName,
   });
 }
 
@@ -3476,6 +3483,7 @@ export function App({
   onRightPanelOpen,
   onFileReviewOpen,
   onWorkspaceFileOpen,
+  onPickWorkspaceDirectory,
   onInsightReportOpen,
   onContextUsageOpen,
   messageTurnOutputs,
@@ -3539,6 +3547,8 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [archivedSessionsTarget, setArchivedSessionsTarget] =
+    useState<HTMLElement | null>(null);
   const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
   const [managedArchivedStatus, setManagedArchivedStatus] = useState({
@@ -4018,6 +4028,9 @@ export function App({
       ).origin,
     [workspace.baseUrl],
   );
+  const daemonAvailable = useDaemonAvailability() === 'available';
+  const daemonAvailableRef = useRef(daemonAvailable);
+  daemonAvailableRef.current = daemonAvailable;
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -4324,6 +4337,17 @@ export function App({
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
+  const archiveManagementAvailable = Boolean(
+    sidebarOptions.enabled &&
+      (connection.capabilities?.features?.includes('session_archive') ||
+        (!lockedWorkspaceCwd &&
+          workspace.capabilities?.features?.includes(
+            STANDALONE_SESSIONS_CAPABILITY,
+          )) ||
+        managedAgentProvider?.lifecycle),
+  );
+  const settingsAvailable =
+    projectFeaturesAvailable || archiveManagementAvailable;
   const externalManagedAgentAvailable = managedAgentProvider !== undefined;
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
@@ -5206,6 +5230,14 @@ export function App({
       SESSION_ATTACHMENT_LIST_FEATURE,
     ) === true;
   useEffect(() => {
+    if (!daemonAvailable) {
+      if (logicalSessionKey) {
+        attachmentRetryCountRef.current.delete(logicalSessionKey);
+      }
+      setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
+      return;
+    }
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
@@ -5322,6 +5354,7 @@ export function App({
     connection.loadingTranscript,
     connection.status,
     attachmentRefreshNonce,
+    daemonAvailable,
     environmentPanelOpen,
     logicalSessionKey,
     transcriptRevision,
@@ -8400,6 +8433,7 @@ export function App({
     connection.capabilities?.features.includes(SESSION_AGENTS_FEATURE) === true;
   useEffect(() => {
     if (
+      !daemonAvailable ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
       !connection.sessionId ||
@@ -8439,7 +8473,9 @@ export function App({
           timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
         }
       } catch (error) {
-        if (disposed || !owner.isCurrent()) return;
+        if (disposed || !owner.isCurrent() || isDaemonUnavailableError(error)) {
+          return;
+        }
         if (consecutiveFailures === 0) {
           console.warn('[web-shell] failed to refresh session agents:', error);
         }
@@ -8465,6 +8501,7 @@ export function App({
     connection.sessionId,
     connection.status,
     environmentNeedsAgents,
+    daemonAvailable,
     logicalSessionKey,
     sessionAgentsSupported,
     sessionOwnerGuard,
@@ -8526,6 +8563,7 @@ export function App({
   );
   useEffect(() => {
     if (
+      !daemonAvailable ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
       !connection.sessionId ||
@@ -8567,6 +8605,7 @@ export function App({
     };
   }, [
     agentTraceActivityKey,
+    daemonAvailable,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
@@ -9181,7 +9220,7 @@ export function App({
     logicalSessionKey,
     sessionWriteBlocked,
   ]);
-  const connected = connection.status === 'connected';
+  const connected = connection.status === 'connected' && daemonAvailable;
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
@@ -10072,7 +10111,10 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+      !(
+        activePanel === 'settings' &&
+        (settingsAvailable || initialConnectionsSettingsCategory)
+      )
     ) {
       setActivePanel(null);
     }
@@ -10109,6 +10151,7 @@ export function App({
     modelDialogMode,
     projectFeaturesAvailable,
     initialConnectionsSettingsCategory,
+    settingsAvailable,
     workspaceContextActive,
   ]);
   const handleUseSkill = useCallback(
@@ -10225,7 +10268,8 @@ export function App({
         (sidebarOptions.footer !== false &&
           sidebarOptions.footer?.items?.some((item) => {
             if (item === 'collapse') return false;
-            if (item === 'settings' || item === 'sessionsOverview') {
+            if (item === 'settings') return settingsAvailable;
+            if (item === 'sessionsOverview') {
               return projectFeaturesAvailable;
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
@@ -10432,15 +10476,17 @@ export function App({
           : page;
     const allowed =
       page === 'chat' ||
-      (projectFeaturesAvailable &&
-        (page !== 'live' || liveSidebarEnabled) &&
-        (page !== 'pr-watches' || prWatchesAvailable) &&
-        (page === 'settings'
-          ? hostSidebar?.footer !== false &&
-            (hostSidebar?.footer?.items?.includes('settings') ?? true)
-          : (hostSidebar?.primaryNav?.items?.some(
-              (item) => item === primaryItem,
-            ) ?? true)));
+      (page === 'settings'
+        ? settingsAvailable &&
+          hostSidebar?.footer !== false &&
+          (hostSidebar?.footer?.items?.includes('settings') ?? true)
+        : projectFeaturesAvailable &&
+          (page !== 'live' || liveSidebarEnabled) &&
+          (page !== 'pr-watches' || prWatchesAvailable) &&
+          (hostSidebar?.primaryNav?.items?.some(
+            (item) => item === primaryItem,
+          ) ??
+            true));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
     navigationAppliedRef.current = navigation.revision;
     navigationSettledRef.current = false;
@@ -10469,6 +10515,7 @@ export function App({
   }, [
     navigation,
     projectFeaturesAvailable,
+    settingsAvailable,
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
@@ -12823,6 +12870,7 @@ export function App({
         : undefined,
     connected,
     writeBlocked:
+      !daemonAvailable ||
       sessionWriteBlocked ||
       standaloneWriterBlocked ||
       connection.runtimeStopped,
@@ -13099,6 +13147,14 @@ export function App({
           previous.includes(retry) ? previous : [...previous, retry],
         );
       }
+      if (
+        notice.category === 'connection' &&
+        notice.operation === 'stream' &&
+        !daemonAvailable
+      ) {
+        dismissNotice(notice.id);
+        continue;
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -13111,7 +13167,7 @@ export function App({
       }
       dismissNotice(notice.id);
     }
-  }, [dismissNotice, notices, pushToast, t]);
+  }, [dismissNotice, notices, pushToast, t, daemonAvailable]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -13516,6 +13572,7 @@ export function App({
     ),
     activePanel === 'live' ||
       (activePanel === 'settings' && !liveSidebarEnabled),
+    t,
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
@@ -15715,6 +15772,32 @@ export function App({
   const workspaceAddLocationIsConnected =
     workspaceAddSelectedLocation ===
     (workspace.baseUrl || window.location.origin);
+  const workspacePickerTarget = useMemo(
+    () => ({
+      client: workspace.client,
+      baseUrl: workspace.baseUrl,
+      status: workspace.status,
+    }),
+    [workspace.client, workspace.baseUrl, workspace.status],
+  );
+  let workspaceDirectoryPicker: WebShellWorkspaceDirectoryPicker | undefined;
+  if (workspaceAddLocationIsConnected) {
+    if (onPickWorkspaceDirectory) {
+      if (workspace.status === 'connected') {
+        workspaceDirectoryPicker = onPickWorkspaceDirectory;
+      }
+    } else if (
+      nativeDirectoryPickerSupported &&
+      (!workspace.baseUrl ||
+        new URL(workspace.baseUrl, window.location.origin).origin ===
+          window.location.origin)
+    ) {
+      workspaceDirectoryPicker = async () => {
+        const result = await workspaceActions.pickWorkspaceDirectory();
+        return result.selected ? result.path : undefined;
+      };
+    }
+  }
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
     setWorkspaceAddLocation(origin);
     return true;
@@ -17921,6 +18004,7 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        if (!daemonAvailableRef.current) return false;
         const admissionAttachment = {
           current: sessionOwnerGuard.capture(),
         };
@@ -19153,6 +19237,10 @@ export function App({
             inputAnnotations: metadata?.inputAnnotations,
           },
         );
+      } else if (!daemonAvailableRef.current) {
+        // Local slash commands above stay reachable during an outage; only
+        // network submissions are gated.
+        return false;
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
@@ -20048,11 +20136,16 @@ export function App({
         .then((result) => {
           if (!owner.isCurrent()) return;
           const summary = getModelSwitchSummary(result);
-          setPendingModel(summary?.modelId ?? modelId);
+          setPendingModel(modelId);
           if (summary) {
+            const displayName = getModelDisplayName(
+              connectionRef.current.models?.find(
+                (model) => model.id === modelId,
+              )?.label || summary.modelId,
+            );
             store.dispatch({
               type: 'debug',
-              text: serializeModelSwitchSummary(summary, t),
+              text: serializeModelSwitchSummary(summary, displayName, t),
               source: 'model_switch_summary',
               data: summary,
             });
@@ -20713,6 +20806,7 @@ export function App({
             workspace.baseUrl,
             workspace.token,
             legacyWorkspaceContextCwd,
+            workspace.client,
           )
         : undefined,
     [
@@ -20720,6 +20814,7 @@ export function App({
       legacyWorkspaceContextCwd,
       workspace.baseUrl,
       workspace.token,
+      workspace.client,
     ],
   );
   // The session an @-mention goes to, with the workspace it lives in: a new
@@ -20826,6 +20921,7 @@ export function App({
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,
+    client: workspace.client,
     sessionApi: sessionAgentsApi,
     ensureSession: ensureAgentMentionSession,
     onSubmit: handleEditorSubmit,
@@ -20975,7 +21071,7 @@ export function App({
       gitStatusWorkspaceCwdRef.current = gitStatusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
-    if (!workspaceGitStatusEnabled) return;
+    if (!workspaceGitStatusEnabled || !daemonAvailable) return;
     let cancelled = false;
     const fetchStatus = () => {
       const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
@@ -20993,8 +21089,10 @@ export function App({
             );
           }
         })
-        .catch(() => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        .catch((err) => {
+          if (!cancelled && !isDaemonUnavailableError(err)) {
+            setSelectedWorkspaceGitStatus(undefined);
+          }
         });
       // Fresh path: resolves when the daemon's recomputation lands, so the
       // enriched counters fill in without depending on SSE — the
@@ -21014,7 +21112,9 @@ export function App({
             }
           })
           .catch((err) => {
-            console.warn('[web-shell] git status fresh path failed:', err);
+            if (!cancelled && !isDaemonUnavailableError(err)) {
+              console.warn('[web-shell] git status fresh path failed:', err);
+            }
           });
       }
     };
@@ -21039,6 +21139,7 @@ export function App({
     connection.gitBranch,
     connection.sessionId,
     workspaceGitStatusEnabled,
+    daemonAvailable,
     isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
@@ -22009,19 +22110,9 @@ export function App({
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
                 gitClone={gitCloneControls}
-                onPick={
-                  workspaceAddLocationIsConnected &&
-                  nativeDirectoryPickerSupported &&
-                  (!workspace.baseUrl ||
-                    new URL(workspace.baseUrl, window.location.origin)
-                      .origin === window.location.origin)
-                    ? async () => {
-                        const result =
-                          await workspaceActions.pickWorkspaceDirectory();
-                        return result.selected ? result.path : undefined;
-                      }
-                    : undefined
-                }
+                onPick={workspaceDirectoryPicker}
+                pickerTarget={workspacePickerTarget}
+                pickerUsesHostUi={Boolean(onPickWorkspaceDirectory)}
                 persistenceSupported={
                   workspaceAddLocationIsConnected &&
                   persistentWorkspaceRegistrationSupported
@@ -22205,6 +22296,7 @@ export function App({
                     closeMobileDrawer();
                     openPanel('sessions');
                   }}
+                  canOpenSettings={settingsAvailable}
                   canOpenSessionsOverview={projectFeaturesAvailable}
                   onOpenSplitView={() => {
                     closeMobileDrawer();
@@ -22253,6 +22345,7 @@ export function App({
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
+                  archivedSessionsTarget={archivedSessionsTarget}
                   managedArchivedSessions={
                     managedAgentProvider?.lifecycle
                       ? {
@@ -22603,6 +22696,11 @@ export function App({
                     )}
                 </div>
               )}
+              {!artifactPanelFullscreen &&
+                (managedMode ||
+                  !(artifactPanelOpen && useFloatingArtifactPanel)) && (
+                  <DaemonConnectionBanner />
+                )}
               <div
                 ref={contextBodyRef}
                 data-testid="context-body"
@@ -22661,7 +22759,8 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable || activePanel === 'status' ||
+                  (activePanel === 'settings' && settingsAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -22824,12 +22923,17 @@ export function App({
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
+                        archivedSessions={
+                          archiveManagementAvailable ? (
+                            <div ref={setArchivedSessionsTarget} data-web-shell-archived-sessions />
+                          ) : undefined
+                        }
                         workspaceDirectoriesSection={
                           workspaceDirectoriesSupported ? (
                             <WorkspaceDirectoriesSection />
                           ) : undefined
                         }
-                        modelManagementSectionProps={{
+                        modelManagementSectionProps={projectFeaturesAvailable ? {
                           ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -22857,7 +22961,7 @@ export function App({
                               'builtin:model-management';
                             setShowAuthDialog(true);
                           },
-                        }}
+                        } : undefined}
                         onSubDialog={(key, scope) => {
                           if (!isSettingVisible(key, settingsPresentation)) return;
                           settingsDialogKeyRef.current = key;

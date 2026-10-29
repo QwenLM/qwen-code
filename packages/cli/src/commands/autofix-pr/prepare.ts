@@ -10,7 +10,7 @@
 // resumes without losing its cursor or work in progress.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { realpathNearestExisting } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { isWithinRoot } from '../../config/path-comparison.js';
@@ -34,12 +34,17 @@ import {
   historyPath,
   isBranchName,
   isCommandSafeName,
+  cloneWorktreeRoots,
+  findWatchRoot,
+  vouchedScanRoots,
   readHistory,
   readState,
   repoRoot,
+  watchRoot,
   requireState,
   sameRepository,
   withWatchLock,
+  writeAnchor,
   writeState,
   type AutofixPrHistory,
   type AutofixPrState,
@@ -409,13 +414,99 @@ function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
   );
 }
 
+/**
+ * Reconcile a PR's history across the clone on a fresh prepare (a new watch or
+ * a relocation). Several worktrees may hold a history — one per hop, including
+ * the destination's own when a watch returns to a root it left — so the settled
+ * lists (handled comments, posted replies, spent checks/reruns) are unioned
+ * across every copy: a first-match would import a stale copy and re-answer what
+ * a later hop handled, and skipping the destination's copy would lose what a
+ * later hop settled on a return. The pending lists (holds, deferred runs,
+ * announced posts) are settlement state, not a union: they come from the most
+ * recently written copy, and a hold whose floor was already spent is dropped,
+ * so a relocation never resurrects a hold a later watch spent (`keepHistory`
+ * avoids merging these back for the same reason). Only JSON metadata is read;
+ * no git command runs in a discovered worktree.
+ */
+function reconcileHistory(
+  prNumber: number,
+  repository: { host: string; owner: string; repo: string },
+  local: AutofixPrHistory | null,
+  localRoot: string,
+): AutofixPrHistory | null {
+  const union = (a: string[] = [], b: string[] = []) => [
+    ...new Set([...a, ...b]),
+  ];
+  const copies: Array<{ history: AutofixPrHistory; mtimeMs: number }> = [];
+  const consider = (h: AutofixPrHistory | null, path: string) => {
+    if (!h || !sameRepository(h, repository)) return;
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      // An unreadable mtime only loses the recency tie-break.
+    }
+    copies.push({ history: h, mtimeMs });
+  };
+  consider(local, historyPath(autofixPrPaths(localRoot, prNumber), repository));
+  const exclude = realpathNearestExisting(localRoot);
+  for (const root of vouchedScanRoots(cloneWorktreeRoots())) {
+    if (realpathNearestExisting(root) === exclude) continue;
+    const path = historyPath(autofixPrPaths(root, prNumber), repository);
+    let h: AutofixPrHistory | null = null;
+    try {
+      h = readHistory(path);
+    } catch {
+      continue;
+    }
+    consider(h, path);
+  }
+  if (copies.length === 0) return null;
+  let merged: AutofixPrHistory = { ...copies[0]!.history };
+  for (const { history } of copies.slice(1)) {
+    merged = {
+      ...merged,
+      handledCommentIds: union(
+        merged.handledCommentIds,
+        history.handledCommentIds,
+      ),
+      postedCommentIds: union(
+        merged.postedCommentIds,
+        history.postedCommentIds,
+      ),
+      handledChecks: union(merged.handledChecks, history.handledChecks),
+      rerunChecks: union(merged.rerunChecks, history.rerunChecks),
+    };
+  }
+  const newest = copies.reduce((a, b) =>
+    b.mtimeMs > a.mtimeMs ? b : a,
+  ).history;
+  const settledFloors = new Set(merged.rerunChecks ?? []);
+  return {
+    ...merged,
+    // The conflict marker is a scalar settlement, not an accumulating list:
+    // the most recent copy wins, so a stale main-root marker cannot override a
+    // newer linked-root settlement (which would re-fix a conflict already left
+    // to a human).
+    handledConflictSha: newest.handledConflictSha ?? null,
+    heldChecks: (newest.heldChecks ?? []).filter(
+      (hold) => !settledFloors.has(hold.replace(/^\d+:/, '')),
+    ),
+    deferredRuns: newest.deferredRuns ?? [],
+    pendingPosts: newest.pendingPosts ?? [],
+  };
+}
+
 export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
-  const root = repoRoot();
+  // Resume the watch wherever the clone holds it; a fresh one roots at the
+  // session's own worktree. assertSessionCanRunWorktree below still refuses a
+  // resolved worktree outside the session's working directory.
+  const root = findWatchRoot(args.pr) ?? watchRoot();
   const paths = autofixPrPaths(root, args.pr);
 
   // A resume hands back the same worktree, so both refusals come before the
@@ -514,6 +605,9 @@ export function runPrepare(args: PrepareArgs): void {
           authorCanPush: canPush,
           ...remotes,
         };
+        // Re-confirm the anchor from the current cwd; this also re-establishes
+        // it under a new main after a clone move (`git worktree repair`).
+        writeAnchor(current, current.prNumber, repoRoot());
         if (JSON.stringify(next) !== JSON.stringify(current)) {
           writeState(paths.statePath, next);
         }
@@ -662,6 +756,18 @@ export function runPrepare(args: PrepareArgs): void {
     if (history && !sameRepository(history, { host, owner, repo: repoName })) {
       history = null;
     }
+    // A fresh prepare (a new watch or a relocation) reconciles the PR's history
+    // across the clone, including the destination's own copy, so neither a
+    // first move nor a return hop forgets what an earlier watch handled or
+    // settled. A resume (`existing`) keeps the running watch's state as it is.
+    if (!existing) {
+      history = reconcileHistory(
+        args.pr,
+        { host, owner, repo: repoName },
+        history,
+        root,
+      );
+    }
     const state: AutofixPrState = {
       version: 1,
       sessionId: currentSessionId(),
@@ -714,6 +820,9 @@ export function runPrepare(args: PrepareArgs): void {
           }
         : {}),
     };
+    // Record the clone this watch is confirmed against, in the anchor store
+    // outside the workspace (defense-in-depth; see `anchorStoreRoot`).
+    writeAnchor({ host, owner, repo: repoName }, args.pr, repoRoot());
     writeState(paths.statePath, state);
     return state;
   });

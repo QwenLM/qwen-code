@@ -1,3 +1,10 @@
+# 0.27.0 (2026-10-26)
+
+- Enable the native agent cursor for same-process Node SDK and main-thread MCP hosts by default.
+- Add local macOS live previews for recently authorized windows, with session cursor mapping and nonactivating controls.
+- Keep preview sampling and native UI cleanup scoped to the owning runtime and session.
+- Present previews as draggable, borderless card stacks with hover controls and animated card switching.
+
 # 0.26.0 (2026-10-16)
 
 Qwen Computer Use release; no longer follows the upstream version number. The SDK, native payload, browser SDK and Node REPL use this same version.

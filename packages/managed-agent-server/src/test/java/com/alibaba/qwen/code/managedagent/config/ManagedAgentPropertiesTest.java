@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
 import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HostedCleanupRetryCoordinator;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
 import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
@@ -469,8 +470,8 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void theThreeScanDelaySchedulesShareOneFallback() throws java.io.IOException {
-        // The Dispatch comment claims the three sites read the identical
+    void theFourScanDelaySchedulesShareOneFallback() throws java.io.IOException {
+        // The Dispatch comment claims the four sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
         // true when one fallback is retuned without the others. The unit
         // is half of the claim: @Scheduled reads a bare number as
@@ -487,7 +488,8 @@ class ManagedAgentPropertiesTest {
         assertThat(applicationYmlValues()).containsEntry(
                 "qwen.managed-agent.dispatch.scan-delay", "1s");
         for (Class<?> coordinator : List.of(ActionResponseCoordinator.class,
-                HarnessCoordinator.class, SessionLifecycleCoordinator.class)) {
+                HarnessCoordinator.class, SessionLifecycleCoordinator.class,
+                HostedCleanupRetryCoordinator.class)) {
             assertThat(schedulesOn(coordinator, "dispatch.scan-delay"))
                     .as(coordinator.getSimpleName())
                     .hasSize(1)
@@ -545,6 +547,7 @@ class ManagedAgentPropertiesTest {
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
                 "runtime-broker.retention.scan-delay",
+                "session-worktree.scan-delay",
                 "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {

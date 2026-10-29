@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef } from 'react';
 import { fileReferenceInsertText } from '../../hooks/useAtMentionSources';
 import type { FileUploadClient } from '../../hooks/useFileUpload';
 import type { WebShellComposerTag } from '../../customization';
-import type { ManagedAgentProvider } from './managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedWorkspaceFileLocator,
+} from './managed-agent-provider';
 
 export interface ManagedUploadReference {
   version: 1;
@@ -11,13 +14,11 @@ export interface ManagedUploadReference {
   path: string;
 }
 
-interface UploadScope {
-  workspaceId: string;
-  cwdRelative: string;
+type UploadScope = ManagedWorkspaceFileLocator & {
   source: string;
   scopeRevision: string;
   maxUploadBytes: number;
-}
+};
 
 export function useManagedFileUpload(
   provider: ManagedAgentProvider,
@@ -27,6 +28,7 @@ export function useManagedFileUpload(
   const api = provider.workspaceFiles;
   const workspaceId = scope?.workspaceId;
   const cwdRelative = scope?.cwdRelative;
+  const sessionId = scope?.sessionId;
   const source = scope?.source;
   const scopeRevision = scope?.scopeRevision;
   const targetKey =
@@ -46,8 +48,7 @@ export function useManagedFileUpload(
   return useMemo(() => {
     if (
       !api?.upload ||
-      !workspaceId ||
-      !cwdRelative ||
+      (!sessionId && (!workspaceId || !cwdRelative)) ||
       !source ||
       !scopeRevision ||
       !targetKey ||
@@ -79,8 +80,9 @@ export function useManagedFileUpload(
         try {
           result = await api.upload!(
             {
-              workspaceId,
-              cwdRelative,
+              ...(sessionId
+                ? { sessionId }
+                : { workspaceId: workspaceId!, cwdRelative: cwdRelative! }),
               path: request.path,
               expectedScopeRevision: scopeRevision,
               uploadId,
@@ -153,6 +155,7 @@ export function useManagedFileUpload(
     clientId,
     workspaceId,
     cwdRelative,
+    sessionId,
     source,
     scopeRevision,
     maxBytes,

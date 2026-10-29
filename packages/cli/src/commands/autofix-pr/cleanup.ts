@@ -29,6 +29,8 @@ import {
   keepHistory,
   readState,
   repoRoot,
+  resolveWatchRoot,
+  trustAnchor,
   requireState,
   withWatchLock,
   writeState,
@@ -65,14 +67,16 @@ export function unsavedWork(
   paths: AutofixPrPaths,
   prHeads: string[] | null,
   liveHead: () => string | null = () => null,
+  trustRoot: string = repoRoot(),
 ): string | null {
   const hasWorktree = existsSync(paths.worktreePath);
   if (hasWorktree) {
-    // The clone's main worktree: the watch's files sit in its `.qwen/tmp`.
-    const root = dirname(dirname(dirname(paths.worktreePath)));
+    // Trust is anchored to the genuine clone, never to the watch's root
+    // worktree: a sibling checkout's `.git` can be rewritten by code that ran
+    // inside it, so it must not vouch for a watch nested in it.
     const untrusted =
-      untrustedGitfile(paths.worktreePath, root) ??
-      untrustedSubmodules(paths.worktreePath, root);
+      untrustedGitfile(paths.worktreePath, trustRoot) ??
+      untrustedSubmodules(paths.worktreePath, trustRoot);
     // Not read: git would take the config of a git directory the tree holds.
     if (untrusted !== null) return untrusted;
     // Inside a directory that is not a worktree of its own, git finds the
@@ -146,7 +150,7 @@ export function runCleanup(
   force: boolean,
   takeOver = false,
 ): void {
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   if (
     existsSync(paths.worktreePath) &&
@@ -188,6 +192,7 @@ export function runCleanup(
       paths,
       state ? [state.lastKnownHeadSha, ...state.pushedShas] : null,
       () => (state ? livePrHead(state, prNumber) : null),
+      state ? trustAnchor(state) : repoRoot(),
     );
     if (reason) {
       // The watch has ended all the same. A round of it that still runs —

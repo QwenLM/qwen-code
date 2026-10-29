@@ -138,6 +138,15 @@ public final class ChildWorktreeGit {
         return version;
     }
 
+    public byte[] sessionCommand(Path directory, Path root, List<String> arguments) {
+        Result result = run(directory, root, null, arguments);
+        if (result.exit != 0) {
+            throw new ChildWorkspaceException(ChildWorkspaceException.GIT, false,
+                    "git " + arguments.getFirst() + " failed: " + summary(result.err));
+        }
+        return result.out;
+    }
+
     private static boolean tooOld(Matcher version) {
         int major = Integer.parseInt(version.group(1));
         int minor = Integer.parseInt(version.group(2));
@@ -183,6 +192,14 @@ public final class ChildWorktreeGit {
      * the root, a non-bare and non-sparse checkout, and a safe config.
      */
     public Layout layout(Path root, String parentCwdRelative) {
+        return layout(root, parentCwdRelative, false);
+    }
+
+    public Layout sessionLayout(Path root, String cwdRelative) {
+        return layout(root, cwdRelative, true);
+    }
+
+    private Layout layout(Path root, String parentCwdRelative, boolean allowStorageRoot) {
         Path directory = root.resolve(parentCwdRelative).normalize();
         try {
             if (!directory.startsWith(root) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
@@ -199,7 +216,7 @@ public final class ChildWorktreeGit {
             throw ChildWorkspaceException.layout("The parent's working directory is not in a Git repository");
         }
         Path top = Path.of(firstLine(located.out));
-        Repository repository = open(root, root.relativize(top).toString());
+        Repository repository = open(root, root.relativize(top).toString(), allowStorageRoot);
         String offset = repository.top().relativize(directory).toString().replace('\\', '/');
         return new Layout(relative(root, repository.top()), offset.isEmpty() ? "." : offset);
     }
@@ -210,8 +227,16 @@ public final class ChildWorktreeGit {
      * repository the model may have rearranged since.
      */
     public Repository open(Path root, String repositoryRelative) {
+        return open(root, repositoryRelative, false);
+    }
+
+    public Repository sessionOpen(Path root, String repositoryRelative) {
+        return open(root, repositoryRelative, true);
+    }
+
+    private Repository open(Path root, String repositoryRelative, boolean allowStorageRoot) {
         Path top = root.resolve(repositoryRelative).normalize();
-        if (!top.startsWith(root) || top.equals(root)
+        if (!top.startsWith(root) || !allowStorageRoot && top.equals(root)
                 || top.startsWith(root.resolve(CONTAINER))) {
             throw ChildWorkspaceException.layout(
                     "The repository must lie strictly inside the storage root, outside " + CONTAINER);

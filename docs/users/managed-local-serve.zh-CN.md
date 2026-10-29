@@ -71,12 +71,12 @@ systemd，此命令不依赖它。
 浏览器地址。
 
 这一条命令同时启动普通 daemon 与 Managed Agent。同一个 WebShell 使用已有的
-统一的项目导航同时显示普通与托管工作区及其会话，托管工作区带有标识，不再提供执行方式 tab。“新建任务”跟随所选工作区或当前会话。Local 会话使用命令启动目录，Managed 会话使用应用创建的
+统一的工作区导航同时显示普通与托管工作区及其会话，托管工作区带有标识，不再提供执行方式 tab。“新建会话”跟随所选工作区或当前会话。Local 会话使用命令启动目录，Managed 会话使用应用创建的
 Workspace 或显式导入的本机项目。两者共享一个需要认证的浏览器 origin，无需再启动 daemon 命令或打开
 第二个页面。
 
 在“添加工作区”中，提交前可选择“本地（daemon）”或“托管（Managed Agent）”，
-默认跟随当前会话所属服务。工作区行与“新建任务”显示该服务，新任务继承所选
+默认跟随当前会话所属服务。工作区行与“新建会话”显示该服务，新会话继承所选
 工作区。daemon 已有的 SSH 工作区支持仍然可用；Managed SSH 登记尚未接入此
 统一弹窗。
 
@@ -110,13 +110,12 @@ qwen serve --managed --managed-data-dir /absolute/private/data --open
 
 启动通过现有幂等 Workspace API 创建应用管理的默认 Workspace 和 OWNER 授权。
 使用已有本机项目时，打开“工作区 → 选择已有目录”，浏览或输入绝对路径后添加
-文件夹。服务会自动登记项目父目录并授予 OWNER 权限，已有文件保留原处，
-新任务从所选项目启动。也可创建空 Workspace。
+文件夹。服务自动授予 OWNER 权限，已有文件保留原处，新任务从所选项目启动。新导入是共享外部目录：独立本机实例可以导入同一项目，无需移交父目录，也不替换已有全局存储标记。父目录继续作为各实例内共享的导航及 worktree 布局边界。也可创建空 Workspace。
 
 启动目录仍供 Local 会话使用，不会自动导入。Managed 本地模式继续拒绝
-`--workspace`，请从界面选择项目。`.qwen-managed-storage.json` 维护标记保留在
-Git 工作树之外，不要编辑、删除、stash 或提交。导入的项目文件位于私有 Managed
-数据目录之外，需要单独备份。
+`--workspace`，请从界面选择项目。新导入的实例私有元数据位于 `runtime/imported-projects/<storage ID>/.qwen-managed-storage.json`，应与整个 Managed 数据目录一起保留。已有导入及应用自有存储保留此前的标记契约，不要编辑、删除、stash 或提交这些标记。导入项目的文件位于私有 Managed 数据目录之外，需要单独备份。
+
+共享项目会承担与多个独立终端相同的编辑冲突，需要隔离编辑时使用独立 worktree。新共享导入不支持整存储迁移、物理恢复和独占文件历史 rewind；本实例自身 Runtime 进程的恢复仍可用。不自动转换早期导入。参见[共享项目设计](../design/2026-10-28-managed-local-shared-projects.zh-CN.md)。
 
 Local 会话历史继续使用普通 Qwen 存储，与 Managed 数据目录独立，仅备份 Managed
 目录不会包含 Local 会话历史。
@@ -148,7 +147,7 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
@@ -164,7 +163,7 @@ runtime 构建器只要求匹配的服务 JAR、Java runtime 和本 checkout 中
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -176,7 +175,7 @@ npm run package:managed-runtime -- \
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```
@@ -201,14 +200,20 @@ Qwen home 下的版本化安装。存在相邻 payload 时，它优先于 Qwen h
 `Release Managed server runtime` workflow 从已公开的 CLI release tag 构建，使用
 相同源码修订的 SDK 和服务。手动运行必须从 `main` 发起，默认是 dry-run。它验证
 CLI 和 Java 模块，构建 `central-release` profile，并将 JAR 与校验文件保留为
-workflow artifact，不修改公开仓库。
+workflow artifact，不修改公开仓库。workflow 优先选择 `-exec.jar` 构建产物，
+对旧 tag 回退到主 JAR；公开的版本化 JAR 名称保持不变。
 
 验证 dry-run 后，发行运维可通过受保护的 `production-release` environment，用
-相同 tag 和 `dry_run=false` 运行。workflow 将服务制品版本设为 CLI 版本，向
-Maven Central 发布 `com.alibaba:qwen-managed-agent-server:<cli-version>` 及源码、
-Javadoc 和签名，再将相同主 JAR 及其 `.sha256` 分发到该 GitHub Release 和现有的
-版本化 OSS 镜像。辅助运维 JAR 不附加到 Central 发布。已有产物逐字节比较，绝不
+相同 tag 和 `dry_run=false` 运行。workflow 将服务制品版本设为 CLI 版本，
+将验证后的可执行 JAR 及其 `.sha256` 分发到该 GitHub Release 和现有的版本化 OSS
+镜像，再将两个公开下载渠道的制品与暂存字节核对。已有产物逐字节比较，绝不
 用不同内容替换。公开的 CLI release 事件也会自动运行该 workflow。
+
+runtime 分发需要现有 OSS 上传凭据和 GitHub release 权限，无需 Central 发布凭据或
+GPG 私钥，不探测服务坐标在 Central 上是否存在，不向 Central 发布或等待其完成。
+Maven 仍负责构建和完整验证 SDK 与服务，正常依赖解析保持不变。
+需要签名发布 Maven 制品时，可独立使用现有 `central-release`
+profile；该操作不阻塞 runtime 交付。
 
 CLI 从 OSS/GitHub 下载，不从 Maven Central 下载，也不要求用户单独解析 SDK：
 可执行服务 JAR 包含其 Java 依赖。精确匹配 CLI release 的 runtime 产物必须已存在，

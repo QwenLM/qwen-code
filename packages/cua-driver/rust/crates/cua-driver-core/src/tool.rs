@@ -16,7 +16,7 @@ thread_local! {
 use crate::{
     pip_hook,
     protocol::{Content, ToolResult},
-    recording::{now_ms, screenshot_for, RecordingSession},
+    recording::{now_ms, RecordingSession},
     recording_tools::{
         GetRecordingStateTool, ReplayRegistrySlot, ReplayTrajectoryTool, StartRecordingTool,
         StopRecordingTool,
@@ -669,6 +669,7 @@ impl TrustedInvocationEvidence {
 /// Thread-safe collection of all registered tools.
 pub struct ToolRegistry {
     computer_use: Option<Arc<crate::computer_use::ComputerUseRuntime>>,
+    preview_enabled: bool,
     tools: HashMap<String, Box<dyn Tool>>,
     /// Ordered list of tool names for `tools/list`.
     order: Vec<String>,
@@ -741,6 +742,7 @@ impl ToolRegistry {
             }));
         Self {
             computer_use: None,
+            preview_enabled: false,
             tools: HashMap::new(),
             order: Vec::new(),
             recording,
@@ -889,6 +891,14 @@ impl ToolRegistry {
         registration: crate::session::CursorOutcomeReaderRegistration,
     ) {
         self.cursor_outcome_readers.push(registration);
+    }
+
+    pub fn set_preview_enabled(&mut self, enabled: bool) {
+        self.preview_enabled = enabled;
+    }
+
+    pub fn preview_enabled(&self) -> bool {
+        self.preview_enabled
     }
 
     pub fn retain_runtime_cleanup(&mut self, cleanup: impl FnOnce() + Send + Sync + 'static) {
@@ -1429,7 +1439,7 @@ impl ToolRegistry {
         // avoids prompting for a call the capability manifest will refuse, while
         // preserving the public arguments in the grant scope and the private
         // runtime session key in its revocation lifecycle.
-        if has_adapter("private_observation")
+        let observation_grant = if has_adapter("private_observation")
             && ((!runtime_proves_driver_owned
                 && tool
                     .protected_resource_ownership("private_observation", &public_args)
@@ -1437,7 +1447,7 @@ impl ToolRegistry {
                     != ProtectedResourceOwnership::DriverOwned)
                 || context.capability_manifest().is_some())
         {
-            if let Err(error) = self
+            match self
                 .authorize_private_observation(
                     tool.as_ref(),
                     resolved_name,
@@ -1447,9 +1457,12 @@ impl ToolRegistry {
                 )
                 .await
             {
-                return protected_consent_refusal(error);
+                Ok(grant) => grant,
+                Err(error) => return protected_consent_refusal(error),
             }
-        }
+        } else {
+            None
+        };
         if has_adapter("clipboard") {
             if let Err(error) = self
                 .authorize_clipboard(
@@ -1848,26 +1861,77 @@ impl ToolRegistry {
             );
         }
 
-        // Experimental PiP push — only when --experimental-pip is on argv
-        // (otherwise `pip_enabled()` is false and we skip the screenshot
-        // entirely to avoid wasted capture work). We push for the same set
-        // of action tools the recording pipeline cares about (non-read-only,
-        // not the recording-control meta-tools) so the live view matches
-        // what the recorder would have captured for the turn.
-        if pip_hook::pip_enabled() && should_record && !private_consent_turn {
-            let window_id = args.opt_u64("window_id");
-            let pid = args.opt_i64("pid");
-            if let Some(png_bytes) = screenshot_for(window_id, pid) {
-                let label = synthesize_action_label(name, &public_args);
-                pip_hook::push_pip_frame(pip_hook::PipHookFrame {
-                    png_bytes,
-                    action_label: label,
-                    timestamp_ms: now_ms(),
-                });
+        if self.preview_enabled && pip_hook::enabled() {
+            if let Some(target) = self
+                .preview_target(
+                    name,
+                    &args,
+                    &public_args,
+                    &result,
+                    context,
+                    observation_grant,
+                )
+                .await
+            {
+                pip_hook::observe_target(target);
             }
         }
 
         result
+    }
+
+    async fn preview_target(
+        &self,
+        name: &str,
+        args: &Value,
+        public_args: &Value,
+        result: &ToolResult,
+        context: &crate::session_authorization::EffectiveAuthorizationContext,
+        grant: Option<crate::consent::ResourceGrant>,
+    ) -> Option<pip_hook::PipTarget> {
+        let (pid, window_id) = observed_preview_window(name, args, result)?;
+        let session = args.get("_session_id").and_then(Value::as_str)?;
+        let session = session.to_owned();
+        let scope = context.runtime_scope_key();
+        let capture_args = serde_json::json!({
+            "session": session,
+            "pid": pid,
+            "window_id": window_id,
+            "include_screenshot": true,
+        });
+        let mut policy_args = public_args.clone();
+        policy_args["pid"] = pid.into();
+        policy_args["window_id"] = window_id.into();
+        policy_args["include_screenshot"] = true.into();
+        let mut resource = serde_json::json!({"kind":"window", "pid":pid, "window_id":window_id});
+        if context.capability_manifest().is_some() {
+            self.enrich_application_resource(&mut resource, i64::from(pid))
+                .await;
+        }
+        let context = context.clone();
+        let owner = session.clone();
+        let is_live = Arc::new(move || {
+            !context.is_expired()
+                && !crate::session::is_session_ended(&owner)
+                && !crate::session::is_runtime_scope_suspended(&scope)
+                && grant
+                    .as_ref()
+                    .is_none_or(crate::consent::ResourceGrant::is_current)
+                && crate::capture_scope::enforce_tool("get_window_state", &capture_args).is_ok()
+                && crate::policy::authorize_tool_call("get_window_state", &policy_args).is_ok()
+                && context.capability_manifest().is_none_or(|manifest| {
+                    manifest.check_lifetime().is_ok()
+                        && manifest
+                            .authorize_protected_resource("private_observation", &resource)
+                            .is_ok()
+                })
+        });
+        is_live().then_some(pip_hook::PipTarget {
+            session,
+            pid,
+            window_id,
+            is_live,
+        })
     }
 
     async fn authorize_private_observation(
@@ -1877,11 +1941,11 @@ impl ToolRegistry {
         args: &Value,
         context: &crate::session_authorization::EffectiveAuthorizationContext,
         lifecycle_session: Option<&str>,
-    ) -> Result<(), crate::consent::ConsentError> {
+    ) -> Result<Option<crate::consent::ResourceGrant>, crate::consent::ConsentError> {
         if context.mode() == crate::authorization::PermissionMode::Unrestricted
             && context.capability_manifest().is_none()
         {
-            return Ok(());
+            return Ok(None);
         }
         let browser_target = args.get("target_id").and_then(Value::as_str);
         let browser_tab = args.get("tab_id").and_then(Value::as_str);
@@ -1904,7 +1968,7 @@ impl ToolRegistry {
             // Whole-display scope discovery is X11-specific on Linux. It is
             // not a grant boundary in standard mode and must not turn routine
             // promptless operation into a pure-Wayland failure.
-            return Ok(());
+            return Ok(None);
         }
         let browser_scope = tool
             .protected_resource_scope("private_observation", args)
@@ -2024,8 +2088,7 @@ impl ToolRegistry {
                 Duration::from_secs(30 * 60),
                 Duration::from_secs(8 * 60 * 60),
             )
-            .await?;
-        Ok(())
+            .await
     }
 
     async fn authorize_desktop_input(
@@ -3772,6 +3835,48 @@ resources:
     }
 
     #[tokio::test]
+    async fn preview_stops_at_manifest_absolute_and_idle_expiry_without_renewal() {
+        for (expires_after, idle_timeout) in [("1s", "1s"), ("1h", "1s")] {
+            let context = bounded_context(&format!(
+                "version: 2\nmode: bounded\nexpires_after: {expires_after}\nidle_timeout: {idle_timeout}\nallow:\n  tools: [get_window_state]\nresources:\n  desktop:\n    windows:\n      - pid: 42\n        window_id: 7\n"
+            ));
+            let registry = attested_registry(
+                "get_window_state",
+                None,
+                Arc::new(AtomicUsize::new(0)),
+                false,
+            );
+            let session = context.runtime_session_key("preview-expiry");
+            let args =
+                serde_json::json!({"pid":42,"window_id":7,"session":session,"_session_id":session});
+            let public_args =
+                serde_json::json!({"pid":42,"window_id":7,"session":"preview-expiry"});
+            let result = ToolResult::text("observed")
+                .with_structured(serde_json::json!({"pid":42,"window_id":7}));
+            let target = registry
+                .preview_target(
+                    "get_window_state",
+                    &args,
+                    &public_args,
+                    &result,
+                    &context,
+                    None,
+                )
+                .await
+                .expect("initial observation permits preview");
+            assert!((target.is_live)());
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                (target.is_live)();
+            }
+            assert!(
+                !(target.is_live)(),
+                "preview must not extend {expires_after}/{idle_timeout}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn capability_manifest_typed_resources_narrow_standard_and_unrestricted() {
         for mode in [PermissionMode::Standard, PermissionMode::Unrestricted] {
             let allowed_hits = Arc::new(AtomicUsize::new(0));
@@ -5296,51 +5401,27 @@ impl Default for ToolRegistry {
     }
 }
 
-/// Build a short, human-friendly label for the PiP overlay from the
-/// tool name + raw args. Kept under ~60 chars so the macOS NSTextField
-/// has room without truncation at default geometry.
-fn synthesize_action_label(tool_name: &str, args: &Value) -> String {
-    let arg = |k: &str| -> Option<String> {
-        args.get(k).map(|v| match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        })
-    };
-    let summary = match tool_name {
-        "click" | "double_click" | "right_click" => {
-            if let Some(idx) = args.opt_u64("element_index") {
-                format!("element_index={idx}")
-            } else if let (Some(x), Some(y)) = (args.opt_f64("x"), args.opt_f64("y")) {
-                format!("({x:.0}, {y:.0})")
-            } else {
-                "".into()
-            }
-        }
-        "type_text" => {
-            let text = arg("text").unwrap_or_default();
-            let trimmed: String = text.chars().take(40).collect();
-            if text.chars().count() > 40 {
-                format!("\"{trimmed}…\"")
-            } else {
-                format!("\"{trimmed}\"")
-            }
-        }
-        "press_key" | "hotkey" => arg("key").or_else(|| arg("keys")).unwrap_or_default(),
-        "scroll" => format!(
-            "dx={} dy={}",
-            arg("dx").unwrap_or_else(|| "0".into()),
-            arg("dy").unwrap_or_else(|| "0".into())
-        ),
-        "drag" => "drag".into(),
-        "set_value" => arg("value").unwrap_or_default(),
-        "launch_app" => arg("bundle_id").or_else(|| arg("name")).unwrap_or_default(),
-        _ => String::new(),
-    };
-    if summary.is_empty() {
-        tool_name.to_owned()
-    } else {
-        format!("{tool_name}: {summary}")
+fn observed_preview_window(name: &str, args: &Value, result: &ToolResult) -> Option<(i32, u32)> {
+    if name != "get_window_state" || result.is_error == Some(true) {
+        return None;
     }
+    let observed = result.structured_content.as_ref()?;
+    let pid = i32::try_from(observed.get("pid")?.as_i64()?).ok()?;
+    let window_id = u32::try_from(observed.get("window_id")?.as_u64()?).ok()?;
+    if pid <= 0
+        || window_id == 0
+        || args
+            .get("pid")
+            .and_then(Value::as_i64)
+            .is_some_and(|requested| requested != i64::from(pid))
+        || args
+            .get("window_id")
+            .and_then(Value::as_u64)
+            .is_some_and(|requested| requested != u64::from(window_id))
+    {
+        return None;
+    }
+    Some((pid, window_id))
 }
 
 #[cfg(test)]
@@ -5350,6 +5431,56 @@ mod capability_tests {
     //! These belong in cua-driver-core because they cover the shape
     //! of the registry response — no platform code involved.
     use super::*;
+
+    #[test]
+    fn preview_uses_only_a_successfully_observed_exact_window() {
+        let result = || {
+            ToolResult::text("observed")
+                .with_structured(serde_json::json!({"pid":42,"window_id":7}))
+        };
+        assert_eq!(
+            observed_preview_window(
+                "get_window_state",
+                &serde_json::json!({"pid":42}),
+                &result()
+            ),
+            Some((42, 7))
+        );
+        for (name, args, result) in [
+            (
+                "click",
+                serde_json::json!({"pid":42,"window_id":7}),
+                result(),
+            ),
+            ("get_window_state", serde_json::json!({"pid":43}), result()),
+            (
+                "get_window_state",
+                serde_json::json!({"window_id":8}),
+                result(),
+            ),
+            (
+                "get_window_state",
+                serde_json::json!({}),
+                ToolResult::error("refused")
+                    .with_structured(serde_json::json!({"pid":42,"window_id":7})),
+            ),
+            (
+                "get_window_state",
+                serde_json::json!({}),
+                ToolResult::text("display")
+                    .with_structured(serde_json::json!({"pid":0,"window_id":0})),
+            ),
+            (
+                "get_window_state",
+                serde_json::json!({}),
+                ToolResult::text("invalid")
+                    .with_structured(serde_json::json!({"pid":42,"window_id":u64::MAX})),
+            ),
+        ] {
+            assert_eq!(observed_preview_window(name, &args, &result), None);
+        }
+        assert!(!ToolRegistry::new().preview_enabled());
+    }
 
     #[test]
     fn browser_prepare_recording_redacts_transport_identity() {
