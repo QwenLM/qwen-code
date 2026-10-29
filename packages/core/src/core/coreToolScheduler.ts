@@ -1275,13 +1275,19 @@ const createCancelledResponse = (
   // model-visible output must not orphan files already persisted to disk.
   persistedOutputFiles?: string[],
   visionBridgeNotice?: string,
+  // A producer that reported its own interrupted work by returning (the shell
+  // tool on user cancel) already described what ran before the kill. Keep that
+  // text: the cancellation notice says the call never finished, the detail says
+  // how far it got.
+  detail?: string,
 ): CoreToolCallResponseInfo => {
   const cancellationPrefix =
     getModelFacingToolName(request) === ToolNames.TOOL_CALL &&
     executionStatus === 'not_started'
       ? DEFERRED_TOOL_CALL_CANCELLATION_PREFIX
       : '';
-  const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}`;
+  const errorDetail = detail?.trim() ? `\n\n${detail}` : '';
+  const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}${errorDetail}`;
   return {
     callId: request.callId,
     responseParts: [
@@ -6646,6 +6652,11 @@ export class CoreToolScheduler {
           executionStatus,
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
+          undefined,
+          typeof toolResult.llmContent === 'string' &&
+            toolResult.interruptedBeforeCompletion
+            ? toolResult.llmContent
+            : undefined,
         );
         observeProducerOutput(cancelledResponse, true);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);

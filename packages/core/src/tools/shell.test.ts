@@ -2167,6 +2167,17 @@ describe('ShellTool', () => {
       expect(String(result.llmContent)).toContain(
         'Command was cancelled by user before it could complete.',
       );
+      // What already ran is part of the interrupted account, not a detail the
+      // cancellation may drop.
+      expect(String(result.llmContent)).toContain(
+        'Below is the output before it was cancelled:\nstart',
+      );
+    });
+
+    it('does not mark a completed command as interrupted', async () => {
+      const result = await runFg('npm test', { output: 'done', exitCode: 0 });
+
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
     });
 
     it('preserves shell wrapper environment and flags during foreground execution', async () => {
@@ -4451,6 +4462,8 @@ describe('ShellTool', () => {
           ['timed out'],
         );
         expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
+        // Neither a timeout nor a refused promote is a returned interruption.
+        expect(result.interruptedBeforeCompletion).toBeUndefined();
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
@@ -5343,6 +5356,8 @@ describe('ShellTool', () => {
         message: TIMED_OUT,
         type: ToolErrorType.EXECUTION_TIMEOUT,
       });
+      // A timeout is reported as a tool error, never as a returned interruption.
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
     });
 
     it('returns a structured timeout when the command produced no output', async () => {

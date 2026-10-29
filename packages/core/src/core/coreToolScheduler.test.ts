@@ -11245,6 +11245,31 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain(wrongNotice);
   });
 
+  // The notice says the call did not finish; the producer's own text says how
+  // far it got. Replacing the whole payload with the notice loses the partial
+  // output the model needs to decide what remains.
+  it('keeps the partial output a cancelled producer reported', async () => {
+    const { call } = await runAbortedDuringExecution(
+      {},
+      {
+        llmContent:
+          'Command was cancelled by user before it could complete. Below is the output before it was cancelled:\nstart',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+    );
+
+    const completedCall = expectSettled(call, 'cancelled', 'cancelled');
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call.',
+    );
+    expect(responseText).toContain(
+      'Below is the output before it was cancelled',
+    );
+    expect(responseText).toContain('start');
+  });
+
   // A post-execution cancellation drops the model-visible output, but the
   // references to files the tool already spilled to disk must survive —
   // otherwise nothing points at them and they are orphaned (#8180 review).
