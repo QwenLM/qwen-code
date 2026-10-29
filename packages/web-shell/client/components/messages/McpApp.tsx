@@ -2,6 +2,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppBridge,
   PostMessageTransport,
+  type McpUiStyles,
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import {
   McpAppHostContext,
@@ -129,13 +130,62 @@ export function applySandboxCspQuery(
     : sandboxUrl;
 }
 
-function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
+// Cards grow with their content up to this height, then scroll inside.
+const MAX_APP_HEIGHT = 960;
+
+// Standard MCP App style variables resolved from the Web Shell tokens the
+// card itself sees, so Apps can match the current theme instead of the
+// operating system's color scheme. Secondary text uses the token that keeps
+// readable contrast in each theme.
+function hostStyleVariables(
+  element: Element | null,
+  theme: ReturnType<typeof useTheme>,
+): Record<string, string> | undefined {
+  if (!element || typeof getComputedStyle !== 'function') return undefined;
+  const computed = getComputedStyle(element);
+  const tokens: Record<string, string> = {
+    '--color-background-primary': '--background',
+    '--color-background-secondary': '--muted',
+    '--color-background-inverse': '--primary',
+    '--color-text-primary': '--foreground',
+    '--color-text-secondary':
+      theme === 'light' ? '--secondary-foreground' : '--muted-foreground',
+    '--color-text-inverse': '--primary-foreground',
+    '--color-text-danger': '--destructive',
+    '--color-border-primary': '--border',
+    '--color-border-secondary': '--input',
+    '--color-ring-primary': '--ring',
+    '--font-sans': '--font-sans',
+    '--border-radius-md': '--radius',
+  };
+  const variables: Record<string, string> = {};
+  for (const [name, token] of Object.entries(tokens)) {
+    const value = computed.getPropertyValue(token).trim();
+    if (value) variables[name] = value;
+  }
+  return Object.keys(variables).length ? variables : undefined;
+}
+
+function mcpAppHostContext(
+  theme: ReturnType<typeof useTheme>,
+  locale: string,
+  variables?: Record<string, string>,
+) {
   return {
     theme,
+    locale,
+    // Hosts may send any subset of the standard variables.
+    ...(variables
+      ? {
+          styles: {
+            variables: variables as Partial<McpUiStyles> as McpUiStyles,
+          },
+        }
+      : {}),
     platform: 'web' as const,
     displayMode: 'inline' as const,
     availableDisplayModes: ['inline' as const],
-    containerDimensions: { maxHeight: 640 },
+    containerDimensions: { maxHeight: MAX_APP_HEIGHT },
   };
 }
 
@@ -237,7 +287,11 @@ export function McpAppRuntime({
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
+  const { language } = useI18n();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
   const mountGenerationRef = useRef(0);
   const displayRef = useRef(display);
@@ -280,7 +334,13 @@ export function McpAppRuntime({
           ...(current.csp ? { csp: current.csp } : {}),
         },
       },
-      { hostContext: mcpAppHostContext(themeRef.current) },
+      {
+        hostContext: mcpAppHostContext(
+          themeRef.current,
+          languageRef.current,
+          hostStyleVariables(cardRef.current, themeRef.current),
+        ),
+      },
     );
     bridgeRef.current = bridge;
     const appAbort = new AbortController();
@@ -421,7 +481,9 @@ export function McpAppRuntime({
         Number.isFinite(requestedHeight) &&
         (!retained || (retained.isVisible() && requestedHeight > 0))
       ) {
-        setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
+        setHeight(
+          Math.min(MAX_APP_HEIGHT, Math.max(120, Math.ceil(requestedHeight))),
+        );
       }
     };
 
@@ -478,15 +540,21 @@ export function McpAppRuntime({
   ]);
 
   useEffect(() => {
-    bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
-  }, [theme]);
+    bridgeRef.current?.setHostContext(
+      mcpAppHostContext(
+        theme,
+        language,
+        hostStyleVariables(cardRef.current, theme),
+      ),
+    );
+  }, [theme, language]);
 
   if (!display.html || !sandboxUrl) {
     return <div className={styles.fallback}>{display.fallbackText}</div>;
   }
 
   return (
-    <div className={styles.card} data-testid="mcp-app">
+    <div ref={cardRef} className={styles.card} data-testid="mcp-app">
       <div className={styles.header}>
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>

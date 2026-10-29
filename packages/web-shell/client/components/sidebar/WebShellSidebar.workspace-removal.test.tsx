@@ -7279,13 +7279,17 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(other!.disabled).toBe(false);
   });
 
-  it('puts No workspace in Projects and hides it for a locked workspace', async () => {
+  it('puts No workspace beside Projects and hides it for a locked workspace', async () => {
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
     };
     connection.capabilities = standaloneCapabilities;
     workspace.capabilities = standaloneCapabilities;
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:projects',
+      'false',
+    );
     renderSidebar({
       onLoadStandaloneSession: vi.fn(),
       onStandaloneNotice: vi.fn(),
@@ -7298,7 +7302,8 @@ describe('WebShellSidebar standalone grouping', () => {
       '[data-testid="standalone-active-group"]',
     );
     expect(group).not.toBeNull();
-    expect(group!.closest('[class*="workspaceList"]')).not.toBeNull();
+    expect(group!.closest('[class*="workspaceList"]')).toBeNull();
+    expect(group!.closest('[hidden]')).toBeNull();
     expect(listStandaloneSessionsPage).toHaveBeenCalledWith({
       archiveState: 'active',
       pageSize: 50,

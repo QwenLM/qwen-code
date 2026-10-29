@@ -10,6 +10,11 @@ import type {
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
+  ManagedWorkspaceFileQueryRequest,
+  ManagedWorkspaceFileReadRequest,
+  ManagedWorkspaceFileUploadRequest,
+} from './managed-agent-provider';
+import type {
   ManagedArtifact,
   ManagedArtifactPage,
   ManagedArtifactResponse,
@@ -233,31 +238,28 @@ export class JavaManagedAgentClient {
   }
 
   queryWorkspaceFiles(
-    request: Schemas['WebShellWorkspaceFileQueryRequest'],
+    request: ManagedWorkspaceFileQueryRequest,
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellWorkspaceFilePage']> {
     return this.post('/workspaces/files/query', request, signal);
   }
 
   readWorkspaceFile(
-    request: Schemas['WebShellWorkspaceFileReadRequest'],
+    request: ManagedWorkspaceFileReadRequest,
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
     return this.post('/workspaces/files/read', request, signal);
   }
 
   async uploadWorkspaceFile(
-    request: {
-      workspaceId: string;
-      cwdRelative: string;
-      path: string;
-      expectedScopeRevision: string;
-      uploadId: string;
-    },
+    request: ManagedWorkspaceFileUploadRequest,
     data: Blob,
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellWorkspaceFileUploadResult']> {
-    const query = new URLSearchParams(request);
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(request)) {
+      if (value !== undefined) query.set(key, value);
+    }
     const response = await this.fetchRequest(
       `/workspaces/files/upload?${query}`,
       data,
@@ -345,6 +347,39 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
+  }
+
+  worktreeOptions(
+    request: Schemas['WebShellSessionWorktreeOptionsRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreeOptions']> {
+    return this.post('/workspaces/worktrees/options', request, signal);
+  }
+
+  listSessionWorktrees(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreePage']> {
+    return this.post('/workspaces/worktrees/query', { workspaceId }, signal);
+  }
+
+  inspectSessionWorktree(
+    workspaceId: string,
+    worktreeId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreeInspection']> {
+    return this.post(
+      '/workspaces/worktrees/inspect',
+      { workspaceId, worktreeId },
+      signal,
+    );
+  }
+
+  cleanupSessionWorktree(
+    request: Schemas['WebShellSessionWorktreeCleanupRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktree']> {
+    return this.post('/workspaces/worktrees/cleanup', request, signal);
   }
 
   submitTurn(

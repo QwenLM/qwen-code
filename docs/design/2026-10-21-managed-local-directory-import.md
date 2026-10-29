@@ -51,10 +51,9 @@ A concurrent first import can fail closed while registration is pending; a
 retry may reuse the now-completed owned root after verifying the pinned
 identity. Revoked access is never restored by replay.
 
-The selected project becomes `defaultCwdRelative`. The registered parent and
-its physical-owner lease are shared, as in existing directory selection;
-selecting a child directory does not establish filesystem isolation. The marker
-stays outside Git cleanup and the project remains the initial working directory.
+The selected project becomes `defaultCwdRelative`. Within one installation, the registered parent and its catalog-local execution lease are shared, as in existing directory selection; selecting a child directory does not establish filesystem isolation. The parent remains a navigation/worktree-layout boundary, not a global claim over its contents.
+
+New imports use `imported-<receipt key>` storage IDs and private registration metadata under the Runtime state directory. They leave an existing global marker untouched and allow independent local catalogs to use the same project. Whole-storage migration, physical recovery and exclusive file-history rewind are refused for these shared imports; own-process Runtime recovery stays available. Existing `created-` receipts retain their original global marker contract and are not rewritten automatically. See the [shared-project design](2026-10-28-managed-local-shared-projects.md).
 
 ## Browser flow and contract
 
@@ -92,8 +91,7 @@ contract stays unchanged.
    File queries and an initial tool Turn use the imported root.
 3. Retry, restart, disabled future imports, second-project reuse and concurrent
    first imports preserve durable authority and idempotency.
-4. Missing/replaced directories, foreign markers, overlapping roots, private
-   state, invalid requests and revoked grants fail without creating authority.
+4. Missing/replaced directories, missing or mismatched private registration metadata, overlapping roots, private state, invalid requests and revoked grants fail without creating authority. Legacy imports continue to reject foreign global markers; new shared imports preserve them.
 5. Disabled or remotely exposed deployments cannot browse arbitrary host paths.
    Existing empty creation, authorized directory selection and SSH still work.
 6. Run focused H2/unit tests, disposable MySQL 8.4 integration tests, Maven
@@ -102,7 +100,7 @@ contract stays unchanged.
 
 ## Status and open questions
 
-Implemented. Native macOS checks cover import from an empty registry, file
+The original import implementation is complete. Its earlier native macOS checks cover import from an empty registry, file
 queries, model Read tools, active-root reuse, browser retry, and restart with
 new imports disabled. Native Linux execution was not exercised locally.
 Targeted Java/MySQL and TypeScript/browser checks are recorded separately from
@@ -114,3 +112,5 @@ The local-launcher follow-up also verifies loopback SIGNED startup, retained
 bearer/signature refusals, absolute-path browser import, an actual Read tool
 turn and restart retention on native macOS. Detailed command results and test
 artifact limitations remain in `.qwen/e2e-tests/managed-local-import.md`.
+
+The shared-project follow-up has separate local validation recorded in its [design](2026-10-28-managed-local-shared-projects.md). Earlier model, browser and restart evidence above does not establish those paths for the follow-up.

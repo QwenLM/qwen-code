@@ -11,6 +11,7 @@ import {
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
 import { useMcpAppMessages } from '../../hooks/useMcpAppMessages';
+import { I18nProvider } from '../../i18n';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -37,6 +38,7 @@ const appBridgeMocks = vi.hoisted(() => ({
     ) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
+  lastOptions: undefined as unknown,
   setHostContext: vi.fn(),
   connect: vi.fn(() => Promise.resolve()),
   close: vi.fn(() => Promise.resolve()),
@@ -56,8 +58,14 @@ vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
     sendToolInput = appBridgeMocks.sendToolInput;
     sendToolResult = appBridgeMocks.sendToolResult;
     teardownResource = appBridgeMocks.teardownResource;
-    constructor(_app: unknown, _info: unknown, capabilities?: unknown) {
+    constructor(
+      _app: unknown,
+      _info: unknown,
+      capabilities?: unknown,
+      options?: unknown,
+    ) {
       appBridgeMocks.constructed += 1;
+      appBridgeMocks.lastOptions = options;
       appBridgeMocks.last = this;
       appBridgeMocks.lastCapabilities = capabilities;
     }
@@ -128,6 +136,12 @@ function renderApp(
     },
   };
 }
+
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
 
 describe('McpApp host lifetime', () => {
   it('advertises messages only for the bound transcript session', () => {
@@ -318,7 +332,7 @@ describe('McpApp host lifetime', () => {
           />,
         ),
       );
-      expect(await pendingMessage).toEqual({ isError: true });
+      expect(await pendingMessage).toEqual(notSent('cancelled'));
       expect(appBridgeMocks.last).toBe(bridge);
       expect(appBridgeMocks.constructed).toBe(constructed);
       expect(container.querySelector('iframe')).toBe(iframe);
@@ -335,7 +349,7 @@ describe('McpApp host lifetime', () => {
       await act(async () =>
         rerender(<BoundApp clientId="client-b" enabled={false} />),
       );
-      expect(await fresh).toEqual({ isError: true });
+      expect(await fresh).toEqual(notSent('cancelled'));
       expect(submit).not.toHaveBeenCalled();
       finishTool({ content: [] });
       await pendingTool;
@@ -534,6 +548,97 @@ describe('McpApp host lifetime', () => {
     expect(appBridgeMocks.setHostContext).toHaveBeenCalledWith(
       expect.objectContaining({ theme: WebShellThemeId.Light }),
     );
+  });
+
+  it('sends the Web Shell language and pushes language changes', async () => {
+    const display = appDisplay();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (language: 'zh-CN' | 'en') => (
+      <I18nProvider language={language}>
+        <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+          <ThemeProvider value={WebShellThemeId.Dark}>
+            <McpApp display={display} />
+          </ThemeProvider>
+        </McpAppHostContext.Provider>
+      </I18nProvider>
+    );
+
+    act(() => root.render(wrap('zh-CN')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { locale: 'zh-CN' },
+    });
+
+    act(() => root.render(wrap('en')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.constructed).toBe(1);
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ locale: 'en' }),
+    );
+  });
+
+  it('passes theme-specific style variables resolved from Web Shell tokens', async () => {
+    const display = appDisplay();
+    // jsdom does not inherit custom properties, so declare them on the card.
+    const tokens = document.createElement('style');
+    tokens.textContent =
+      '[data-testid="mcp-app"] { --background: rgb(10, 10, 10); ' +
+      '--foreground: rgb(250, 250, 250); --muted-foreground: rgb(161, 161, 161); ' +
+      '--secondary-foreground: rgb(116, 116, 118); }';
+    document.head.appendChild(tokens);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (
+      theme: (typeof WebShellThemeId)[keyof typeof WebShellThemeId],
+    ) => (
+      <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+        <ThemeProvider value={theme}>
+          <McpApp display={display} />
+        </ThemeProvider>
+      </McpAppHostContext.Provider>
+    );
+
+    act(() => root.render(wrap(WebShellThemeId.Dark)));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: {
+        theme: WebShellThemeId.Dark,
+        styles: {
+          variables: expect.objectContaining({
+            '--color-background-primary': 'rgb(10, 10, 10)',
+            '--color-text-primary': 'rgb(250, 250, 250)',
+            '--color-text-secondary': 'rgb(161, 161, 161)',
+          }),
+        },
+      },
+    });
+
+    act(() => root.render(wrap(WebShellThemeId.Light)));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        theme: WebShellThemeId.Light,
+        styles: {
+          variables: expect.objectContaining({
+            '--color-text-secondary': 'rgb(116, 116, 118)',
+          }),
+        },
+      }),
+    );
+    tokens.remove();
   });
 
   it('sends the sandbox resource after AppBridge reports ready', async () => {
