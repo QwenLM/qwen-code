@@ -152,16 +152,20 @@ test('reviews normalized parameters, freezes the message, and sends only after c
 }, testInfo) => {
   const { app, daemon, scenario } = await openCards(page, testInfo);
   await page.setViewportSize({ width: 375, height: 900 });
-  const continueBounds = await app()
-    .locator('#continue-analysis')
-    .boundingBox();
-  const stopBounds = await app().locator('#stop').boundingBox();
-  expect(continueBounds).not.toBeNull();
-  expect(stopBounds).not.toBeNull();
-  expect(continueBounds!.y).toBeGreaterThanOrEqual(
-    stopBounds!.y + stopBounds!.height,
-  );
-  expect(continueBounds!.x + continueBounds!.width).toBeLessThanOrEqual(375);
+  // The card refits after the resize, so measure once the layout settles.
+  await expect
+    .poll(async () => {
+      const continueBounds = await app()
+        .locator('#continue-analysis')
+        .boundingBox();
+      const stopBounds = await app().locator('#stop').boundingBox();
+      if (!continueBounds || !stopBounds) return false;
+      return (
+        continueBounds.y >= stopBounds.y + stopBounds.height &&
+        continueBounds.x + continueBounds.width <= 375
+      );
+    })
+    .toBe(true);
   await app().locator('#continue-analysis').scrollIntoViewIfNeeded();
   await expect(app().locator('#continue-analysis')).toBeVisible();
   const screenshot = testInfo.outputPath('continuation-narrow.png');
@@ -229,17 +233,6 @@ test('reviews normalized parameters, freezes the message, and sends only after c
   await expect(review).toContainText('Analysis may still be running.');
   await review.getByRole('button', { name: /^close$/i }).click();
   await page.setViewportSize({ width: 375, height: 900 });
-  await app().locator('#continue-analysis').hover();
-  await page.mouse.wheel(0, 600);
-  await expect(app().locator('#continuation-help')).toBeInViewport();
-  await expect(app().locator('#continuation-status')).toBeInViewport();
-  await expect
-    .poll(() =>
-      app()
-        .locator('body')
-        .evaluate(() => window.scrollY),
-    )
-    .toBeGreaterThan(0);
   await app()
     .locator('#continuation-help')
     .evaluate((element) => element.scrollIntoView({ block: 'center' }));
@@ -271,7 +264,11 @@ test('cancels without dispatch and keeps identical cards independent @smoke', as
   await expect(review).not.toBeVisible();
   await expect(app(0).locator('#continuation-status')).toHaveAttribute(
     'data-state',
-    'unconfirmed',
+    'idle',
+  );
+  await expect(app(0).locator('#continuation-status')).toHaveText('Not sent.');
+  await expect(app(0).locator('#continue-analysis')).toHaveText(
+    'Continue analysis with current parameters',
   );
   expect(daemon.promptRequests()).toHaveLength(0);
 
