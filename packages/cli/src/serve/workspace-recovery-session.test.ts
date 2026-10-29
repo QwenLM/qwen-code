@@ -21,10 +21,7 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import {
-  scanManagedSessionJournal,
-  scanManagedSessionJournalStream,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import { scanManagedSessionJournal } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -130,36 +127,12 @@ function fixture(
     resources.set(ref.resourceId, bytes);
     return ref;
   }
-  let physicalParentUuid: string | null = null;
   function tx(records: unknown[]) {
-    const physicalRecords = records.map((value, index) => {
-      const record = value as Record<string, unknown> & {
-        uuid?: string;
-        parentUuid?: string | null;
-      };
-      const uuid =
-        record.uuid === undefined
-          ? `physical-${transactions.length + 1}-${index}`
-          : record.uuid;
-      const normalized =
-        record.uuid === undefined || record.parentUuid === undefined
-          ? {
-              ...record,
-              uuid,
-              parentUuid:
-                record.parentUuid === undefined
-                  ? physicalParentUuid
-                  : record.parentUuid,
-            }
-          : value;
-      physicalParentUuid = uuid;
-      return normalized;
-    });
     const bytes = Buffer.from(
-      physicalRecords.map((value) => JSON.stringify(value)).join('\n') + '\n',
+      records.map((value) => JSON.stringify(value)).join('\n') + '\n',
     );
     const descriptor = describeTransaction(
-      physicalRecords,
+      records,
       bytes,
       source.head!.activationEpoch,
       KEY,
@@ -348,15 +321,6 @@ async function hostedModelFixture(
             Buffer.from(records.map((r) => JSON.stringify(r) + '\n').join('')),
             KEY,
           ),
-        scan: async (consume) =>
-          scanManagedSessionJournalStream(
-            (async function* () {
-              for (const record of records)
-                yield Buffer.from(JSON.stringify(record) + '\n');
-            })(),
-            KEY,
-            consume,
-          ),
         appendTransaction: async (batch) => {
           f.tx([...batch]);
           records.push(...batch);
@@ -367,7 +331,6 @@ async function hostedModelFixture(
       }),
     },
   });
-  let attempts: ManagedSessionEvent[] = [];
   try {
     await session.authority.submitInput(
       {
@@ -408,13 +371,12 @@ async function hostedModelFixture(
           systemPayload: { promptId: 'prompt', state: 'completed', endedAt: 1 },
         });
     });
-    attempts = await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .filter((event) => event.kind === 'model.attempt')
-      .collect(1_000_000);
   } finally {
     await session.close();
   }
+  const attempts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'model.attempt');
   return {
     ...f,
     attempts,

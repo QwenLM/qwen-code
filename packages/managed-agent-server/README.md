@@ -526,55 +526,6 @@ Restore transaction pages are bounded to 8 MiB of unencoded record bytes even
 when the requested item limit is larger. Unknown head states, unsafe counters,
 or missing transaction revisions fail closed as storage corruption.
 
-`POST /internal/managed-session-store/v1/sessions/{sessionId}/history:query`
-and `history:backfill` use the same Session-scoped, current writer read grant.
-Request restore with `includeNativeHistory=true` to receive the optional
-`nativeHistory: { "version": 1 }` capability. Without that flag the restore
-response retains its existing fields. Clients without this advertisement
-build a file query view by streaming the existing native restore protocol;
-an advertised incompatible version or a failed query is an error.
-Both take `workspaceId` and a frozen `view` containing `journalRevision`,
-`committedSequence` and `lastCommitDigest` from restore. The server verifies
-that prefix against the native journal; public message projections cannot
-establish it. History facts contain source coordinates and small metadata,
-while transaction and resource bytes remain canonical.
-
-A query supplies a closed `family` and its exact `identity`, optional
-`throughSequence` within the view, `mode` (`first` or `latest`, default
-`latest`), an exclusive `afterSequence` cursor and `limit` (default 100,
-maximum 256). Responses are bounded to 8 MiB of metadata. The
-`event` family uses the decimal sequence as its identity and returns the
-canonical transaction revision, event ordinal and record digest without
-copying the event body. The
-`extension-domain` family enumerates first-committed record identities in a
-domain; use each record's `recordKey` with the `extension` family to read its
-latest revision within the frozen prefix. An unindexed prefix returns
-`managed_session_history_not_ready`; missing derived facts return
-`managed_session_history_corrupt`, never an authoritative negative answer.
-Selected facts are checked against their canonical transaction bytes, event
-ordinal, identity and metadata before returning them. Canonical resource or
-journal damage remains a journal error and cannot be repaired as an index.
-
-Backfill accepts an optional `limit` from 1 through 100 and processes at most
-one existing 8 MiB transaction page per request. Responses include the
-current positive `generation`. Repeat until `complete` is true. After a
-canonical comparison detects a derived mismatch, send `repair: true` and
-`expectedGeneration` from the last response on the first backfill request.
-An equal generation atomically starts the next generation at an empty
-coverage prefix; an older expected generation continues the repair already
-in progress, and an ahead value conflicts. Subsequent pages omit `repair`.
-Each backfill call reclaims at most 256 facts from older generations, so
-repair does not delete a Session's entire index in one transaction.
-Index inserts and continuous coverage advancement commit together;
-new journal commits cannot certify an earlier gap. A damaged derived index
-is rebuilt from the native journal, and corrupt original bytes or resources
-remain errors. MySQL and the local H2 profile share this implementation;
-no new database is required for the pure-file CLI adapter. See the
-[authority-window design](../../docs/design/2026-10-29-managed-sql-authority-window.md)
-([简体中文](../../docs/design/2026-10-29-managed-sql-authority-window.zh-CN.md)).
-
-Native history source pages stay within the captured journal revision even when a concurrent commit advances the head. Queries and backfill require the existing live read grant, without first renewing an ordinary writer during lifecycle cleanup. For an externally launched file-H2 service, start Java with `-Djdk.nio.maxCachedBufferSize=1048576`; `qwen serve --managed` supplies this flag automatically. It limits each cached JDK temporary direct buffer to 1 MiB, rather than increasing the JVM memory budget or changing H2 synchronous durability. The scale profile uses the same flag and records direct/mapped buffer pools; heap, direct-memory and RSS remain separate evidence.
-
 The routes follow `qwen.managed-agent.harness.enabled` by default, because
 the Hosted Harness requires them; `QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED`
 overrides that default. Serve them only on a private service listener or
@@ -1601,32 +1552,6 @@ mvn -Pmysql-integration \
 
 Use a disposable database: the integration test creates and deletes fixture
 rows within the selected schema.
-
-The `managed-history-scale` profile is a separate, long-running qualification
-lane. It runs the actual Core HTTP client against this Spring service with
-10,000 and 100,000 completed events, one independent Node process with a
-256 MiB V8 old-space limit per size and a 512 MiB Java heap. It requires both sizes, checks event/cache and
-scan-delivery budgets, and compares retained GC heap and buffer memory while
-recording RSS and JVM pool peaks. H2 uses a private file database with an
-explicit cache budget; MySQL requires an isolated MySQL 8.4 instance with a
-128 MiB packet limit, native AIO disabled and binary logging disabled.
-
-```bash
-mvn -Pmanaged-history-scale -Dqwen.managed.history.engine=h2 verify
-mvn -Pmanaged-history-scale -Dqwen.managed.history.engine=mysql \
-  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_history_scale' \
-  -Dmysql.user=root -Dmysql.password= verify
-node ../../scripts/check-failsafe-reports.js managed-history-scale .
-```
-
-This opt-in does not replace the ordinary unit, database or Hosted profiles.
-The full SDK Java workflow runs both engines and always uploads
-`target/managed-history-scale/` metrics/logs plus the Failsafe reports. It
-passes the actual checked-out Git revision as `QWEN_HISTORY_TEST_REVISION`;
-local runs without that variable are labeled as an uncommitted working tree.
-Allow substantial disk I/O and cold-recovery time; these commands remain
-subject to the local verification budget in [AGENTS.md](AGENTS.md). A CI job
-definition or a passing small HTTP smoke does not establish scale acceptance.
 
 The `hosted-harness-mysql` profile additionally clears every `ma_` base table
 before each top-level `Hosted*IT` class, while retaining the schema and Flyway

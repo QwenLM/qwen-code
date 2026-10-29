@@ -338,8 +338,7 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
 
   // The record's output manifest advanced to what the live capture shows.
   let record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-bg'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record.outputRef?.kind).toBe(MANAGED_TOOL_RESULT_KINDS.manifest);
 
@@ -370,8 +369,7 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
   // The record settled with exactly that evidence, and the manifest's
   // physical fields read the same exit.
   record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-bg'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'exited',
@@ -399,11 +397,9 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
   expect(finalManifest.contents[1]!.byteLength).toBe(4);
   // No second tool.receipt exists anywhere for this outcome.
   expect(
-    (
-      await session!.authority
-        .iterateEvents(1, session!.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'tool.receipt'),
+    session!.authority
+      .eventsInSequenceRange(1, session!.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(0);
 });
 
@@ -446,8 +442,7 @@ it('projects a platform-driven stop as stop_requested, never as an exit', async 
   await r.registry.accept(prepared.identity, envelope);
 
   const record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-bg'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'stop_requested',
@@ -497,10 +492,8 @@ it('melds a monitor watch through one terminal step only after its start receipt
     request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
   );
   let record = parseMonitorRun(
-    (await session!.authority.extensionRecord(
-      'monitor_run',
-      'monitor-execution',
-    ))!.record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
   );
   expect(record.startReceiptRef).toBeNull();
   expect(record.outputRef).toBeNull();
@@ -533,10 +526,8 @@ it('melds a monitor watch through one terminal step only after its start receipt
   prepared.sink.setStarted(8);
   await prepared.sink.write('stdout', Buffer.from('line one\nline two\n'));
   record = parseMonitorRun(
-    (await session!.authority.extensionRecord(
-      'monitor_run',
-      'monitor-execution',
-    ))!.record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
   );
   expect(record.outputRef?.kind).toBe(MANAGED_TOOL_RESULT_KINDS.manifest);
 
@@ -561,10 +552,8 @@ it('melds a monitor watch through one terminal step only after its start receipt
   // The finalize awaited the loop's own exit chain: the last window is
   // committed to the record before its settled mark, exactly once.
   record = parseMonitorRun(
-    (await session!.authority.extensionRecord(
-      'monitor_run',
-      'monitor-execution',
-    ))!.record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
   );
   expect(record).toMatchObject({
     observationSequence: 1,
@@ -697,10 +686,10 @@ it.each([
       await vi.waitFor(
         async () => {
           const settled = parseMonitorRun(
-            (await session!.authority.extensionRecord(
+            session!.authority.extensionRecord(
               'monitor_run',
               'monitor-execution',
-            ))!.record,
+            )!.record,
           );
           expect(settled.stopReason).not.toBeNull();
           const manifest = parseToolResultManifestBytes(
@@ -726,10 +715,8 @@ it.each([
       },
     ]);
     const record = parseMonitorRun(
-      (await session!.authority.extensionRecord(
-        'monitor_run',
-        'monitor-execution',
-      ))!.record,
+      session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+        .record,
     );
     // The loop's own bound is the reason, proven by the worker — not the
     // stop marker its finalize carried — and the record quotes the sealed
@@ -834,10 +821,8 @@ it('settles a natural exit that crosses the quota without stopping the watch (#1
 
   expect(stops).toEqual([]);
   const record = parseMonitorRun(
-    (await session!.authority.extensionRecord(
-      'monitor_run',
-      'monitor-execution',
-    ))!.record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
   );
   expect(record).toMatchObject({
     observationSequence: 1,
@@ -900,8 +885,7 @@ it('retries a finalize that failed once instead of caching the refusal forever',
   const envelope = await prepared.sink.finalize('success', [], undefined);
   expect(envelope.capture?.captureStatus).toBe('complete');
   const record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-bg'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'exited',
@@ -958,8 +942,7 @@ it.each([false, true])(
     const envelope = await prepared.sink.finalize('success', [], undefined);
     await r.registry.accept(prepared.identity, envelope);
     const record = parseMonitorRun(
-      (await session!.authority.extensionRecord('monitor_run', 'monitor-tail'))!
-        .record,
+      session!.authority.extensionRecord('monitor_run', 'monitor-tail')!.record,
     );
     expect(record).toMatchObject({
       observationSequence: 1,
@@ -967,11 +950,9 @@ it.each([false, true])(
       stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
     });
-    const wakes = (
-      await session!.authority
-        .iterateEvents(1, session!.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'wake.requested');
+    const wakes = session!.authority
+      .eventsInSequenceRange(1, session!.authority.committedSequence)
+      .filter((event) => event.kind === 'wake.requested');
     expect(wakes).toHaveLength(lifecycle ? 0 : 1);
   },
 );
@@ -1037,8 +1018,7 @@ it('completes a refused exit settle on the record’s own attach, without a clie
   // The record refuses a settle it cannot name as attached.
   expect(first.status).toBeGreaterThanOrEqual(400);
   const unattached = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-late'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-late')!.record,
   );
   expect(unattached.stopReason).toBeNull();
   // The start receipt lands through the ordinary accept: the refused
@@ -1050,8 +1030,7 @@ it('completes a refused exit settle on the record’s own attach, without a clie
   );
   await publisher!.settleAttached('execution-late');
   const record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-late'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-late')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'exited',
@@ -1127,8 +1106,7 @@ it('re-drives a refused final forward on an attached record without any client a
   expect(refused.status).toBeGreaterThanOrEqual(400);
   expect(advance).toHaveBeenCalledOnce();
   const stranded = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-strand'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-strand')!.record,
   );
   expect(stranded.stopReason).toBeNull();
   // No client retry, no re-attach, no manual settle: the refused body's
@@ -1136,12 +1114,10 @@ it('re-drives a refused final forward on an attached record without any client a
   await vi.advanceTimersByTimeAsync(0);
   vi.useRealTimers();
   await vi.waitFor(
-    async () => {
+    () => {
       const record = parseChildShellRun(
-        (await session!.authority.extensionRecord(
-          'child_run',
-          'execution-strand',
-        ))!.record,
+        session!.authority.extensionRecord('child_run', 'execution-strand')!
+          .record,
       );
       expect(record).toMatchObject({
         stopReason: 'exited',
@@ -1221,15 +1197,13 @@ it('heals a refused final forward through the bounded redrive when the store fla
   expect(refused.status).toBeGreaterThanOrEqual(400);
   expect(
     parseChildShellRun(
-      (await session!.authority.extensionRecord('child_run', 'execution-flap'))!
-        .record,
+      session!.authority.extensionRecord('child_run', 'execution-flap')!.record,
     ).stopReason,
   ).toBeNull();
   await vi.advanceTimersByTimeAsync(0);
   expect(
     parseChildShellRun(
-      (await session!.authority.extensionRecord('child_run', 'execution-flap'))!
-        .record,
+      session!.authority.extensionRecord('child_run', 'execution-flap')!.record,
     ).stopReason,
   ).toBeNull();
   // The backoff step's attempted number two also fires inside the
@@ -1237,12 +1211,10 @@ it('heals a refused final forward through the bounded redrive when the store fla
   await vi.advanceTimersByTimeAsync(400);
   vi.useRealTimers();
   await vi.waitFor(
-    async () => {
+    () => {
       const record = parseChildShellRun(
-        (await session!.authority.extensionRecord(
-          'child_run',
-          'execution-flap',
-        ))!.record,
+        session!.authority.extensionRecord('child_run', 'execution-flap')!
+          .record,
       );
       expect(record).toMatchObject({
         stopReason: 'exited',
@@ -1341,8 +1313,7 @@ it('waits an in-flight redrive inside the drain instead of closing past it (P2-A
   releaseGate();
   await closing;
   const record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-drain'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-drain')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'exited',
@@ -1478,11 +1449,10 @@ it('waits a redrive whose backoff fires only while the drain is already waiting 
     expect(settleCalls.get('execution-b')).toBe(2);
   });
   releaseGateA();
-  await vi.waitFor(async () => {
+  await vi.waitFor(() => {
     expect(
       parseChildShellRun(
-        (await session!.authority.extensionRecord('child_run', 'execution-a'))!
-          .record,
+        session!.authority.extensionRecord('child_run', 'execution-a')!.record,
       ).stopReason,
     ).toBe('exited');
   });
@@ -1496,8 +1466,7 @@ it('waits a redrive whose backoff fires only while the drain is already waiting 
   await closing;
   for (const executionCallId of ['execution-a', 'execution-b']) {
     const record = parseChildShellRun(
-      (await session!.authority.extensionRecord('child_run', executionCallId))!
-        .record,
+      session!.authority.extensionRecord('child_run', executionCallId)!.record,
     );
     expect(record).toMatchObject({
       stopReason: 'exited',
@@ -1531,14 +1500,12 @@ it('advances the record when a blind-capture revision lands, without waiting for
   await r.registry.prepare(
     request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
   );
-  const outputRef = async () =>
+  const outputRef = () =>
     parseChildShellRun(
-      (await session!.authority.extensionRecord(
-        'child_run',
-        'execution-blind',
-      ))!.record,
+      session!.authority.extensionRecord('child_run', 'execution-blind')!
+        .record,
     ).outputRef;
-  const openRef = (await outputRef())!;
+  const openRef = outputRef()!;
   expect(openRef).not.toBeNull();
   // The one segment publish is refused by the record resources: the
   // stream latches blind, and the announced revision lands alone, ahead
@@ -1593,16 +1560,14 @@ it('advances the record when a blind-capture revision lands, without waiting for
   expect(finish.status).toBeLessThan(300);
   void resourcesSpy;
   await vi.waitFor(
-    async () => {
-      const next = await outputRef();
+    () => {
+      const next = outputRef();
       expect(next).not.toBeNull();
       expect(next).not.toEqual(openRef);
     },
     { timeout: 5_000, interval: 50 },
   );
-  const bytes = Buffer.from(
-    await session!.resources.read((await outputRef())!),
-  );
+  const bytes = Buffer.from(await session!.resources.read(outputRef()!));
   const manifest = JSON.parse(bytes.toString()) as Record<string, unknown>;
   expect(manifest['captureStatus']).toBe('partial');
   expect(manifest['captureReason']).toBe('storage_failed');
@@ -1642,14 +1607,12 @@ it('swallows a refused write-arm forward and retries it on the next edging write
       request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
     ),
   ).rejects.toThrow('Shell publisher refused the request.');
-  const outputRef = async () =>
+  const outputRef = () =>
     parseChildShellRun(
-      (await session!.authority.extensionRecord(
-        'child_run',
-        'execution-write',
-      ))!.record,
+      session!.authority.extensionRecord('child_run', 'execution-write')!
+        .record,
     ).outputRef;
-  expect(await outputRef()).toBeNull();
+  expect(outputRef()).toBeNull();
   let offset = 0;
   const writeChunk = (text: string) => {
     const bytes = Buffer.from(text, 'utf8');
@@ -1677,12 +1640,12 @@ it('swallows a refused write-arm forward and retries it on the next edging write
   const first = await writeChunk('one\n');
   expect(first.status).toBeGreaterThanOrEqual(200);
   expect(first.status).toBeLessThan(300);
-  expect(await outputRef()).toBeNull();
+  expect(outputRef()).toBeNull();
   // The next edging write retries the same manifest and the record moves.
   const second = await writeChunk('two\n');
   expect(second.status).toBeGreaterThanOrEqual(200);
   expect(second.status).toBeLessThan(300);
-  expect(await outputRef()).not.toBeNull();
+  expect(outputRef()).not.toBeNull();
 });
 
 it('keeps an ownerless tail for the settle that its attach unblocks', async () => {
@@ -1743,8 +1706,7 @@ it('keeps an ownerless tail for the settle that its attach unblocks', async () =
   });
   expect(first.status).toBeGreaterThanOrEqual(400);
   const pending = parseMonitorRun(
-    (await session!.authority.extensionRecord('monitor_run', 'monitor-late'))!
-      .record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-late')!.record,
   );
   // The refusal consumed nothing: the tail waits with its record un-settled.
   expect(pending).toMatchObject({
@@ -1755,8 +1717,7 @@ it('keeps an ownerless tail for the settle that its attach unblocks', async () =
   await r.monitors.attach('monitor-late', BINDING, { pid: 9 });
   await publisher!.settleAttached('monitor-late');
   const record = parseMonitorRun(
-    (await session!.authority.extensionRecord('monitor_run', 'monitor-late'))!
-      .record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-late')!.record,
   );
   expect(record).toMatchObject({
     observationSequence: 1,
@@ -1808,8 +1769,7 @@ it('retries the record forward a wedge threw once instead of latching its write'
   // the record ends pinned at the very manifest the byte chain reached.
   expect(broken.mock.calls.length).toBeGreaterThanOrEqual(2);
   const record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-bg'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record.outputRef).toEqual(envelope.capture!.manifest!);
 });
@@ -1845,8 +1805,7 @@ it('settles an unproven background end as a failure, never as an exit', async ()
   });
   await r.registry.accept(prepared.identity, envelope);
   const record = parseChildShellRun(
-    (await session!.authority.extensionRecord('child_run', 'execution-bg'))!
-      .record,
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'process_failed',
@@ -1897,10 +1856,8 @@ it('settles an unproven monitor end as watch_failed, never as a clean exit', asy
   });
   await r.registry.accept(prepared.identity, envelope);
   const record = parseMonitorRun(
-    (await session!.authority.extensionRecord(
-      'monitor_run',
-      'monitor-unproven',
-    ))!.record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-unproven')!
+      .record,
   );
   expect(record).toMatchObject({
     stopReason: 'watch_failed',
@@ -1953,8 +1910,7 @@ it('settles a parked monitor from its real exit evidence, not the tail (#13856 R
   const envelope = await prepared.sink.finalize('success', []);
   await r.registry.accept(prepared.identity, envelope);
   const record = parseMonitorRun(
-    (await session!.authority.extensionRecord('monitor_run', 'monitor-parked'))!
-      .record,
+    session!.authority.extensionRecord('monitor_run', 'monitor-parked')!.record,
   );
   expect(record).toMatchObject({
     stopReason: 'exited',

@@ -21,9 +21,9 @@ export function isHostedWakeContinuationId(turnId: string): boolean {
   return /^wake-recovery:[0-9a-f]{64}$/.test(turnId);
 }
 
-async function acceptedInput(session: ManagedSession, turnId: string) {
-  return await session.authority
-    .iterateEvents(1, session.authority.committedSequence)
+function acceptedInput(session: ManagedSession, turnId: string) {
+  return session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
     .find(
       (event) =>
         event.kind === 'input.accepted' && event.payload['turnId'] === turnId,
@@ -35,7 +35,7 @@ function canContinue(source: unknown): boolean {
 }
 
 async function inputBody(session: ManagedSession, turnId: string) {
-  const input = await acceptedInput(session, turnId);
+  const input = acceptedInput(session, turnId);
   const ref = assertManagedSessionDurableRef(
     input?.payload['contentRef'],
     'wake continuation input',
@@ -61,14 +61,14 @@ async function continuationBody(session: ManagedSession, turnId: string) {
   const body = await inputBody(session, turnId);
   const interrupted = body['interruptedTurnId'];
   const notification = body['notificationTurnId'];
-  const source = (await acceptedInput(session, turnId))?.payload['source'];
+  const source = acceptedInput(session, turnId)?.payload['source'];
   if (
     typeof interrupted !== 'string' ||
     hostedWakeContinuationId(interrupted) !== turnId ||
     typeof notification !== 'string' ||
     isHostedWakeContinuationId(notification) ||
     !canContinue(source) ||
-    (await acceptedInput(session, notification))?.payload['source'] !== source
+    acceptedInput(session, notification)?.payload['source'] !== source
   )
     throw new ManagedSessionRecordError('Invalid wake continuation identity.');
   return { text: body['text'] as string, notificationTurnId: notification };
@@ -79,10 +79,10 @@ export async function enqueueHostedWakeContinuation(
   session: ManagedSession,
   interruptedTurnId: string,
 ): Promise<string | undefined> {
-  const input = await acceptedInput(session, interruptedTurnId);
+  const input = acceptedInput(session, interruptedTurnId);
   if (!canContinue(input?.payload['source'])) return undefined;
   const turnId = hostedWakeContinuationId(interruptedTurnId);
-  if (await acceptedInput(session, turnId)) return turnId;
+  if (acceptedInput(session, turnId)) return turnId;
   const notificationTurnId = isHostedWakeContinuationId(interruptedTurnId)
     ? (await continuationBody(session, interruptedTurnId)).notificationTurnId
     : interruptedTurnId;

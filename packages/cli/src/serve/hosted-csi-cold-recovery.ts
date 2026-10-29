@@ -4,13 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { hostedMessageRecords } from './hosted-session-records.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import type { HarnessToolItem } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
@@ -61,15 +59,15 @@ export async function recoverHostedCsiReceipts(
   owner?: CsiRecoveryOwner,
 ): Promise<{ parts: Part[]; finalOutput?: ChatRecord }> {
   const authority = session.authority;
-  const events = authority.iterateEvents(1, authority.committedSequence);
+  const events = authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  );
   const inputs = events.filter((event) => event.kind === 'input.accepted');
-  if (
-    (await inputs.count()) !== 1 ||
-    (await inputs.at(0))!.payload['inputId'] !== promptId
-  )
+  if (inputs.length !== 1 || inputs[0].payload['inputId'] !== promptId)
     throw new Error('Original CSI prompt identity differs.');
   const inputRef = assertManagedSessionDurableRef(
-    (await inputs.at(0))!.payload['contentRef'],
+    inputs[0].payload['contentRef'],
     'original CSI input',
   );
   if (
@@ -88,16 +86,15 @@ export async function recoverHostedCsiReceipts(
     authorization.checkpoint.identity.promptId !== promptId
   )
     throw new Error('Original CSI checkpoint is unavailable.');
-  if (await authorization.history.tools.some((item) => item.consumed))
-    throw new Error('Original CSI assistant batch differs.');
-  const items: HarnessToolItem[] = [];
-  for await (const item of authorization.history.tools) items.push(item);
-  items.sort((left, right) => left.ordinal - right.ordinal);
+  const items = [...(authorization.checkpoint.tools?.items ?? [])].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  );
   if (items.length === 0)
     throw new Error('Original CSI receipt batch is unavailable.');
-  const canonical = hostedMessageRecords(session);
+  const projected = await session.sink.project();
   const batchId = items[0].modelMessageId;
-  const batch = await canonical.find((record) => record.uuid === batchId);
+  const batchIndex = projected.findIndex((record) => record.uuid === batchId);
+  const batch = projected[batchIndex];
   if (
     !batch ||
     batch.type !== 'assistant' ||
@@ -119,16 +116,6 @@ export async function recoverHostedCsiReceipts(
     (part, partIndex) =>
       part.functionCall ? [{ call: part.functionCall, partIndex }] : [],
   );
-  const following: ChatRecord[] = [];
-  let afterBatch = false;
-  for await (const record of canonical) {
-    if (!afterBatch) {
-      if (record.uuid === batchId) afterBatch = true;
-      continue;
-    }
-    following.push(record);
-    if (following.length >= functions.length + 2) break;
-  }
   for (const item of items) {
     const original = functions[item.ordinal];
     if (
@@ -178,7 +165,7 @@ export async function recoverHostedCsiReceipts(
       [],
       reason,
     ).map((part) => ({ functionResponse: part.functionResponse }));
-    const existing = following[refusalCount];
+    const existing = projected[batchIndex + 1 + refusalCount];
     if (
       !existing ||
       !isDeepStrictEqual(existing, {
@@ -205,12 +192,9 @@ export async function recoverHostedCsiReceipts(
         event.payload['executionCallId'] === item.executionCallId,
     ),
   );
-  const receiptCounts = await Promise.all(
-    receiptEvents.map((receipts) => receipts.count()),
-  );
-  if (receiptCounts.some((count) => count > 1))
+  if (receiptEvents.some((receipts) => receipts.length > 1))
     throw new Error('Original CSI receipt is ambiguous.');
-  const missing = receiptCounts.some((count) => count === 0);
+  const missing = receiptEvents.some((receipts) => receipts.length === 0);
   if (missing && !owner)
     throw new Error('Original CSI installed recovery owner is required.');
   const recovered = missing
@@ -230,14 +214,14 @@ export async function recoverHostedCsiReceipts(
     record: ChatRecord;
     exists: boolean;
   }> = [];
-  const ids = new Set<string>();
+  const ids = new Set(projected.map((record) => record.uuid));
   let existingCount = 0;
   for (const [index, item] of items.entries()) {
     const receipts = receiptEvents[index];
     const ref =
-      (await receipts.count()) === 1
+      receipts.length === 1
         ? assertManagedSessionDurableRef(
-            (await receipts.at(0))!.payload['toolOutcomeRef'],
+            receipts[0].payload['toolOutcomeRef'],
             'original CSI outcome',
           )
         : null;
@@ -312,14 +296,14 @@ export async function recoverHostedCsiReceipts(
       model: batch.model,
       message: { role: 'user', parts },
     };
-    const existing = await canonical.find(
+    const existing = projected.find(
       (candidate) => candidate.uuid === record.uuid,
     );
     if (existing) {
       if (
         existingCount !== index ||
         !isDeepStrictEqual(existing, record) ||
-        following[refusalCount + index]?.uuid !== record.uuid
+        projected[batchIndex + 1 + refusalCount + index]?.uuid !== record.uuid
       )
         throw new Error('Original CSI tool message differs.');
       existingCount++;
@@ -343,14 +327,14 @@ export async function recoverHostedCsiReceipts(
     responses[item.ordinal] = parts;
     parentUuid = record.uuid;
   }
-  const tail = following.slice(refusalCount + existingCount);
+  const tail = projected.slice(batchIndex + 1 + refusalCount + existingCount);
   let finalOutput: ChatRecord | undefined;
   if (tail.length !== 0) {
     const candidate = tail[0];
-    const attempt = await events
+    const attempt = events
       .filter((event) => event.kind === 'model.attempt')
       .at(-1);
-    const message = await events
+    const message = events
       .filter((event) => event.kind === 'message.committed')
       .at(-1);
     const routeRef =

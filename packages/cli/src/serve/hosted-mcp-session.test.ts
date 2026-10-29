@@ -123,10 +123,10 @@ beforeEach(async () => {
         if (operation.kind === 'mcp-cancel')
           expect(
             parseMcpOperation(
-              (await session.authority.extensionRecord(
+              session.authority.extensionRecord(
                 'mcp_operation',
                 operation.targetOperationId,
-              ))!.record,
+              )!.record,
             ).cancelRequested,
           ).toBe(true);
         return (
@@ -139,7 +139,7 @@ beforeEach(async () => {
       if (!('grant' in operation)) throw new Error('Missing grant');
       const domain =
         operation.kind === 'mcp-invoke' ? 'mcp_operation' : 'mcp_configuration';
-      const record = await session.authority.extensionRecord(
+      const record = session.authority.extensionRecord(
         domain,
         operation.grant.operationId,
       );
@@ -208,7 +208,7 @@ beforeEach(async () => {
       return view;
     },
   );
-  mcp = await HostedMcpSession.create(
+  mcp = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -227,8 +227,8 @@ it('keeps a server send_message in the MCP namespace and its overflow fatal (#14
   const name = mcp.tools()[0].name!;
   const args = { text: '"'.repeat(20_000) };
   expect(name).toMatch(/^mcp_[a-f0-9]{32}$/);
-  expect(await mcp.toolInput('send_message', args, 'dense')).toBeUndefined();
-  expect((await mcp.toolInput(name, args, 'dense'))?.input.request).toEqual({
+  expect(mcp.toolInput('send_message', args, 'dense')).toBeUndefined();
+  expect(mcp.toolInput(name, args, 'dense')?.input.request).toEqual({
     kind: 'tool_call',
     name: 'send_message',
     arguments: args,
@@ -277,7 +277,7 @@ it('pins discovery, commits raw resource results and replays without another eff
   expect(response.response).toEqual(rawResponse);
   expect(mcp.tools()).toHaveLength(1);
   expect(
-    await mcp.toolInput(mcp.tools()[0].name!, { text: 'hello' }, 'tool-1'),
+    mcp.toolInput(mcp.tools()[0].name!, { text: 'hello' }, 'tool-1'),
   ).toMatchObject({
     toolName: 'managed_mcp_call',
     input: {
@@ -294,7 +294,7 @@ it('pins discovery, commits raw resource results and replays without another eff
   expect(
     requests.filter((request) => request.kind === 'mcp-invoke'),
   ).toHaveLength(1);
-  expect(await session.authority.taskViews()).toEqual([]);
+  expect(session.authority.taskViews()).toEqual([]);
   expect(
     (await session.sink.project()).some(
       (entry) => entry.type === 'tool_result',
@@ -308,7 +308,7 @@ it('pins discovery, commits raw resource results and replays without another eff
 });
 
 it('identifies each server behind opaque model tool names without changing invocation bindings', async () => {
-  mcp = await HostedMcpSession.create(
+  mcp = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin, { ...pin, serverId: 'other' }],
@@ -322,13 +322,8 @@ it('identifies each server behind opaque model tool names without changing invoc
       `MCP server: "${serverId}"\nMCP tool: "echo"\nEcho input`,
     );
     expect(
-      (
-        await mcp.toolInput(
-          tools[index].name!,
-          { text: 'hello' },
-          `call-${index}`,
-        )
-      )?.input,
+      mcp.toolInput(tools[index].name!, { text: 'hello' }, `call-${index}`)
+        ?.input,
     ).toMatchObject({ serverId, request: { kind: 'tool_call', name: 'echo' } });
   }
 });
@@ -348,11 +343,8 @@ it('queries a lost configure reply by its original identity instead of reconnect
 it('keeps an unchanged independent MCP connection through package configuration changes', async () => {
   await mcp.ensureReady();
   const before = mcp.tools();
-  const configuration = (
-    await session.authority
-      .extensionRecordsInDomain('mcp_configuration')
-      .collect(1_000_000)
-  )[0]!;
+  const configuration =
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0]!;
   const token = parseMcpConfiguration(configuration.record);
   const requestCount = requests.length;
   await mcp.drainForExtensionConfiguration([pin]);
@@ -360,16 +352,14 @@ it('keeps an unchanged independent MCP connection through package configuration 
   expect(requests).toHaveLength(requestCount);
   expect(mcp.tools()).toEqual(before);
   expect(
-    await session.authority
-      .extensionRecordsInDomain('mcp_configuration')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('mcp_configuration'),
   ).toHaveLength(1);
   expect(
     parseMcpConfiguration(
-      (await session.authority.extensionRecord(
+      session.authority.extensionRecord(
         'mcp_configuration',
         token.configurationId,
-      ))!.record,
+      )!.record,
     ),
   ).toMatchObject({
     configurationId: token.configurationId,
@@ -381,19 +371,16 @@ it('keeps an unchanged independent MCP connection through package configuration 
 
 it('drains only the MCP server changed by an extension configuration', async () => {
   const other = { ...pin, serverId: 'other' };
-  mcp = await HostedMcpSession.create(
+  mcp = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin, other],
   );
   await mcp.ensureReady();
-  const preserved = (await (
-    await session.authority
-      .extensionRecordsInDomain('mcp_configuration')
-      .collect(1_000_000)
-  )
+  const preserved = session.authority
+    .extensionRecordsInDomain('mcp_configuration')
     .map((entry) => parseMcpConfiguration(entry.record))
-    .find((entry) => entry.serverId === 'other'))!;
+    .find((entry) => entry.serverId === 'other')!;
   const next = { ...pin, serverRevision: 2, definitionDigest: 'b'.repeat(64) };
   await mcp.drainForExtensionConfiguration([next, other]);
   await mcp.enableExtensionConfiguration([next, other], randomUUID());
@@ -403,11 +390,8 @@ it('drains only the MCP server changed by an extension configuration', async () 
       .map((request) => ('serverId' in request ? request.serverId : undefined)),
   ).toEqual(['demo']);
   expect(
-    (
-      await session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000)
-    )
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
       .map((entry) => parseMcpConfiguration(entry.record))
       .filter((entry) => entry.serverId === 'other'),
   ).toEqual([preserved]);
@@ -442,7 +426,7 @@ async function interruptBeforeDispatch(operationId: string) {
 it('resumes an unsent operation after a failed dispatch commit and a status query', async () => {
   const operationId = randomUUID();
   await interruptBeforeDispatch(operationId);
-  const reloaded = await HostedMcpSession.create(
+  const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -452,7 +436,7 @@ it('resumes an unsent operation after a failed dispatch commit and a status quer
     state: 'running',
   });
   expect(
-    (await session.authority.extensionRecord('mcp_operation', operationId))!.run
+    session.authority.extensionRecord('mcp_operation', operationId)!.run
       .execution,
   ).toBe('intent');
   const response = await reloaded.invoke(operationId, 'demo', {
@@ -465,7 +449,7 @@ it('resumes an unsent operation after a failed dispatch commit and a status quer
       .filter((entry) => entry.kind === 'mcp-invoke')
       .map((entry) => entry.operationId),
   ).toEqual([operationId]);
-  expect(await reloaded.hasPendingOperations()).toBe(false);
+  expect(reloaded.hasPendingOperations()).toBe(false);
   await reloaded.close();
 });
 
@@ -479,13 +463,12 @@ it('cancels an unsent operation durably without invoking it on a later retry', a
     error: { code: 'managed_mcp_cancelled' },
   });
   expect(
-    (await session.authority.extensionRecord('mcp_operation', operationId))!
-      .run,
+    session.authority.extensionRecord('mcp_operation', operationId)!.run,
   ).toMatchObject({
     state: 'cancelled',
     execution: 'not_started_proven',
   });
-  const reloaded = await HostedMcpSession.create(
+  const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -502,7 +485,7 @@ it('cancels an unsent operation durably without invoking it on a later retry', a
       (entry) => entry.kind === 'mcp-invoke' || entry.kind === 'mcp-cancel',
     ),
   ).toHaveLength(0);
-  expect(await reloaded.hasPendingOperations()).toBe(false);
+  expect(reloaded.hasPendingOperations()).toBe(false);
   await reloaded.close();
 });
 
@@ -513,7 +496,7 @@ it.each([false, true])(
     const request = { kind: 'resource_read' as const, uri: 'memory://blob' };
     const response = await mcp.invoke(operationId, 'demo', request);
     if (released) await mcp.close();
-    const reloaded = await HostedMcpSession.create(
+    const reloaded = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       [pin],
@@ -549,11 +532,7 @@ it('commits its owner identity before acquiring and resumes a never-dispatched i
   );
   await expect(mcp.ensureReady()).rejects.toThrow('lost acquire reply');
   const intent = parseMcpConfiguration(
-    (
-      await session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000)
-    )[0].record,
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
   );
   expect(intent.run.execution).toBe('intent');
   expect(intent.run.runtime).toBeNull();
@@ -575,22 +554,15 @@ it('reconciles a temporarily unknown configuration without repeating its effect'
     return { operationId: operation.operationId, state: 'outcome_unknown' };
   });
   await expect(mcp.ensureReady()).rejects.toThrow('reconciliation');
-  const unknownRecord = (
-    await session.authority
-      .extensionRecordsInDomain('mcp_configuration')
-      .collect(1_000_000)
-  )[0];
+  const unknownRecord =
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0];
   vi.mocked(control).mockImplementationOnce(async (operation) => ({
     operationId: operation.operationId,
     state: 'running',
   }));
   await expect(mcp.ensureReady()).rejects.toThrow('reconciliation');
   expect(
-    (
-      await session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000)
-    )[0],
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0],
   ).toEqual(unknownRecord);
   await mcp.ensureReady();
   expect(
@@ -631,11 +603,8 @@ it.each(['settled', 'failed'] as const)(
     ).toHaveLength(outcome === 'settled' ? 1 : 0);
     expect(
       parseMcpConfiguration(
-        (
-          await session.authority
-            .extensionRecordsInDomain('mcp_configuration')
-            .collect(1_000_000)
-        )[0].record,
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0]
+          .record,
       ),
     ).toMatchObject({
       releaseState: 'released',
@@ -664,7 +633,7 @@ it('reconciles an older unknown configuration during close after a legacy writer
       ) => Promise<void>;
     }
   ).install(pin, undefined, randomUUID(), 2);
-  const reloaded = await HostedMcpSession.create(
+  const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -683,11 +652,9 @@ it('reconciles an older unknown configuration during close after a legacy writer
     2,
   );
   expect(
-    (
-      await session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000)
-    ).map((entry) => parseMcpConfiguration(entry.record).releaseState),
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record).releaseState),
   ).toEqual(['released', 'released']);
 });
 
@@ -714,7 +681,7 @@ it.each([false, true])(
         });
       await expect(mcp.close()).rejects.toThrow('drain commit interrupted');
       save.mockRestore();
-      mcp = await HostedMcpSession.create(
+      mcp = new HostedMcpSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
         session,
         [pin],
@@ -722,11 +689,7 @@ it.each([false, true])(
     }
     await mcp.close();
     const configuration = parseMcpConfiguration(
-      (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0].record,
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     );
     expect(configuration).toMatchObject({
       releaseState: 'released',
@@ -758,9 +721,7 @@ it('publishes a new immutable configuration after catalog invalidation, without 
   );
   await mcp.refresh();
   expect(mcp.getCatalogs()[0].configRevision).toBe(2);
-  expect(
-    (await mcp.toolInput(name, {}, 'old-call'))?.input.configRevision,
-  ).toBe(1);
+  expect(mcp.toolInput(name, {}, 'old-call')?.input.configRevision).toBe(1);
   await mcp.refresh();
   expect(mcp.getCatalogs()[0].configRevision).toBe(2);
   expect(
@@ -816,11 +777,8 @@ it.each(['refresh', 'close'] as const)(
     );
     await mcp.refresh();
     const sessionKey = session.authority.sessionHeader.sessionKey;
-    const configuration = (
-      await session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000)
-    )[0];
+    const configuration =
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0];
     await session.close();
     session = await openManagedSession({
       runtimeBaseDir: root,
@@ -832,18 +790,15 @@ it.each(['refresh', 'close'] as const)(
       workerId: 'replacement-worker',
       activationLeaseDurationMs: 60_000,
     });
-    const restored = await HostedMcpSession.create(
+    const restored = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       [pin],
     );
     await restored[action]();
     expect(
-      (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0].revision,
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0]
+        .revision,
     ).toBeGreaterThan(configuration.revision);
     expect(
       requests.filter((entry) => entry.kind === 'mcp-configure'),
@@ -854,7 +809,7 @@ it.each(['refresh', 'close'] as const)(
 it('separates effect reconciliation from H1 release and restores the exact v2 owner', async () => {
   await mcp.ensureReady();
   const owner = mcp.broker.runtimeSessionId;
-  const restored = await HostedMcpSession.create(
+  const restored = new HostedMcpSession(
     {
       baseUrl: 'http://127.0.0.1:1',
       token: 'test',
@@ -883,11 +838,7 @@ it('separates effect reconciliation from H1 release and restores the exact v2 ow
   );
   expect(
     parseMcpConfiguration(
-      (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0].record,
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     ).releaseState,
   ).toBe('released');
 });
@@ -910,7 +861,7 @@ it('does not release a v2 owner while a dispatched business result is unknown', 
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;
-  const reloaded = await HostedMcpSession.create(
+  const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -922,7 +873,7 @@ it('restores the original owner before close and uses fresh identities after con
   );
   const identities = new Set([original]);
   for (let round = 0; round < 2; round++) {
-    const next = await HostedMcpSession.create(
+    const next = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       [pin],
@@ -955,7 +906,7 @@ it('does not bypass durable pending work when a newly loaded Session is closed',
     kind: 'resource_read',
     uri: 'memory://blob',
   });
-  const reloaded = await HostedMcpSession.create(
+  const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -972,20 +923,16 @@ it('confirms a lost Broker release acknowledgement before marking connections re
   await expect(mcp.close()).rejects.toThrow('lost ack');
   expect(
     parseMcpConfiguration(
-      (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0].record,
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     ).releaseState,
   ).toBe('drained');
-  const reloaded = await HostedMcpSession.create(
+  const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
   );
   expect(reloaded.broker.runtimeSessionId).toBe(mcp.broker.runtimeSessionId);
-  expect(await reloaded.recoveryBlocked()).toBe(true);
+  expect(reloaded.recoveryBlocked).toBe(true);
   vi.mocked(HostedWorkspaceBroker.prototype.acquire)
     .mockClear()
     .mockRejectedValue(new Error('runtime_session_not_ready'));
@@ -997,11 +944,7 @@ it('confirms a lost Broker release acknowledgement before marking connections re
   expect(HostedWorkspaceBroker.prototype.control).not.toHaveBeenCalled();
   expect(
     parseMcpConfiguration(
-      (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0].record,
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     ).releaseState,
   ).toBe('released');
   expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
@@ -1028,7 +971,7 @@ it('does not release the owner until the physical drain receipt is durably commi
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   save.mockRestore();
   const owner = mcp.broker.runtimeSessionId;
-  mcp = await HostedMcpSession.create(
+  mcp = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -1056,11 +999,8 @@ it.each([
   'refuses an owner rejection before the drain receipt is committed ($status $code)',
   async ({ status, code }) => {
     await mcp.ensureReady();
-    const saved = (
-      await session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000)
-    )[0];
+    const saved =
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0];
     const record = {
       ...parseMcpConfiguration(saved.record),
       releaseState: 'releasing',
@@ -1076,7 +1016,7 @@ it.each([
       { class: 'trusted_entry' },
     );
     const owner = mcp.broker.runtimeSessionId;
-    mcp = await HostedMcpSession.create(
+    mcp = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       [pin],
@@ -1093,11 +1033,8 @@ it.each([
     expect(release).not.toHaveBeenCalled();
     expect(
       parseMcpConfiguration(
-        (
-          await session.authority
-            .extensionRecordsInDomain('mcp_configuration')
-            .collect(1_000_000)
-        )[0].record,
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0]
+          .record,
       ).releaseState,
     ).toBe('releasing');
     expect(
@@ -1117,12 +1054,11 @@ it('keeps advertised calls on their original catalog when a newer definition is 
   const operationId = randomUUID();
   await mcp.configure(operationId, second, 1);
   expect(mcp.tools()[0].name).not.toBe(name);
+  expect(mcp.toolInput(name, { text: 'old' }, 'old-call')?.input).toMatchObject(
+    { serverRevision: 1, connectionGeneration: 1 },
+  );
   expect(
-    (await mcp.toolInput(name, { text: 'old' }, 'old-call'))?.input,
-  ).toMatchObject({ serverRevision: 1, connectionGeneration: 1 });
-  expect(
-    (await mcp.toolInput(mcp.tools()[0].name!, { text: 'new' }, 'new-call'))
-      ?.input,
+    mcp.toolInput(mcp.tools()[0].name!, { text: 'new' }, 'new-call')?.input,
   ).toMatchObject({ serverRevision: 2, connectionGeneration: 2 });
   await mcp.configure(operationId, second, 1);
   expect(
@@ -1155,17 +1091,17 @@ it('advances past a failed replacement revision while retaining the published ca
   await expect(mcp.configure(failedId, pin, 1)).rejects.toThrow(
     'configuration failed',
   );
-  const failedRecord = (await session.authority.extensionRecord(
+  const failedRecord = session.authority.extensionRecord(
     'mcp_configuration',
     failedId,
-  ))!;
+  )!;
   const failure = replies.get(failedId)!;
   replies.set(failedId, { operationId: failedId, state: 'outcome_unknown' });
   await expect(mcp.configure(failedId, pin, 1)).rejects.toBeInstanceOf(
     HostedMcpRecoveryRequiredError,
   );
   expect(
-    await session.authority.extensionRecord('mcp_configuration', failedId),
+    session.authority.extensionRecord('mcp_configuration', failedId),
   ).toEqual(failedRecord);
   replies.set(failedId, failure);
   expect(mcp.getCatalogs()[0].configRevision).toBe(1);
@@ -1189,8 +1125,7 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   await expect(mcp.close()).rejects.toThrow('reconciliation');
   await mcp.cancel(operationId);
   const committed = parseMcpOperation(
-    (await session.authority.extensionRecord('mcp_operation', operationId))!
-      .record,
+    session.authority.extensionRecord('mcp_operation', operationId)!.record,
   );
   expect(committed.run.execution).toBe('outcome_unknown');
   expect(committed.cancelRequested).toBe(true);
@@ -1209,8 +1144,7 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   );
   expect(
     parseMcpOperation(
-      (await session.authority.extensionRecord('mcp_operation', operationId))!
-        .record,
+      session.authority.extensionRecord('mcp_operation', operationId)!.record,
     ).run.state,
   ).toBe('settled');
   expect(
@@ -1335,22 +1269,19 @@ it('does not let a stale cancel intent claim not-started after invocation dispat
   );
   await dispatched;
   const beforeCancel = parseMcpOperation(
-    (await session.authority.extensionRecord('mcp_operation', operationId))!
-      .record,
+    session.authority.extensionRecord('mcp_operation', operationId)!.record,
   );
   releaseLocal();
   expect(await cancelling).toHaveProperty('value.state', 'running');
   const duringNative = parseMcpOperation(
-    (await session.authority.extensionRecord('mcp_operation', operationId))!
-      .record,
+    session.authority.extensionRecord('mcp_operation', operationId)!.record,
   );
-  const pendingWhileNative = await mcp.hasPendingOperations();
+  const pendingWhileNative = mcp.hasPendingOperations();
   releaseNative();
   expect(await invoking).toHaveProperty('value.response', rawResponse);
   barrier.mockRestore();
   const final = parseMcpOperation(
-    (await session.authority.extensionRecord('mcp_operation', operationId))!
-      .record,
+    session.authority.extensionRecord('mcp_operation', operationId)!.record,
   );
 
   expect(beforeCancel.run.execution).toBe('dispatch_started');
@@ -1412,7 +1343,7 @@ it.each([
   'retries an undelivered release before fencing the owner ($count servers, reload: $reload)',
   async ({ count, reload }) => {
     const pins = [pin, { ...pin, serverId: 'second' }].slice(0, count);
-    mcp = await HostedMcpSession.create(
+    mcp = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       pins,
@@ -1449,7 +1380,7 @@ it.each([
     );
     expect(release).not.toHaveBeenCalled();
     if (reload)
-      mcp = await HostedMcpSession.create(
+      mcp = new HostedMcpSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
         session,
         pins,
@@ -1464,14 +1395,12 @@ it.each([
     });
     expect(identities[1]).toEqual(identities[0]);
     expect(
-      await (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      ).every(
-        (entry) =>
-          parseMcpConfiguration(entry.record).releaseState === 'released',
-      ),
+      session.authority
+        .extensionRecordsInDomain('mcp_configuration')
+        .every(
+          (entry) =>
+            parseMcpConfiguration(entry.record).releaseState === 'released',
+        ),
     ).toBe(true);
   },
 );
@@ -1649,11 +1578,8 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       await vi.waitFor(() => expect(entered).toBe(true), {
         timeout: 10_000,
       });
-      const before = (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0];
+      const before =
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
       expect(await initializing).toBe(reason);
       await expect(mcp.close()).rejects.toBeInstanceOf(
@@ -1682,11 +1608,8 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       } else {
         expect(requests).toHaveLength(0);
       }
-      const after = (
-        await session.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0];
+      const after =
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       expect(after.recordId).toBe(before.recordId);
       expect(parseMcpConfiguration(after.record).runtimeSessionId).toBe(
         parseMcpConfiguration(before.record).runtimeSessionId,
@@ -1754,7 +1677,7 @@ it('manages all published selections without changing admission, releasing the s
     const command = managementCommand(action, target, revision, selected);
     const before = requests.length;
     await manager.submit(command);
-    const status = await manager.status(command.operationId);
+    const status = manager.status(command.operationId);
     expect(status).toMatchObject({ state: 'settled', revision: ++revision });
     const effects = requests.length;
     await manager.submit(command);
@@ -1816,8 +1739,8 @@ it('persists removal across cold load and Session rename without reviving a serv
     workerId: 'replacement-worker',
     activationLeaseDurationMs: 60_000,
   });
-  const history = await readHostedMcpSettings(session).collect(1_000_000);
-  const restored = await HostedMcpSession.create(
+  const history = await readHostedMcpSettings(session);
+  const restored = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
@@ -1828,7 +1751,7 @@ it('persists removal across cold load and Session rename without reviving a serv
   ).length;
   await restored.ensureReady();
   expect(restored.tools()).toEqual([]);
-  expect(await restored.recoveryBlocked()).toBe(false);
+  expect(restored.recoveryBlocked).toBe(false);
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(starts);
@@ -1869,9 +1792,7 @@ it('blocks replacement while an original release is unknown and resumes the same
   await expect(manager.submit(command)).rejects.toThrow(
     HostedMcpRecoveryRequiredError,
   );
-  expect((await manager.status(command.operationId))?.state).toBe(
-    'recovery_required',
-  );
+  expect(manager.status(command.operationId)?.state).toBe('recovery_required');
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(1);
@@ -1885,7 +1806,7 @@ it('blocks replacement while an original release is unknown and resumes the same
     response: { released: true },
   });
   await manager.submit(command);
-  expect((await manager.status(command.operationId))?.state).toBe('settled');
+  expect(manager.status(command.operationId)?.state).toBe('settled');
   expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
     1,
   );
@@ -1931,9 +1852,7 @@ it('commits settings after a queued activation renewal without duplicating the c
     expect(await commitHostedMcpSettings(session, command, servers)).toEqual(
       receipt,
     );
-    expect(
-      await readHostedMcpSettings(session).collect(1_000_000),
-    ).toHaveLength(1);
+    expect(await readHostedMcpSettings(session)).toHaveLength(1);
     expect(requests).toEqual([]);
   } finally {
     release();
@@ -1960,9 +1879,7 @@ it('rejects competing settings revisions atomically before creating another phys
     1,
   );
   expect(result.filter((entry) => entry.status === 'rejected')).toHaveLength(1);
-  expect(await readHostedMcpSettings(session).collect(1_000_000)).toHaveLength(
-    1,
-  );
+  expect(await readHostedMcpSettings(session)).toHaveLength(1);
   expect(requests).toEqual([]);
 });
 
@@ -1982,11 +1899,8 @@ it('adds MCP to an ordinary Session with no initial pins and rejects an unpublis
   await manager.submit(managementCommand('add', 'demo', 0, pin));
   expect(manager.mcp).toBeDefined();
   expect(
-    (
-      await manager.status(
-        (await readHostedMcpSettings(session).collect(1_000_000))[0].command
-          .operationId,
-      )
+    manager.status(
+      (await readHostedMcpSettings(session))[0].command.operationId,
     )?.state,
   ).toBe('settled');
   expect(manager.mcp!.tools()).toHaveLength(1);
@@ -2001,7 +1915,7 @@ it('keeps an old disable settled and idempotent after a later enable and cold re
   const disable = managementCommand('disable', 'demo', 0);
   await manager.submit(disable);
   await manager.submit(managementCommand('enable', 'demo', 1));
-  expect((await manager.status(disable.operationId))?.state).toBe('settled');
+  expect(manager.status(disable.operationId)?.state).toBe('settled');
   const effects = requests.length;
   await manager.submit(disable);
   expect(requests).toHaveLength(effects);
@@ -2017,8 +1931,8 @@ it('keeps an old disable settled and idempotent after a later enable and cold re
     workerId: 'replacement-worker',
     activationLeaseDurationMs: 60_000,
   });
-  const history = await readHostedMcpSettings(session).collect(1_000_000);
-  const restored = await HostedMcpSession.create(
+  const history = await readHostedMcpSettings(session);
+  const restored = new HostedMcpSession(
     options,
     session,
     [pin],
@@ -2026,7 +1940,7 @@ it('keeps an old disable settled and idempotent after a later enable and cold re
   );
   const reopened = new HostedMcpManager(session, [pin], options, restored);
   await reopened.open();
-  expect((await reopened.status(disable.operationId))?.state).toBe('settled');
+  expect(reopened.status(disable.operationId)?.state).toBe('settled');
   await reopened.submit(disable);
   expect(requests).toHaveLength(effects);
 });
@@ -2066,12 +1980,8 @@ it.each(['landed', 'absent'] as const)(
       expect(requests).toEqual([]);
       await manager.submit(command);
       await manager.submit(command);
-      expect(
-        await readHostedMcpSettings(session).collect(1_000_000),
-      ).toHaveLength(1);
-      expect((await manager.status(command.operationId))?.state).toBe(
-        'settled',
-      );
+      expect(await readHostedMcpSettings(session)).toHaveLength(1);
+      expect(manager.status(command.operationId)?.state).toBe('settled');
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
       ).toHaveLength(1);
@@ -2081,23 +1991,3 @@ it.each(['landed', 'absent'] as const)(
     }
   },
 );
-
-it('rederives an old opaque tool binding after positive-cache eviction', async () => {
-  await mcp.ensureReady();
-  const originalTool = mcp.tools()[0].name!;
-  const first = await mcp.toolInput(originalTool, { text: 'hello' }, 'first');
-  const cache = Reflect.get(mcp, 'bindings') as { clear(): void; size: number };
-  expect(cache.size).toBe(1);
-  cache.clear();
-  discoveredToolName = 'new_echo';
-  await mcp.configure(randomUUID(), pin, 1);
-  const cold = await mcp.toolInput(originalTool, { text: 'retry' }, 'retry');
-  expect(cold?.input).toMatchObject({
-    serverId: first!.input.serverId,
-    configRevision: first!.input.configRevision,
-    catalogRevision: first!.input.catalogRevision,
-    connectionGeneration: first!.input.connectionGeneration,
-    request: { kind: 'tool_call', name: 'echo', arguments: { text: 'retry' } },
-  });
-  expect(cache.size).toBe(1);
-});

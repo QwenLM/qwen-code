@@ -14,8 +14,6 @@ public final class ManagedSchemaContract {
                     "ma_user_message",
                     "ma_user_message_command",
                     "ma_session_journal_tx",
-                    "ma_session_history_state",
-                    "ma_session_history_fact",
                     "ma_event_stream",
                     "ma_public_event",
                     "ma_message",

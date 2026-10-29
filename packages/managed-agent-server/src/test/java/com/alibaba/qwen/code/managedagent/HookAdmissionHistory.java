@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -145,13 +144,8 @@ final class HookAdmissionHistory {
      */
     Admission admitUntil(int total) {
         Admission last = null;
-        long renewedAt = System.nanoTime();
         while (executions < total) {
             int index = executions;
-            if (last == null || System.nanoTime() - renewedAt >= TimeUnit.SECONDS.toNanos(10)) {
-                inTransaction(journal::renew);
-                renewedAt = System.nanoTime();
-            }
             selects.set(0);
             statements.set(0);
             long started = System.nanoTime();

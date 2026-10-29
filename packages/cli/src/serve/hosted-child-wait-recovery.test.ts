@@ -394,11 +394,11 @@ describe('hosted child wait recovery (#13708)', () => {
         ]);
       }
       const children = childrenOf(replacement);
-      expect(await children.acceptance(CHILD_RUN_ID)).toBeDefined();
+      expect(children.acceptance(CHILD_RUN_ID)).toBeDefined();
       // The replay-safe marks ran outside the fold's journaled gate:
       // the relay's accepted delivery and the parent's consumption
       // queue both advanced (R1-11).
-      expect((await children.record(CHILD_RUN_ID))?.run.delivery?.state).toBe(
+      expect(children.record(CHILD_RUN_ID)?.run.delivery?.state).toBe(
         'accepted',
       );
       expect(consumption).toEqual([CHILD_RUN_ID]);
@@ -460,9 +460,7 @@ describe('hosted child wait recovery (#13708)', () => {
       }
       // The acceptance advanced even though the commit was skipped: the
       // wait leaves its marker either way.
-      expect(
-        await childrenOf(replacement).acceptance(CHILD_RUN_ID),
-      ).toBeDefined();
+      expect(childrenOf(replacement).acceptance(CHILD_RUN_ID)).toBeDefined();
     } finally {
       await replacement.close();
     }
@@ -498,7 +496,7 @@ describe('hosted child wait recovery (#13708)', () => {
       // relay to keep driving. The abandoned fold pays no accepted
       // delivery — there is none — so the resume arm leaves the
       // consumption queue untouched here.
-      const record = await childrenOf(replacement).record(CHILD_RUN_ID);
+      const record = childrenOf(replacement).record(CHILD_RUN_ID);
       expect(record).toBeDefined();
       expect(record?.run.state).not.toBe('cancelled');
       expect(consumption).toEqual([]);
@@ -746,7 +744,7 @@ describe('hosted child wait recovery (#13708)', () => {
       expect(JSON.stringify(callTwo?.message?.parts)).toContain(
         'cancelled before the child agent finished',
       );
-      const record = await childrenOf(replacement).record(orphanRunId);
+      const record = childrenOf(replacement).record(orphanRunId);
       expect(record?.run.state).not.toBe('cancelled');
     } finally {
       await replacement.close();
@@ -848,13 +846,13 @@ describe('hosted child wait recovery (#13708)', () => {
           expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
             '[child workspace]',
           );
-        expect(await children.acceptance(orphanRunId)).toBeDefined();
+        expect(children.acceptance(orphanRunId)).toBeDefined();
         // The fill's replay-safe marks rides outside the fold gate: the
         // relay's delivery advanced to accepted and the parent's
         // consumption queue received the run (R1-11). The wait's own
         // call-1 stays out of the fill — its marks belong to the wait arm
         // that already ran them.
-        expect((await children.record(orphanRunId))?.run.delivery?.state).toBe(
+        expect(children.record(orphanRunId)?.run.delivery?.state).toBe(
           'accepted',
         );
         expect(consumed).toEqual([orphanRunId]);
@@ -1021,7 +1019,7 @@ describe('hosted child wait recovery (#13708)', () => {
       expect(JSON.stringify(callTwo?.message?.parts)).toContain(
         'truncated: the full result is on the acceptance record',
       );
-      expect(await children.acceptance(orphanRunId)).toBeDefined();
+      expect(children.acceptance(orphanRunId)).toBeDefined();
     } finally {
       await replacement.close();
     }
@@ -2028,7 +2026,7 @@ describe('hosted child wait recovery (#13708)', () => {
         'cancelled before the child agent finished',
       );
       // The ledger keeps the orphan: it is abandoned, never revoked.
-      const record = await childrenOf(replacement).record(orphanRunId);
+      const record = childrenOf(replacement).record(orphanRunId);
       expect(record).toBeDefined();
       expect(record?.run.state).not.toBe('cancelled');
     } finally {

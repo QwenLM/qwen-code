@@ -484,13 +484,14 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         // A settled binding needs no handoff: resolving it returns early, so
         // handing it off would only re-insert an already-settled id that
         // pruning may have evicted, as a handed-off entry that never settles.
+        const settled = new Set(
+          (authorization.checkpoint.tools?.items ?? [])
+            .filter((item) => item.state === 'settled')
+            .map((item) => item.executionCallId),
+        );
         for (const binding of authorization.checkpoint.runtime?.bindings ??
           []) {
-          if (
-            (await authorization.history.tool(binding.executionCallId))
-              ?.state === 'settled'
-          )
-            continue;
+          if (settled.has(binding.executionCallId)) continue;
           gate.handoff(binding.executionCallId);
         }
       }
@@ -622,9 +623,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       }
       const requestId = previous.approval?.requestId;
       const action =
-        requestId === undefined
-          ? undefined
-          : await this.authority.action(requestId);
+        requestId === undefined ? undefined : this.authority.action(requestId);
       if (action === undefined || action.state === 'requested') {
         throw new ManagedSessionConflictError(
           'durable wait cannot resolve before a final action decision.',
@@ -1202,13 +1201,13 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         (previous.tools?.items ?? []).every(
           (item) => item.state === 'settled' && item.consumed,
         ) &&
-        (await this.authority
-          .iterateEvents(1, this.authority.committedSequence)
+        this.authority
+          .eventsInSequenceRange(1, this.authority.committedSequence)
           .some(
             (event) =>
               event.kind === 'turn.settled' &&
               event.payload['turnId'] === previous.identity.turnId,
-          ));
+          );
       if (
         ![
           'before_model',
@@ -1269,11 +1268,10 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       this.assertNotDetached();
       this.assertCurrentActivation();
       const latest = this.authority.latestCheckpoint;
-      if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY)
-        await this.ensureRunnableUnlocked();
-      const previousAuthorization = await this.requireRunnableAuthorization();
-      const previous = previousAuthorization.checkpoint;
-      const previousView = previousAuthorization.history;
+      const previous =
+        latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY
+          ? (await this.requireRunnableAuthorization()).checkpoint
+          : await this.ensureRunnableUnlocked();
       if (
         latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
         previous.continuation.phase !== 'await_runtime'
@@ -1306,10 +1304,12 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         );
       }
       const priorItems = previous.tools?.items ?? [];
-      const pending: ManagedAwaitRuntimeCommit[] = [];
-      for (const request of requests)
-        if (!(await previousView.tool(request.executionCallId)))
-          pending.push(request);
+      const pending = requests.filter(
+        (request) =>
+          !priorItems.some(
+            (item) => item.executionCallId === request.executionCallId,
+          ),
+      );
       const gate = managedRuntimeDispatchGate(
         this.authority.sessionHeader.sessionKey,
       );
@@ -1340,7 +1340,10 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           claimed.push(request.executionCallId);
         }
         const identity = this.nextCheckpointIdentity();
-        let nextOrdinal = previousView.maxOrdinal + 1;
+        let nextOrdinal = priorItems.reduce(
+          (next, item) => Math.max(next, item.ordinal + 1),
+          0,
+        );
         const pendingItems = pending.map((request) => {
           const ordinal = Math.max(request.ordinal, nextOrdinal);
           nextOrdinal = ordinal + 1;
@@ -1423,14 +1426,15 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
         return null;
       }
-      const authorization = await this.requireRunnableAuthorization();
-      const previous = authorization.checkpoint;
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
       if (previous.continuation.phase !== 'await_runtime') {
         throw new ManagedSessionConflictError(
           'durable-wait checkpoint is not an await_runtime phase.',
         );
       }
-      const item = await authorization.history.tool(executionCallId);
+      const item = previous.tools?.items.find(
+        (candidate) => candidate.executionCallId === executionCallId,
+      );
       if (item?.state === 'settled') return previous;
       const identity = this.nextCheckpointIdentity();
       const checkpoint = createResultsReadyHarnessCheckpoint({
@@ -1456,8 +1460,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     return this.mutateCheckpoint(async () => {
       this.assertNotDetached();
       this.assertCurrentActivation();
-      const authorization = await this.requireRunnableAuthorization();
-      const previous = authorization.checkpoint;
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
       if (previous.continuation.phase !== 'results_ready') {
         return null;
       }
@@ -1467,10 +1470,10 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       // is refused as Runtime work of a prior activation.
       const adopt =
         previous.identity.activationId !== this.activation.activationId &&
-        authorization.history.toolCount > 0 &&
-        authorization.history.allToolsSettled;
+        items.length > 0 &&
+        items.every((item) => item.state === 'settled');
       if (
-        authorization.history.toolCount === 0 ||
+        items.length === 0 ||
         (!adopt &&
           items.every((item) => item.state !== 'settled' || item.consumed))
       ) {
@@ -1502,19 +1505,18 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     return this.mutateCheckpoint(async () => {
       this.assertNotDetached();
       this.assertCurrentActivation();
-      const authorization = await this.requireRunnableAuthorization();
-      const previous = authorization.checkpoint;
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      const items = previous.tools?.items ?? [];
       if (
         previous.continuation.phase !== 'results_ready' ||
-        authorization.history.toolCount === 0 ||
-        !authorization.history.allToolsConsumed
+        items.length === 0 ||
+        items.some((item) => item.state !== 'settled' || !item.consumed)
       ) {
         return null;
       }
       const identity = this.nextCheckpointIdentity();
       const checkpoint = createTurnSettledHarnessCheckpoint({
         previous,
-        toolCount: authorization.history.toolCount,
         ...identity,
       });
       await this.commitHarnessCheckpoint(

@@ -12,7 +12,6 @@ import {
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import {
-  summarizeLegacyGoalReplay,
   LEGACY_GOAL_REASON,
   renderPreparedGoalUpdate,
   UNREADABLE_GOAL_REASON,
@@ -403,81 +402,5 @@ describe('renderPreparedGoalUpdate', () => {
         throw new Error('snapshot failed');
       }),
     ).rejects.toThrow('snapshot failed');
-  });
-});
-
-describe('streaming legacy Goal summary', () => {
-  it('keeps the same newest run, opening time, and terminal barriers as array replay', async () => {
-    const opening = legacySetCard('first', 1);
-    const checking = legacySetCard('first', 7);
-    const goalState = {
-      ...opening,
-      uuid: 'v2',
-      subtype: 'goal_state' as const,
-    };
-    const terminal = {
-      ...legacySetCard('first', 8),
-      systemPayload: {
-        phase: 'result',
-        rawCommand: '/goal',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'cleared', condition: 'first' },
-        ],
-      },
-    } as ChatRecord;
-    for (const records of [
-      [opening, checking],
-      [opening, goalState],
-      [opening, terminal],
-      [goalState, legacySetCard('new', 2)],
-    ]) {
-      const runtimeWithoutGoal = {
-        getSnapshot: () => ({ v: 2, activity: 'idle', goal: null }),
-      } as unknown as GoalRuntime;
-      const expected = await renderPreparedGoalUpdate(
-        async () => runtimeWithoutGoal,
-        { replayedRecords: records },
-      );
-      const actual = await renderPreparedGoalUpdate(
-        async () => runtimeWithoutGoal,
-        {
-          replayedHistory: {
-            async *[Symbol.asyncIterator]() {
-              yield* records;
-            },
-          },
-        },
-      );
-      expect(actual).toEqual(expected);
-      expect(
-        await summarizeLegacyGoalReplay({
-          async *[Symbol.asyncIterator]() {
-            yield* records;
-          },
-        }),
-      ).toHaveLength(expected.updates.length ? 1 : 0);
-    }
-  });
-
-  it('ignores unreadable v2 records only for the existing unavailable-state correction', async () => {
-    const records = [
-      legacySetCard('old objective', 4),
-      { ...legacySetCard('unused', 0), subtype: 'goal_state' as const },
-    ];
-    const getUnavailable = async (): Promise<GoalRuntime> => {
-      throw new GoalPersistenceUnavailableError('unavailable');
-    };
-    const expected = await renderPreparedGoalUpdate(getUnavailable, {
-      replayedRecords: records,
-    });
-    const actual = await renderPreparedGoalUpdate(getUnavailable, {
-      replayedHistory: {
-        async *[Symbol.asyncIterator]() {
-          yield* records;
-        },
-      },
-    });
-    expect(actual).toEqual(expected);
-    expect(actual.updates).toHaveLength(1);
   });
 });

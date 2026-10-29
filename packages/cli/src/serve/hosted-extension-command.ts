@@ -90,10 +90,7 @@ export async function expandHostedExtensionCommand(options: {
             timeout: 120000,
           }
         : { file_path: raw(injection.content) };
-    const saved = await session.authority.extensionRecord(
-      'tool_stage',
-      toolStageId,
-    );
+    const saved = session.authority.extensionRecord('tool_stage', toolStageId);
     let stage: ManagedToolStage;
     if (saved) {
       stage = parseManagedToolStage(saved.record);
@@ -198,11 +195,11 @@ export async function expandHostedExtensionCommand(options: {
         revision: options.revision,
         extensionId: command.extensionId,
       };
-      const send = async (action: 'execute' | 'status' | 'cancel') =>
+      const send = (action: 'execute' | 'status' | 'cancel') =>
         broker.extensionCommand({
           ...operation,
           action,
-          grant: await session.authority.issueOperationGrant({
+          grant: session.authority.issueOperationGrant({
             domain: 'tool_stage',
             recordId: toolStageId,
             ownerId: broker.runtimeSessionId,
@@ -307,7 +304,7 @@ export async function expandHostedExtensionCommand(options: {
       .then((bytes) => JSON.parse(bytes.toString('utf8')) as T);
   }
   async function commit(stage: ManagedToolStage): Promise<void> {
-    const previous = await session.authority.extensionRecord(
+    const previous = session.authority.extensionRecord(
       'tool_stage',
       stage.toolStageId,
     );

@@ -242,14 +242,14 @@ it('pins Hook plans, consumes once intents atomically and recovers unknown execu
       },
     };
     await commit('execution-unknown', blocked);
-    expect(await first.authority.taskViews()).toEqual([]);
+    expect(first.authority.taskViews()).toEqual([]);
   } finally {
     await first.lease.release();
   }
   const reopened = await open(false);
   try {
     expect(
-      await reopened.authority.extensionRecord('hook_execution', 'execution-1'),
+      reopened.authority.extensionRecord('hook_execution', 'execution-1'),
     ).toMatchObject({ record: blocked!, task: null });
     await expect(
       reopened.authority.commitExtensionRecord(
@@ -288,15 +288,14 @@ it('pins Hook plans, consumes once intents atomically and recovers unknown execu
         actor,
       ),
     ).rejects.toThrow('cannot follow');
-    expect(await reopened.authority.taskViews()).toEqual([]);
+    expect(reopened.authority.taskViews()).toEqual([]);
   } finally {
     await reopened.lease.release();
   }
   const final = await open(false);
   try {
     expect(
-      (await final.authority.extensionRecord('hook_execution', 'execution-1'))
-        ?.run,
+      final.authority.extensionRecord('hook_execution', 'execution-1')?.run,
     ).toMatchObject({ state: 'settled', runtime: null });
   } finally {
     await final.lease.release();

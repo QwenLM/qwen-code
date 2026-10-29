@@ -10,7 +10,6 @@ import type { ChatRecord } from './chatRecordingService.js';
 import {
   resolveBranchPoints,
   resolveCompletedTurnBranchCandidateFromRecords,
-  resolveCompletedTurnBranchCandidateFromHistory,
   type BranchPoint,
 } from './branch-points.js';
 
@@ -60,104 +59,6 @@ function checkpoint(
 function resolveSingle(records: ChatRecord[]): BranchPoint | undefined {
   return resolveBranchPoints(records).values().next().value;
 }
-
-describe('streaming branch checkpoint candidate', () => {
-  it.each([
-    'complete',
-    'duplicate-answer',
-    'mixed-response',
-    'internal',
-    'dangling',
-    'prefix-name',
-  ])('preserves the interval contract for %s', async (kind) => {
-    const call = record('call', 'old-tail', 'assistant', [
-      {
-        functionCall: {
-          id: kind === 'prefix-name' ? undefined : 'new',
-          name: 'read_file',
-          args: {},
-        },
-      },
-    ]);
-    const response = record('response', 'call', 'tool_result', [
-      {
-        functionResponse: {
-          id: 'new',
-          name: 'read_file',
-          response: { output: 'ok' },
-        },
-      },
-    ]);
-    const answer = record('answer', 'response', 'assistant', [
-      { text: 'done' },
-    ]);
-    const records =
-      kind === 'duplicate-answer'
-        ? [answer, { ...answer, uuid: 'another' }]
-        : kind === 'mixed-response'
-          ? [
-              record('mixed', 'old-tail', 'assistant', [
-                {
-                  functionResponse: {
-                    id: 'old',
-                    name: 'read_file',
-                    response: { output: 'ok' },
-                  },
-                },
-                { text: 'same record is not a final answer' },
-              ]),
-            ]
-          : kind === 'internal'
-            ? [
-                { ...response, subtype: 'code_mode_tool_result' as const },
-                answer,
-              ]
-            : kind === 'dangling'
-              ? [call, answer]
-              : [call, response, answer];
-    const pendingCallsAtStart = [{ id: 'old', name: 'read_file' }];
-    const result = await resolveCompletedTurnBranchCandidateFromHistory({
-      records: {
-        async *[Symbol.asyncIterator]() {
-          yield* records;
-        },
-      },
-      startExclusiveRecordUuid: 'old-tail',
-      pendingCallsAtStart,
-    });
-    expect(result).toEqual(
-      resolveCompletedTurnBranchCandidateFromRecords({
-        records,
-        startExclusiveRecordUuid: 'old-tail',
-        pendingCallsAtStart,
-      }),
-    );
-    expect(result?.assistantRecordUuid).toBe(
-      ['complete', 'internal', 'prefix-name'].includes(kind)
-        ? 'answer'
-        : undefined,
-    );
-  });
-
-  it('consumes a long lazy interval without requiring its record bodies as an array', async () => {
-    let read = 0;
-    const result = await resolveCompletedTurnBranchCandidateFromHistory({
-      records: {
-        async *[Symbol.asyncIterator]() {
-          for (let index = 0; index < 100_000; index++) {
-            read++;
-            yield record(String(index), null, 'system');
-          }
-          yield record('answer', null, 'assistant', [{ text: 'done' }]);
-        },
-      },
-      startExclusiveRecordUuid: null,
-      pendingCallsAtStart: [],
-    });
-    expect(read).toBe(100_000);
-    expect(result?.assistantRecordUuid).toBe('answer');
-  });
-});
 
 describe('branch points', () => {
   it('creates and recovers checkpoints for turns with internal Code Mode evidence', () => {

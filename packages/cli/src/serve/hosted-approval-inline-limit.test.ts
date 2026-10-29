@@ -217,13 +217,11 @@ it.each([
             'await_action',
           );
           requestId = authorization.checkpoint.approval!.requestId;
-          expect((await session.authority.action(requestId))?.state).toBe(
-            'requested',
-          );
+          expect(session.authority.action(requestId)?.state).toBe('requested');
         },
         { timeout: WAIT_TIMEOUT_MS },
       );
-      const action = (await session.authority.action(requestId))!;
+      const action = session.authority.action(requestId)!;
       const options = JSON.parse(
         (await session.resources.read(action.optionsRef!)).toString(),
       );

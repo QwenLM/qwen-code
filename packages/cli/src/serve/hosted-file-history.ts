@@ -4,10 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  hostedMessageRecords,
-  hostedRecordsAfter,
-} from './hosted-session-records.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -69,7 +65,7 @@ async function fileHistoryContent(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
 ) {
-  const previous = await hostedMessageRecords(session).at(-1);
+  const previous = (await session.sink.project()).at(-1);
   if (!previous)
     throw new Error('Hosted file history has no owning conversation.');
   return {
@@ -172,6 +168,7 @@ export async function canSettleHostedFileHistory(
         }
       : { blocker: `authorization_${authorization.status}` };
   const checkpoint = authorization.checkpoint;
+  const items = checkpoint.tools?.items ?? [];
   if (
     checkpoint.identity.promptId !== record.pendingTurn ||
     checkpoint.identity.turnId !== record.pendingTurn
@@ -179,20 +176,17 @@ export async function canSettleHostedFileHistory(
     return { blocker: 'checkpoint_identity_mismatch' };
   if (checkpoint.continuation.phase !== 'results_ready')
     return { blocker: `phase_${checkpoint.continuation.phase}` };
-  if (
-    !(await authorization.history.tools.some(
-      (item) => item.modelMessageId === record.pendingMessageId,
-    ))
-  )
+  if (!items.some((item) => item.modelMessageId === record.pendingMessageId))
     return { blocker: 'pending_message_not_ready' };
   // The parser enforces state === 'settled' iff outcomeRef !== null, so the
   // state arm alone decides for every checkpoint that can reach here.
-  if (!authorization.history.allToolsSettled)
+  if (items.some((item) => item.state !== 'settled'))
     return { blocker: 'tool_item_unsettled' };
-  const current = hostedMessageRecords(session).filter(
+  const current = (await session.sink.project()).filter(
     (item) => item.daemonPromptId === record.pendingTurn,
   );
-  const assistant = await current.findLast((item) => item.type === 'assistant');
+  const index = current.findLastIndex((item) => item.type === 'assistant');
+  const assistant = index === -1 ? undefined : current[index];
   if (assistant === undefined) return { blocker: 'pending_message_absent' };
   if (assistant.uuid !== record.pendingMessageId)
     return { blocker: 'assistant_mismatch' };
@@ -200,16 +194,16 @@ export async function canSettleHostedFileHistory(
     assistant.message?.parts?.flatMap((part) =>
       part.functionCall?.id ? [part.functionCall.id] : [],
     ) ?? [];
+  const tail = current.slice(index + 1);
+  const results = tail.flatMap(
+    (item) =>
+      item.message?.parts?.flatMap((part) =>
+        part.functionResponse?.id ? [part.functionResponse.id] : [],
+      ) ?? [],
+  );
   if (calls.length === 0) return { blocker: 'no_pending_tool_calls' };
-  const results: string[] = [];
-  for await (const item of hostedRecordsAfter(current, assistant.uuid)) {
-    if (item.type !== 'tool_result') return { blocker: 'unexpected_tail_item' };
-    for (const part of item.message?.parts ?? []) {
-      if (part.functionResponse?.id) results.push(part.functionResponse.id);
-      if (results.length > calls.length)
-        return { blocker: 'tool_results_mismatch' };
-    }
-  }
+  if (!tail.every((item) => item.type === 'tool_result'))
+    return { blocker: 'unexpected_tail_item' };
   if (new Set(calls).size !== calls.length)
     return { blocker: 'duplicate_tool_call_id' };
   return isDeepStrictEqual(calls.sort(), results.sort())

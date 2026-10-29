@@ -5,8 +5,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RenewWriterRequest;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -66,11 +64,6 @@ public final class ExtensionRecordJournal {
                 new AcquireWriterRequest(workspaceId, WRITER, 60_000L))
                 .writerGeneration();
         return this;
-    }
-
-    WriterGrant renew() {
-        return store.renewWriter(tenantId, sessionId, TOKEN,
-                new RenewWriterRequest(workspaceId, WRITER, writerGeneration, 60_000L));
     }
 
     /** The genesis transaction with two record lines. */
@@ -304,9 +297,7 @@ public final class ExtensionRecordJournal {
         journalRevision++;
         sequence = request.lastSequence();
         lastCommitDigest = request.commitDigest();
-        if (request.eventCount() > 0) {
-            domainEvents++;
-        }
+        domainEvents++;
     }
 
     long committedSequence() {

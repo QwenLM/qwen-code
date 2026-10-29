@@ -640,7 +640,6 @@ describe('SDK Java fast tier', () => {
       'event-transport-multi-node',
       'hosted-failover-e2e',
       'hosted-harness-mysql',
-      'managed-history-scale',
       'mysql-integration',
     ]);
     for (const id of ['test', 'flyway-migrations', 'daemon-e2e']) {

@@ -747,7 +747,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       let openGate: () => void = () => undefined;
       const gate = new Promise<ReadonlyArray<{ daemonPromptId?: string }>>(
@@ -756,10 +756,8 @@ describe('createMonitorWakeRunTurn', () => {
         },
       );
       const project = vi
-        .spyOn(session.sink, 'iterateMessageRecords')
-        .mockImplementation(async function* () {
-          yield* (await gate) as ChatRecord[];
-        });
+        .spyOn(session.sink, 'project')
+        .mockImplementation(() => gate as Promise<ChatRecord[]>);
       let reachedModel = false;
       const runTurn = createMonitorWakeRunTurn({
         session: access,
@@ -797,7 +795,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       let ran: string | undefined;
       const runTurn = createMonitorWakeRunTurn({
@@ -835,7 +833,7 @@ describe('createMonitorWakeRunTurn', () => {
         const access: MonitorWakeTurnSession['session'] = {
           active: undefined,
           blocked: false,
-          managed: { authority: session.authority, sink: session.sink },
+          managed: { sink: session.sink },
         };
         const writes = vi.spyOn(session.sink, 'write');
         const runTurn = createMonitorWakeRunTurn({
@@ -867,7 +865,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       await session.sink.write({
         uuid: 'chin-f6:user',
@@ -922,7 +920,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       const writes = vi.spyOn(session.sink, 'write');
       const failure = new Error('boom');
@@ -962,7 +960,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       await session.sink.write({
         uuid: 'chin-1:user',
@@ -1010,7 +1008,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       await session.sink.write({
         uuid: 'chin-2:user',
@@ -1059,7 +1057,7 @@ describe('createMonitorWakeRunTurn', () => {
       const access: MonitorWakeTurnSession['session'] = {
         active: undefined,
         blocked: false,
-        managed: { authority: session.authority, sink: session.sink },
+        managed: { sink: session.sink },
       };
       await session.sink.write({
         uuid: 'chin-3:user',
@@ -1223,7 +1221,7 @@ describe('settlePendingMonitorInputs', () => {
           wakeReason: 'input',
         },
       );
-      const projected = vi.spyOn(session.sink, 'iterateMessageRecords');
+      const projected = vi.spyOn(session.sink, 'project');
       // Nothing under the named sources: the close pays no projection.
       expect(
         await settlePendingMonitorInputs({
@@ -1354,7 +1352,7 @@ describe('settlePendingMonitorInputs', () => {
         },
       );
       expect(
-        pendingSessionInputs(await authority.readEvents()).map((i) => i.turnId),
+        pendingSessionInputs(authority.readEvents()).map((i) => i.turnId),
       ).toEqual(['monitor-1:notify:1', 'prompt-1']);
 
       const settled = await settlePendingMonitorInputs({
@@ -1364,9 +1362,9 @@ describe('settlePendingMonitorInputs', () => {
         cwd: '/workspace',
       });
       expect(settled).toBe(1);
-      const settledEvents = (await authority.readEvents()).filter(
-        (event) => event.kind === 'turn.settled',
-      );
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
       expect(settledEvents).toHaveLength(1);
       expect(settledEvents[0].payload).toMatchObject({
         turnId: 'monitor-1:notify:1',
@@ -1374,7 +1372,7 @@ describe('settlePendingMonitorInputs', () => {
         stopReason: 'session_closing',
       });
       expect(
-        pendingSessionInputs(await authority.readEvents()).map((i) => i.turnId),
+        pendingSessionInputs(authority.readEvents()).map((i) => i.turnId),
       ).toEqual(['prompt-1']);
     } finally {
       await lease.release().catch(() => undefined);
@@ -1475,9 +1473,7 @@ describe('settlePendingMonitorInputs', () => {
       );
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['monitor-1:notify:111']);
 
@@ -1491,15 +1487,13 @@ describe('settlePendingMonitorInputs', () => {
       ).toBe(1);
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ),
       ).toEqual([]);
     } finally {
       await lease.release().catch(() => undefined);
     }
-  }, 45_000);
+  });
 
   it('leaves an already-attempted wake turn to its recovery owner', async () => {
     // The wake turn ran and parked with its input still owed: canceling it
@@ -1604,15 +1598,11 @@ describe('settlePendingMonitorInputs', () => {
       });
       expect(settled).toBe(0);
       expect(
-        (await authority.readEvents()).filter(
-          (event) => event.kind === 'turn.settled',
-        ),
+        authority.readEvents().filter((event) => event.kind === 'turn.settled'),
       ).toHaveLength(0);
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['monitor-1:notify:1']);
     } finally {
@@ -1652,9 +1642,7 @@ describe('settlePendingMonitorInputs', () => {
       );
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['run-1:accept:notify']);
       const settled = await settlePendingMonitorInputs({
@@ -1664,9 +1652,9 @@ describe('settlePendingMonitorInputs', () => {
         cwd: '/workspace',
       });
       expect(settled).toBe(1);
-      const settledEvents = (await authority.readEvents()).filter(
-        (event) => event.kind === 'turn.settled',
-      );
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
       expect(settledEvents).toHaveLength(1);
       expect(settledEvents[0].payload).toMatchObject({
         turnId: 'run-1:accept:notify',
@@ -1675,9 +1663,7 @@ describe('settlePendingMonitorInputs', () => {
       });
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ),
       ).toHaveLength(0);
     } finally {
@@ -1723,9 +1709,9 @@ describe('settlePendingMonitorInputs', () => {
         cwd: '/workspace',
       });
       expect(settled).toBe(1);
-      const settledEvents = (await authority.readEvents()).filter(
-        (event) => event.kind === 'turn.settled',
-      );
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
       expect(settledEvents).toHaveLength(1);
       expect(settledEvents[0].payload).toMatchObject({
         turnId: 'run-1:accept:notify',
@@ -1734,9 +1720,7 @@ describe('settlePendingMonitorInputs', () => {
       });
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ),
       ).toHaveLength(0);
     } finally {

@@ -553,8 +553,10 @@ export class HostedCsiToolTurn {
       authorization.status !== 'runnable' ||
       authorization.checkpoint.continuation.phase !== 'results_ready' ||
       authorization.checkpoint.identity.promptId !== this.promptId ||
-      authorization.history.toolCount === 0 ||
-      !authorization.history.allToolsSettled
+      !authorization.checkpoint.tools?.items.length ||
+      authorization.checkpoint.tools.items.some(
+        (item) => item.state !== 'settled',
+      )
     )
       throw new HostedToolRecoveryRequiredError(
         'Original CSI results are unavailable.',

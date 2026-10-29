@@ -151,15 +151,15 @@ async function createTeam(callKey = 'prompt:call-team'): Promise<void> {
 
 /** A member launched and joined, as the agent tool does it. */
 async function addMember(name: string, childRunId = `run-${name}`) {
-  const member = await teams.admitMember(name);
+  const member = teams.admitMember(name);
   await launch(childRunId);
   expect(await teams.join({ ...member, childRunId })).toEqual({
     joined: true,
   });
 }
 
-async function revisions(domain: 'team_state' | 'team_task', recordId: string) {
-  return (await session.authority.extensionRecord(domain, recordId))?.revision;
+function revisions(domain: 'team_state' | 'team_task', recordId: string) {
+  return session.authority.extensionRecord(domain, recordId)?.revision;
 }
 
 /** A team_delete stopped after it closed the team, before it deleted it. */
@@ -197,7 +197,7 @@ describe('team plans', () => {
   async function member() {
     planGate.enabled = true;
     await createTeam();
-    const membership = await teams.admitMember('alice');
+    const membership = teams.admitMember('alice');
     await launch('run-alice');
     await teams.join({
       ...membership,
@@ -245,7 +245,7 @@ describe('team plans', () => {
       expect(
         await teams.run('team_plan_approval', args, 'prompt:approval'),
       ).toContain('Plan submit-1 was withdrawn');
-      expect((await teams.plan('submit-1'))?.run.state).toBe('cancelled');
+      expect(teams.plan('submit-1')?.run.state).toBe('cancelled');
       planGate.enabled = enabled;
       const recovered = new HostedTeamSession(
         { authority: session.authority, resources: session.resources },
@@ -271,10 +271,10 @@ describe('team plans', () => {
         answers.some((part) => part.functionResponse?.id === 'unrelated'),
       ).toBe(false);
       expect(
-        await recovered.committedBy('team_plan_approval', 'prompt:approval'),
+        recovered.committedBy('team_plan_approval', 'prompt:approval'),
       ).toBe(true);
       expect(
-        await recovered.committedBy('team_plan_approval', 'prompt:unrelated'),
+        recovered.committedBy('team_plan_approval', 'prompt:unrelated'),
       ).toBe(false);
       expect(
         await recovered.planDecisionEvidence('prompt:unrelated'),
@@ -293,9 +293,9 @@ describe('team plans', () => {
     await stopDeleteAtClosing('first-delete');
     planGate.enabled = true;
     await stopDeleteAtClosing('second-delete');
-    expect((await teams.plan('submit-1'))?.run.state).toBe('cancelled');
-    expect(await teams.committedBy('team_delete', 'second-delete')).toBe(true);
-    expect(await teams.committedBy('team_delete', 'unrelated')).toBe(false);
+    expect(teams.plan('submit-1')?.run.state).toBe('cancelled');
+    expect(teams.committedBy('team_delete', 'second-delete')).toBe(true);
+    expect(teams.committedBy('team_delete', 'unrelated')).toBe(false);
   });
 
   it('submits, reads, rejects and approves with call-keyed continuation evidence', async () => {
@@ -314,7 +314,7 @@ describe('team plans', () => {
         'reject',
       ),
     ).rejects.toThrow('run settles');
-    expect((await teams.plan('submit-1'))?.run.state).toBe('waiting');
+    expect(teams.plan('submit-1')?.run.state).toBe('waiting');
     await settle('run-alice');
     expect(
       await teams.run(
@@ -327,11 +327,9 @@ describe('team plans', () => {
         'reject',
       ),
     ).toContain('member was continued');
-    expect(
-      await teams.memberPlanMode((await teams.membership('run-alice'))!),
-    ).toBe(true);
+    expect(teams.memberPlanMode(teams.membership('run-alice')!)).toBe(true);
     const rejected = decodeChildLaunchEnvelope(
-      await session.resources.read((await children.record('reject'))!.inputRef),
+      await session.resources.read(children.record('reject')!.inputRef),
     );
     expect(rejected.prompt).toContain('plan-mode="required"');
     expect(rejected.prompt).toContain('Read &lt;file&gt;');
@@ -345,13 +343,9 @@ describe('team plans', () => {
       { request_id: 'submit-2', action: 'approve' },
       'approve',
     );
-    expect(
-      await teams.memberPlanMode((await teams.membership('run-alice'))!),
-    ).toBe(false);
+    expect(teams.memberPlanMode(teams.membership('run-alice')!)).toBe(false);
     const approved = decodeChildLaunchEnvelope(
-      await session.resources.read(
-        (await children.record('approve'))!.inputRef,
-      ),
+      await session.resources.read(children.record('approve')!.inputRef),
     );
     expect(approved.prompt).not.toContain('plan-mode="required"');
     expect(approved.prompt).toContain('<plan>\nRead safely\n</plan>');
@@ -411,7 +405,7 @@ describe('team plans', () => {
             closing: false,
           });
           await teams.submitPlan('newer', 'next', 'third');
-          const newer = await teams.plan('newer');
+          const newer = teams.plan('newer');
           await expect(
             teams.submitPlan('fresh-stale', 'run-alice', 'stale'),
           ).rejects.toThrow('Only the running');
@@ -422,13 +416,12 @@ describe('team plans', () => {
           );
           expect(answer).toContain('superseded');
           expect(answer).not.toContain('decision arrives');
-          expect(await teams.plan('newer')).toEqual(newer);
+          expect(teams.plan('newer')).toEqual(newer);
           expect(
-            await teams
+            teams
               .plans()
               .filter((plan) => plan.run.state === 'waiting')
-              .map((plan) => plan.requestId)
-              .collect(1_000_000),
+              .map((plan) => plan.requestId),
           ).toEqual(['newer']);
           return;
         }
@@ -436,8 +429,8 @@ describe('team plans', () => {
           await teams.submitPlan('replacement', 'run-alice', 'second'),
         ).toContain('revision 2');
       }
-      expect((await teams.plan('original'))?.run.state).toBe('cancelled');
-      expect((await teams.plan('replacement'))?.run.state).toBe('waiting');
+      expect(teams.plan('original')?.run.state).toBe('cancelled');
+      expect(teams.plan('replacement')?.run.state).toBe('waiting');
     },
   );
 
@@ -478,25 +471,25 @@ describe('team plans', () => {
     await expect(
       racing.submitPlan('stale', 'run-alice', 'second'),
     ).rejects.toThrow('no longer the running');
-    expect(await teams.plan('newer')).toMatchObject({
+    expect(teams.plan('newer')).toMatchObject({
       planRevision: 2,
       run: { state: 'waiting' },
     });
-    expect(await teams.plan('stale')).toBeUndefined();
+    expect(teams.plan('stale')).toBeUndefined();
   });
 
   it('supersedes only from the current run and withdraws on finished-member shutdown', async () => {
     await member();
     await teams.submitPlan('submit-1', 'run-alice', 'first');
     await teams.submitPlan('submit-2', 'run-alice', 'second');
-    expect((await teams.plan('submit-1'))?.run.state).toBe('cancelled');
+    expect(teams.plan('submit-1')?.run.state).toBe('cancelled');
     await settle('run-alice');
     await teams.run('request_shutdown', { to: 'alice' }, 'shutdown');
-    expect((await teams.plan('submit-2'))?.run.state).toBe('cancelled');
+    expect(teams.plan('submit-2')?.run.state).toBe('cancelled');
     expect(await teams.submitPlan('submit-1', 'run-alice', 'first')).toContain(
       'revision 1',
     );
-    expect(await teams.plans().collect(1_000_000)).toHaveLength(2);
+    expect(teams.plans()).toHaveLength(2);
   });
 
   it('preflights closing before settlement and recovers an undelivered decision', async () => {
@@ -512,7 +505,7 @@ describe('team plans', () => {
         { closing: true },
       ),
     ).rejects.toThrow();
-    expect((await teams.plan('submit-1'))?.run.state).toBe('waiting');
+    expect(teams.plan('submit-1')?.run.state).toBe('waiting');
     const failing = new HostedTeamSession(
       { authority: session.authority, resources: session.resources },
       sessionKey,
@@ -532,8 +525,8 @@ describe('team plans', () => {
     expect(answer).toContain('submit-1');
     expect(answer).toContain('stopped before alice was continued');
     expect(answer).not.toContain('member was continued');
-    expect((await teams.plan('submit-1'))?.decision).toBe('approved');
-    expect(await children.record('split')).toBeUndefined();
+    expect(teams.plan('submit-1')?.decision).toBe('approved');
+    expect(children.record('split')).toBeUndefined();
     expect(
       await teams.run(
         'team_plan_approval',
@@ -541,7 +534,7 @@ describe('team plans', () => {
         'split',
       ),
     ).toBe(answer);
-    expect(await children.record('split')).toBeUndefined();
+    expect(children.record('split')).toBeUndefined();
   });
 
   it('recovers a real never-started plan continuation without launching it again', async () => {
@@ -555,7 +548,7 @@ describe('team plans', () => {
       reason: null,
       started: false,
     });
-    expect((await children.record('decision-run'))?.run.execution).toBe(
+    expect(children.record('decision-run')?.run.execution).toBe(
       'not_started_proven',
     );
     const recovered = new HostedTeamSession(
@@ -563,9 +556,7 @@ describe('team plans', () => {
       sessionKey,
       children,
     );
-    const before = await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000);
+    const before = session.authority.extensionRecordsInDomain('child_run');
     const evidence = await recovered.planDecisionEvidence('decision-run');
     expect(evidence).toContain('continuation never started');
     expect(evidence).toContain('send_message');
@@ -575,11 +566,9 @@ describe('team plans', () => {
       await recovered.run('team_plan_approval', args, 'decision-run'),
     ).toBe(evidence);
     expect(await recovered.planDecisionEvidence('unrelated')).toBeUndefined();
-    expect(
-      await session.authority
-        .extensionRecordsInDomain('child_run')
-        .collect(1_000_000),
-    ).toEqual(before);
+    expect(session.authority.extensionRecordsInDomain('child_run')).toEqual(
+      before,
+    );
     expect(await recovered.run('task_list', {}, 'list-recovered')).toContain(
       'never-started-plan',
     );
@@ -617,14 +606,12 @@ describe('team plans', () => {
     );
     expect(answer).toContain('stopped before alice was continued');
     expect(answer).not.toContain('member was continued');
-    expect(await children.record('race-head')).toBeDefined();
-    expect(await children.record('stale')).toBeUndefined();
+    expect(children.record('race-head')).toBeDefined();
+    expect(children.record('stale')).toBeUndefined();
     expect(
-      await session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
-    expect((await teams.plan('race-plan'))?.decision).toBe('approved');
+    expect(teams.plan('race-plan')?.decision).toBe('approved');
   });
 
   it.each(['request_shutdown', 'team_delete'] as const)(
@@ -641,7 +628,7 @@ describe('team plans', () => {
           'cleanup',
         ),
       ).resolves.toContain(tool === 'request_shutdown' ? 'stopped' : 'deleted');
-      expect((await teams.plan('historical'))?.run.state).toBe('waiting');
+      expect(teams.plan('historical')?.run.state).toBe('waiting');
       await expect(
         teams.submitPlan('fresh', 'run-alice', 'new'),
       ).rejects.toThrow();
@@ -654,8 +641,8 @@ describe('team plans', () => {
       if (tool === 'team_delete')
         await expect(late).rejects.toThrow('not active');
       else await expect(late).resolves.toContain('withdrawn');
-      expect((await teams.plan('historical'))?.decision).toBeNull();
-      expect(await children.record('late')).toBeUndefined();
+      expect(teams.plan('historical')?.decision).toBeNull();
+      expect(children.record('late')).toBeUndefined();
     },
   );
 
@@ -663,20 +650,16 @@ describe('team plans', () => {
     await member();
     await teams.submitPlan('historical', 'run-alice', 'read');
     await settle('run-alice');
-    const before = await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000);
+    const before = session.authority.extensionRecordsInDomain('child_run');
     planGate.enabled = false;
     expect(
       await refusal(teams.run('request_shutdown', { to: 'alice' }, 'rollback')),
     ).toContain('team_plan is disabled');
-    expect((await teams.plan('historical'))?.run.state).toBe('waiting');
-    expect(
-      await session.authority
-        .extensionRecordsInDomain('child_run')
-        .collect(1_000_000),
-    ).toEqual(before);
-    expect(await teams.committedBy('request_shutdown', 'rollback')).toBe(false);
+    expect(teams.plan('historical')?.run.state).toBe('waiting');
+    expect(session.authority.extensionRecordsInDomain('child_run')).toEqual(
+      before,
+    );
+    expect(teams.committedBy('request_shutdown', 'rollback')).toBe(false);
     planGate.enabled = true;
     await expect(
       teams.run(
@@ -685,7 +668,7 @@ describe('team plans', () => {
         'after-refusal',
       ),
     ).resolves.toContain('member was continued');
-    expect(await children.record('after-refusal')).toBeDefined();
+    expect(children.record('after-refusal')).toBeDefined();
   });
 
   it('refuses gate-off shutdown if normal completion outraces its stop', async () => {
@@ -707,11 +690,9 @@ describe('team plans', () => {
         racing.run('request_shutdown', { to: 'alice' }, 'race-shutdown'),
       ),
     ).toContain('team_plan is disabled');
-    expect((await teams.plan('race-shutdown-plan'))?.run.state).toBe('waiting');
-    expect((await children.record('run-alice'))?.stopRequested).toBe(false);
-    expect(await racing.committedBy('request_shutdown', 'race-shutdown')).toBe(
-      false,
-    );
+    expect(teams.plan('race-shutdown-plan')?.run.state).toBe('waiting');
+    expect(children.record('run-alice')?.stopRequested).toBe(false);
+    expect(racing.committedBy('request_shutdown', 'race-shutdown')).toBe(false);
   });
 
   it('recognizes only the shutdown call that durably withdrew a completed member plan', async () => {
@@ -720,7 +701,7 @@ describe('team plans', () => {
     await settle('run-alice');
     await teams.run('request_shutdown', { to: 'alice' }, 'withdraw-only');
     expect(
-      await session.authority.committedExtensionOperation(
+      session.authority.committedExtensionOperation(
         'commitChildRunRecord',
         'shutdown:withdraw-only',
       ),
@@ -730,12 +711,10 @@ describe('team plans', () => {
       sessionKey,
       children,
     );
-    expect(
-      await recovered.committedBy('request_shutdown', 'withdraw-only'),
-    ).toBe(true);
-    expect(await recovered.committedBy('request_shutdown', 'unrelated')).toBe(
-      false,
+    expect(recovered.committedBy('request_shutdown', 'withdraw-only')).toBe(
+      true,
     );
+    expect(recovered.committedBy('request_shutdown', 'unrelated')).toBe(false);
   });
 
   it('bounds escaped plans and feedback before writing', async () => {
@@ -743,7 +722,7 @@ describe('team plans', () => {
     await expect(
       teams.submitPlan('too-big', 'run-alice', '<'.repeat(7000)),
     ).rejects.toThrow('byte_limit');
-    expect(await teams.plans().collect(1_000_000)).toHaveLength(0);
+    expect(teams.plans()).toHaveLength(0);
     expect(
       hostedTeamArgumentError('team_plan_approval', {
         request_id: 'x',
@@ -784,9 +763,9 @@ describe('team plans', () => {
         ),
       ),
     ).toEqual({ needed: first.available + 1, available: first.available });
-    expect(await teams.plans().collect(1_000_000)).toHaveLength(0);
+    expect(teams.plans()).toHaveLength(0);
     await teams.submitPlan('fits', 'run-alice', 'B'.repeat(first.available));
-    expect((await teams.plan('fits'))?.planRevision).toBe(1);
+    expect(teams.plan('fits')?.planRevision).toBe(1);
   });
 });
 
@@ -799,7 +778,7 @@ describe('team lifecycle', () => {
         'prompt:call-1',
       ),
     ).toBe('Team "code-review" created.');
-    expect(await teams.team('prompt:call-1')).toMatchObject({
+    expect(teams.team('prompt:call-1')).toMatchObject({
       name: 'code-review',
       leadSessionId: sessionKey.sessionId,
       lifecycle: 'active',
@@ -814,9 +793,7 @@ describe('team lifecycle', () => {
       ),
     ).toBe('Team "code-review" created.');
     expect(
-      await session.authority
-        .extensionRecordsInDomain('team_state')
-        .collect(1_000_000),
+      session.authority.extensionRecordsInDomain('team_state'),
     ).toHaveLength(1);
     expect(
       await refusal(
@@ -836,45 +813,45 @@ describe('team lifecycle', () => {
     expect(
       await refusal(teams.run('team_delete', {}, 'prompt:del-1')),
     ).toContain('still has running members: alice');
-    expect((await teams.openTeam())?.lifecycle).toBe('active');
+    expect(teams.openTeam()?.lifecycle).toBe('active');
     await settle('run-alice');
     expect(await teams.run('team_delete', {}, 'prompt:del-2')).toBe(
       'Team "review" deleted.',
     );
-    const deleted = (await teams.team('prompt:call-team'))!;
+    const deleted = teams.team('prompt:call-team')!;
     expect(deleted).toMatchObject({ lifecycle: 'deleted' });
     expect(deleted.run.state).toBe('cancelled');
     // Opening, join, closing, deleted.
-    expect(await revisions('team_state', 'prompt:call-team')).toBe(4);
-    expect(await teams.openTeam()).toBeUndefined();
+    expect(revisions('team_state', 'prompt:call-team')).toBe(4);
+    expect(teams.openTeam()).toBeUndefined();
     // The replay answers what its call committed; another call finds no team.
     expect(await teams.run('team_delete', {}, 'prompt:del-2')).toBe(
       'Team "review" deleted.',
     );
-    expect(await revisions('team_state', 'prompt:call-team')).toBe(4);
+    expect(revisions('team_state', 'prompt:call-team')).toBe(4);
     expect(await refusal(teams.run('team_delete', {}, 'prompt:del-3'))).toBe(
       'No active team to delete.',
     );
     await teams.run('team_create', { team_name: 'next' }, 'prompt:call-next');
-    expect((await teams.openTeam())?.name).toBe('next');
+    expect(teams.openTeam()?.name).toBe('next');
   });
 
   it('finishes a team that a stopped team_delete left closing', async () => {
     await createTeam();
     await stopDeleteAtClosing('prompt:del');
-    expect((await teams.openTeam())?.lifecycle).toBe('closing');
-    await expect(teams.admitMember('bob')).rejects.toThrow(/closing/);
+    expect(teams.openTeam()?.lifecycle).toBe('closing');
+    expect(teams.admitMember.bind(teams, 'bob')).toThrow(/closing/);
     // A later team_delete finishes it, and that call's replay answers so.
     for (let attempt = 0; attempt < 2; attempt++)
       expect(await teams.run('team_delete', {}, 'prompt:del-later')).toBe(
         'Team "review" deleted.',
       );
-    expect(await revisions('team_state', 'prompt:call-team')).toBe(3);
+    expect(revisions('team_state', 'prompt:call-team')).toBe(3);
     // The stopped call's own replay finds the team it closed now deleted.
     expect(await teams.run('team_delete', {}, 'prompt:del')).toBe(
       'Team "review" deleted.',
     );
-    expect(await revisions('team_state', 'prompt:call-team')).toBe(3);
+    expect(revisions('team_state', 'prompt:call-team')).toBe(3);
   });
 });
 
@@ -887,45 +864,39 @@ describe('members', () => {
     const records = () =>
       session.authority.extensionRecordsInDomain('team_state');
     // H4e-b2: the open-team answer reads the run's chain root.
-    const openMember = async () =>
-      await hostedOpenTeamChainMember(
-        await records(),
-        new HostedChildChains(session.authority),
+    const openMember = () =>
+      hostedOpenTeamChainMember(
+        records(),
+        new HostedChildChains(
+          session.authority.extensionRecordsInDomain('child_run'),
+        ),
         'run-alice',
       );
     const alice = { teamName: 'review', name: 'alice' };
-    expect(await openMember()).toMatchObject({ name: 'alice' });
+    expect(openMember()).toMatchObject({ name: 'alice' });
     await stopDeleteAtClosing('prompt:del');
-    expect((await teams.openTeam())?.lifecycle).toBe('closing');
-    expect(await openMember()).toMatchObject({ name: 'alice' });
+    expect(teams.openTeam()?.lifecycle).toBe('closing');
+    expect(openMember()).toMatchObject({ name: 'alice' });
     await teams.run('team_delete', {}, 'prompt:del');
-    expect(await teams.openTeam()).toBeUndefined();
-    expect(await openMember()).toBeUndefined();
-    expect(
-      await hostedTeamMembership(await records(), 'run-alice'),
-    ).toMatchObject(alice);
-    expect(
-      await hostedTeamMembership(await records(), 'run-bob'),
-    ).toBeUndefined();
+    expect(teams.openTeam()).toBeUndefined();
+    expect(openMember()).toBeUndefined();
+    expect(hostedTeamMembership(records(), 'run-alice')).toMatchObject(alice);
+    expect(hostedTeamMembership(records(), 'run-bob')).toBeUndefined();
   });
 
   it('admits a member only into an active team, by a free sanitized name', async () => {
-    await expect(teams.admitMember('alice')).rejects.toThrow(
-      /team_create first/,
-    );
+    expect(() => teams.admitMember('alice')).toThrow(/team_create first/);
     await createTeam();
-    expect(await teams.admitMember('Alice Smith')).toEqual({
+    expect(teams.admitMember('Alice Smith')).toEqual({
       teamId: 'prompt:call-team',
       teamName: 'review',
       name: 'alice-smith',
     });
-    await expect(teams.admitMember('Leader')).rejects.toThrow(/reserved/);
-    await expect(teams.admitMember('***')).rejects.toThrow(/empty string/);
-    await expect(teams.admitMember('a'.repeat(65))).rejects.toThrow(
-      /64 characters/,
-    );
+    expect(() => teams.admitMember('Leader')).toThrow(/reserved/);
+    expect(() => teams.admitMember('***')).toThrow(/empty string/);
+    expect(() => teams.admitMember('a'.repeat(65))).toThrow(/64 characters/);
     await addMember('alice');
-    await expect(teams.admitMember('ALICE')).rejects.toThrow(
+    expect(() => teams.admitMember('ALICE')).toThrow(
       'A teammate named "alice" already exists in this team (existing: alice). Choose a different name.',
     );
   });
@@ -936,9 +907,7 @@ describe('members', () => {
       await addMember(`member-${index}`);
       await settle(`run-member-${index}`);
     }
-    await expect(teams.admitMember('eleventh')).rejects.toThrow(
-      /already has 10/,
-    );
+    expect(() => teams.admitMember('eleventh')).toThrow(/already has 10/);
   });
 
   it('joins once, and a run that ended first never joins', async () => {
@@ -951,13 +920,13 @@ describe('members', () => {
         childRunId: 'run-alice',
       }),
     ).toEqual({ joined: true });
-    expect(await revisions('team_state', 'prompt:call-team')).toBe(2);
-    expect(await teams.membership('run-alice')).toEqual({
+    expect(revisions('team_state', 'prompt:call-team')).toBe(2);
+    expect(teams.membership('run-alice')).toEqual({
       teamId: 'prompt:call-team',
       teamName: 'review',
       name: 'alice',
     });
-    const member = await teams.admitMember('bob');
+    const member = teams.admitMember('bob');
     await launch('run-bob');
     await children.settleFailed('run-bob', {
       stopReason: 'creation_failed',
@@ -968,8 +937,8 @@ describe('members', () => {
     expect('ended' in joined && joined.ended.stopReason).toBe(
       'creation_failed',
     );
-    expect(await teams.membership('run-bob')).toBeUndefined();
-    expect((await teams.admitMember('bob')).name).toBe('bob');
+    expect(teams.membership('run-bob')).toBeUndefined();
+    expect(teams.admitMember('bob').name).toBe('bob');
   });
 });
 
@@ -1005,10 +974,8 @@ describe('the board', () => {
       ),
     ).toBe('Task #4 created: "four"');
     const task = parseTeamTask(
-      (await session.authority.extensionRecord(
-        'team_task',
-        'prompt:call-team#4',
-      ))!.record,
+      session.authority.extensionRecord('team_task', 'prompt:call-team#4')!
+        .record,
     );
     expect(task).toMatchObject({ number: 4, activeForm: 'Doing four' });
     expect(
@@ -1200,10 +1167,8 @@ describe('the board', () => {
     ).toBe('Task #1 updated (status: completed, owner: alice).');
     expect(
       parseTeamTask(
-        (await session.authority.extensionRecord(
-          'team_task',
-          'prompt:call-team#1',
-        ))!.record,
+        session.authority.extensionRecord('team_task', 'prompt:call-team#1')!
+          .record,
       ),
     ).toMatchObject({ status: 'completed', owner: 'alice' });
     // Reopening keeps the owner, so it is checked like a new one: the
@@ -1289,7 +1254,7 @@ describe('the board', () => {
         'prompt:same',
       ),
     ).toBe('Task #1 updated (status: pending).');
-    expect(await revisions('team_task', 'prompt:call-team#1')).toBe(1);
+    expect(revisions('team_task', 'prompt:call-team#1')).toBe(1);
   });
 
   it('merges metadata by key and deletes a key set to null', async () => {
@@ -1310,18 +1275,14 @@ describe('the board', () => {
       },
       'prompt:meta',
     );
-    const task = async () =>
+    const task = () =>
       parseTeamTask(
-        (await session.authority.extensionRecord(
-          'team_task',
-          'prompt:call-team#1',
-        ))!.record,
+        session.authority.extensionRecord('team_task', 'prompt:call-team#1')!
+          .record,
       );
     expect(
       JSON.parse(
-        (await session.resources.read((await task()).metadataRef!)).toString(
-          'utf8',
-        ),
+        (await session.resources.read(task().metadataRef!)).toString('utf8'),
       ),
     ).toEqual({ a: 1, c: 3 });
     await teams.run(
@@ -1329,7 +1290,7 @@ describe('the board', () => {
       { taskId: '1', metadata: { a: null, c: null } },
       'prompt:meta-2',
     );
-    expect((await task()).metadataRef).toBeNull();
+    expect(task().metadataRef).toBeNull();
     expect(
       await refusal(
         teams.run(
@@ -1370,18 +1331,14 @@ describe('the board', () => {
     );
     expect(
       parseTeamTask(
-        (await session.authority.extensionRecord(
-          'team_task',
-          'prompt:call-team#2',
-        ))!.record,
+        session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+          .record,
       ).blockedBy,
     ).toEqual(['prompt:call-team#1']);
     expect(
       parseTeamTask(
-        (await session.authority.extensionRecord(
-          'team_task',
-          'prompt:call-team#1',
-        ))!.record,
+        session.authority.extensionRecord('team_task', 'prompt:call-team#1')!
+          .record,
       ).blockedBy,
     ).toEqual(['prompt:call-team#3']);
     expect(
@@ -1401,10 +1358,7 @@ describe('the board', () => {
         'No members yet.',
       ].join('\n'),
     );
-    const dependentRevision = await revisions(
-      'team_task',
-      'prompt:call-team#2',
-    );
+    const dependentRevision = revisions('team_task', 'prompt:call-team#2');
     await teams.run(
       'task_update',
       { taskId: '3', status: 'completed' },
@@ -1419,7 +1373,7 @@ describe('the board', () => {
       'prompt:done-1',
     );
     // Completing a blocker writes nothing to the task it blocked.
-    expect(await revisions('team_task', 'prompt:call-team#2')).toBe(
+    expect(revisions('team_task', 'prompt:call-team#2')).toBe(
       dependentRevision,
     );
     expect(
@@ -1464,7 +1418,7 @@ describe('the board', () => {
         ),
       ),
     ).toBe('Cannot update task #67: task #1 would have more than 64 blockers.');
-    expect(await revisions('team_task', 'prompt:call-team#67')).toBe(1);
+    expect(revisions('team_task', 'prompt:call-team#67')).toBe(1);
     // An edge already stored is not counted twice.
     expect(
       await teams.run(
@@ -1514,19 +1468,17 @@ describe('the board', () => {
     await expect(
       failing.run('task_update', call, 'prompt:edges'),
     ).rejects.toThrow('store unavailable');
-    expect(await revisions('team_task', 'prompt:call-team#1')).toBe(2);
-    expect(await revisions('team_task', 'prompt:call-team#2')).toBe(1);
+    expect(revisions('team_task', 'prompt:call-team#1')).toBe(2);
+    expect(revisions('team_task', 'prompt:call-team#2')).toBe(1);
     await teams.run('task_update', call, 'prompt:edges');
     await teams.run('task_update', call, 'prompt:edges');
-    expect(await revisions('team_task', 'prompt:call-team#1')).toBe(2);
-    expect(await revisions('team_task', 'prompt:call-team#2')).toBe(2);
-    expect(await revisions('team_task', 'prompt:call-team#3')).toBe(2);
+    expect(revisions('team_task', 'prompt:call-team#1')).toBe(2);
+    expect(revisions('team_task', 'prompt:call-team#2')).toBe(2);
+    expect(revisions('team_task', 'prompt:call-team#3')).toBe(2);
     expect(
       parseTeamTask(
-        (await session.authority.extensionRecord(
-          'team_task',
-          'prompt:call-team#3',
-        ))!.record,
+        session.authority.extensionRecord('team_task', 'prompt:call-team#3')!
+          .record,
       ).blockedBy,
     ).toEqual(['prompt:call-team#1']);
   });
@@ -1642,10 +1594,8 @@ describe('the board', () => {
     expect(result).toContain('Not committed');
     expect(result).toContain('dependency cycle');
     const two = parseTeamTask(
-      (await session.authority.extensionRecord(
-        'team_task',
-        'prompt:call-team#2',
-      ))!.record,
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
     );
     expect(two.blockedBy).toHaveLength(0);
   });
@@ -1695,10 +1645,8 @@ describe('the board', () => {
     expect(result).toContain('Not committed');
     expect(result).toContain('would exceed 64 blockers');
     const two = parseTeamTask(
-      (await session.authority.extensionRecord(
-        'team_task',
-        'prompt:call-team#2',
-      ))!.record,
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
     );
     expect(two.blockedBy).toHaveLength(64);
   });
@@ -1766,9 +1714,7 @@ it('rebuilds the team and its board from a reopened journal', async () => {
     { subject: 'audit', description: 'audit it' },
     'prompt:create',
   );
-  const before = await session.authority
-    .extensionRecordsInDomain('team_state')
-    .collect(1_000_000);
+  const before = session.authority.extensionRecordsInDomain('team_state');
   await session.close();
   session = await openManagedSession({
     runtimeBaseDir: root,
@@ -1790,11 +1736,9 @@ it('rebuilds the team and its board from a reopened journal', async () => {
       sessionKey,
     ),
   );
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('team_state')
-      .collect(1_000_000),
-  ).toEqual(before);
+  expect(session.authority.extensionRecordsInDomain('team_state')).toEqual(
+    before,
+  );
   expect(parseTeamState(before[0]!.record).members).toHaveLength(1);
   expect(await reopened.run('task_list', {}, 'prompt:list')).toContain(
     '#1 [pending] — audit',
@@ -1832,15 +1776,15 @@ describe('request_shutdown (H4e-b3a)', () => {
   it('commits the H4f stop on a running head, then reads it on replay', async () => {
     await createTeam();
     await addMember('alice');
-    expect(await teams.committedBy('request_shutdown', 'p:stop')).toBe(false);
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(false);
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
       'alice is being stopped. Delete the team once task_list shows it ended.',
     );
-    expect((await children.record('run-alice'))!.stopRequested).toBe(true);
-    expect(await teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
+    expect(children.record('run-alice')!.stopRequested).toBe(true);
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
     // The stop evidence keys on the call, not the member: a call key that
     // never ran has committed nothing.
-    expect(await teams.committedBy('request_shutdown', 'p:other')).toBe(false);
+    expect(teams.committedBy('request_shutdown', 'p:other')).toBe(false);
     // A re-driven call answers its committed stop from the records.
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
       'alice is already being stopped. Delete the team once task_list shows it ended.',
@@ -1880,7 +1824,7 @@ describe('request_shutdown (H4e-b3a)', () => {
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
       'alice has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.',
     );
-    expect((await children.record('run-alice'))!.stopRequested).toBe(false);
+    expect(children.record('run-alice')!.stopRequested).toBe(false);
   });
 
   it('names a head that completed after a stop was requested', async () => {
@@ -1911,11 +1855,11 @@ describe('request_shutdown (H4e-b3a)', () => {
     await addMember('alice');
     // The H4f user cancel commits its stop under the revision-shaped id.
     await children.requestStop('run-alice');
-    expect(await teams.committedBy('request_shutdown', 'p:new')).toBe(false);
+    expect(teams.committedBy('request_shutdown', 'p:new')).toBe(false);
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:new')).toBe(
       'alice is already being stopped. Delete the team once task_list shows it ended.',
     );
-    expect(await teams.committedBy('request_shutdown', 'p:new')).toBe(false);
+    expect(teams.committedBy('request_shutdown', 'p:new')).toBe(false);
   });
 
   it('reads its keyed stop after the stopped continuation fell back', async () => {
@@ -1936,7 +1880,7 @@ describe('request_shutdown (H4e-b3a)', () => {
     // The stopped continuation never starts and the head falls back, yet
     // the keyed stop evidence still credits the call that requested it.
     await children.settleCancelled('shut:more', { started: false });
-    expect(await teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
   });
 
   it('answers the settled head when its settlement outraced the stop', async () => {
@@ -1958,7 +1902,7 @@ describe('request_shutdown (H4e-b3a)', () => {
     ).toBe(
       'alice has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.',
     );
-    expect(await racing.committedBy('request_shutdown', 'p:stop')).toBe(false);
+    expect(racing.committedBy('request_shutdown', 'p:stop')).toBe(false);
   });
 
   it('refuses a stop on a lane that carries no child funnel', async () => {
@@ -2003,9 +1947,7 @@ describe('members through their continuation chains', () => {
     expect(await sendTo('run-alice', 'fix it', 'turn-1:c1')).toMatchObject({
       kind: 'continuation',
     });
-    expect((await teams.memberView('run-alice')).head?.childRunId).toBe(
-      'turn-1:c1',
-    );
+    expect(teams.memberView('run-alice').head?.childRunId).toBe('turn-1:c1');
     expect(await line('alice')).toBe(
       `alice: running — ${children.taskIdOf('turn-1:c1')}`,
     );
@@ -2023,9 +1965,7 @@ describe('members through their continuation chains', () => {
       reason: null,
       started: false,
     });
-    expect((await teams.memberView('run-alice')).head?.childRunId).toBe(
-      'turn-1:c1',
-    );
+    expect(teams.memberView('run-alice').head?.childRunId).toBe('turn-1:c1');
     expect(await line('alice')).toBe(
       `alice: completed — ${children.taskIdOf('turn-1:c1')} (its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it)`,
     );

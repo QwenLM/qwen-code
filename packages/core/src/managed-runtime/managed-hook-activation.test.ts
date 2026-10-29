@@ -285,16 +285,17 @@ describe('Managed Hook model activation', () => {
     expect(() => expired!.evaluate(evaluation, async () => result)).toThrow(
       'active Session model slot',
     );
-    const events = await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000);
+    const events = session.authority.eventsInSequenceRange(
+      1,
+      session.authority.committedSequence,
+    );
     const attempts = events.filter((event) => event.kind === 'model.attempt');
     expect(attempts.map((event) => event.payload['state'])).toEqual([
       'started',
       'output_committed',
     ]);
     expect(
-      await events.some(
+      events.some(
         (event) =>
           event.kind === 'turn.settled' ||
           event.kind === 'checkpoint.committed',
@@ -408,11 +409,8 @@ describe('Managed Hook model activation', () => {
     expect(session.activation).toEqual(activation);
     expect(session.authority.latestCheckpoint).toEqual(checkpoint);
     expect(
-      (
-        await session.authority
-          .iterateEvents(1, session.authority.committedSequence)
-          .collect(1_000_000)
-      )
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
         .filter((event) => event.kind === 'model.attempt')
         .map((event) => event.payload['state']),
     ).toEqual(['started', 'output_committed', 'started', 'output_committed']);

@@ -177,11 +177,8 @@ function orchestratorOf(active: ManagedSession): HostedChildRunSession {
   );
 }
 
-async function committed(shellId: string) {
-  const existing = await session!.authority.extensionRecord(
-    'child_run',
-    shellId,
-  );
+function committed(shellId: string) {
+  const existing = session!.authority.extensionRecord('child_run', shellId);
   if (existing === undefined)
     throw new Error(`No child_run record for ${shellId}.`);
   return parseChildShellRun(existing.record);
@@ -348,7 +345,7 @@ describe('reconcileNeverStartedChildRuns', () => {
       settled: ['shell-1'],
       skipped: [],
     });
-    expect(await committed('shell-1')).toMatchObject({
+    expect(committed('shell-1')).toMatchObject({
       stopReason: 'start_failed',
       run: { state: 'failed', execution: 'not_started_proven' },
     });
@@ -359,7 +356,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.runtimeSessionIds).toEqual(['runtime-a']);
     const taskId = `task_${managedExtensionRecordKey(key.sessionId, 'child_run', 'shell-1')}`;
-    expect(await session!.authority.taskViews()).toEqual([
+    expect(session!.authority.taskViews()).toEqual([
       expect.objectContaining({
         taskId,
         state: 'failed',
@@ -369,7 +366,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     ]);
     // Reads as never-started on yet another reload: the settle is durable.
     await reopen();
-    expect(await committed('shell-1')).toMatchObject({
+    expect(committed('shell-1')).toMatchObject({
       stopReason: 'start_failed',
       run: { state: 'failed', execution: 'not_started_proven' },
     });
@@ -429,7 +426,7 @@ describe('reconcileNeverStartedChildRuns', () => {
       'runtime-a',
       'runtime-b',
     ]);
-    expect((await committed('shell-2')).run.execution).toBe('dispatch_started');
+    expect(committed('shell-2').run.execution).toBe('dispatch_started');
   });
 
   it('settles a stranded record whose runtime Session was released', async () => {
@@ -473,10 +470,8 @@ describe('reconcileNeverStartedChildRuns', () => {
 
       expect(result.settled).toEqual([]);
       expect(result.skipped).toEqual(['shell-1']);
-      expect((await committed('shell-1')).run.execution).toBe(
-        'dispatch_started',
-      );
-      expect((await committed('shell-1')).stopReason).toBeNull();
+      expect(committed('shell-1').run.execution).toBe('dispatch_started');
+      expect(committed('shell-1').stopReason).toBeNull();
     },
   );
 
@@ -497,7 +492,7 @@ describe('reconcileNeverStartedChildRuns', () => {
 
     expect(result.settled).toEqual([]);
     expect(result.skipped).toEqual(['shell-1']);
-    expect((await committed('shell-1')).run.execution).toBe('dispatch_started');
+    expect(committed('shell-1').run.execution).toBe('dispatch_started');
   });
 
   it('attributes each skip cause with the session id and never logs the rejection message', async () => {
@@ -557,9 +552,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     } finally {
       stderr.mockRestore();
     }
-    expect((await committed('shell-ambiguous')).run.execution).toBe(
-      'dispatch_started',
-    );
+    expect(committed('shell-ambiguous').run.execution).toBe('dispatch_started');
   });
 
   it.each([
@@ -595,9 +588,7 @@ describe('reconcileNeverStartedChildRuns', () => {
       });
       expect(broker.calls).toEqual([]);
       expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
-      expect((await committed('shell-1')).run.execution).toBe(
-        'dispatch_started',
-      );
+      expect(committed('shell-1').run.execution).toBe('dispatch_started');
     },
   );
 
@@ -622,7 +613,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     } finally {
       settle.mockRestore();
     }
-    expect((await committed('shell-1')).run.execution).toBe('dispatch_started');
+    expect(committed('shell-1').run.execution).toBe('dispatch_started');
   });
 
   it('leaves a record alone when its runtime session cannot be rebuilt', async () => {
@@ -645,7 +636,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     });
     expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
     expect(broker.runtimeSessionIds).toEqual([]);
-    expect((await committed('shell-1')).run.execution).toBe('dispatch_started');
+    expect(committed('shell-1').run.execution).toBe('dispatch_started');
   });
 
   it('leaves a record alone when the route belongs to another Session', async () => {
@@ -679,7 +670,7 @@ describe('reconcileNeverStartedChildRuns', () => {
         args: { command: 'printf hi', is_background: true },
       }),
     ).resolves.toMatchObject({ kind: 'managed-tool-args' });
-    expect(await committed('shell-1')).toMatchObject({
+    expect(committed('shell-1')).toMatchObject({
       kind: 'shell',
       run: { state: 'admitted', execution: 'intent' },
     });

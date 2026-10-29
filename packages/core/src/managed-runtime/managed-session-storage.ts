@@ -90,23 +90,9 @@ export interface ManagedSessionJournalScan {
 
 export interface ManagedSessionJournalReader {
   readonly sessionKey: ManagedSessionKey;
-  scan(
-    consume: (batch: ManagedSessionJournalBatch) => Promise<void>,
-    options?: { readonly maxBytes?: number },
-  ): Promise<ManagedSessionJournalSummary>;
   read(options?: {
     readonly maxBytes?: number;
   }): Promise<ManagedSessionJournalScan>;
-}
-
-export type ManagedSessionJournalSummary = Omit<
-  ManagedSessionJournalScan,
-  'events' | 'transactions'
->;
-
-export interface ManagedSessionJournalBatch extends ManagedSessionJournalScan {
-  readonly sourceBytes: Buffer;
-  readonly sourceOffset: number;
 }
 
 /**
@@ -128,7 +114,6 @@ export interface ManagedSessionCommitProof {
  */
 export interface ManagedSessionJournalHandle
   extends ManagedSessionJournalReader {
-  readonly history?: ManagedSessionNativeHistoryReader;
   appendTransaction(records: readonly unknown[]): Promise<void>;
   /** Undefined means the store requires event-based activation renewal. */
   renewActivation?(request: {
@@ -167,64 +152,6 @@ export interface ManagedSessionJournalHandle
   readonly takeoverCommitProof?: ManagedSessionCommitProof;
   /** Abandons an unsuccessful open without publishing a handoff boundary. */
   abort(): Promise<void>;
-}
-
-export type ManagedSessionNativeHistoryFamily =
-  | 'event'
-  | 'event-id'
-  | 'event-kind'
-  | 'event-correlation'
-  | 'command'
-  | 'command-id'
-  | 'receipt'
-  | 'checkpoint'
-  | 'hook-activation'
-  | 'domain'
-  | 'domain-event'
-  | 'extension-event'
-  | 'extension'
-  | 'extension-domain'
-  | 'opening-operation'
-  | 'hook-once'
-  | 'hook-occurrence'
-  | 'hook-ordinal'
-  | 'hook-definition'
-  | 'child-continuation'
-  | 'action';
-
-export interface ManagedSessionNativeHistoryFact {
-  readonly family: ManagedSessionNativeHistoryFamily;
-  readonly identity: string;
-  readonly journalRevision: number;
-  readonly sequence: number;
-  readonly eventOrdinal: number;
-  readonly recordDigest: string;
-  readonly metadata: Readonly<Record<string, unknown>>;
-}
-
-export interface ManagedSessionNativeHistoryReader {
-  readonly available: boolean;
-  query(
-    family: ManagedSessionNativeHistoryFamily,
-    identity: string,
-    options: {
-      readonly throughSequence: number;
-      readonly mode?: 'first' | 'latest';
-      readonly afterSequence?: number;
-      readonly limit?: number;
-    },
-  ): Promise<readonly ManagedSessionNativeHistoryFact[]>;
-  readEvent(
-    fact: ManagedSessionNativeHistoryFact,
-  ): Promise<ManagedSessionEvent>;
-  readTransaction(
-    fact: ManagedSessionNativeHistoryFact,
-  ): Promise<ManagedSessionCommittedTransaction>;
-  repair(throughSequence: number): Promise<void>;
-  iterateEvents(
-    fromSequence: number,
-    throughSequence: number,
-  ): AsyncIterable<ManagedSessionEvent>;
 }
 
 export interface ManagedSessionJournalStore {
@@ -286,7 +213,6 @@ export function scanManagedSessionJournal(
   bytes: Buffer,
   sessionKey: ManagedSessionKey,
   maxBytes?: number,
-  previous?: ManagedSessionJournalSummary,
 ): ManagedSessionJournalScan {
   const text = (
     maxBytes === undefined || maxBytes >= bytes.byteLength
@@ -297,14 +223,13 @@ export function scanManagedSessionJournal(
   const tornTail = lines[lines.length - 1] !== '' ? 1 : 0;
   lines.pop();
 
-  let header: ManagedSessionHeader | undefined = previous?.header;
+  let header: ManagedSessionHeader | undefined;
   const events: ManagedSessionEvent[] = [];
   const transactions = new Map<string, ManagedSessionCommittedTransaction>();
-  let committed = previous?.committed ?? 0;
-  let lastMarkerDigest: string | null = previous?.lastMarkerDigest ?? null;
-  let lastRecordUuid: string | null = previous?.lastRecordUuid ?? null;
-  let activation: ManagedSessionActivationState | undefined =
-    previous?.activation;
+  let committed = 0;
+  let lastMarkerDigest: string | null = null;
+  let lastRecordUuid: string | null = null;
+  let activation: ManagedSessionActivationState | undefined;
   let scanned = 0;
   let committedBytes = 0;
   let headerBytes = 0;
@@ -470,93 +395,6 @@ export function scanManagedSessionJournal(
     headerBytes,
     uncommittedBytes: Buffer.byteLength(text, 'utf8') - committedBytes,
     uncommitted: pending.length + tornTail,
-    foreignRecords,
-    engineRecords,
-  };
-}
-
-/** Keeps at most one bounded transaction while reusing the canonical decoder. */
-export async function scanManagedSessionJournalStream(
-  chunks: AsyncIterable<Buffer>,
-  sessionKey: ManagedSessionKey,
-  consume: (batch: ManagedSessionJournalBatch) => Promise<void>,
-): Promise<ManagedSessionJournalSummary> {
-  let summary: ManagedSessionJournalSummary = emptyManagedSessionJournalScan();
-  let pending = Buffer.alloc(0);
-  let transaction: Buffer[] = [];
-  let transactionBytes = 0;
-  let totalBytes = 0;
-  let blockStart = 0;
-  let committedBytes = 0;
-  let headerBytes = 0;
-  let foreignRecords = 0;
-  let engineRecords = 0;
-  const flush = async () => {
-    if (transactionBytes === 0) return;
-    const sourceBytes = Buffer.concat(transaction, transactionBytes);
-    const batch = scanManagedSessionJournal(
-      sourceBytes,
-      sessionKey,
-      undefined,
-      summary,
-    );
-    if (batch.headerBytes) headerBytes = blockStart + batch.headerBytes;
-    if (batch.committedBytes)
-      committedBytes = blockStart + batch.committedBytes;
-    foreignRecords += batch.foreignRecords;
-    engineRecords += batch.engineRecords;
-    const { events: _events, transactions: _transactions, ...state } = batch;
-    summary = state;
-    await consume({ ...batch, sourceBytes, sourceOffset: blockStart });
-    transaction = [];
-    transactionBytes = 0;
-    blockStart = totalBytes;
-  };
-  for await (const chunk of chunks) {
-    let start = 0;
-    while (start < chunk.byteLength) {
-      const newline = chunk.indexOf(10, start);
-      const end = newline < 0 ? chunk.byteLength : newline + 1;
-      const part = chunk.subarray(start, end);
-      if (
-        pending.byteLength + part.byteLength >
-        MANAGED_SESSION_LIMITS.maxEventBytes + 1
-      )
-        throw new ManagedSessionRecordError(
-          'Journal line exceeds its byte budget.',
-        );
-      pending = pending.length
-        ? Buffer.concat([pending, part])
-        : Buffer.from(part);
-      totalBytes += part.byteLength;
-      start = end;
-      if (newline < 0) continue;
-      if (pending.byteLength === 1)
-        throw new ManagedSessionRecordError('Journal line is blank.');
-      const record = parseManagedSessionRecordJson(
-        pending.subarray(0, -1).toString('utf8'),
-        MANAGED_SESSION_LIMITS.maxEventBytes,
-      ) as Record<string, unknown>;
-      transaction.push(pending);
-      transactionBytes += pending.byteLength;
-      pending = Buffer.alloc(0);
-      if (transactionBytes > MANAGED_SESSION_LIMITS.maxTransactionBytes)
-        throw new ManagedSessionRecordError(
-          'Journal transaction exceeds its byte budget.',
-        );
-      if (record?.['subtype'] !== MANAGED_SESSION_EVENT_SUBTYPE) await flush();
-    }
-  }
-  if (pending.byteLength) {
-    transaction.push(pending);
-    transactionBytes += pending.byteLength;
-  }
-  await flush();
-  return {
-    ...summary,
-    committedBytes,
-    headerBytes,
-    uncommittedBytes: totalBytes - Math.max(committedBytes, headerBytes),
     foreignRecords,
     engineRecords,
   };

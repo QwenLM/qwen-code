@@ -420,48 +420,38 @@ public final class JdbcCsiExecutionAdmission {
     private static DispatchCheckpoint dispatchCheckpoint(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         DispatchCheckpoint result = null;
-        long cursor = 0;
-        while (true) {
-            try (PreparedStatement statement = read.statement(connection,
-                    "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                            + " AND workspace_id = ? AND operation = 'commitCheckpoint' AND journal_revision > ?"
-                            + " AND journal_revision <= ? ORDER BY journal_revision LIMIT 1")) {
-                JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
-                JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
-                JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getWorkspaceId());
-                statement.setLong(4, cursor);
-                statement.setLong(5, maximumRevision);
-                try (ResultSet rows = statement.executeQuery()) {
-                    if (!rows.next()) {
-                        break;
-                    }
-                    long revision = rows.getLong("journal_revision");
-                    require(revision > cursor && revision <= maximumRevision);
-                    cursor = revision;
+        try (PreparedStatement statement = read.statement(connection,
+                "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                        + " AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY journal_revision")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getWorkspaceId());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
                     if (!com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "command_id").startsWith("harness:await_runtime:")) {
-                        require(!rows.next());
                         continue;
                     }
+                    long revision = rows.getLong("journal_revision");
+                    require(revision <= maximumRevision);
                     var record = CsiNativeActivationProof.records(rows.getBytes("record_bytes")).stream()
                             .filter(value -> "system".equals(value.path("type").textValue())
                                     && "managed_session_event_v1".equals(value.path("subtype").textValue())
                                     && "checkpoint.committed".equals(value.path("managedSession").path("kind").textValue()))
                             .findFirst().orElseThrow(JdbcCsiExecutionAdmission::unavailable);
                     JsonNode ref = record.path("managedSession").path("payload").path("stateRef");
-                    var view = CsiNativeActivationProof.readCheckpointView(ref, JdbcCsiActivationAdmission.checkpointReader(connection, original, revision, read));
-                    boolean[] contains = {false};
-                    boolean[] allInProgress = {true};
-                    view.tools(item -> {
+                    JsonNode state = CsiNativeActivationProof.readCheckpoint(ref, JdbcCsiActivationAdmission.checkpointReader(connection, original, revision, read));
+                    boolean contains = false;
+                    boolean allInProgress = true;
+                    for (JsonNode item : state.path("tools").path("items")) {
                         if (batchId.equals(item.path("modelMessageId").textValue())) {
-                            contains[0] = true;
-                            allInProgress[0] &= "in_progress".equals(item.path("state").textValue());
+                            contains = true;
+                            allInProgress &= "in_progress".equals(item.path("state").textValue());
                         }
-                    });
-                    if (contains[0] && allInProgress[0]) {
+                    }
+                    if (contains && allInProgress) {
                         require(result == null);
                         result = new DispatchCheckpoint(revision, rows.getLong("last_sequence"), ref);
                     }
-                    require(!rows.next());
                 }
             }
         }

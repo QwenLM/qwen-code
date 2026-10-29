@@ -30,7 +30,6 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as {
 };
 const settlement = config.fault === 'recovery-settlement';
 type Transaction = {
-  journalRevision: number;
   transactionId: string;
   recordBytesBase64: string;
 };
@@ -59,7 +58,6 @@ const inFlight = !['harness-prepare', 'harness-result'].includes(config.fault);
 await writeFile(proof, 'x');
 let cli = new HostedHarnessProcess();
 let clientId = '';
-const restoredByRevision = new Map<number, Transaction>();
 let restoring = false;
 let injected = false;
 let serviceKilled = false;
@@ -345,21 +343,8 @@ const proxy = createServer(async (req, res) => {
         assert.equal(responseJson.code, 'runtime_broker_execution_unknown');
       } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     }
-    if (restoring && store && url.pathname.endsWith('/transactions')) {
-      for (const transaction of responseJson.transactions as Transaction[]) {
-        assert(Number.isSafeInteger(transaction.journalRevision));
-        const key = transaction.journalRevision;
-        const previous = restoredByRevision.get(key);
-        if (previous) assert.deepEqual(transaction, previous);
-        else {
-          restoredByRevision.set(key, transaction);
-          report.restoreTransactions.push(transaction);
-          report.restoreTransactions.sort(
-            (a, b) => a.journalRevision - b.journalRevision,
-          );
-        }
-      }
-    }
+    if (restoring && store && url.pathname.endsWith('/transactions'))
+      report.restoreTransactions.push(...responseJson.transactions);
     if (!store && operation === 'prepare') {
       assert.equal(report.executionCallId, '');
       report.executionCallId = responseJson.executionCallId;

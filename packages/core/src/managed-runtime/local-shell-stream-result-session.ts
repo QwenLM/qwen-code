@@ -113,7 +113,7 @@ export class LocalShellStreamResultSession {
         `${domain.label} capture belongs to another Session or binding.`,
       );
     }
-    const record = await this.session.authority.extensionRecord(
+    const record = this.session.authority.extensionRecord(
       this.recordDomain,
       capture.executionCallId,
     );

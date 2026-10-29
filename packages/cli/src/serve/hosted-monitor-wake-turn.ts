@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import { randomUUID } from 'node:crypto';
 import { isChildNotificationSource } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
-import { MonitorWakeTransientReadError } from './hosted-monitor-wake.js';
+import {
+  wakeHasPriorAttempt,
+  MonitorWakeTransientReadError,
+} from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
@@ -54,8 +56,7 @@ export interface MonitorWakeTurnSession {
     };
     blocked: boolean;
     managed: {
-      readonly authority: { readonly committedSequence: number };
-      sink: Pick<ManagedSessionRecordSink, 'iterateMessageRecords' | 'write'>;
+      sink: Pick<ManagedSessionRecordSink, 'project' | 'write'>;
     };
   };
 }
@@ -97,7 +98,7 @@ export function createMonitorWakeRunTurn(params: {
    */
   readonly settleInterrupted?: (
     turn: HostedMonitorWakeTurn,
-    attempted: ManagedHistoryQuery<ChatRecord>,
+    attempted: ChatRecord[],
   ) => Promise<'settled' | 'held' | 'busy' | false>;
   readonly writeStderr: (line: string) => void;
 }): (
@@ -106,13 +107,8 @@ export function createMonitorWakeRunTurn(params: {
   const { session } = params;
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
-    const throughSequence = session.managed.authority.committedSequence;
-    const attempted = new ManagedHistoryQuery(() =>
-      session.managed.sink.iterateMessageRecords(throughSequence),
-    );
-    if (
-      await attempted.some((record) => record.daemonPromptId === turn.turnId)
-    ) {
+    const attempted = await session.managed.sink.project();
+    if (wakeHasPriorAttempt(attempted, turn.turnId)) {
       let interrupted: 'settled' | 'held' | 'busy' | false | undefined;
       try {
         interrupted = await params.settleInterrupted?.(turn, attempted);

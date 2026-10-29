@@ -4,23 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { open, rename, unlink } from 'node:fs/promises';
+import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import {
   acquireLocalManagedSessionWriter,
   prepareLocalManagedSessionWriter,
 } from './local-managed-session-writer.js';
-import {
-  readLocalManagedJournal,
-  scanLocalManagedJournal,
-} from './local-managed-journal-snapshot.js';
+import { readLocalManagedJournal } from './local-managed-journal-snapshot.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
 import {
   type ManagedSessionCommitProof,
   type ManagedSessionJournalHandle,
-  type ManagedSessionJournalBatch,
   type ManagedSessionJournalScan,
-  type ManagedSessionJournalSummary,
   type ManagedSessionJournalStore,
 } from './managed-session-storage.js';
 import type { ManagedSessionKey } from './managed-session-records.js';
@@ -75,18 +70,6 @@ export class LocalJsonlManagedSessionJournalStore
   }): Promise<ManagedSessionJournalScan> {
     return readLocalManagedJournal(options);
   }
-
-  static scan(
-    options: {
-      readonly transcriptPath: string;
-      readonly runtimeBaseDir: string;
-      readonly sessionKey: ManagedSessionKey;
-      readonly maxBytes?: number;
-    },
-    consume: (batch: ManagedSessionJournalBatch) => Promise<void>,
-  ): Promise<ManagedSessionJournalSummary> {
-    return scanLocalManagedJournal(options, consume);
-  }
 }
 
 export class LocalJsonlManagedSessionJournalHandle
@@ -100,31 +83,6 @@ export class LocalJsonlManagedSessionJournalHandle
   ) {}
 
   private preparation: Promise<boolean> | undefined;
-
-  async scan(
-    consume: (batch: ManagedSessionJournalBatch) => Promise<void>,
-    options: { readonly maxBytes?: number } = {},
-  ): Promise<ManagedSessionJournalSummary> {
-    if (this.prepareOnRead) {
-      this.preparation ??= prepareLocalManagedSessionWriter(
-        this.lease,
-        this.sessionKey,
-      );
-      await this.preparation;
-    }
-    return this.lease.withTranscriptStream((chunks) =>
-      scanLocalManagedJournal(
-        {
-          transcriptPath: this.lease.transcriptPath,
-          runtimeBaseDir: this.lease.runtimeBaseDir,
-          sessionKey: this.sessionKey,
-          ...options,
-        },
-        consume,
-        chunks,
-      ),
-    );
-  }
 
   async read(
     options: {
@@ -188,7 +146,7 @@ export class LocalJsonlManagedSessionJournalHandle
     discardedBytes: number;
     diagnosticPath: string;
   }> {
-    const scan = await this.scan(async () => {});
+    const scan = await this.read();
     if (scan.uncommitted === 0) {
       throw new ManagedSessionRecordError(
         'session log has no uncommitted tail to discard.',
@@ -200,43 +158,23 @@ export class LocalJsonlManagedSessionJournalHandle
         'session log has no committed prefix to retain.',
       );
     }
+    const bytes = await readFile(this.lease.transcriptPath);
+    if (bytes.byteLength <= retain) {
+      throw new ManagedSessionRecordError(
+        'session log changed while preparing tail recovery.',
+      );
+    }
+    const discarded = bytes.subarray(retain);
     const diagnosticPath = `${this.lease.transcriptPath}.uncommitted-tail`;
     const pendingPath = `${diagnosticPath}.pending`;
-    let discardedBytes = 0;
-    let sourceHash = '';
+    await writeFile(pendingPath, discarded, { mode: 0o600 });
     try {
-      const pending = await open(pendingPath, 'w', 0o600);
-      try {
-        await this.lease.withTranscriptStream(async (chunks, proof) => {
-          if (
-            proof.byteLength !==
-              Math.max(scan.committedBytes, scan.headerBytes) +
-                scan.uncommittedBytes ||
-            proof.byteLength <= retain
-          )
-            throw new ManagedSessionRecordError(
-              'session log changed while preparing tail recovery.',
-            );
-          sourceHash = proof.sha256;
-          let offset = 0;
-          for await (const chunk of chunks) {
-            const discarded = chunk.subarray(Math.max(0, retain - offset));
-            offset += chunk.byteLength;
-            if (discarded.byteLength) {
-              await pending.writeFile(discarded);
-              discardedBytes += discarded.byteLength;
-            }
-          }
-        });
-      } finally {
-        await pending.close();
-      }
-      await this.lease.truncateTo(retain, sourceHash);
+      await this.lease.truncateTo(retain);
     } catch (cause) {
       await unlink(pendingPath).catch(() => undefined);
       throw cause;
     }
     await rename(pendingPath, diagnosticPath);
-    return { discardedBytes, diagnosticPath };
+    return { discardedBytes: discarded.byteLength, diagnosticPath };
   }
 }

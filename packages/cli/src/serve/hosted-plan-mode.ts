@@ -35,16 +35,14 @@ export async function hostedPublicPlanActive(
 ): Promise<boolean> {
   if (!(await readHostedTurnApprovalSelection(session, promptId))?.planMode)
     return false;
-  const events = session.authority.iterateEvents(
+  const events = session.authority.eventsInSequenceRange(
     1,
     session.authority.committedSequence,
   );
-  for await (const event of events) {
+  for (const event of events) {
     if (event.kind !== 'action.changed' || event.payload['state'] !== 'decided')
       continue;
-    const action = await session.authority.action(
-      String(event.payload['requestId']),
-    );
+    const action = session.authority.action(String(event.payload['requestId']));
     if (!action) continue;
     const options = await readHostedActionOptions(session, action);
     if (

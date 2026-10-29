@@ -1527,7 +1527,7 @@ class HostedWorkflowRelayFaultGatesIT {
                                 .registerSingleton("fg10Authentication",
                                         authentication()))
                         .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
+        jdbc = spring.getBean(JdbcTemplate.class);
     }
 
     private void startHarness() throws Exception {

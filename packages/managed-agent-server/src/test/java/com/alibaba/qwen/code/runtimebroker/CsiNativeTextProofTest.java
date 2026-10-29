@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -293,10 +292,9 @@ class CsiNativeTextProofTest {
         var batch = new CsiNativeActivationProof.PendingBatch("message", mutable,
                 List.of(new CsiNativeActivationProof.FunctionCall("call", "tool", mutable, 0, 0)));
         var frozen = new CsiNativeActivationProof.FrozenBatch(mutable, mutable, List.of(mutable), 1, 2);
-        var sourceIds = new java.util.HashSet<>(List.of("used"));
         var historical = new CsiNativeActivationProof.Prefix(null,
                 new CsiNativeActivationProof.Checkpoint(mutable, mutable), "message", null, false, null,
-                sourceIds, null,
+                new java.util.HashSet<>(List.of("used")), null,
                 Map.of("batch", new CsiNativeActivationProof.OriginalBatch("prompt", batch)),
                 new CsiNativeActivationProof.FileHistory(mutable, mutable, Map.of("batch", frozen)),
                 Map.of("intent", new CsiNativeActivationProof.ToolIntent(mutable, 1, 1, "digest")),
@@ -306,10 +304,9 @@ class CsiNativeTextProofTest {
                 "fc17e89d-c50c-4b55-b69d-aa58659e7242");
         var saved = proof.predecessorPrefix();
         mutable.put("value", "source changed");
-        sourceIds.add("source changed");
-        assertFalse(historical.usedIds().contains("source changed"));
+        historical.usedIds().add("source changed");
         var returned = proof.predecessorPrefix();
-        assertThrows(UnsupportedOperationException.class, () -> returned.usedIds().add("accessor changed"));
+        returned.usedIds().add("accessor changed");
         ((ObjectNode) returned.batches().get("batch").batch().calls().getFirst().args()).put("value", "changed");
         ((ObjectNode) returned.fileHistory().batches().get("batch").invocations().getFirst()).put("value", "changed");
         ((ObjectNode) returned.intents().get("intent").payload()).put("value", "changed");

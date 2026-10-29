@@ -24,7 +24,6 @@ import type {
   ToolResultSegmentStore,
 } from './managed-tool-result-store.js';
 import { LocalShellResultCapture } from './local-shell-result-capture.js';
-import type { ManagedHistoryMap } from './managed-session-history.js';
 
 export interface LocalShellCaptureRequest {
   readonly reference: {
@@ -72,7 +71,7 @@ function equalRef(
 /** Admits captured Shell results under their original Managed Session. */
 export class ManagedShellResultSession {
   private readonly activation: ManagedSession['activation'];
-  private readonly prepared: ManagedHistoryMap<string>;
+  private readonly prepared = new Map<string, string>();
 
   constructor(
     protected readonly session: ManagedSession,
@@ -89,7 +88,6 @@ export class ManagedShellResultSession {
       throw new Error('Shell capture binding generation is invalid.');
     }
     this.activation = session.activation;
-    this.prepared = session.authority.createQueryHistory().map('resource');
   }
 
   private assertActivation(): void {
@@ -151,7 +149,9 @@ export class ManagedShellResultSession {
     if (!parsed?.ok)
       throw new Error('Runtime dispatch has no readable checkpoint.');
     const checkpoint = parsed.checkpoint;
-    const item = await parsed.history.tool(capture.executionCallId);
+    const item = checkpoint.tools?.items.find(
+      (each) => each.executionCallId === capture.executionCallId,
+    );
     if (
       checkpoint.continuation.phase !== 'await_runtime' ||
       (!recovering &&
@@ -167,8 +167,8 @@ export class ManagedShellResultSession {
         'Original Shell execution was not committed before dispatch.',
       );
     }
-    const intent = await this.session.authority
-      .iterateEvents(1, this.session.authority.committedSequence)
+    const intent = this.session.authority
+      .eventsInSequenceRange(1, this.session.authority.committedSequence)
       .find(
         (event) =>
           event.kind === 'tool.intent' &&
@@ -180,7 +180,9 @@ export class ManagedShellResultSession {
       );
     if (!intent) throw new Error('Original tool intent is missing.');
     if (modelCallId !== reference.callId) {
-      const binding = await parsed.history.binding(capture.executionCallId);
+      const binding = checkpoint.runtime?.bindings.find(
+        (entry) => entry.executionCallId === capture.executionCallId,
+      );
       if (
         binding?.invocationBindingId !== reference.callId ||
         binding.state !== 'dispatch'
@@ -225,18 +227,18 @@ export class ManagedShellResultSession {
     };
     await this.assertWritable();
     const encoded = JSON.stringify(identity);
-    const prior = await this.prepared.get(capture.executionCallId);
+    const prior = this.prepared.get(capture.executionCallId);
     if (prior && prior !== encoded) {
       throw new Error('Original Shell capture identity conflicts.');
     }
-    await this.prepared.set(capture.executionCallId, encoded);
+    this.prepared.set(capture.executionCallId, encoded);
     return identity;
   }
 
-  private async receiptEvent(
+  private receiptEvent(
     executionCallId: string,
-  ): Promise<ManagedSessionEvent | undefined> {
-    return await this.session.authority.committedReceipt(executionCallId);
+  ): ManagedSessionEvent | undefined {
+    return this.session.authority.committedReceipt(executionCallId);
   }
 
   private async saved(event: ManagedSessionEvent): Promise<SavedOutcome> {
@@ -264,7 +266,7 @@ export class ManagedShellResultSession {
   async recorded(
     identity: ToolResultExpectedIdentity,
   ): Promise<LocalShellReceipt | null> {
-    const event = await this.receiptEvent(identity.executionCallId);
+    const event = this.receiptEvent(identity.executionCallId);
     if (!event) return null;
     const saved = await this.saved(event);
     if (JSON.stringify(saved.identity) !== JSON.stringify(identity)) {
@@ -339,7 +341,7 @@ export class ManagedShellResultSession {
     }
     const original = await this.recorded(identity);
     if (original) {
-      const event = (await this.receiptEvent(identity.executionCallId))!;
+      const event = this.receiptEvent(identity.executionCallId)!;
       const saved = await this.saved(event);
       if (JSON.stringify(saved.envelope) !== JSON.stringify(envelope)) {
         throw new Error(
@@ -350,8 +352,7 @@ export class ManagedShellResultSession {
     }
     const manifestRef = envelope.capture?.manifest ?? null;
     if (
-      (await this.prepared.get(identity.executionCallId)) !==
-      JSON.stringify(identity)
+      this.prepared.get(identity.executionCallId) !== JSON.stringify(identity)
     ) {
       throw new Error('Shell result was not prepared by this Session owner.');
     }

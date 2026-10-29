@@ -7,8 +7,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -35,18 +33,6 @@ class CsiNativeToolReservationTest {
             "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), "/workspace", SESSION);
     private final JdbcCsiFilesRetirementGuard.Original original = new JdbcCsiFilesRetirementGuard.Original(request,
             "binding", 1, RuntimeBindingRecord.State.READY, false, 1, 2L);
-
-    private CsiProofHistory.Scope proofScope;
-
-    @BeforeEach
-    void openProofScope() {
-        proofScope = CsiProofHistory.scope();
-    }
-
-    @AfterEach
-    void closeProofScope() {
-        proofScope.close();
-    }
 
     @Test
     void recoveryStoredBytesAreBoundedBeforeParsingAndRejectAmbiguousJson() {
@@ -76,29 +62,6 @@ class CsiNativeToolReservationTest {
         var extra = new HashMap<>(owner);
         extra.put("checkpointId", BATCH);
         assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(extra));
-    }
-
-    @Test
-    void executionSnapshotReusesTheSqlParserWithoutLosingDecimalPrecision() throws Exception {
-        var prepared = tuple(prefix(capturedParts()), 0).execution();
-        String reference = com.alibaba.fastjson2.JSON.toJSONString(prepared.getReference());
-        String result = "{\"executionStatus\":\"success\",\"responseParts\":[],"
-                + "\"decimal\":0.123456789012345678901234567890123456789}";
-        var expected = prepared.withResult(JdbcToolExecutionRepository.fromJson(result), 1, Instant.parse("2026-01-01T00:00:00Z"));
-        assertEquals(new java.math.BigDecimal("0.123456789012345678901234567890123456789"), expected.getResult().get("decimal"));
-        try (var history = CsiProofHistory.temporary()) {
-            Map<String, CsiNativeToolReservation.ExecutionSnapshot> facts = history.map(1, CsiNativeToolReservation.ExecutionSnapshot.class);
-            facts.put("settled", CsiNativeToolReservation.ExecutionSnapshot.of(expected, reference, result));
-            var snapshot = facts.get("settled");
-            var restored = snapshot.execution();
-            assertEquals(reference, snapshot.referenceJson());
-            assertEquals(result, snapshot.resultJson());
-            assertEquals(expected.getReference(), restored.getReference());
-            assertEquals(expected.getResult(), restored.getResult());
-            assertEquals(java.math.BigDecimal.class, restored.getResult().get("decimal").getClass());
-            facts.put("prepared", CsiNativeToolReservation.ExecutionSnapshot.of(prepared, reference, null));
-            assertEquals(null, facts.get("prepared").execution().getResult());
-        }
     }
 
     @Test

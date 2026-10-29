@@ -5,7 +5,7 @@ import org.junit.jupiter.api.AfterEach;
 
 import javax.sql.DataSource;
 
-class ManagedSessionHistoryStoreMySqlIT extends ManagedSessionHistoryStoreTest {
+class ManagedSessionQueryMySqlIT extends ManagedSessionQueryTest {
     private IsolatedManagedSchemaMySqlTestDatabase database;
 
     @Override

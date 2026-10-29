@@ -268,11 +268,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
-import {
-  normalizeGoalRecoveryRecord,
-  type GoalRecoveryRecord,
-} from '../goals/goal-persistence.js';
-import { ManagedHistoryQuery } from '../managed-runtime/managed-session-history.js';
+import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
@@ -386,6 +382,7 @@ import {
   LocalManagedRuntimeOutcomes,
   unresolvedRuntimeWorkReason,
 } from '../managed-runtime/managed-runtime-outcomes.js';
+import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_FORMAT_VERSION,
   ManagedSessionRecordError,
@@ -495,16 +492,14 @@ function managedRecordWriter(
   return {
     canCarry: (record) => managed.sink.canCarry(record),
     write: (record) => managed.sink.write(record),
-    // The recorder's model view reconnects parents across omitted metadata.
-    project: () => managed.sink.projectContextRecords(),
-    iterate: () => {
-      const through = managed.authority.committedSequence;
-      return new ManagedHistoryQuery(() =>
-        managed.sink.iterateActiveRecords(through),
-      );
-    },
-    createQueryHistory: () => managed.authority.createQueryHistory(),
-    dispose: () => managed.authority.disposeHistory(),
+    // Every record the reader replays, not only messages: turn results, goal
+    // state and the other records the chain passes through are parents too.
+    project: () =>
+      readManagedSessionRecords({
+        transcriptPath: log.transcriptPath,
+        runtimeBaseDir: log.runtimeBaseDir,
+        sessionKey: managed.authority.sessionHeader.sessionKey,
+      }),
     stopAdvancing: () => stopAdvancing(managed),
     commitProof: () => managedCommitProof(managed),
     logSize: () => {
@@ -12212,22 +12207,7 @@ export class Config {
     if (!recordingService) {
       throw new GoalPersistenceUnavailableError();
     }
-    let records: readonly GoalRecoveryRecord[];
-    if (this.sessionExecutionEngine === 'managed') {
-      const summary: GoalRecoveryRecord[] = [];
-      for await (const entry of await recordingService.readActiveTranscriptHistory()) {
-        const record = normalizeGoalRecoveryRecord(entry);
-        if (!record) continue;
-        if (record.systemPayload !== null)
-          summary.splice(0, summary.length, record);
-        else if (summary[0]?.systemPayload !== null && summary.length > 0)
-          summary.splice(1, summary.length, record);
-        else summary.splice(0, summary.length, record);
-      }
-      records = summary;
-    } else {
-      records = await recordingService.readActiveTranscriptChain();
-    }
+    const records = await recordingService.readActiveTranscriptChain();
     this.goalTurnHostUnbind?.();
     this.goalTurnHostUnbind = undefined;
     runtime.dispose();

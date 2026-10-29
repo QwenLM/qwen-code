@@ -35,6 +35,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DeadlockLoserDataAccessException;
@@ -134,7 +135,6 @@ public class ManagedSessionStore {
                     result.getObject("activation_head_revision", Long.class));
     private final RowMapper<TransactionRow> transactionMapper =
             (result, row) -> transactionRow(result);
-    private final ManagedSessionHistoryStore history;
     private final RowMapper<ResourceRow> resourceMapper =
             (result, row) ->
                     new ResourceRow(
@@ -164,23 +164,14 @@ public class ManagedSessionStore {
         this(jdbc, extensionRecords, null);
     }
 
-    public ManagedSessionStore(
-            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            ManagedExtensionRecordStore extensionRecords,
-            ManagedActionStore actions) {
-        this(jdbc, extensionRecords, actions, new ManagedSessionHistoryStore(jdbc, CSI_JSON));
-    }
-
     @Autowired
     public ManagedSessionStore(
             @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             ManagedExtensionRecordStore extensionRecords,
-            ManagedActionStore actions,
-            ManagedSessionHistoryStore history) {
+            ManagedActionStore actions) {
         this.jdbc = jdbc;
         this.extensionRecords = extensionRecords;
         this.actions = actions;
-        this.history = history;
         var manager =
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource());
         this.outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
@@ -1394,8 +1385,6 @@ public class ManagedSessionStore {
                 request.latestCheckpointResourceId(),
                 validated.recordBytes(), validated.recordBytes().length,
                 validated.recordDigest(), now.getTime());
-        history.append(tenantId, request.workspaceId(), sessionId,
-                historyTransaction(request, revision, validated), applied.records(), reader);
         ActivationChange activation = activationChange(
                 applied.lastActivation());
         if (placement != null && "QUIESCING".equals(placement.state()) && activation != null
@@ -1566,12 +1555,12 @@ public class ManagedSessionStore {
                 "SELECT journal_revision, byte_length"
                         + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND journal_revision > ? AND journal_revision <= ?"
+                        + " AND journal_revision > ?"
                         + " ORDER BY journal_revision LIMIT ?",
                 (result, row) -> new TransactionSize(
                         result.getLong("journal_revision"),
                         result.getLong("byte_length")),
-                tenantId, sessionId, afterRevision, head.journalRevision(),
+                tenantId, sessionId, afterRevision,
                 limit + 1);
         int selectedCount = 0;
         long selectedBytes = 0;
@@ -1607,10 +1596,10 @@ public class ManagedSessionStore {
                         "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + ""
                                 + " FROM ma_session_journal_tx"
                                 + " WHERE tenant_id = ? AND session_id = ?"
-                                + " AND journal_revision > ? AND journal_revision <= ?"
+                                + " AND journal_revision > ?"
                                 + " ORDER BY journal_revision LIMIT ?",
                         transactionMapper, tenantId, sessionId,
-                        afterRevision, head.journalRevision(), selectedCount);
+                        afterRevision, selectedCount);
         if (rows.size() != selectedCount) {
             throw journalCorrupt();
         }
@@ -1633,105 +1622,117 @@ public class ManagedSessionStore {
     }
 
     @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
-    public ManagedSessionHistoryStore.QueryResult historyQuery(String tenant, String session, String token,
-            ManagedSessionHistoryStore.QueryRequest request) {
-        requireHistoryView(tenant, request.workspaceId(), session, token, request.view());
-        var coverage = history.coverage(tenant, request.workspaceId(), session, request.view());
-        if (coverage.indexedRevision() > 0) {
-            requireHistoryView(tenant, request.workspaceId(), session, token,
-                    new ManagedSessionHistoryStore.View(coverage.indexedRevision(), coverage.indexedSequence(), coverage.lastCommitDigest()));
+    public ManagedSessionStoreModels.RecentTransactionPage recentTransactions(String tenantId, String workspaceId,
+            String sessionId, String writerToken, Long throughRevision, Long beforeRevision, int limit) {
+        long through = historyRevision(tenantId, workspaceId, sessionId, writerToken, throughRevision);
+        if (limit < 1 || limit > 100 || beforeRevision != null && (beforeRevision < 1 || beforeRevision > through)) {
+            throw invalid("History page position or limit is outside its bounds.");
         }
-        var result = history.query(tenant, request.workspaceId(), session, request, revision -> {
-            var page = transactions(tenant, request.workspaceId(), session, token, revision - 1, 1);
-            if (page.transactions().isEmpty() || page.transactions().getFirst().journalRevision() != revision) {
+        long upper = beforeRevision == null ? through : beforeRevision - 1;
+        List<TransactionSize> candidates = jdbc.query("SELECT journal_revision, byte_length FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND journal_revision <= ?"
+                        + " ORDER BY journal_revision DESC LIMIT ?",
+                (row, index) -> new TransactionSize(row.getLong("journal_revision"), row.getLong("byte_length")),
+                tenantId, sessionId, upper, limit + 1);
+        int selected = 0;
+        long bytes = 0;
+        long expected = upper;
+        for (TransactionSize candidate : candidates) {
+            if (candidate.journalRevision() != expected-- || candidate.byteLength() < 1
+                    || candidate.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
                 throw journalCorrupt();
             }
-            return page.transactions().getFirst();
-        }, id -> storedResource(sessionScopeKey(tenant, session), tenant, request.workspaceId(), session, id, false));
-        restore(tenant, request.workspaceId(), session, token);
-        return result;
-    }
-
-    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
-    public ManagedSessionHistoryStore.Coverage historyBackfill(String tenant, String session, String token,
-            ManagedSessionHistoryStore.BackfillRequest request) {
-        requireHistoryView(tenant, request.workspaceId(), session, token, request.view());
-        int limit = request.limit() == null ? 100 : request.limit();
-        if (limit < 1 || limit > 100) {
-            throw invalid("History backfill limit is outside its bounds.");
+            if (selected == limit || selected > 0 && bytes + candidate.byteLength()
+                    > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                break;
+            }
+            bytes += candidate.byteLength();
+            selected++;
         }
-        long after = history.prepareBackfill(tenant, request.workspaceId(), session, request);
-        if (after < request.view().journalRevision()) {
-            var page = transactions(tenant, request.workspaceId(), session, token, after,
-                    (int) Math.min(limit, request.view().journalRevision() - after));
-            if (page.transactions().isEmpty()) {
+        if (upper > 0 && (candidates.isEmpty() || candidates.size() < limit + 1
+                && candidates.getLast().journalRevision() != 1)) {
+            throw journalCorrupt();
+        }
+        List<TransactionRow> rows = selected == 0 ? List.of() : jdbc.query(
+                "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND journal_revision <= ?"
+                        + " ORDER BY journal_revision DESC LIMIT ?", transactionMapper, tenantId, sessionId, upper, selected);
+        if (rows.size() != selected) {
+            throw journalCorrupt();
+        }
+        List<StoredTransaction> transactions = new ArrayList<>();
+        for (int index = 0; index < rows.size(); index++) {
+            TransactionRow row = rows.get(index);
+            if (row.journalRevision() != candidates.get(index).journalRevision()
+                    || row.byteLength() != candidates.get(index).byteLength()) {
                 throw journalCorrupt();
             }
-            StoredTransaction previous = null;
-            if (after > 0) {
-                var prefix = transactions(tenant, request.workspaceId(), session, token, after - 1, 1);
-                if (prefix.transactions().isEmpty() || prefix.transactions().getFirst().journalRevision() != after) {
-                    throw journalCorrupt();
-                }
-                previous = prefix.transactions().getFirst();
+            requireTransactionWorkspace(row, workspaceId);
+            transactions.add(storedTransaction(row));
+        }
+        boolean more = candidates.size() > selected;
+        Long next = more ? transactions.getLast().journalRevision() : null;
+        java.util.Collections.reverse(transactions);
+        restore(tenantId, workspaceId, sessionId, writerToken);
+        return new ManagedSessionStoreModels.RecentTransactionPage(List.copyOf(transactions), through, next, more);
+    }
+
+    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    public ManagedSessionStoreModels.CommandTransaction commandTransaction(String tenantId, String workspaceId,
+            String sessionId, String writerToken, Long throughRevision, String operation, String commandId) {
+        long through = historyRevision(tenantId, workspaceId, sessionId, writerToken, throughRevision);
+        if (StringUtils.isBlank(operation) || operation.length() > 4096
+                || StringUtils.isBlank(commandId) || commandId.length() > 512) {
+            throw invalid("History command identity is invalid.");
+        }
+        String key = commandKeyHash(operation, commandId);
+        var sizes = jdbc.query("SELECT journal_revision, byte_length FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND command_key_hash = ? AND journal_revision <= ?",
+                (row, index) -> new TransactionSize(row.getLong("journal_revision"), row.getLong("byte_length")),
+                tenantId, sessionId, key, through);
+        StoredTransaction transaction = null;
+        if (!sizes.isEmpty()) {
+            TransactionSize size = sizes.getFirst();
+            if (sizes.size() != 1 || size.byteLength() < 1
+                    || size.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                throw journalCorrupt();
             }
-            for (var transaction : page.transactions()) {
-                try {
-                    history.append(tenant, request.workspaceId(), session, transaction,
-                            ManagedSessionHistoryStore.records(transaction, sessionScopeKey(tenant, session), request.workspaceId(), session, previous),
-                            id -> storedResource(sessionScopeKey(tenant, session), tenant, request.workspaceId(), session, id, false));
-                    previous = transaction;
-                } catch (ManagedAgentException error) {
-                    if (!"managed_session_history_corrupt".equals(error.getCode())) {
-                        throw error;
-                    }
-                    history.reset(tenant, request.workspaceId(), session);
-                    restore(tenant, request.workspaceId(), session, token);
-                    return history.coverage(tenant, request.workspaceId(), session, request.view());
-                }
+            TransactionRow row = findTransactionByCommand(tenantId, sessionId, key);
+            if (row == null || row.journalRevision() != size.journalRevision() || row.byteLength() != size.byteLength()) {
+                throw journalCorrupt();
+            }
+            requireTransactionWorkspace(row, workspaceId);
+            if (!operation.equals(row.operation()) || !commandId.equals(row.commandId())
+                    || row.byteLength() < 1 || row.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                throw journalCorrupt();
+            }
+            transaction = storedTransaction(row);
+        }
+        restore(tenantId, workspaceId, sessionId, writerToken);
+        return new ManagedSessionStoreModels.CommandTransaction(through, transaction);
+    }
+
+    private long historyRevision(String tenantId, String workspaceId, String sessionId, String writerToken,
+            Long throughRevision) {
+        RestoreHead head = restore(tenantId, workspaceId, sessionId, writerToken);
+        if (head.compactedThroughRevision() != 0) {
+            throw conflict(ManagedSessionStoreModels.ERROR_RECOVERY_CONFLICT, "History prefix is no longer retained.");
+        }
+        if (throughRevision != null && (throughRevision < 0
+                || throughRevision > ManagedSessionStoreModels.MAX_SAFE_COUNTER
+                || throughRevision > head.journalRevision())) {
+            throw invalid("History prefix is outside its committed bounds.");
+        }
+        long through = throughRevision == null ? head.journalRevision() : throughRevision;
+        if (through > 0) {
+            var prefix = jdbc.query("SELECT workspace_id FROM ma_session_journal_tx"
+                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                    (row, index) -> row.getString("workspace_id"), tenantId, sessionId, through);
+            if (prefix.size() != 1 || !workspaceId.equals(prefix.getFirst())) {
+                throw journalCorrupt();
             }
         }
-        var coverage = history.coverage(tenant, request.workspaceId(), session, request.view());
-        if (coverage.indexedRevision() > 0) {
-            requireHistoryView(tenant, request.workspaceId(), session, token,
-                    new ManagedSessionHistoryStore.View(coverage.indexedRevision(), coverage.indexedSequence(), coverage.lastCommitDigest()));
-        }
-        return coverage;
-    }
-
-    private void requireHistoryView(String tenant, String workspace, String session, String token,
-            ManagedSessionHistoryStore.View view) {
-        ManagedSessionHistoryStore.validateView(view);
-        RestoreHead head = restore(tenant, workspace, session, token);
-        if (view.journalRevision() > head.journalRevision() || view.committedSequence() > head.committedSequence()) {
-            throw conflict("managed_session_history_view_conflict", "History view is ahead of its native journal.");
-        }
-        if (view.journalRevision() == head.journalRevision()
-                && (view.committedSequence() != head.committedSequence()
-                        || !Objects.equals(view.lastCommitDigest(), head.lastCommitDigest()))) {
-            throw journalCorrupt();
-        }
-        var proof = jdbc.query("SELECT workspace_id, last_sequence, commit_digest FROM ma_session_journal_tx"
-                        + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?", (row, index) ->
-                        workspace.equals(row.getString("workspace_id")) && row.getLong("last_sequence") == view.committedSequence()
-                                && Objects.equals(row.getString("commit_digest"), view.lastCommitDigest()),
-                tenant, session, view.journalRevision());
-        if (proof.size() != 1 || !proof.getFirst()) {
-            throw journalCorrupt();
-        }
-    }
-
-    static StoredTransaction terminalHistoryTransaction(byte[] body, long revision) {
-        var request = csiTerminalRequest(body);
-        return historyTransaction(request, revision, validateCommit(request));
-    }
-
-    private static StoredTransaction historyTransaction(CommitTransactionRequest request, long revision, ValidatedCommit validated) {
-        return new StoredTransaction(revision, request.transactionId(), request.operation(), request.commandId(),
-                request.contentDigest(), request.firstSequence(), request.lastSequence(), request.eventCount(),
-                request.eventsDigest(), request.previousCommitDigest(), request.commitDigest(), request.writerGeneration(),
-                request.activationEpoch(), request.latestCheckpointResourceId(), "identity", request.recordBytesBase64(),
-                validated.recordBytes().length, validated.recordDigest());
+        return through;
     }
 
     /** Proves only an untouched initial journal; it never opens or fences a writer. */
@@ -2503,12 +2504,7 @@ public class ManagedSessionStore {
     /** A committed resource of this transaction's Session, verified. */
     private StoredResource storedResource(String scopeKey, String tenantId,
             String workspaceId, String sessionId, String resourceId) {
-        return storedResource(scopeKey, tenantId, workspaceId, sessionId, resourceId, true);
-    }
-
-    private StoredResource storedResource(String scopeKey, String tenantId,
-            String workspaceId, String sessionId, String resourceId, boolean lock) {
-        ResourceRow resource = findResource(scopeKey, resourceId, lock);
+        ResourceRow resource = findResource(scopeKey, resourceId);
         if (resource == null) {
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
@@ -2561,10 +2557,6 @@ public class ManagedSessionStore {
                 validated.recordBytes().length,
                 validated.recordDigest(),
                 now.getTime());
-        StoredTransaction transaction = historyTransaction(request, revision, validated);
-        history.append(tenantId, request.workspaceId(), sessionId, transaction,
-                ManagedSessionHistoryStore.records(transaction, sessionScopeKey(tenantId, sessionId), request.workspaceId(), sessionId),
-                id -> storedResource(sessionScopeKey(tenantId, sessionId), tenantId, request.workspaceId(), sessionId, id));
     }
 
     record TerminalCandidate(CommitTransactionRequest request,

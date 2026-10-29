@@ -205,13 +205,11 @@ async function settleTurn(
   });
 }
 
-async function inputs(session: ManagedSession) {
+function inputs(session: ManagedSession) {
   const authority = session.authority;
-  return (
-    await authority
-      .iterateEvents(1, authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'input.accepted');
+  return authority
+    .eventsInSequenceRange(1, authority.committedSequence)
+    .filter((event) => event.kind === 'input.accepted');
 }
 
 describe('send_message to a child task (H4d-b)', () => {
@@ -222,7 +220,7 @@ describe('send_message to a child task (H4d-b)', () => {
       kind: 'message',
       childRunId: 'run-1',
     });
-    const committed = (await parent.messages.message('msg_call-9'))!;
+    const committed = parent.messages.message('msg_call-9')!;
     expect(committed).toMatchObject({
       direction: 'outbound',
       route: 'to_child',
@@ -249,7 +247,7 @@ describe('send_message to a child task (H4d-b)', () => {
     await launch(parent.children);
     await attach(parent.children);
     await send(parent.children, 'also check the tests');
-    expect(await parent.children.undeliveredMessagesTo('run-1')).toBe(1);
+    expect(parent.children.undeliveredMessagesTo('run-1')).toBe(1);
     await expect(complete(parent.children)).rejects.toThrow(
       ChildMessagesPendingError,
     );
@@ -258,14 +256,14 @@ describe('send_message to a child task (H4d-b)', () => {
       ChildMessagesPendingError,
     );
     await parent.messages.accepted('msg_call-9', 'msg_call-9:message');
-    expect(await parent.children.undeliveredMessagesTo('run-1')).toBe(0);
+    expect(parent.children.undeliveredMessagesTo('run-1')).toBe(0);
     // A settlement that did not see the message (it opened after the
     // caller's read and was handed over since) is refused all the same.
     await expect(complete(parent.children, 'run-1', 0)).rejects.toThrow(
       ChildMessagesPendingError,
     );
     await complete(parent.children, 'run-1', 1);
-    expect((await parent.children.record('run-1'))?.run.state).toBe('settled');
+    expect(parent.children.record('run-1')?.run.state).toBe('settled');
     // A failure chosen from the child's newest turn names what it saw; a
     // give-up names nothing and never waits.
     await launch(parent.children, 'run-2');
@@ -291,7 +289,7 @@ describe('send_message to a child task (H4d-b)', () => {
       reason: null,
       started: true,
     });
-    expect((await parent.children.record('run-2'))?.run.state).toBe('failed');
+    expect(parent.children.record('run-2')?.run.state).toBe('failed');
   });
 
   it('bounds the messages in flight and in all per child run', async () => {
@@ -321,9 +319,7 @@ describe('send_message to a child task (H4d-b)', () => {
       kind: 'message',
       childRunId: 'run-1',
     });
-    expect(
-      await parent.children.messagesTo('run-1').collect(1_000_000),
-    ).toHaveLength(10);
+    expect(parent.children.messagesTo('run-1')).toHaveLength(10);
   });
 
   // #13753 I2: a continuation is a launch, and a worktree run needs a host
@@ -356,10 +352,10 @@ describe('send_message to a child task (H4d-b)', () => {
       });
     const refused = await continuation(false, 'call-1');
     expect(refused).toMatchObject({ kind: 'refused' });
-    expect(await parent.children.record('prompt:call-1')).toBeUndefined();
+    expect(parent.children.record('prompt:call-1')).toBeUndefined();
     const continued = await continuation(true, 'call-2');
     expect(continued).toMatchObject({ kind: 'continuation' });
-    expect((await parent.children.record('prompt:call-2'))?.workspaceMode).toBe(
+    expect(parent.children.record('prompt:call-2')?.workspaceMode).toBe(
       'worktree',
     );
   });
@@ -427,17 +423,13 @@ describe('send_message to a child task (H4d-b)', () => {
     expect((running as { reason: string }).reason).toContain(
       'is a read-only snapshot and takes no messages while it runs',
     );
-    expect(await parent.messages.message('msg_call-1')).toBeUndefined();
-    expect(
-      await parent.children.messagesTo('run-1').collect(1_000_000),
-    ).toHaveLength(0);
+    expect(parent.messages.message('msg_call-1')).toBeUndefined();
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
     await attach(parent.children);
     expect(await sendSnapshot('call-2', true)).toMatchObject({
       kind: 'refused',
     });
-    expect(
-      await parent.children.messagesTo('run-1').collect(1_000_000),
-    ).toHaveLength(0);
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
     // A closing Session admits no continuation, so its refusal must not
     // promise one.
     const closing = await sendSnapshot('call-c', true, true);
@@ -445,19 +437,17 @@ describe('send_message to a child task (H4d-b)', () => {
       kind: 'refused',
       reason: 'This Session is closing and sends no more messages.',
     });
-    expect(await parent.messages.message('msg_call-c')).toBeUndefined();
-    expect(
-      await parent.children.messagesTo('run-1').collect(1_000_000),
-    ).toHaveLength(0);
+    expect(parent.messages.message('msg_call-c')).toBeUndefined();
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
     await complete(parent.children);
     expect(await sendSnapshot('call-3', false)).toMatchObject({
       kind: 'refused',
     });
-    expect(await parent.children.record('prompt:call-3')).toBeUndefined();
+    expect(parent.children.record('prompt:call-3')).toBeUndefined();
     expect(await sendSnapshot('call-4', true)).toMatchObject({
       kind: 'continuation',
     });
-    expect((await parent.children.record('prompt:call-4'))?.workspaceMode).toBe(
+    expect(parent.children.record('prompt:call-4')?.workspaceMode).toBe(
       'snapshot',
     );
   });
@@ -472,7 +462,7 @@ describe('send_message to a child task (H4d-b)', () => {
       childRunId: 'prompt:call-9',
       predecessorChildRunId: 'run-1',
     });
-    const continued = (await parent.children.record('prompt:call-9'))!;
+    const continued = parent.children.record('prompt:call-9')!;
     expect(continued).toMatchObject({
       predecessorChildRunId: 'run-1',
       completion: 'sent',
@@ -572,16 +562,11 @@ describe('send_message to a child task (H4d-b)', () => {
     });
     expect(JSON.stringify(ended)).toContain('cannot receive messages');
     expect(
-      await parent.session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      parent.session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
     expect(
-      (
-        await parent.session.authority
-          .extensionRecordsInDomain('child_run')
-          .collect(1_000_000)
-      )
+      parent.session.authority
+        .extensionRecordsInDomain('child_run')
         .map((entry) => parseChildRun(entry.record))
         .filter((run) => 'predecessorChildRunId' in run)
         .map((run) => run.childRunId),
@@ -612,13 +597,13 @@ describe('the session message funnel (H4d-b)', () => {
     await parent.messages.accepted('msg_call-9', 'msg_call-9:message');
     await parent.messages.settle('msg_call-9', 'consumed');
     await parent.messages.settle('msg_call-9', 'consumed');
-    expect(await parent.messages.message('msg_call-9')).toMatchObject({
+    expect(parent.messages.message('msg_call-9')).toMatchObject({
       targetSessionId: CHILD,
       inputId: 'msg_call-9:message',
     });
-    expect(
-      (await parent.messages.message('msg_call-9'))?.run.delivery?.state,
-    ).toBe('consumed');
+    expect(parent.messages.message('msg_call-9')?.run.delivery?.state).toBe(
+      'consumed',
+    );
     await send(parent.children, 'two', 'call-13');
     await parent.messages.settle('msg_call-13', 'cancelled');
     await expect(
@@ -650,7 +635,7 @@ describe('the session message funnel (H4d-b)', () => {
     expect(await parent.messages.receive(receipt)).toBe(
       'msg_from-child:message',
     );
-    const accepted = await inputs(parent.session);
+    const accepted = inputs(parent.session);
     expect(accepted).toHaveLength(1);
     expect(accepted[0]!.payload).toMatchObject({
       inputId: 'msg_from-child:message',
@@ -670,15 +655,13 @@ describe('the session message funnel (H4d-b)', () => {
     expect(content.text).toContain('which branch should I use?');
     const authority = parent.session.authority;
     expect(
-      await (
-        await authority
-          .iterateEvents(1, authority.committedSequence)
-          .collect(1_000_000)
-      ).some(
-        (event) =>
-          event.kind === 'wake.requested' &&
-          event.eventId === 'msg_from-child:message:wake',
-      ),
+      authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'wake.requested' &&
+            event.eventId === 'msg_from-child:message:wake',
+        ),
     ).toBe(true);
     await expect(
       parent.messages.receive({
@@ -698,8 +681,7 @@ describe('the session message funnel (H4d-b)', () => {
     await parent.messages.markConsumed('msg_from-child:message');
     await parent.messages.markConsumed('unrelated:input');
     const inbound = parseSessionMessage(
-      (await authority.extensionRecord('session_message', 'msg_from-child'))!
-        .record,
+      authority.extensionRecord('session_message', 'msg_from-child')!.record,
     );
     expect(inbound.direction).toBe('inbound');
     expect(inbound.run.delivery?.state).toBe('consumed');
@@ -721,7 +703,7 @@ describe('the session message funnel (H4d-b)', () => {
     await expect(parent.messages.consume('msg_q')).rejects.toThrow(
       'ended cancelled',
     );
-    expect((await parent.messages.message('msg_q'))?.run.delivery?.state).toBe(
+    expect(parent.messages.message('msg_q')?.run.delivery?.state).toBe(
       'accepted',
     );
   });
@@ -738,7 +720,7 @@ describe('the session message funnel (H4d-b)', () => {
         contentDigest: sha256('hi'),
       }),
     ).rejects.toThrow('must name a child Session run');
-    expect(await inputs(parent.session)).toHaveLength(0);
+    expect(inputs(parent.session)).toHaveLength(0);
   });
 
   it('refuses content that does not match its digest', async () => {
@@ -755,7 +737,7 @@ describe('the session message funnel (H4d-b)', () => {
         contentDigest: sha256('original'),
       }),
     ).rejects.toThrow('does not match its digest');
-    expect(await inputs(parent.session)).toHaveLength(0);
+    expect(inputs(parent.session)).toHaveLength(0);
   });
 
   it('lets a child message its parent and receive along its lineage only', async () => {
@@ -775,7 +757,7 @@ describe('the session message funnel (H4d-b)', () => {
       executionCallId: 'turn:call-1',
       closing: false,
     });
-    expect(await child.messages.message('msg_up')).toMatchObject({
+    expect(child.messages.message('msg_up')).toMatchObject({
       direction: 'outbound',
       route: 'to_parent',
       childRunId: 'run-1',
@@ -797,7 +779,7 @@ describe('the session message funnel (H4d-b)', () => {
     const text = JSON.parse(
       (
         await child.session.resources.read(
-          (await inputs(child.session))[0]!.payload['contentRef'] as never,
+          inputs(child.session)[0]!.payload['contentRef'] as never,
         )
       ).toString('utf8'),
     ) as { text: string };
@@ -828,7 +810,7 @@ describe('the session message funnel (H4d-b)', () => {
         closing: true,
       }),
     ).rejects.toThrow('closing and sends no more messages');
-    expect(await child.messages.message('msg_closing')).toBeUndefined();
+    expect(child.messages.message('msg_closing')).toBeUndefined();
     await child.messages.sendToParent({
       text: 'done with part one',
       messageId: 'msg_up',
@@ -924,7 +906,7 @@ describe('team members over Session messages (H4e-b2)', () => {
     name: string,
     childRunId: string,
   ): Promise<void> {
-    const member = await parent.teams.admitMember(name);
+    const member = parent.teams.admitMember(name);
     await launch(parent.children, childRunId);
     await parent.teams.join({ ...member, childRunId });
   }
@@ -948,15 +930,15 @@ describe('team members over Session messages (H4e-b2)', () => {
   async function promptOf(parent: Side, childRunId: string): Promise<string> {
     return decodeChildLaunchEnvelope(
       await parent.session.resources.read(
-        (await parent.children.record(childRunId))!.inputRef,
+        parent.children.record(childRunId)!.inputRef,
       ),
     ).prompt;
   }
 
   async function inputText(session: ManagedSession, inputId: string) {
-    const event = (await (
-      await inputs(session)
-    ).find((each) => each.payload['inputId'] === inputId))!;
+    const event = inputs(session).find(
+      (each) => each.payload['inputId'] === inputId,
+    )!;
     return (
       JSON.parse(
         (
@@ -1007,10 +989,10 @@ describe('team members over Session messages (H4e-b2)', () => {
     await join(parent, 'alice', 'run-a');
     await finish(parent, 'run-a', CHILD);
     const team = parseTeamState(
-      (await parent.session.authority.extensionRecord(
+      parent.session.authority.extensionRecord(
         'team_state',
         'prompt:call-team',
-      ))!.record,
+      )!.record,
     );
     const closing = teamLifecycleBody(team, 'closing');
     await parent.session.authority.commitExtensionRecord(
@@ -1027,7 +1009,7 @@ describe('team members over Session messages (H4e-b2)', () => {
       kind: 'refused',
       reason: `Member "alice" (task ${parent.children.taskIdOf('run-a')}) belongs to team "review", which is closing and takes no new work. Finish it with team_delete.`,
     });
-    expect(await parent.children.record('prompt:c1')).toBeUndefined();
+    expect(parent.children.record('prompt:c1')).toBeUndefined();
   });
 
   it("labels a member's messages and continued results only while its team is open", async () => {
@@ -1227,7 +1209,7 @@ describe('member messages (b3c decision 8)', () => {
     const text = JSON.parse(
       (
         await child.session.resources.read(
-          (await inputs(child.session))[0]!.payload['contentRef'] as never,
+          inputs(child.session)[0]!.payload['contentRef'] as never,
         )
       ).toString('utf8'),
     ) as { text: string };
@@ -1292,7 +1274,7 @@ describe('member messages (b3c decision 8)', () => {
     const text = JSON.parse(
       (
         await child.session.resources.read(
-          (await inputs(child.session))[1]!.payload['contentRef'] as never,
+          inputs(child.session)[1]!.payload['contentRef'] as never,
         )
       ).toString('utf8'),
     ) as { text: string };
@@ -1354,7 +1336,7 @@ describe('member messages (b3c decision 8)', () => {
     const text = JSON.parse(
       (
         await child.session.resources.read(
-          (await inputs(child.session))[1]!.payload['contentRef'] as never,
+          inputs(child.session)[1]!.payload['contentRef'] as never,
         )
       ).toString('utf8'),
     ) as { text: string };
@@ -1415,7 +1397,7 @@ describe('member messages (b3c decision 8)', () => {
     const text = JSON.parse(
       (
         await child.session.resources.read(
-          (await inputs(child.session))[1]!.payload['contentRef'] as never,
+          inputs(child.session)[1]!.payload['contentRef'] as never,
         )
       ).toString('utf8'),
     ) as { text: string };
@@ -1447,7 +1429,7 @@ describe('member messages (b3c decision 8)', () => {
     const text = JSON.parse(
       (
         await child.session.resources.read(
-          (await inputs(child.session))[0]!.payload['contentRef'] as never,
+          inputs(child.session)[0]!.payload['contentRef'] as never,
         )
       ).toString('utf8'),
     ) as { text: string };

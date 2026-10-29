@@ -312,32 +312,6 @@ it('keeps checkpoint and file-history read failures closed', async () => {
   });
 });
 
-it.each(['pending', 'input', 'terminal'] as const)(
-  'keeps unavailable %s identity evidence closed without failing the status read',
-  async (stage) => {
-    const f = await fixture(true);
-    await f.terminal();
-    if (stage === 'pending') {
-      vi.spyOn(f.managed.authority, 'pendingInputsAt').mockRejectedValueOnce(
-        new Error('append outcome is unsettled'),
-      );
-    } else {
-      const original = f.managed.authority.findEvent.bind(f.managed.authority);
-      const find = vi.spyOn(f.managed.authority, 'findEvent');
-      if (stage === 'terminal') find.mockImplementationOnce(original);
-      find.mockRejectedValueOnce(new Error('history verification unavailable'));
-    }
-    expect(await inspectHostedRecovery(f.session, f.promptId)).toMatchObject({
-      state: 'awaiting_evidence',
-      reasonCode: 'recovery_evidence_unavailable',
-      promptId: f.promptId,
-      inputSettled: false,
-      continuationReady: false,
-      nextTurnAllowed: false,
-    });
-  },
-);
-
 it('rejects a positive read that raced another journal commit', async () => {
   const f = await fixture(true);
   await f.terminal();

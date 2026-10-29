@@ -5,11 +5,7 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
-import {
-  readHarnessCheckpointView,
-  type ManagedHarnessCheckpointView,
-} from './managed-checkpoint-history.js';
-import type { FileManagedSessionHistory } from './managed-session-history.js';
+import { readHarnessCheckpoint } from './managed-checkpoint-history.js';
 import { readOnlyManagedSessionSnapshot } from './http-managed-session-store.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import {
@@ -64,8 +60,6 @@ function object(value: unknown): Record<string, unknown> {
 export async function inspectOriginalReceiptCheckpointCoverage(
   value: unknown,
 ): Promise<OriginalReceiptCheckpointObservation> {
-  let authority: LocalManagedSessionAuthority | undefined;
-  let scratch: FileManagedSessionHistory | undefined;
   try {
     const snapshot = readOnlyManagedSessionSnapshot(value);
     const original = object(object(value)['original']);
@@ -99,8 +93,8 @@ export async function inspectOriginalReceiptCheckpointCoverage(
         manifestRef.kind === 'managed-tool-result-manifest',
       'original_resource_kind',
     );
-    authority = await LocalManagedSessionAuthority.openReadOnly({
-      scan: (consume) => snapshot.journal.scan(consume),
+    const authority = await LocalManagedSessionAuthority.open({
+      journal: snapshot.journal,
       sessionKey: snapshot.sessionKey,
       resources: snapshot.resources,
       cwd: '.',
@@ -116,16 +110,17 @@ export async function inspectOriginalReceiptCheckpointCoverage(
         activation.epoch === binding.activationEpoch,
       'original_activation_changed',
     );
-    requireFact(
-      (await authority.countEvents(
-        'tool.receipt',
-        'executionCallId',
-        binding.executionCallId,
-      )) === 1,
-      'original_receipt_missing_or_repeated',
+    const events = authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
     );
-    const receipt = await authority.committedReceipt(binding.executionCallId);
-    requireFact(receipt !== undefined, 'original_receipt_missing_or_repeated');
+    const receipts = events.filter(
+      (event) =>
+        event.kind === 'tool.receipt' &&
+        event.payload['executionCallId'] === binding.executionCallId,
+    );
+    requireFact(receipts.length === 1, 'original_receipt_missing_or_repeated');
+    const receipt = receipts[0];
     const transaction = snapshot.transactions[revision - 1];
     requireFact(
       receipt.sequence === sequence &&
@@ -196,29 +191,17 @@ export async function inspectOriginalReceiptCheckpointCoverage(
     requireFact(authorization.status === 'runnable', 'checkpoint_not_runnable');
     const latest = authority.lastEventOfKind('checkpoint.committed');
     requireFact(latest !== undefined, 'checkpoint_missing');
-    const events = authority.iterateEvents(1, authority.committedSequence);
     const checkpoints = events.filter(
       (event) => event.kind === 'checkpoint.committed',
     );
-    const current = authorization.checkpoint;
-    scratch = authority.createQueryHistory();
-    let dispatchView: ManagedHarnessCheckpointView | undefined;
-    let previousView: ManagedHarnessCheckpointView | undefined;
-    let dispatch: HarnessCheckpointV1 | undefined;
-    let originalCheckpoint: ManagedSessionEvent | undefined;
-    let previousState: HarnessCheckpointV1 | undefined;
+    const checkpointStates = new Map<string, HarnessCheckpointV1>();
     let previousCheckpointId: string | null = null;
-    for await (const event of checkpoints) {
+    for (const event of checkpoints) {
       const ref = assertManagedSessionDurableRef(
         event.payload['stateRef'],
         'checkpoint state',
       );
-      const view = await readHarnessCheckpointView(
-        snapshot.resources,
-        ref,
-        scratch,
-      );
-      const state = view.checkpoint;
+      const state = await readHarnessCheckpoint(snapshot.resources, ref);
       requireFact(
         ref.kind === 'managed-checkpoint' &&
           ref.schemaVersion === 1 &&
@@ -236,20 +219,10 @@ export async function inspectOriginalReceiptCheckpointCoverage(
           ),
         'checkpoint_event_body_conflict',
       );
-      if (isDeepStrictEqual(event.payload['stateRef'], binding.checkpointRef)) {
-        originalCheckpoint = event;
-        dispatch = state;
-        dispatchView = view;
-      }
-      if (
-        state.identity.checkpointId === current.identity.previousCheckpointId
-      ) {
-        previousState = state;
-        previousView = view;
-      }
-      if (view !== dispatchView && view !== previousView) await view.close();
+      checkpointStates.set(state.identity.checkpointId, state);
       previousCheckpointId = state.identity.checkpointId;
     }
+    const current = authorization.checkpoint;
     requireFact(
       current.identity.coveredSequence >= sequence,
       'receipt_not_covered',
@@ -266,7 +239,7 @@ export async function inspectOriginalReceiptCheckpointCoverage(
       'checkpoint_original_identity_conflict',
     );
     requireFact(
-      await events
+      events
         .filter((event) => event.sequence > latest.sequence)
         .every(
           (event) =>
@@ -276,12 +249,22 @@ export async function inspectOriginalReceiptCheckpointCoverage(
         ),
       'uncovered_later_work',
     );
-    const intent = await events.find(
+    const originalCheckpoint = checkpoints.find((event) =>
+      isDeepStrictEqual(event.payload['stateRef'], binding.checkpointRef),
+    );
+    const dispatch =
+      originalCheckpoint &&
+      checkpointStates.get(
+        originalCheckpoint.payload['checkpointId'] as string,
+      );
+    const intent = events.find(
       (event) => event.sequence === binding.intentSequence,
     );
-    const dispatchItem = await dispatchView?.tool(binding.executionCallId);
-    const dispatchRuntime = await dispatchView?.binding(
-      binding.executionCallId,
+    const dispatchItem = dispatch?.tools?.items.find(
+      (item) => item.executionCallId === binding.executionCallId,
+    );
+    const dispatchRuntime = dispatch?.runtime?.bindings.find(
+      (item) => item.executionCallId === binding.executionCallId,
     );
     requireFact(
       dispatch?.continuation.phase === 'await_runtime' &&
@@ -304,12 +287,13 @@ export async function inspectOriginalReceiptCheckpointCoverage(
         dispatch.identity.coveredSequence >= binding.intentSequence,
       'original_dispatch_evidence_conflict',
     );
-    const matchesTool = async (
-      view: ManagedHarnessCheckpointView,
-      consumed: boolean,
-    ) => {
-      const item = await view.tool(binding.executionCallId);
-      const runtime = await view.binding(binding.executionCallId);
+    const matchesTool = (state: HarnessCheckpointV1, consumed: boolean) => {
+      const item = state.tools?.items.find(
+        (item) => item.executionCallId === binding.executionCallId,
+      );
+      const runtime = state.runtime?.bindings.find(
+        (item) => item.executionCallId === binding.executionCallId,
+      );
       return (
         item?.state === 'settled' &&
         item.toolName === 'run_shell_command' &&
@@ -330,46 +314,38 @@ export async function inspectOriginalReceiptCheckpointCoverage(
       state.approval?.state !== 'requested';
     requireFact(noPendingWork(current), 'checkpoint_pending_work');
     const toolState =
-      current.continuation.phase === 'before_model' ? previousState : current;
-    const toolView =
       current.continuation.phase === 'before_model'
-        ? previousView
-        : authorization.history;
+        ? checkpointStates.get(current.identity.previousCheckpointId ?? '')
+        : current;
+    const represented = new Set(
+      toolState?.tools?.items.map((item) => item.executionCallId),
+    );
     requireFact(
-      toolState !== undefined &&
-        toolView !== undefined &&
-        dispatchView !== undefined &&
-        (await dispatchView.tools.every(
-          async (item) =>
-            (await toolView.tool(item.executionCallId)) !== undefined,
-        )) &&
-        (await events
+      dispatch.tools!.items.every((item) =>
+        represented.has(item.executionCallId),
+      ) &&
+        events
           .filter(
             (event) =>
               event.kind === 'tool.intent' &&
               event.sequence > originalCheckpoint!.sequence &&
               event.sequence <= current.identity.coveredSequence,
           )
-          .every(
-            async (event) =>
-              (await toolView.tool(
-                event.payload['executionCallId'] as string,
-              )) !== undefined,
-          )),
+          .every((event) =>
+            represented.has(event.payload['executionCallId'] as string),
+          ),
       'checkpoint_unrepresented_tool_work',
     );
     if (current.continuation.phase === 'before_model') {
       const covered = current.identity.coveredSequence;
-      const companion = await events.find(
-        (event) => event.sequence === covered + 1,
-      );
+      const companion = events.find((event) => event.sequence === covered + 1);
       const tx = snapshot.transactions.find(
         (tx) => tx.lastSequence === latest.sequence,
       );
       const previous =
         current.identity.previousCheckpointId === null
           ? undefined
-          : previousState;
+          : checkpointStates.get(current.identity.previousCheckpointId);
       requireFact(
         latest.payload['boundary'] === HARNESS_TURN_COMPLETE_BOUNDARY &&
           latest.sequence === covered + 2 &&
@@ -386,9 +362,9 @@ export async function inspectOriginalReceiptCheckpointCoverage(
             previous.continuation.phase,
           ) &&
           noPendingWork(previous) &&
-          previousView?.allToolsConsumed === true &&
+          previous.tools?.items.every((item) => item.consumed) === true &&
           previous.identity.coveredSequence >= sequence &&
-          (await matchesTool(previousView, true)),
+          matchesTool(previous, true),
         'turn_complete_consumed_history_not_qualified',
       );
     } else {
@@ -397,7 +373,7 @@ export async function inspectOriginalReceiptCheckpointCoverage(
           (current.continuation.phase === 'results_ready' ||
             (current.continuation.phase === 'turn_settled' &&
               current.tools?.items.every((item) => item.consumed) === true)) &&
-          (await matchesTool(authorization.history, false)),
+          matchesTool(current, false),
         'checkpoint_original_tool_not_settled',
       );
     }
@@ -418,8 +394,5 @@ export async function inspectOriginalReceiptCheckpointCoverage(
       status: 'unresolved',
       reason: error instanceof Error ? error.message : 'invalid_snapshot',
     };
-  } finally {
-    await scratch?.close();
-    await authority?.disposeHistory();
   }
 }

@@ -6,19 +6,9 @@
 
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import os from 'node:os';
-import path from 'node:path';
-import {
-  FileManagedSessionHistory,
-  ManagedHistoryQuery,
-  ManagedHistoryUnavailableError,
-} from './managed-session-history.js';
 import {
   encodeHarnessCheckpointV1,
   parseHarnessCheckpointObject,
-  parseHarnessCheckpointResidentObject,
-  parseToolItem,
-  parseRuntimeBinding,
   tryParseHarnessCheckpointV1,
   type HarnessCheckpointParseResult,
   type HarnessCheckpointV1,
@@ -56,7 +46,6 @@ export interface PreparedHarnessCheckpoint {
   readonly bytes: Buffer;
   readonly checkpoint: HarnessCheckpointV1;
   readonly history?: History;
-  readonly view: ManagedHarnessCheckpointView;
 }
 
 function requireHistory(
@@ -218,7 +207,7 @@ async function verifiedRead(
   resources: Pick<ManagedSessionResourceStore, 'read'>,
   ref: ManagedSessionDurableRef,
 ): Promise<Buffer> {
-  const bytes = Buffer.from(await resources.read(ref));
+  const bytes = await resources.read(ref);
   requireHistory(
     bytes.byteLength === ref.byteLength &&
       createHash('sha256').update(bytes).digest('hex') === ref.digest,
@@ -227,659 +216,173 @@ async function verifiedRead(
   return bytes;
 }
 
-interface ItemLocator {
-  readonly ref: ManagedSessionDurableRef;
-  readonly index: number;
-  readonly position: number;
-}
-interface PageProof extends History {
-  readonly context: string;
-  readonly maxOrdinal: number;
-  readonly pendingBindings: number;
-}
-const key = (...parts: Array<string | number>) => JSON.stringify(parts);
-const contextOf = (checkpoint: HarnessCheckpointV1) =>
-  JSON.stringify([
-    checkpoint.identity.sessionKey,
-    checkpoint.identity.turnId,
-    checkpoint.identity.promptId,
-  ]);
-
-async function toolAt(
-  resources: Pick<ManagedSessionResourceStore, 'read'>,
-  locator: ItemLocator,
-  index: FileManagedSessionHistory,
-): Promise<HarnessToolItem> {
-  const page = checkpointHistoryPage(
-    await index.loadBody(`checkpoint-page:${JSON.stringify(locator.ref)}`, () =>
-      verifiedRead(resources, locator.ref),
-    ),
-  );
-  requireHistory(locator.index < page.items.length, 'tool locator conflicts.');
-  return parseToolItem(page.items[locator.index], 'checkpoint history tool');
-}
-async function bindingAt(
-  resources: Pick<ManagedSessionResourceStore, 'read'>,
-  locator: ItemLocator,
-  index: FileManagedSessionHistory,
-): Promise<HarnessRuntimeBinding> {
-  const page = checkpointHistoryPage(
-    await index.loadBody(`checkpoint-page:${JSON.stringify(locator.ref)}`, () =>
-      verifiedRead(resources, locator.ref),
-    ),
-  );
-  requireHistory(
-    locator.index < page.bindings.length,
-    'binding locator conflicts.',
-  );
-  return parseRuntimeBinding(
-    page.bindings[locator.index],
-    'checkpoint history binding',
-  );
-}
-
-export class ManagedHarnessCheckpointView {
-  private reference: ManagedSessionDurableRef | undefined;
-  readonly tools: ManagedHistoryQuery<HarnessToolItem>;
-  readonly bindings: ManagedHistoryQuery<HarnessRuntimeBinding>;
-  readonly toolCount: number;
-  readonly bindingCount: number;
-  readonly maxOrdinal: number;
-  readonly allToolsSettled: boolean;
-  readonly allToolsConsumed: boolean;
-  readonly hasRuntimeDispatch: boolean;
-  constructor(
-    readonly checkpoint: HarnessCheckpointV1,
-    private readonly resources: Pick<ManagedSessionResourceStore, 'read'>,
-    private readonly index: FileManagedSessionHistory,
-    readonly archive: PageProof | undefined,
-    private readonly release = () => index.close(),
-    private readonly bodyDigest?: string,
-  ) {
-    this.toolCount =
-      (archive?.toolCount ?? 0) + (checkpoint.tools?.items.length ?? 0);
-    this.bindingCount =
-      (archive?.bindingCount ?? 0) + (checkpoint.runtime?.bindings.length ?? 0);
-    this.maxOrdinal = (checkpoint.tools?.items ?? []).reduce(
-      (maximum, item) => Math.max(maximum, item.ordinal),
-      archive?.maxOrdinal ?? -1,
-    );
-    this.allToolsSettled = (checkpoint.tools?.items ?? []).every(
-      (item) => item.state === 'settled',
-    );
-    this.allToolsConsumed = (checkpoint.tools?.items ?? []).every(
-      (item) => item.state === 'settled' && item.consumed,
-    );
-    this.hasRuntimeDispatch = (checkpoint.runtime?.bindings ?? []).some(
-      (binding) => binding.state === 'dispatch',
-    );
-    this.tools = new ManagedHistoryQuery(() => this.iterateTools());
-    this.bindings = new ManagedHistoryQuery(() => this.iterateBindings());
-  }
-  private get context(): string {
-    return contextOf(this.checkpoint);
-  }
-  async tool(executionCallId: string): Promise<HarnessToolItem | undefined> {
-    const inline = this.checkpoint.tools?.items.find(
-      (item) => item.executionCallId === executionCallId,
-    );
-    if (inline) return inline;
-    const locator = await this.index.get<ItemLocator>(
-      'resource',
-      key('checkpoint-tool', this.context, executionCallId),
-    );
-    return locator && locator.position < (this.archive?.toolCount ?? 0)
-      ? toolAt(this.resources, locator, this.index)
-      : undefined;
-  }
-  async binding(
-    executionCallId: string,
-  ): Promise<HarnessRuntimeBinding | undefined> {
-    const inline = this.checkpoint.runtime?.bindings.find(
-      (item) => item.executionCallId === executionCallId,
-    );
-    if (inline) return inline;
-    const locator = await this.index.get<ItemLocator>(
-      'resource',
-      key('checkpoint-binding', this.context, executionCallId),
-    );
-    return locator && locator.position < (this.archive?.bindingCount ?? 0)
-      ? bindingAt(this.resources, locator, this.index)
-      : undefined;
-  }
-  private async *iterateTools(): AsyncGenerator<HarnessToolItem> {
-    for (
-      let position = 0;
-      position < (this.archive?.toolCount ?? 0);
-      position++
-    ) {
-      const locator = await this.index.get<ItemLocator>(
-        'event',
-        key('checkpoint-tool', this.context, position),
-      );
-      requireHistory(
-        locator !== undefined && locator.position === position,
-        'tool directory is incomplete.',
-      );
-      yield await toolAt(this.resources, locator, this.index);
-    }
-    yield* this.checkpoint.tools?.items ?? [];
-  }
-  private async *iterateBindings(): AsyncGenerator<HarnessRuntimeBinding> {
-    for (
-      let position = 0;
-      position < (this.archive?.bindingCount ?? 0);
-      position++
-    ) {
-      const locator = await this.index.get<ItemLocator>(
-        'event',
-        key('checkpoint-binding', this.context, position),
-      );
-      requireHistory(
-        locator !== undefined && locator.position === position,
-        'binding directory is incomplete.',
-      );
-      yield await bindingAt(this.resources, locator, this.index);
-    }
-    yield* this.checkpoint.runtime?.bindings ?? [];
-  }
-  bindReference(ref: ManagedSessionDurableRef): void {
-    if (this.reference && isDeepStrictEqual(this.reference, ref)) return;
-    requireHistory(
-      ref.kind === 'managed-checkpoint' &&
-        ref.schemaVersion === 1 &&
-        ref.digest === this.bodyDigest,
-      'checkpoint source reference conflicts.',
-    );
-    this.reference = structuredClone(ref);
-    const source = this.reference;
-    this.index.setRebuilder(async (repair) => {
-      const rebuilt = await viewOf(
-        await verifiedRead(this.resources, source),
-        this.resources,
-        repair,
-      );
-      await rebuilt.view.close();
-    });
-  }
-  forkIndex(): FileManagedSessionHistory {
-    const fork = this.index.fork();
-    fork.setRebuilder(async () => {
-      throw new ManagedHistoryUnavailableError(
-        'Checkpoint preparation must reopen its verified basis.',
-      );
-    });
-    return fork;
-  }
-  close(): Promise<void> {
-    return this.release();
-  }
-}
-
-async function indexArchive(
-  resources: Pick<ManagedSessionResourceStore, 'read'>,
-  checkpoint: HarnessCheckpointV1,
-  history: History,
-  index: FileManagedSessionHistory,
-): Promise<PageProof> {
-  const context = contextOf(checkpoint);
-  const queueKey = key('checkpoint-queue', context, history.ref.digest);
-  let next: ManagedSessionDurableRef | null = history.ref;
-  let tools = history.toolCount;
-  let bindings = history.bindingCount;
-  let queued = 0;
-  let known: PageProof | undefined;
-  while (next !== null) {
-    const proof = await index.get<PageProof>(
-      'checkpoint',
-      key('checkpoint-page', context, next.digest),
-    );
-    if (proof) {
-      requireHistory(
-        proof.context === context &&
-          isDeepStrictEqual(proof.ref, next) &&
-          proof.toolCount === tools &&
-          proof.bindingCount === bindings,
-        'cached page coverage conflicts.',
-      );
-      known = proof;
-      break;
-    }
-    requireHistory(queued < MAX_HISTORY_PAGES, 'page capacity exceeded.');
-    const bytes = await verifiedRead(resources, next);
-    const page = checkpointHistoryPage(bytes);
-    requireHistory(
-      isDeepStrictEqual(page.sessionKey, checkpoint.identity.sessionKey) &&
-        page.turnId === checkpoint.identity.turnId &&
-        page.promptId === checkpoint.identity.promptId,
-      'page belongs to another Session or Turn.',
-    );
-    requireHistory(
-      page.toolCount === tools && page.bindingCount === bindings,
-      'page counts conflict.',
-    );
-    const toolStart = tools - page.items.length;
-    const bindingStart = bindings - page.bindings.length;
-    requireHistory(
-      toolStart >= 0 && bindingStart >= 0,
-      'page counts conflict.',
-    );
-    index.begin();
-    try {
-      for (let itemIndex = 0; itemIndex < page.items.length; itemIndex++) {
-        const item = parseToolItem(
-          page.items[itemIndex],
-          'checkpoint history tool',
-        );
-        const locator: ItemLocator = {
-          ref: next,
-          index: itemIndex,
-          position: toolStart + itemIndex,
-        };
-        for (const [family, identity] of [
-          ['resource', key('checkpoint-tool', context, item.executionCallId)],
-          ['resource', key('checkpoint-call', context, item.functionCallId)],
-          ['resource', key('checkpoint-ordinal', context, item.ordinal)],
-          ['event', key('checkpoint-tool', context, locator.position)],
-        ] as const) {
-          const old = await index.get<ItemLocator>(family, identity);
-          requireHistory(
-            !old ||
-              (old.position === locator.position &&
-                isDeepStrictEqual(await toolAt(resources, old, index), item)),
-            'historical tool identity conflicts.',
-          );
-          await index.set(family, identity, locator);
-        }
-      }
-      for (let itemIndex = 0; itemIndex < page.bindings.length; itemIndex++) {
-        const binding = parseRuntimeBinding(
-          page.bindings[itemIndex],
-          'checkpoint history binding',
-        );
-        const locator: ItemLocator = {
-          ref: next,
-          index: itemIndex,
-          position: bindingStart + itemIndex,
-        };
-        for (const [family, identity] of [
-          [
-            'resource',
-            key('checkpoint-binding', context, binding.executionCallId),
-          ],
-          [
-            'resource',
-            key('checkpoint-invocation', context, binding.invocationBindingId),
-          ],
-          ['event', key('checkpoint-binding', context, locator.position)],
-        ] as const) {
-          const old = await index.get<ItemLocator>(family, identity);
-          requireHistory(
-            !old ||
-              (old.position === locator.position &&
-                isDeepStrictEqual(
-                  await bindingAt(resources, old, index),
-                  binding,
-                )),
-            'historical binding identity conflicts.',
-          );
-          await index.set(family, identity, locator);
-        }
-      }
-      await index.set('resource-pending', key(queueKey, queued++), {
-        ref: next,
-        bytes: bytes.byteLength,
-      });
-      await index.flush();
-    } catch (cause) {
-      index.discard();
-      throw cause;
-    }
-    tools = toolStart;
-    bindings = bindingStart;
-    next = page.previous;
-    requireHistory(
-      next !== null || tools + bindings === 0,
-      'history is incomplete.',
-    );
-  }
-  let proof = known;
-  for (let offset = queued - 1; offset >= 0; offset--) {
-    const queuedPage = await index.get<{
-      ref: ManagedSessionDurableRef;
-      bytes: number;
-    }>('resource-pending', key(queueKey, offset));
-    requireHistory(queuedPage !== undefined, 'page queue is incomplete.');
-    const page = checkpointHistoryPage(
-      await verifiedRead(resources, queuedPage.ref),
-    );
-    let pendingBindings = 0;
-    const pendingKey = (digest: string, position: number) =>
-      key('checkpoint-pending-binding', context, digest, position);
-    const keepPending = async (locator: ItemLocator) => {
-      const binding = await bindingAt(resources, locator, index);
-      const tool = await index.get<ItemLocator>(
-        'resource',
-        key('checkpoint-tool', context, binding.executionCallId),
-      );
-      if (!tool || tool.position >= page.toolCount)
-        await index.set(
-          'resource-pending',
-          pendingKey(queuedPage.ref.digest, pendingBindings++),
-          locator,
-        );
-    };
-    for (
-      let position = 0;
-      position < (proof?.pendingBindings ?? 0);
-      position++
-    ) {
-      const locator = await index.get<ItemLocator>(
-        'resource-pending',
-        pendingKey(proof!.ref.digest, position),
-      );
-      requireHistory(locator !== undefined, 'binding directory is incomplete.');
-      await keepPending(locator);
-    }
-    for (let position = 0; position < page.bindings.length; position++)
-      await keepPending({
-        ref: queuedPage.ref,
-        index: position,
-        position: page.bindingCount - page.bindings.length + position,
-      });
-    const maxOrdinal = page.items.reduce<number>(
-      (maximum, raw) =>
-        Math.max(
-          maximum,
-          parseToolItem(raw, 'checkpoint history tool').ordinal,
-        ),
-      proof?.maxOrdinal ?? -1,
-    );
-    const nextProof: PageProof = {
-      ref: queuedPage.ref,
-      toolCount: page.toolCount,
-      bindingCount: page.bindingCount,
-      pageCount: (proof?.pageCount ?? 0) + 1,
-      byteLength: (proof?.byteLength ?? 0) + queuedPage.bytes,
-      context,
-      maxOrdinal,
-      pendingBindings,
-    };
-    requireHistory(
-      nextProof.pageCount <= MAX_HISTORY_PAGES &&
-        nextProof.byteLength <= MAX_HISTORY_BYTES,
-      'decoded history capacity exceeded.',
-    );
-    await index.set(
-      'checkpoint',
-      key('checkpoint-page', context, queuedPage.ref.digest),
-      nextProof,
-    );
-    proof = nextProof;
-  }
-  requireHistory(
-    proof !== undefined &&
-      isDeepStrictEqual(proof.ref, history.ref) &&
-      proof.toolCount === history.toolCount &&
-      proof.bindingCount === history.bindingCount,
-    'history coverage conflicts.',
-  );
-  return proof;
-}
-
-async function viewOf(
-  bytes: Buffer,
-  resources: Pick<ManagedSessionResourceStore, 'read'>,
-  index: FileManagedSessionHistory,
-  release?: () => Promise<void>,
-): Promise<PreparedHarnessCheckpoint> {
-  bytes = Buffer.from(bytes);
-  const paged = isPagedHarnessCheckpoint(bytes);
-  const physical = paged ? physicalRoot(bytes) : undefined;
-  const checkpoint = physical
-    ? parseHarnessCheckpointResidentObject(
-        physical.state,
-        physical.history.toolCount,
-      )
-    : (() => {
-        const parsed = tryParseHarnessCheckpointV1(bytes);
-        requireHistory(parsed.ok, parsed.ok ? '' : parsed.message);
-        return parsed.checkpoint;
-      })();
-  if (physical)
-    requireHistory(
-      checkpoint.tools !== null &&
-        (physical.history.bindingCount === 0 || checkpoint.runtime !== null),
-      'archived checkpoint group is missing.',
-    );
-  const history = physical
-    ? await indexArchive(resources, checkpoint, physical.history, index)
-    : undefined;
-  const context = contextOf(checkpoint);
-  for (const item of checkpoint.tools?.items ?? []) {
-    for (const identity of [
-      key('checkpoint-tool', context, item.executionCallId),
-      key('checkpoint-call', context, item.functionCallId),
-      key('checkpoint-ordinal', context, item.ordinal),
-    ]) {
-      const old = await index.get<ItemLocator>('resource', identity);
-      requireHistory(
-        !old || old.position >= (history?.toolCount ?? 0),
-        'inline tool repeats archived identity.',
-      );
-    }
-  }
-  for (
-    let position = 0;
-    position < (history?.pendingBindings ?? 0);
-    position++
-  ) {
-    const locator = await index.get<ItemLocator>(
-      'resource-pending',
-      key('checkpoint-pending-binding', context, history!.ref.digest, position),
-    );
-    requireHistory(locator !== undefined, 'binding directory is incomplete.');
-    const binding = await bindingAt(resources, locator, index);
-    requireHistory(
-      checkpoint.tools?.items.some(
-        (item) => item.executionCallId === binding.executionCallId,
-      ),
-      'binding has no matching tool.',
-    );
-  }
-  for (const binding of checkpoint.runtime?.bindings ?? []) {
-    for (const identity of [
-      key('checkpoint-binding', context, binding.executionCallId),
-      key('checkpoint-invocation', context, binding.invocationBindingId),
-    ]) {
-      const old = await index.get<ItemLocator>('resource', identity);
-      requireHistory(
-        !old || old.position >= (history?.bindingCount ?? 0),
-        'inline binding repeats archived identity.',
-      );
-    }
-    const tool = await index.get<ItemLocator>(
-      'resource',
-      key('checkpoint-tool', context, binding.executionCallId),
-    );
-    requireHistory(
-      (tool !== undefined && tool.position < (history?.toolCount ?? 0)) ||
-        checkpoint.tools?.items.some(
-          (item) => item.executionCallId === binding.executionCallId,
-        ),
-      'binding has no matching tool.',
-    );
-  }
-  const snapshot = index.snapshot();
-  snapshot.setRebuilder(async (repair) => {
-    const rebuilt = await viewOf(bytes, resources, repair);
-    await rebuilt.view.close();
-  });
-  const view = new ManagedHarnessCheckpointView(
-    checkpoint,
-    resources,
-    snapshot,
-    history,
-    release,
-    createHash('sha256').update(bytes).digest('hex'),
-  );
-  return { bytes, checkpoint, history, view };
-}
-
-export async function readHarnessCheckpointView(
+async function load(
   resources: Pick<ManagedSessionResourceStore, 'read'>,
   ref: ManagedSessionDurableRef,
-  scratch?: FileManagedSessionHistory,
-): Promise<ManagedHarnessCheckpointView> {
-  ref = structuredClone(ref);
+): Promise<PreparedHarnessCheckpoint> {
   requireHistory(
     ref.kind === 'managed-checkpoint' && ref.schemaVersion === 1,
     'checkpoint reference conflicts.',
   );
-  const index =
-    scratch ??
-    (await FileManagedSessionHistory.create(
-      path.join(os.tmpdir(), 'qwen-checkpoint-query'),
-    ));
-  try {
-    const view = (
-      await viewOf(
-        await verifiedRead(resources, ref),
-        resources,
-        index,
-        scratch ? undefined : () => index.close(),
-      )
-    ).view;
-    view.bindReference(ref);
-    return view;
-  } catch (cause) {
-    if (!scratch) await index.close();
-    throw cause;
+  const bytes = await verifiedRead(resources, ref);
+  if (!isPagedHarnessCheckpoint(bytes)) {
+    const parsed = tryParseHarnessCheckpointV1(bytes);
+    requireHistory(
+      parsed.ok,
+      parsed.ok ? '' : (parsed.message ?? 'invalid inline checkpoint.'),
+    );
+    return { bytes, checkpoint: parsed.checkpoint };
   }
+  const root = physicalRoot(bytes);
+  const identity = object(root.state['identity']);
+  const pages: Array<ReturnType<typeof checkpointHistoryPage>> = [];
+  const visited = new Set<string>();
+  let next: ManagedSessionDurableRef | null = root.history.ref;
+  let toolCount = root.history.toolCount;
+  let bindingCount = root.history.bindingCount;
+  let totalBytes = 0;
+  while (next !== null) {
+    requireHistory(
+      !visited.has(next.resourceId) && visited.size < MAX_HISTORY_PAGES,
+      'page cycle or capacity exceeded.',
+    );
+    visited.add(next.resourceId);
+    const part = await verifiedRead(resources, next);
+    totalBytes += part.byteLength;
+    requireHistory(
+      totalBytes <= MAX_HISTORY_BYTES,
+      'decoded history capacity exceeded.',
+    );
+    const page = checkpointHistoryPage(part);
+    requireHistory(
+      isDeepStrictEqual(page.sessionKey, identity['sessionKey']) &&
+        page.turnId === identity['turnId'] &&
+        page.promptId === identity['promptId'],
+      'page belongs to another Session or Turn.',
+    );
+    requireHistory(
+      page.toolCount === toolCount && page.bindingCount === bindingCount,
+      'page counts conflict.',
+    );
+    toolCount -= page.items.length;
+    bindingCount -= page.bindings.length;
+    requireHistory(
+      toolCount >= 0 &&
+        bindingCount >= 0 &&
+        (page.previous !== null || toolCount + bindingCount === 0),
+      'page coverage conflicts.',
+    );
+    pages.push(page);
+    next = page.previous;
+  }
+  requireHistory(
+    toolCount === 0 && bindingCount === 0,
+    'history is incomplete.',
+  );
+  const tools = object(root.state['tools']);
+  const runtime =
+    root.state['runtime'] === null ? null : object(root.state['runtime']);
+  requireHistory(
+    Array.isArray(tools['items']) &&
+      (runtime === null || Array.isArray(runtime['bindings'])),
+    'active arrays conflict.',
+  );
+  pages.reverse();
+  const items = pages.flatMap((page) => page.items);
+  const bindings = pages.flatMap((page) => page.bindings);
+  const checkpoint = parseHarnessCheckpointObject({
+    ...root.state,
+    tools: { ...tools, items: [...items, ...tools['items']] },
+    runtime:
+      runtime === null
+        ? null
+        : {
+            ...runtime,
+            bindings: [
+              ...bindings,
+              ...(runtime['bindings'] as ManagedSessionJsonValue[]),
+            ],
+          },
+  });
+  requireHistory(
+    root.history.bindingCount === 0 || runtime !== null,
+    'archived bindings lost their group.',
+  );
+  return {
+    bytes,
+    checkpoint,
+    history: {
+      ...root.history,
+      pageCount: pages.length,
+      byteLength: totalBytes,
+    },
+  };
 }
 
-/** Explicit complete materialization; production recovery uses the fixed-prefix view. */
 export async function readHarnessCheckpoint(
   resources: Pick<ManagedSessionResourceStore, 'read'>,
   ref: ManagedSessionDurableRef,
 ): Promise<HarnessCheckpointV1> {
-  const view = await readHarnessCheckpointView(resources, ref);
-  try {
-    return parseHarnessCheckpointObject({
-      ...view.checkpoint,
-      tools: view.checkpoint.tools && {
-        ...view.checkpoint.tools,
-        items: await view.tools.collect(
-          MAX_HISTORY_PAGES * CHECKPOINT_HISTORY_PAGE_ITEMS + 65536,
-        ),
-      },
-      runtime: view.checkpoint.runtime && {
-        bindings: await view.bindings.collect(
-          MAX_HISTORY_PAGES * CHECKPOINT_HISTORY_PAGE_ITEMS + 65536,
-        ),
-      },
-    } as unknown as ManagedSessionJsonValue);
-  } finally {
-    await view.close();
-  }
+  return (await load(resources, ref)).checkpoint;
 }
 
-export type ManagedHarnessCheckpointParseResult =
-  | {
-      readonly ok: true;
-      readonly checkpoint: HarnessCheckpointV1;
-      readonly history: ManagedHarnessCheckpointView;
-    }
-  | Extract<HarnessCheckpointParseResult, { ok: false }>;
-
-/** One committed basis; its resident body contains active work and a fixed tail. */
+/** One committed basis only; uncertain writes never advance this cache. */
 export class ManagedCheckpointHistory {
-  private committed?: Omit<PreparedHarnessCheckpoint, 'bytes'> & {
+  private committed?: PreparedHarnessCheckpoint & {
     readonly ref: ManagedSessionDurableRef;
   };
-  private index?: FileManagedSessionHistory;
-  constructor(
-    private readonly resources: ManagedSessionResourceStore,
-    private readonly createIndex?: () => FileManagedSessionHistory,
-  ) {}
-  private async currentIndex(): Promise<FileManagedSessionHistory> {
-    this.index ??=
-      this.createIndex?.() ??
-      (await FileManagedSessionHistory.create(
-        path.join(os.tmpdir(), 'qwen-checkpoint-query'),
-      ));
-    return this.index;
-  }
+
+  constructor(private readonly resources: ManagedSessionResourceStore) {}
+
   async read(
     ref: ManagedSessionDurableRef,
   ): Promise<PreparedHarnessCheckpoint> {
-    ref = structuredClone(ref);
     if (this.committed && isDeepStrictEqual(this.committed.ref, ref))
-      return {
-        ...this.committed,
-        bytes: await verifiedRead(this.resources, ref),
-      };
-    return viewOf(
-      await verifiedRead(this.resources, ref),
-      this.resources,
-      await this.currentIndex(),
-    );
+      return this.committed;
+    return load(this.resources, ref);
   }
+
   async tryRead(
     ref: ManagedSessionDurableRef,
-  ): Promise<ManagedHarnessCheckpointParseResult> {
-    ref = structuredClone(ref);
+  ): Promise<HarnessCheckpointParseResult> {
     if (this.committed && isDeepStrictEqual(this.committed.ref, ref))
-      return {
-        ok: true,
-        checkpoint: this.committed.checkpoint,
-        history: this.committed.view,
-      };
-    try {
-      const prepared = await this.read(ref);
-      this.remember(ref, prepared);
-      return {
-        ok: true,
-        checkpoint: prepared.checkpoint,
-        history: prepared.view,
-      };
-    } catch (cause) {
-      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
-      const bytes = await verifiedRead(this.resources, ref);
+      return { ok: true, checkpoint: this.committed.checkpoint };
+    const bytes = await verifiedRead(this.resources, ref);
+    if (!isPagedHarnessCheckpoint(bytes)) {
       const parsed = tryParseHarnessCheckpointV1(bytes);
-      return parsed.ok
-        ? { ok: false, reason: 'invalid', message: cause.message }
-        : parsed;
+      if (parsed.ok)
+        this.remember(ref, { bytes, checkpoint: parsed.checkpoint });
+      return parsed;
+    }
+    try {
+      const prepared = await load(this.resources, ref);
+      this.remember(ref, prepared);
+      return { ok: true, checkpoint: prepared.checkpoint };
+    } catch (error) {
+      if (!(error instanceof ManagedSessionRecordError)) throw error;
+      return { ok: false, reason: 'invalid', message: error.message };
     }
   }
+
   remember(
     ref: ManagedSessionDurableRef,
     prepared: PreparedHarnessCheckpoint,
   ): void {
-    prepared.view.bindReference(ref);
-    const { bytes: _bytes, ...resident } = prepared;
-    this.committed = { ...resident, ref: structuredClone(ref) };
-    this.index = prepared.view.forkIndex();
+    this.committed = { ...prepared, ref };
   }
+
   async prepare(
     checkpoint: HarnessCheckpointV1,
     previousRef?: ManagedSessionDurableRef,
   ): Promise<PreparedHarnessCheckpoint> {
-    const previous = previousRef ? await this.read(previousRef) : undefined;
-    let state = parseHarnessCheckpointResidentObject(
+    const state = parseHarnessCheckpointObject(
       checkpoint as unknown as ManagedSessionJsonValue,
-      checkpoint.continuation.phase === 'before_model'
-        ? 0
-        : (previous?.history?.toolCount ?? 0),
     );
-    let items = state.tools?.items ?? [];
-    let bindings = state.runtime?.bindings ?? [];
+    const items = state.tools?.items ?? [];
+    const bindings = state.runtime?.bindings ?? [];
     let history: History | undefined;
-    let index =
-      previousRef && state.continuation.phase !== 'before_model'
-        ? (await this.currentIndex()).fork()
-        : (await this.currentIndex()).emptyView();
-    if (previous && state.continuation.phase !== 'before_model') {
+    if (previousRef && state.continuation.phase !== 'before_model') {
+      const previous = await this.read(previousRef);
       if (
         previous.history &&
         managedSessionKeysEqual(
@@ -890,46 +393,20 @@ export class ManagedCheckpointHistory {
         previous.checkpoint.identity.promptId === state.identity.promptId
       ) {
         history = previous.history;
-        index = previous.view.forkIndex();
-        const firstIsInline =
-          items[0] &&
-          previous.checkpoint.tools?.items.some(
-            (item) => item.executionCallId === items[0].executionCallId,
-          );
-        const archivedFirst =
-          !firstIsInline && items[0]
-            ? await previous.view.tools.at(0)
-            : undefined;
-        if (
-          archivedFirst &&
-          archivedFirst.executionCallId === items[0]?.executionCallId
-        ) {
-          let offset = 0;
-          for await (const item of previous.view.tools.slice(
-            0,
-            history.toolCount,
-          ))
-            requireHistory(
-              isDeepStrictEqual(item, items[offset++]),
-              'committed prefix was changed.',
-            );
-          offset = 0;
-          for await (const binding of previous.view.bindings.slice(
-            0,
-            history.bindingCount,
-          ))
-            requireHistory(
-              isDeepStrictEqual(binding, bindings[offset++]),
-              'committed prefix was changed.',
-            );
-          items = items.slice(history.toolCount);
-          bindings = bindings.slice(history.bindingCount);
-          state = {
-            ...state,
-            tools: state.tools && { ...state.tools, items },
-            runtime: state.runtime && { bindings },
-          };
-        }
+        requireHistory(
+          isDeepStrictEqual(
+            items.slice(0, history.toolCount),
+            previous.checkpoint.tools?.items.slice(0, history.toolCount),
+          ) &&
+            isDeepStrictEqual(
+              bindings.slice(0, history.bindingCount),
+              previous.checkpoint.runtime?.bindings.slice(
+                0,
+                history.bindingCount,
+              ) ?? [],
+            ),
+          'committed prefix was changed.',
+        );
       }
     }
     let eligible = 0;
@@ -939,35 +416,30 @@ export class ManagedCheckpointHistory {
       items[eligible].consumed
     )
       eligible++;
-    const toolTarget =
+    const toolTarget = Math.max(
+      history?.toolCount ?? 0,
       Math.floor(
         Math.max(0, eligible - CHECKPOINT_HISTORY_PAGE_ITEMS) /
           CHECKPOINT_HISTORY_PAGE_ITEMS,
-      ) * CHECKPOINT_HISTORY_PAGE_ITEMS;
-    const context = contextOf(state);
+      ) * CHECKPOINT_HISTORY_PAGE_ITEMS,
+    );
     const archivedIds = new Set(
       items.slice(0, toolTarget).map((item) => item.executionCallId),
     );
     let bindingTarget = 0;
     while (
       bindingTarget < bindings.length &&
-      bindings[bindingTarget].state !== 'dispatch'
-    ) {
-      const id = bindings[bindingTarget].executionCallId;
-      const old = await index.get<ItemLocator>(
-        'resource',
-        key('checkpoint-tool', context, id),
-      );
-      if (
-        !archivedIds.has(id) &&
-        !(old && old.position < (history?.toolCount ?? 0))
-      )
-        break;
+      bindings[bindingTarget].state !== 'dispatch' &&
+      archivedIds.has(bindings[bindingTarget].executionCallId)
+    )
       bindingTarget++;
-    }
-    let toolsArchived = 0;
-    let bindingsArchived = 0;
-    while (toolsArchived < toolTarget || bindingsArchived < bindingTarget) {
+    let toolCount = history?.toolCount ?? 0;
+    let bindingCount = history?.bindingCount ?? 0;
+    requireHistory(
+      eligible >= toolCount && bindingTarget >= bindingCount,
+      'committed history became unfinished.',
+    );
+    while (toolCount < toolTarget || bindingCount < bindingTarget) {
       const pageItems: HarnessToolItem[] = [];
       const pageBindings: HarnessRuntimeBinding[] = [];
       const body = () => ({
@@ -976,29 +448,29 @@ export class ManagedCheckpointHistory {
         turnId: state.identity.turnId,
         promptId: state.identity.promptId,
         previous: history?.ref ?? null,
-        toolCount: (history?.toolCount ?? 0) + pageItems.length,
-        bindingCount: (history?.bindingCount ?? 0) + pageBindings.length,
+        toolCount: toolCount + pageItems.length,
+        bindingCount: bindingCount + pageBindings.length,
         items: pageItems,
         bindings: pageBindings,
       });
       const fits = () =>
-        Buffer.byteLength(JSON.stringify(body())) <=
+        Buffer.byteLength(JSON.stringify(body()), 'utf8') <=
         CHECKPOINT_HISTORY_PAGE_BYTES;
       while (
-        toolsArchived + pageItems.length < toolTarget &&
+        toolCount + pageItems.length < toolTarget &&
         pageItems.length < CHECKPOINT_HISTORY_PAGE_ITEMS
       ) {
-        pageItems.push(items[toolsArchived + pageItems.length]);
+        pageItems.push(items[toolCount + pageItems.length]);
         if (!fits()) {
           pageItems.pop();
           break;
         }
       }
       while (
-        bindingsArchived + pageBindings.length < bindingTarget &&
+        bindingCount + pageBindings.length < bindingTarget &&
         pageBindings.length < CHECKPOINT_HISTORY_PAGE_ITEMS
       ) {
-        pageBindings.push(bindings[bindingsArchived + pageBindings.length]);
+        pageBindings.push(bindings[bindingCount + pageBindings.length]);
         if (!fits()) {
           pageBindings.pop();
           break;
@@ -1008,7 +480,7 @@ export class ManagedCheckpointHistory {
         pageItems.length + pageBindings.length > 0,
         'one history entry exceeds the page budget.',
       );
-      const bytes = Buffer.from(JSON.stringify(body()));
+      const bytes = Buffer.from(JSON.stringify(body()), 'utf8');
       const pageCount = (history?.pageCount ?? 0) + 1;
       const byteLength = (history?.byteLength ?? 0) + bytes.byteLength;
       requireHistory(
@@ -1016,44 +488,36 @@ export class ManagedCheckpointHistory {
         'decoded history capacity exceeded.',
       );
       const ref = await this.resources.publish(CHECKPOINT_HISTORY_KIND, bytes);
-      history = {
-        ref,
-        toolCount: (history?.toolCount ?? 0) + pageItems.length,
-        bindingCount: (history?.bindingCount ?? 0) + pageBindings.length,
-        pageCount,
-        byteLength,
-      };
-      toolsArchived += pageItems.length;
-      bindingsArchived += pageBindings.length;
+      toolCount += pageItems.length;
+      bindingCount += pageBindings.length;
+      history = { ref, toolCount, bindingCount, pageCount, byteLength };
     }
-    const tail = {
+    if (!history)
+      return { bytes: encodeHarnessCheckpointV1(state), checkpoint: state };
+    const tail: HarnessCheckpointV1 = {
       ...state,
-      tools: state.tools && {
-        ...state.tools,
-        items: items.slice(toolsArchived),
-      },
+      tools: state.tools && { ...state.tools, items: items.slice(toolCount) },
       runtime: state.runtime && {
         ...state.runtime,
-        bindings: bindings.slice(bindingsArchived),
+        bindings: bindings.slice(bindingCount),
       },
     };
-    const bytes = history
-      ? Buffer.from(
-          JSON.stringify({
-            ...tail,
-            storageProfile: CHECKPOINT_STORAGE_PROFILE,
-            history: {
-              ref: history.ref,
-              toolCount: history.toolCount,
-              bindingCount: history.bindingCount,
-            },
-          }),
-        )
-      : encodeHarnessCheckpointV1(tail);
+    const bytes = Buffer.from(
+      JSON.stringify({
+        ...JSON.parse(encodeHarnessCheckpointV1(tail).toString('utf8')),
+        storageProfile: CHECKPOINT_STORAGE_PROFILE,
+        history: {
+          ref: history.ref,
+          toolCount: history.toolCount,
+          bindingCount: history.bindingCount,
+        },
+      }),
+      'utf8',
+    );
     requireHistory(
       bytes.byteLength <= MANAGED_SESSION_LIMITS.maxEventBytes,
       'active checkpoint exceeds its physical budget.',
     );
-    return viewOf(bytes, this.resources, index);
+    return { bytes, checkpoint: state, history };
   }
 }

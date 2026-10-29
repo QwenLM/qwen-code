@@ -26,7 +26,7 @@ function committed(
   return {
     authority: {
       committedSequence: 1,
-      iterateEvents: () => [
+      eventsInSequenceRange: () => [
         {
           kind: 'input.accepted',
           payload: {

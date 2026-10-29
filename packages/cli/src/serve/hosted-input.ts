@@ -169,8 +169,8 @@ export async function readHostedInput(
   promptId: string,
   fallbackText: string,
 ): Promise<ReturnType<typeof parseHostedInput>> {
-  const accepted = await session.authority
-    .iterateEvents(1, session.authority.committedSequence)
+  const accepted = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast(
       (event) =>
         event.kind === 'input.accepted' &&

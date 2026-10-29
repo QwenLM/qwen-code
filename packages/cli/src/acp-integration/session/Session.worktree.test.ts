@@ -143,7 +143,6 @@ describe('Session.pendingWorktreeNotice', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
         readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
-        readLastApiPromptCancellation: vi.fn().mockResolvedValue(undefined),
         getBranchCheckpointCursor: vi.fn().mockReturnValue({
           recordId: null,
           activeRecordCount: 0,

@@ -35,8 +35,8 @@ export interface HostedRecoverySession {
   mcpRecovering: number;
   mcpClosing?: boolean;
   hooksBusy?: boolean;
-  mcp?: { recoveryBlocked(): Promise<boolean> };
-  hooks?: { hasPendingOperations(): Promise<boolean> };
+  mcp?: { readonly recoveryBlocked: boolean };
+  hooks?: { readonly hasPendingOperations: boolean };
 }
 
 /** Reads committed evidence only; a moving or unreadable view cannot admit work. */
@@ -46,8 +46,24 @@ export async function inspectHostedRecovery(
 ): Promise<HostedRecoveryStatus> {
   const authority = session.managed.authority;
   const sequence = authority.committedSequence;
-  let promptId: string | null = requestedPromptId ?? null;
-  let inputSettled = false;
+  const events = authority.eventsInSequenceRange(1, sequence);
+  const pending = new Set<string>();
+  const accepted = new Set<string>();
+  const settled = new Map<string, number>();
+  for (const event of events) {
+    const turnId = event.payload['turnId'];
+    if (typeof turnId !== 'string') continue;
+    if (event.kind === 'input.accepted') {
+      accepted.add(turnId);
+      pending.add(turnId);
+    } else if (event.kind === 'turn.settled') {
+      pending.delete(turnId);
+      settled.set(turnId, event.sequence);
+    }
+  }
+  const promptId = requestedPromptId ?? [...accepted].at(-1) ?? null;
+  const inputSettled =
+    promptId === null || (accepted.has(promptId) && !pending.has(promptId));
   let continuationReady = false;
   const status = (
     state: HostedRecoveryStatus['state'],
@@ -60,50 +76,23 @@ export async function inspectHostedRecovery(
     continuationReady,
     nextTurnAllowed: state === 'ready',
   });
+  if (requestedPromptId && !accepted.has(requestedPromptId))
+    return status('operator_required', 'original_input_missing');
   try {
-    const pending = await authority.pendingInputsAt(sequence);
-    const input = requestedPromptId
-      ? await authority.findEvent(
-          'input.accepted',
-          'turnId',
-          requestedPromptId,
-          {
-            throughSequence: sequence,
-          },
-        )
-      : await authority.findEvent('input.accepted', 'kind', 'input.accepted', {
-          last: true,
-          throughSequence: sequence,
-        });
-    promptId =
-      requestedPromptId ??
-      (typeof input?.payload['turnId'] === 'string'
-        ? input.payload['turnId']
-        : null);
-    const settled =
-      promptId === null
-        ? undefined
-        : await authority.findEvent('turn.settled', 'turnId', promptId, {
-            throughSequence: sequence,
-          });
-    inputSettled =
-      promptId === null || (input !== undefined && settled !== undefined);
-    if (requestedPromptId && input === undefined)
-      return status('operator_required', 'original_input_missing');
     const authorization = await authority.harnessRunAuthorization();
     const history = await readHostedFileHistory(session.managed);
     if (authority.committedSequence !== sequence)
       return status('awaiting_evidence', 'evidence_changed');
     if (authorization.status === 'initial') {
-      continuationReady = inputSettled && pending.length === 0;
+      continuationReady = inputSettled && pending.size === 0;
     } else if (authorization.status === 'runnable') {
       const checkpoint = authorization.checkpoint;
       continuationReady =
         inputSettled &&
-        pending.length === 0 &&
+        pending.size === 0 &&
         (promptId === null ||
           checkpoint.identity.coveredSequence >=
-            (settled?.sequence ?? Infinity) - 1) &&
+            (settled.get(promptId) ?? Infinity) - 1) &&
         checkpoint.continuation.phase === 'before_model' &&
         checkpoint.continuation.pendingEventIds.length === 0 &&
         checkpoint.attempt === null &&
@@ -132,7 +121,7 @@ export async function inspectHostedRecovery(
           : 'awaiting_evidence',
         `checkpoint_${authorization.reason}`,
       );
-    if (pending.length > 0)
+    if (pending.size > 0)
       return status(
         session.hooks || session.mcp
           ? 'operator_required'
@@ -148,15 +137,12 @@ export async function inspectHostedRecovery(
     if (history?.pendingTurn || session.fileHistoryOwed)
       return status('cleanup_pending', 'file_history_pending');
     if (
-      (await hasHostedCleanupDebt(session.managed)) ||
+      hasHostedCleanupDebt(session.managed) ||
       session.runtimeLeaseOwedByTerminalRoute ||
       session.cleanupBlocked
     )
       return status('cleanup_pending', 'runtime_cleanup_pending');
-    if (
-      (await session.hooks?.hasPendingOperations()) ||
-      (await session.mcp?.recoveryBlocked())
-    )
+    if (session.hooks?.hasPendingOperations || session.mcp?.recoveryBlocked)
       return status('operator_required', 'unsupported_extension_recovery');
     if (session.blocked || authority.writesStopped)
       return status(

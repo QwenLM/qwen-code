@@ -171,7 +171,7 @@ async function firePreTool(
   fields: Record<string, unknown> = {},
   toolInputOrder?: string,
 ): Promise<void> {
-  const hooks = await HostedHookSession.create(options, session, pin, broker);
+  const hooks = new HostedHookSession(options, session, pin, broker);
   await hooks.fire(
     HookEventName.PreToolUse,
     'prompt:call',
@@ -209,7 +209,7 @@ async function recover(): Promise<number> {
     cwd: root,
     promptId: 'prompt',
     skills,
-    hooks: await HostedHookSession.create(options, session, pin, broker),
+    hooks: new HostedHookSession(options, session, pin, broker),
   });
 }
 

@@ -19,7 +19,6 @@ import {
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { runHostedCsiTextTurn } from './hosted-csi-text-turn.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
-import { readCommittedHostedCsiTurn } from './hosted-csi-session.js';
 
 vi.mock('./hosted-harness-model.js', () => ({
   runHostedHarnessTextTurn: vi.fn(),
@@ -113,70 +112,6 @@ describe('private CSI native text turn', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('replays an old canonical turn result after a later turn without another model call', async () => {
-    vi.mocked(runHostedHarnessTextTurn).mockImplementation(async (input) => {
-      const finish = await input.modelScope!.beginMainAttempt('owned-model');
-      await finish(true, []);
-      return { text: 'answer', model: 'owned-model' };
-    });
-    await submit(managed, PROMPT_A, 'first');
-    const original = await runHostedCsiTextTurn(
-      { managed, cwd: root },
-      PROMPT_A,
-      'first',
-      new AbortController(),
-    );
-    await submit(managed, PROMPT_B, 'second');
-    await runHostedCsiTextTurn(
-      { managed, cwd: root },
-      PROMPT_B,
-      'second',
-      new AbortController(),
-    );
-    const throughSequence = managed.authority.committedSequence;
-    expect(
-      await readCommittedHostedCsiTurn(managed, PROMPT_A, 'first'),
-    ).toEqual(original);
-    expect(managed.authority.committedSequence).toBe(throughSequence);
-    expect(runHostedHarnessTextTurn).toHaveBeenCalledTimes(2);
-  });
-
-  it('replays an error settlement from canonical history without retrying its model effect', async () => {
-    vi.mocked(runHostedHarnessTextTurn).mockRejectedValueOnce(
-      new Error('known model failure'),
-    );
-    await submit(managed, PROMPT_A, 'failed instruction');
-    const original = await runHostedCsiTextTurn(
-      { managed, cwd: root },
-      PROMPT_A,
-      'failed instruction',
-      new AbortController(),
-    );
-    expect(original.systemPayload).toMatchObject({ state: 'error' });
-    const throughSequence = managed.authority.committedSequence;
-    expect(
-      await readCommittedHostedCsiTurn(managed, PROMPT_A, 'failed instruction'),
-    ).toEqual(original);
-    expect(managed.authority.committedSequence).toBe(throughSequence);
-    expect(runHostedHarnessTextTurn).toHaveBeenCalledOnce();
-  });
-
-  it('refuses a changed retry and propagates an unavailable canonical input resource', async () => {
-    await submit(managed, PROMPT_A, 'original');
-    await expect(
-      readCommittedHostedCsiTurn(managed, PROMPT_A, 'changed'),
-    ).rejects.toMatchObject({ code: 'csi_prompt_conflict' });
-    expect(
-      await readCommittedHostedCsiTurn(managed, PROMPT_B, 'not admitted'),
-    ).toBeUndefined();
-    const failure = new Error('canonical input resource unavailable');
-    vi.spyOn(managed.resources, 'read').mockRejectedValueOnce(failure);
-    await expect(
-      readCommittedHostedCsiTurn(managed, PROMPT_A, 'original'),
-    ).rejects.toBe(failure);
-    expect(runHostedHarnessTextTurn).not.toHaveBeenCalled();
-  });
-
   it('retains complete Parts and connects streamed identity to native settlement', async () => {
     const parts = [{ text: 'reason', thought: true }, { text: 'answer' }];
     vi.mocked(runHostedHarnessTextTurn).mockImplementation(async (input) => {
@@ -196,14 +131,15 @@ describe('private CSI native text turn', () => {
     const projected = await managed.sink.project();
     const assistant = projected.find((entry) => entry.type === 'assistant')!;
     expect(assistant.message?.parts).toEqual(parts);
-    const events = await managed.authority
-      .iterateEvents(1, managed.authority.committedSequence)
-      .collect(1_000_000);
+    const events = managed.authority.eventsInSequenceRange(
+      1,
+      managed.authority.committedSequence,
+    );
     expect(
-      (await events.find((event) => event.kind === 'message.delta'))?.payload,
+      events.find((event) => event.kind === 'message.delta')?.payload,
     ).toMatchObject({ messageId: assistant.uuid });
     expect(
-      (await events.find((event) => event.kind === 'turn.settled'))?.payload,
+      events.find((event) => event.kind === 'turn.settled')?.payload,
     ).toMatchObject({ turnId: PROMPT_A, outcome: 'completed' });
     expect(managed.authority.currentActivation?.epoch).toBe(1);
     expect(runHostedHarnessTextTurn).toHaveBeenCalledWith(
@@ -271,22 +207,23 @@ describe('private CSI native text turn', () => {
     );
     expect(assistants).toHaveLength(1);
     expect(assistants[0].message?.parts).toEqual(parts);
-    const events = await managed.authority
-      .iterateEvents(1, managed.authority.committedSequence)
-      .collect(1_000_000);
+    const events = managed.authority.eventsInSequenceRange(
+      1,
+      managed.authority.committedSequence,
+    );
     expect(
-      (await events.find((event) => event.kind === 'message.delta'))?.payload[
+      events.find((event) => event.kind === 'message.delta')?.payload[
         'messageId'
       ],
     ).toBe(assistants[0].uuid);
-    const output = (await events.find(
+    const output = events.find(
       (event) =>
         event.kind === 'model.attempt' &&
         event.payload['state'] === 'output_committed',
-    ))!;
-    const message = (await events.find(
+    )!;
+    const message = events.find(
       (event) => event.sequence === output.sequence + 1,
-    ))!;
+    )!;
     expect(message.kind).toBe('message.committed');
     expect(message.payload).toMatchObject({
       messageId: assistants[0].uuid,
@@ -337,11 +274,9 @@ describe('private CSI native text turn', () => {
       ),
     ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
     expect(
-      await (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some((event) => event.kind === 'turn.settled'),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .some((event) => event.kind === 'turn.settled'),
     ).toBe(false);
   });
 
@@ -359,11 +294,9 @@ describe('private CSI native text turn', () => {
       ),
     ).rejects.toThrow('owned model receipt lost');
     expect(
-      await (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some((event) => event.kind === 'turn.settled'),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .some((event) => event.kind === 'turn.settled'),
     ).toBe(false);
   });
 
@@ -388,11 +321,9 @@ describe('private CSI native text turn', () => {
       ),
     ).rejects.toThrow('owned uncertain output');
     expect(
-      await (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some((event) => event.kind === 'turn.settled'),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .some((event) => event.kind === 'turn.settled'),
     ).toBe(false);
   });
 
@@ -416,11 +347,9 @@ describe('private CSI native text turn', () => {
       ),
     ).rejects.toThrow('owned lost receipt');
     expect(
-      await (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some((event) => event.kind === 'turn.settled'),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .some((event) => event.kind === 'turn.settled'),
     ).toBe(false);
   });
 });

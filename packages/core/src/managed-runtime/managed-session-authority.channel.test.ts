@@ -275,7 +275,7 @@ describe('managed session authority channel records', () => {
         receipt: { replayed: false },
       });
       expect(first.recordRef.kind).toBe('managed-channel_route');
-      expect(await authority.taskViews()).toEqual([]);
+      expect(authority.taskViews()).toEqual([]);
 
       harness.now = 2_000;
       await authority.commitExtensionRecord(
@@ -305,12 +305,12 @@ describe('managed session authority channel records', () => {
       );
       expect(rolled.revision).toBe(3);
       expect(
-        await authority.extensionRecord('channel_route', 'route-1'),
+        authority.extensionRecord('channel_route', 'route-1'),
       ).toMatchObject({
         revision: 3,
         operationId: 'route-1:1',
       });
-      expect(await authority.taskViews()).toEqual([]);
+      expect(authority.taskViews()).toEqual([]);
     });
   });
 
@@ -409,14 +409,14 @@ describe('managed session authority channel records', () => {
       );
       expect(last.revision).toBe(4);
       // A delivery is a task of its route Session (#13746 F3).
-      expect(await authority.taskViews()).toEqual([
+      expect(authority.taskViews()).toEqual([
         expect.objectContaining({
           kind: 'channel_delivery',
           state: 'completed',
         }),
       ]);
       expect(
-        await authority.extensionRecord('channel_delivery', 'delivery-1'),
+        authority.extensionRecord('channel_delivery', 'delivery-1'),
       ).toMatchObject({ revision: 4 });
     });
   });
@@ -481,12 +481,12 @@ describe('managed session authority channel records', () => {
       harness,
       async (authority) => {
         expect(
-          await authority.extensionRecord('channel_route', 'route-1'),
+          authority.extensionRecord('channel_route', 'route-1'),
         ).toMatchObject({ revision: 1 });
         expect(
-          await authority.extensionRecord('channel_delivery', 'delivery-1'),
+          authority.extensionRecord('channel_delivery', 'delivery-1'),
         ).toMatchObject({ revision: 1 });
-        expect(await authority.taskViews()).toEqual([
+        expect(authority.taskViews()).toEqual([
           expect.objectContaining({
             kind: 'channel_delivery',
             state: 'pending',
@@ -586,7 +586,7 @@ describe('managed session authority channel records', () => {
       harness,
       async (authority) => {
         expect(
-          await authority.extensionRecord('channel_delivery', 'delivery-1'),
+          authority.extensionRecord('channel_delivery', 'delivery-1'),
         ).toMatchObject({ revision: 3 });
       },
       { create: false },

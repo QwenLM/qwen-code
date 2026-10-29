@@ -4857,28 +4857,6 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
-    it('keeps Legacy Goal rebasing on the original transcript reader', async () => {
-      const config = recordingConfig({ sessionExecutionEngine: 'legacy' });
-      await config.getGoalRuntimeReady();
-      const recorder = config.getChatRecordingService()!;
-      const records = pausedGoalSession().conversation.messages;
-      const read = vi
-        .spyOn(recorder, 'readActiveTranscriptChain')
-        .mockResolvedValue(records);
-      const stream = vi
-        .spyOn(recorder, 'readActiveTranscriptHistory')
-        .mockRejectedValue(new Error('Managed streaming history unavailable'));
-      await expect(
-        config.rebaseGoalRuntimeFromActiveTranscript(),
-      ).resolves.toBeUndefined();
-      expect(read).toHaveBeenCalledOnce();
-      expect(stream).not.toHaveBeenCalled();
-      expect(config.getGoalRuntime().getSnapshot().goal).toMatchObject({
-        goalId: 'goal-1',
-        status: 'paused',
-      });
-    });
-
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = recordingConfig();
       const canonical = config.getGoalRuntime();

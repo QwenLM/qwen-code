@@ -169,7 +169,7 @@ public final class WorkspaceCsiApplicationStore {
             require(frozen.length <= WorkspaceCsiApplicationInventory.MAX_BYTES);
             var expected = WorkspaceCsiApplicationImage.expected(locked.inventory(), Stage.FROZEN, frozen, null, null);
             // Reserve space for the terminal rows, cut and bounded cleanup receipt before irreversible freezing.
-            require(expected.rowCount() <= WorkspaceCsiApplicationInventory.MAX_ROWS - 9
+            require(expected.rowCount() <= WorkspaceCsiApplicationInventory.MAX_ROWS - 3
                     && expected.bytes().length + body.length * 2L + 256 * 1024 < WorkspaceCsiApplicationInventory.MAX_BYTES);
             locked.authority().requireCurrentTime(target);
             require(jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = 2,"
@@ -361,10 +361,9 @@ public final class WorkspaceCsiApplicationStore {
                 && terminal.expectedJournalRevision() == head.number("journal_revision")
                 && terminal.expectedCommittedSequence() == head.number("committed_sequence")
                 && java.util.Objects.equals(terminal.previousCommitDigest(), head.text("last_commit_digest")));
-        try (var prepared = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, binding.getRequest(), body)) {
-            WorkspaceCsiApplicationWorkerMatch.verify(baseline, prepared, observation, expected);
-            return value;
-        }
+        var prepared = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, binding.getRequest(), body);
+        WorkspaceCsiApplicationWorkerMatch.verify(baseline, prepared, observation, expected);
+        return value;
     }
 
     private Snapshot inspect(Connection target, Locked locked) throws SQLException {

@@ -96,21 +96,19 @@ public class ManagedCheckpointHistorySqlTest {
     }
 
     @Test
-    void queriesACommittedPageFromAnEarlierRevisionWithoutHydratingIt() throws Exception {
+    void hydratesACommittedPageFromAnEarlierRevision() throws Exception {
         ObjectNode root = commitCheckpoint();
         transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
             var sql = JdbcCsiActivationAdmission.checkpointReader(connection, original, 2,
                     JdbcCsiActivationAdmission.JournalRead.LIVE);
             assertThat(sql.historicalPage(pageRef, 2).revision()).isEqualTo(1);
             for (var reader : List.of(sql, historicalOnly(sql))) {
-                var view = ManagedCheckpointHistory.open(root, reader);
-                JsonNode state = view.state();
+                JsonNode state = ManagedCheckpointHistory.hydrate(root, reader);
                 assertThat(state.has("storageProfile")).isFalse();
                 assertThat(state.has("history")).isFalse();
-                assertThat(state.path("tools").path("items").size()).isZero();
-                assertThat(view.toolCount()).isEqualTo(1);
-                assertThat(view.tool("execution").path("executionCallId").textValue()).isEqualTo("execution");
-                JsonNode outcome = view.tool("execution").path("outcomeRef");
+                assertThat(state.path("tools").path("items").size()).isEqualTo(1);
+                assertThat(state.path("tools").path("items").get(0).path("executionCallId").textValue()).isEqualTo("execution");
+                JsonNode outcome = state.path("tools").path("items").get(0).path("outcomeRef");
                 assertThat(outcome.path("resourceId").textValue()).isEqualTo("outcome");
                 assertThatThrownBy(() -> reader.apply(outcome)).isInstanceOf(RuntimeBrokerException.class);
             }
@@ -128,7 +126,7 @@ public class ManagedCheckpointHistorySqlTest {
                     JdbcCsiActivationAdmission.JournalRead.LIVE);
             for (var reader : List.of(sql, historicalOnly(sql))) {
                 JsonNode state = CsiNativeActivationProof.readCheckpoint(ref, reader);
-                assertThat(state).isEqualTo(ManagedCheckpointHistory.open(root, reader).state());
+                assertThat(state).isEqualTo(ManagedCheckpointHistory.hydrate(root, reader));
                 assertThat(reader.apply(state.path("contextRef"))).isEqualTo("{}".getBytes(StandardCharsets.UTF_8));
             }
             jdbc.update("DELETE FROM ma_resource_ref WHERE resource_id = ?", "active");

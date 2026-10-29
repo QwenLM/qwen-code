@@ -202,7 +202,7 @@ export class HostedMonitorLoop {
   async resumeAttached(params: MonitorLoopParams): Promise<void> {
     this.params = params;
     this.debounceMs = Math.max(params.debounceMs, MONITOR_DEBOUNCE_FLOOR_MS);
-    const record = await this.monitors.record(this.monitorId);
+    const record = this.monitors.record(this.monitorId);
     if (record === undefined || record.startReceiptRef === null) {
       throw new Error(
         `Monitor ${this.monitorId} has no attached watch to resume.`,
@@ -379,8 +379,7 @@ export class HostedMonitorLoop {
     const lines = this.buffered;
     this.buffered = [];
     const nextSequence =
-      ((await this.monitors.record(this.monitorId))?.observationSequence ?? 0) +
-      1;
+      (this.monitors.record(this.monitorId)?.observationSequence ?? 0) + 1;
     const input = this.lifecycleCleanup
       ? undefined
       : await this.notification(nextSequence, lines);
@@ -393,8 +392,7 @@ export class HostedMonitorLoop {
       this.onNotification?.();
       this.armIdle();
     }
-    const sequence = (await this.monitors.record(this.monitorId))
-      ?.observationSequence;
+    const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
       settleQuota &&
       !this.lifecycleCleanup &&

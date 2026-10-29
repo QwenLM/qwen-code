@@ -95,12 +95,7 @@ class CsiNativeFinalOutputProofTest {
             } else {
                 var restored = advance(changed, metadata, before).checkpoint();
                 assertEquals(rootRef, restored.ref());
-                assertTrue(restored.state().path("tools").path("items").isEmpty());
-                assertEquals(expectedState.path("tools").path("items").size(), restored.toolCount());
-                try (var scope = CsiProofHistory.scope()) {
-                    var view = restored.view(reader);
-                    assertTrue(view.matches(expectedState, null));
-                }
+                assertEquals(CsiNativeActivationProof.canonical(expectedState), CsiNativeActivationProof.canonical(restored.state()));
             }
         }
     }

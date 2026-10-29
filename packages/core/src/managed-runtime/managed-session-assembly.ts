@@ -344,7 +344,7 @@ export async function openManagedSession(
       // released with no successor.
       if (
         activationId !== undefined &&
-        (await authority.hasInstalledActivation(activationId))
+        authority.hasInstalledActivation(activationId)
       ) {
         throw activationAlreadyInstalledError(activationId);
       }

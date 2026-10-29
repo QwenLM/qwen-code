@@ -5,7 +5,6 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { FileManagedSessionHistory } from './managed-session-history.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import {
   ManagedSessionAppendUnsettledError,
@@ -15,7 +14,6 @@ import {
 import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
-  scanManagedSessionJournalStream,
   type ManagedSessionJournalHandle,
 } from './managed-session-storage.js';
 
@@ -38,14 +36,6 @@ async function fixture(inputCount = 0) {
   let sealed = false;
   const journal: ManagedSessionJournalHandle = {
     sessionKey,
-    scan: (consume) =>
-      scanManagedSessionJournalStream(
-        (async function* () {
-          yield* chunks;
-        })(),
-        sessionKey,
-        consume,
-      ),
     async read(options) {
       const scan = scanManagedSessionJournal(
         Buffer.concat(chunks),
@@ -118,26 +108,26 @@ async function fixture(inputCount = 0) {
 
 describe('managed authority history reads', () => {
   it('visits only the returned tail range/page and does not scan for an absent kind', async () => {
-    const harness = await fixture(8);
+    const harness = await fixture(2048);
     const authority = await harness.open();
     const through = authority.committedSequence;
-    const reads = vi.spyOn(FileManagedSessionHistory.prototype, 'readBlock');
+    harness.visits.count = 0;
     expect(
-      (
-        await authority.iterateEvents(through - 2, through).collect(1_000_000)
-      ).map((event) => event.sequence),
+      authority
+        .eventsInSequenceRange(through - 2, through)
+        .map((event) => event.sequence),
     ).toEqual([through - 2, through - 1, through]);
-    const rangeVisits = reads.mock.calls.length;
-    reads.mockClear();
+    const rangeVisits = harness.visits.count;
+    harness.visits.count = 0;
     expect(
-      (
-        await authority.readEvents({ afterSequence: through - 3, limit: 3 })
-      ).map((event) => event.sequence),
+      authority
+        .readEvents({ afterSequence: through - 3, limit: 3 })
+        .map((event) => event.sequence),
     ).toEqual([through - 2, through - 1, through]);
-    const pageVisits = reads.mock.calls.length;
-    reads.mockClear();
+    const pageVisits = harness.visits.count;
+    harness.visits.count = 0;
     expect(authority.lastEventOfKind('tool.intent')).toBeUndefined();
-    const latestVisits = reads.mock.calls.length;
+    const latestVisits = harness.visits.count;
     console.log(
       JSON.stringify({
         committed: through,
@@ -146,91 +136,80 @@ describe('managed authority history reads', () => {
         latestVisits,
       }),
     );
-    expect.soft(rangeVisits).toBe(2);
-    expect.soft(pageVisits).toBe(2);
+    expect.soft(rangeVisits).toBe(3);
+    expect.soft(pageVisits).toBe(3);
     expect.soft(latestVisits).toBe(0);
-    reads.mockRestore();
-    await authority.disposeHistory();
-    await harness.authority.disposeHistory();
   });
 
-  it('preserves inclusive integer ranges and rejects invalid sequence bounds', async () => {
+  it('preserves inclusive, clipped, fractional and non-finite range semantics', async () => {
     const { authority } = await fixture(4);
-    for (const { from, to, expected } of [
+    const cases = [
       { from: 2, to: 5, expected: [2, 3, 4, 5] },
+      { from: 2.2, to: 5.8, expected: [3, 4, 5] },
+      { from: -10, to: 2, expected: [1, 2] },
       { from: 7, to: 100, expected: [7, 8] },
       { from: 5, to: 4, expected: [] },
-      { from: 1, to: 0, expected: [] },
-    ])
+      { from: NaN, to: 8, expected: [] },
+      { from: 1, to: NaN, expected: [] },
+      { from: Infinity, to: Infinity, expected: [] },
+      { from: -Infinity, to: Infinity, expected: [1, 2, 3, 4, 5, 6, 7, 8] },
+      { from: 1, to: -Infinity, expected: [] },
+    ];
+    for (const { from, to, expected } of cases) {
       expect(
-        (await authority.iterateEvents(from, to).collect(16)).map(
-          (event) => event.sequence,
-        ),
+        authority
+          .eventsInSequenceRange(from, to)
+          .map((event) => event.sequence),
       ).toEqual(expected);
-    for (const [from, to] of [
-      [2.2, 5.8],
-      [-10, 2],
-      [NaN, 8],
-      [1, NaN],
-      [Infinity, Infinity],
-      [-Infinity, Infinity],
-      [1, -Infinity],
-    ])
-      expect(() => authority.iterateEvents(from, to)).toThrow(
-        /safe integer bounds/,
-      );
-    const first = (await authority.readEvents({ limit: 1 }))[0];
-    expect((await authority.iterateEvents(1, 1).collect(1_000_000))[0]).toEqual(
-      first,
+    }
+    const first = authority.readEvents({ limit: 1 })[0];
+    expect(authority.eventsInSequenceRange(1, 1)[0]).toBe(first);
+    expect(authority.eventsInSequenceRange(1, 8)).not.toBe(
+      authority.eventsInSequenceRange(1, 8),
     );
-    expect(await authority.iterateEvents(1, 8).collect(1_000_000)).not.toBe(
-      await authority.iterateEvents(1, 8).collect(1_000_000),
+    expect((await fixture()).authority.eventsInSequenceRange(1, 10)).toEqual(
+      [],
     );
-    expect(
-      await (await fixture()).authority.iterateEvents(1, 10).collect(1_000_000),
-    ).toEqual([]);
   });
 
-  it('pages a frozen prefix and rejects invalid cursors and limits', async () => {
+  it('preserves page cursor and existing numeric limit behavior', async () => {
     const { authority } = await fixture(4);
-    for (const { after, limit, expected } of [
+    const cases = [
       { after: 0, limit: 3, expected: [1, 2, 3] },
-      { after: 1, limit: 2, expected: [2, 3] },
+      { after: 1.5, limit: 2, expected: [2, 3] },
+      { after: NaN, limit: 2, expected: [1, 2] },
+      { after: -3, limit: 2, expected: [1, 2] },
+      { after: Infinity, limit: 2, expected: [] },
+      { after: -Infinity, limit: 2, expected: [1, 2] },
       { after: 100, limit: 2, expected: [] },
-      { after: Number.MAX_SAFE_INTEGER, limit: 2, expected: [] },
-    ])
+      { after: 5, limit: 1.5, expected: [6, 7, 8] },
+      { after: 5, limit: NaN, expected: [6, 7, 8] },
+    ];
+    for (const { after, limit, expected } of cases) {
       expect(
-        (await authority.readEvents({ afterSequence: after, limit })).map(
-          (event) => event.sequence,
-        ),
+        authority
+          .readEvents({ afterSequence: after, limit })
+          .map((event) => event.sequence),
       ).toEqual(expected);
-    for (const afterSequence of [1.5, NaN, -3, Infinity, -Infinity])
-      await expect(authority.readEvents({ afterSequence })).rejects.toThrow(
-        /outside their bounds/,
+    }
+    for (const limit of [0, -1, -Infinity]) {
+      expect(() => authority.readEvents({ limit })).toThrow(
+        'limit must be positive',
       );
-    for (const limit of [0, -1, 1.5, NaN, Infinity, -Infinity, 257])
-      await expect(authority.readEvents({ limit })).rejects.toThrow(
-        /outside their bounds/,
-      );
-    for (const throughSequence of [0.5, NaN, -1, Infinity])
-      await expect(authority.readEvents({ throughSequence })).rejects.toThrow(
-        /safe integer/,
-      );
-    const { authority: large } = await fixture(128);
-    expect(await large.readEvents()).toHaveLength(
+    }
+    const { authority: large } = await fixture(256);
+    expect(large.readEvents()).toHaveLength(
       MANAGED_SESSION_LIMITS.defaultReadEvents,
     );
+    expect(large.readEvents({ limit: Infinity })).toHaveLength(
+      MANAGED_SESSION_LIMITS.maxReadEvents,
+    );
     expect(
-      await large.readEvents({ limit: MANAGED_SESSION_LIMITS.maxReadEvents }),
-    ).toHaveLength(MANAGED_SESSION_LIMITS.maxReadEvents);
-    expect(
-      (await large.readEvents({ afterSequence: 254, limit: 3 })).map(
-        (event) => event.sequence,
-      ),
-    ).toEqual([255, 256]);
-    await authority.disposeHistory();
-    await large.disposeHistory();
-  }, 60_000);
+      large
+        .readEvents({ afterSequence: 510, limit: 3 })
+        .map((event) => event.sequence),
+    ).toEqual([511, 512]);
+  });
 
   it('keeps latest-kind results current across live writes, retries and cold open', async () => {
     const harness = await fixture(2);
@@ -266,12 +245,8 @@ describe('managed authority history reads', () => {
       'rejected',
     );
     expect(harness.authority.lastEventOfKind('input.accepted')).toBe(previous);
-    expect(
-      await harness.authority.iterateEvents(3, 10).collect(1_000_000),
-    ).toEqual([]);
-    expect(await harness.authority.readEvents({ afterSequence: 2 })).toEqual(
-      [],
-    );
+    expect(harness.authority.eventsInSequenceRange(3, 10)).toEqual([]);
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
     await harness.submit(harness.authority, 2);
     expect(harness.authority.lastEventOfKind('input.accepted')?.sequence).toBe(
       3,
@@ -297,12 +272,8 @@ describe('managed authority history reads', () => {
       expect(harness.authority.lastEventOfKind('input.accepted')).toBe(
         previous,
       );
-      expect(await harness.authority.readEvents({ afterSequence: 2 })).toEqual(
-        [],
-      );
-      expect(
-        await harness.authority.iterateEvents(3, 4).collect(1_000_000),
-      ).toEqual([]);
+      expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+      expect(harness.authority.eventsInSequenceRange(3, 4)).toEqual([]);
       const receipt = await harness.submit(harness.authority, 2);
       expect(receipt.replayed).toBe(outcome === 'landed');
       expect(
@@ -312,9 +283,9 @@ describe('managed authority history reads', () => {
         harness.authority.lastEventOfKind('wake.requested')?.sequence,
       ).toBe(4);
       expect(
-        (await harness.authority.readEvents({ afterSequence: 2 })).map(
-          (event) => event.sequence,
-        ),
+        harness.authority
+          .readEvents({ afterSequence: 2 })
+          .map((event) => event.sequence),
       ).toEqual([3, 4]);
     },
   );

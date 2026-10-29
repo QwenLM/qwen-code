@@ -14,7 +14,7 @@ class ManagedSnapshotRestoreResponseTest {
     @Test
     void absentSnapshotPreservesTheExactLegacyHeadShape() throws Exception {
         var head = head();
-        var response = new ManagedSessionStoreController.RestoreResponse(head, null, null);
+        var response = new ManagedSessionStoreController.RestoreResponse(head, null);
         assertThat(json.readTree(json.writeValueAsBytes(response)))
                 .isEqualTo(json.readTree(json.writeValueAsBytes(head)));
     }
@@ -26,20 +26,10 @@ class ManagedSnapshotRestoreResponseTest {
                 0, null, 1, 1, 0, "a".repeat(64));
         var descriptor = new ManagedNativeJournalSnapshots.Descriptor(manifest,
                 new ToolResultResourceRef("manifest", "managed-native-journal-snapshot", 1, 100, "b".repeat(64)), false);
-        var response = json.readTree(json.writeValueAsBytes(new ManagedSessionStoreController.RestoreResponse(head(), descriptor, null)));
+        var response = json.readTree(json.writeValueAsBytes(new ManagedSessionStoreController.RestoreResponse(head(), descriptor)));
         assertThat(response.path("nativeSnapshot").path("snapshot").path("snapshotId").asText()).isEqualTo("snapshot");
         assertThat(response.has("head")).isFalse();
         ((com.fasterxml.jackson.databind.node.ObjectNode) response).remove("nativeSnapshot");
-        assertThat(response).isEqualTo(json.readTree(json.writeValueAsBytes(head())));
-    }
-
-    @Test
-    void nativeHistoryIsAnOptionalVersionOnlySibling() throws Exception {
-        var response = json.readTree(json.writeValueAsBytes(new ManagedSessionStoreController.RestoreResponse(
-                head(), null, new ManagedSessionStoreController.NativeHistoryCapability(1))));
-        assertThat(response.path("nativeHistory")).isEqualTo(json.readTree("{\"version\":1}"));
-        assertThat(response.has("nativeSnapshot")).isFalse();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) response).remove("nativeHistory");
         assertThat(response).isEqualTo(json.readTree(json.writeValueAsBytes(head())));
     }
 

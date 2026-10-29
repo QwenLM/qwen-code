@@ -66,9 +66,9 @@ describe('Hosted Harness instance lifecycle', () => {
     ).toBe(409);
     counters.attachedSessions = 0;
     counters.heldResources = 1;
-    expect((await instance.snapshot()).state).toBe('QUIESCING');
+    expect(instance.snapshot().state).toBe('QUIESCING');
     counters.heldResources = 0;
-    expect((await instance.snapshot()).state).toBe('DRAINED');
+    expect(instance.snapshot().state).toBe('DRAINED');
     const metrics = await headers(supertest(app).get(`${route}/metrics`));
     expect(metrics.headers['cache-control']).toBe('no-store');
     expect(metrics.body.process.rssBytes).toBeGreaterThan(0);

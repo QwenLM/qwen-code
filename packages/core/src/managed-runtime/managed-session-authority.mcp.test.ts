@@ -241,20 +241,18 @@ it('reopens MCP chains and resource closure without tasks, preserves unknown ope
       { domain: 'mcp_operation', record: operation },
       actor,
     );
-    expect(await first.authority.taskViews()).toEqual([]);
+    expect(first.authority.taskViews()).toEqual([]);
   } finally {
     await first.lease.release();
   }
   const reopened = await open(false);
   try {
-    expect(await reopened.authority.taskViews()).toEqual([]);
+    expect(reopened.authority.taskViews()).toEqual([]);
     expect(
-      await reopened.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000),
+      reopened.authority.extensionRecordsInDomain('mcp_configuration'),
     ).toHaveLength(1);
     expect(
-      await reopened.authority.extensionRecord('mcp_operation', 'operation-1'),
+      reopened.authority.extensionRecord('mcp_operation', 'operation-1'),
     ).toMatchObject({
       task: null,
       record: operation!,
@@ -325,20 +323,12 @@ it('reopens MCP chains and resource closure without tasks, preserves unknown ope
   const final = await open(false);
   try {
     expect(
-      (
-        await final.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0].record,
+      final.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     ).toMatchObject({ releaseState: 'released' });
     expect(
-      (
-        await final.authority
-          .extensionRecordsInDomain('mcp_operation')
-          .collect(1_000_000)
-      )[0].run.state,
+      final.authority.extensionRecordsInDomain('mcp_operation')[0].run.state,
     ).toBe('settled');
-    expect(await final.authority.taskViews()).toEqual([]);
+    expect(final.authority.taskViews()).toEqual([]);
   } finally {
     await final.lease.release();
   }

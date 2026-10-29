@@ -3,7 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -80,7 +80,6 @@ for (const fixture of fixtures) {
     sessionId: sessionKey.sessionId,
     transcriptPath,
   });
-  let headerUuid;
   try {
     await LocalManagedSessionAuthority.open({
       journal: LocalJsonlManagedSessionJournalStore.fromLease(
@@ -104,7 +103,6 @@ for (const fixture of fixtures) {
       0,
       sessionKey,
     );
-    headerUuid = records.at(-1).uuid;
     fixture.create = {
       ...transaction,
       recordCount: records.length,
@@ -167,26 +165,13 @@ for (const fixture of fixtures) {
       recoveryRef,
     },
   };
-  const eventUuid = randomUUID();
-  const common = {
-    type: 'system',
-    timestamp: '2026-10-27T00:00:00Z',
-    cwd: '/workspace',
-    version: 'test',
-  };
   const records = [
     {
-      ...common,
-      uuid: eventUuid,
-      parentUuid: headerUuid,
       subtype: 'managed_session_event_v1',
       sessionId: sessionKey.sessionId,
       managedSession: event,
     },
     {
-      ...common,
-      uuid: randomUUID(),
-      parentUuid: eventUuid,
       subtype: 'managed_session_commit_v1',
       sessionId: sessionKey.sessionId,
       managedSession: {

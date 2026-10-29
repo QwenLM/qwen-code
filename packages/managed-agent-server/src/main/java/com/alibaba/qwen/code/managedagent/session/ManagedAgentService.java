@@ -1198,6 +1198,14 @@ public class ManagedAgentService {
                 page.hasMore(), session.lastSequence());
     }
 
+    public WebShellExportPage recentTranscriptItems(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findRecentSnapshotPage(tenantId, sessionId, cursor, limit(requestedLimit));
+        return new WebShellExportPage(page.items().stream().map(this::webShellItem).toList(),
+                page.nextCursor(), page.hasMore(), page.coveredSequence());
+    }
+
     // Events are read before the floor: a floor that is not above the cursor
     // after the read was not above it during the read either, so no event
     // after the cursor had been pruned. A stream reconciliation discards the

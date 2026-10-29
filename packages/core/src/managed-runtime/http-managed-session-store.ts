@@ -12,9 +12,6 @@ import {
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIPv4 } from 'node:net';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { FileManagedSessionHistory } from './managed-session-history.js';
 import { isDeepStrictEqual } from 'node:util';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -30,7 +27,6 @@ import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   managedSessionEventRefs,
-  managedSessionEventsDigest,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -38,7 +34,6 @@ import {
   parseManagedSessionRecordJson,
   type ManagedSessionDurableRef,
   type ManagedSessionKey,
-  type ManagedSessionEvent,
 } from './managed-session-records.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
@@ -75,13 +70,7 @@ import {
 import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
-  emptyManagedSessionJournalScan,
   type ManagedSessionActivationLease,
-  type ManagedSessionJournalBatch,
-  type ManagedSessionJournalSummary,
-  type ManagedSessionNativeHistoryReader,
-  type ManagedSessionNativeHistoryFact,
-  type ManagedSessionNativeHistoryFamily,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionJournalStore,
@@ -307,13 +296,11 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (snapshot['format'] !== 'qwen-csi-receipt-checkpoint-snapshot/1') {
     throw corrupt('snapshot format is unsupported.');
   }
-  const sessionKey = Object.freeze(
-    assertManagedSessionKey(
-      snapshot['sessionKey'] as ManagedSessionJsonValue,
-      'snapshot sessionKey',
-    ),
+  const sessionKey = assertManagedSessionKey(
+    snapshot['sessionKey'] as ManagedSessionJsonValue,
+    'snapshot sessionKey',
   );
-  const head = Object.freeze(parseRestoreHead(snapshot['head']));
+  const head = parseRestoreHead(snapshot['head']);
   if (
     ![1, 2].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
@@ -326,13 +313,63 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (rows.length !== head.journalRevision || rows.length > 4096) {
     throw corrupt('snapshot transaction enumeration is incomplete.');
   }
-  const transactions = Object.freeze(
-    rows.map((row) => Object.freeze(parseStoredTransaction(row))),
-  );
+  const transactions = rows.map(parseStoredTransaction);
+  const chunks: Buffer[] = [];
+  const references = new Map<string, Map<number, ManagedSessionDurableRef>>();
+  let activationEpoch = 0;
+  let checkpointResourceId: string | null = null;
   let totalBytes = 0;
+  for (const [index, transaction] of transactions.entries()) {
+    if (transaction.journalRevision !== index + 1) {
+      throw corrupt('snapshot revisions are not contiguous.');
+    }
+    const bytes = decodeBase64(transaction.recordBytesBase64, 'recordBytes');
+    totalBytes += bytes.length;
+    if (
+      bytes.length > MANAGED_SESSION_LIMITS.maxTransactionBytes ||
+      totalBytes > 128 * 1024 * 1024 ||
+      bytes.length !== transaction.byteLength ||
+      sha256(bytes) !== transaction.recordDigest
+    ) {
+      throw corrupt('snapshot transaction bytes conflict.');
+    }
+    const descriptor = describeTransaction(
+      decodeRecords(bytes),
+      bytes,
+      activationEpoch,
+      sessionKey,
+    );
+    requireStoredTransactionMatches(transaction, descriptor);
+    if ((index === 0) !== (descriptor.operation === 'session.create')) {
+      throw corrupt('snapshot genesis is missing or repeated.');
+    }
+    activationEpoch = descriptor.activationEpoch;
+    checkpointResourceId =
+      descriptor.latestCheckpointResourceId ?? checkpointResourceId;
+    for (const ref of descriptor.refs) {
+      const revisions = references.get(ref.resourceId) ?? new Map();
+      for (const prior of revisions.values()) requireSameRef(prior, ref);
+      revisions.set(transaction.journalRevision, ref);
+      references.set(ref.resourceId, revisions);
+    }
+    chunks.push(bytes);
+  }
+  const journalBytes = Buffer.concat(chunks);
+  const scan = scanManagedSessionJournal(journalBytes, sessionKey);
+  if (
+    scan.header === undefined ||
+    scan.uncommitted !== 0 ||
+    scan.uncommittedBytes !== 0 ||
+    scan.committed !== head.committedSequence ||
+    scan.lastMarkerDigest !== head.lastCommitDigest ||
+    (scan.activation?.epoch ?? 0) !== head.activationEpoch ||
+    checkpointResourceId !== head.latestCheckpointResourceId
+  ) {
+    throw corrupt('snapshot bytes do not match its complete head.');
+  }
   const resources = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytesBase64: string }
+    { ref: ManagedSessionDurableRef; bytes: Buffer }
   >();
   const resourceRevisions = new Map<string, number[]>();
   const resourceRows = asArray(snapshot['resources'], 'snapshot resources');
@@ -342,11 +379,9 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   }
   for (const value of resourceRows) {
     const row = asRecord(value, 'snapshot resource');
-    const ref = Object.freeze(
-      assertManagedSessionDurableRef(
-        row['ref'] as ManagedSessionJsonValue,
-        'snapshot resource ref',
-      ),
+    const ref = assertManagedSessionDurableRef(
+      row['ref'] as ManagedSessionJsonValue,
+      'snapshot resource ref',
     );
     if (resources.has(ref.resourceId))
       throw corrupt('snapshot resource is repeated.');
@@ -368,176 +403,75 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       throw corrupt('snapshot resource reference revisions conflict.');
     }
     resourceRevisions.set(ref.resourceId, committedRevisions);
-    const bytesBase64 = string(row['bytesBase64'], 'bytesBase64');
-    totalBytes += Buffer.byteLength(bytesBase64, 'base64');
-    if (totalBytes > 128 * 1024 * 1024)
-      throw corrupt('snapshot resource bytes conflict.');
-    const bytes = decodeBase64(bytesBase64, 'resource bytes');
-    if (bytes.length !== ref.byteLength || sha256(bytes) !== ref.digest) {
+    const bytes = decodeBase64(
+      string(row['bytesBase64'], 'bytesBase64'),
+      'resource bytes',
+    );
+    totalBytes += bytes.length;
+    if (
+      totalBytes > 128 * 1024 * 1024 ||
+      bytes.length !== ref.byteLength ||
+      sha256(bytes) !== ref.digest
+    ) {
       throw corrupt('snapshot resource bytes conflict.');
     }
-    resources.set(ref.resourceId, { ref, bytesBase64 });
+    resources.set(ref.resourceId, { ref, bytes });
   }
-  const initialSummary = (): ManagedSessionJournalSummary => {
-    const {
-      events: _events,
-      transactions: _transactions,
-      ...summary
-    } = emptyManagedSessionJournalScan();
-    return summary;
-  };
-  const parseBatch = (
-    sourceBytes: Buffer,
-    previous: ManagedSessionJournalSummary,
-    sourceOffset: number,
-  ) => {
-    const batch = scanManagedSessionJournal(
-      sourceBytes,
-      sessionKey,
-      undefined,
-      previous,
-    );
-    const { events: _events, transactions: _transactions, ...state } = batch;
-    const committedBytes = batch.committedBytes
-      ? sourceOffset + batch.committedBytes
-      : previous.committedBytes;
-    const headerBytes = batch.headerBytes
-      ? sourceOffset + batch.headerBytes
-      : previous.headerBytes;
-    const summary: ManagedSessionJournalSummary = {
-      ...state,
-      header: state.header && structuredClone(state.header),
-      activation: state.activation && structuredClone(state.activation),
-      committedBytes,
-      headerBytes,
-      uncommittedBytes:
-        sourceOffset +
-        sourceBytes.byteLength -
-        Math.max(committedBytes, headerBytes),
-      foreignRecords: previous.foreignRecords + batch.foreignRecords,
-      engineRecords: previous.engineRecords + batch.engineRecords,
-    };
-    return { batch: { ...batch, sourceBytes, sourceOffset }, summary };
-  };
-  let verified = initialSummary();
-  let journalBytes = 0;
-  let checkpointResourceId: string | null = null;
-  const proven = new Map<string, Set<number>>();
-  for (const [index, transaction] of transactions.entries()) {
-    if (transaction.journalRevision !== index + 1)
-      throw corrupt('snapshot revisions are not contiguous.');
-    totalBytes += Buffer.byteLength(transaction.recordBytesBase64, 'base64');
-    if (
-      transaction.byteLength > MANAGED_SESSION_LIMITS.maxTransactionBytes ||
-      totalBytes > 128 * 1024 * 1024
-    )
-      throw corrupt('snapshot transaction bytes conflict.');
-    const bytes = decodeBase64(transaction.recordBytesBase64, 'recordBytes');
-    if (
-      bytes.byteLength !== transaction.byteLength ||
-      sha256(bytes) !== transaction.recordDigest
-    )
-      throw corrupt('snapshot transaction bytes conflict.');
-    const descriptor = describeTransaction(
-      decodeRecords(bytes),
-      bytes,
-      verified.activation?.epoch ?? 0,
-      sessionKey,
-    );
-    requireStoredTransactionMatches(transaction, descriptor);
-    if ((index === 0) !== (descriptor.operation === 'session.create'))
-      throw corrupt('snapshot genesis is missing or repeated.');
-    const parsed = parseBatch(bytes, verified, journalBytes);
-    verified = parsed.summary;
-    journalBytes += bytes.byteLength;
-    if (verified.uncommitted !== 0 || verified.uncommittedBytes !== 0)
-      throw corrupt('snapshot bytes do not match its complete head.');
-    checkpointResourceId =
-      descriptor.latestCheckpointResourceId ?? checkpointResourceId;
-    const revision = transaction.journalRevision;
-    for (const ref of descriptor.refs)
-      if (!resourceRevisions.get(ref.resourceId)?.includes(revision))
-        throw corrupt('snapshot direct resource reference is missing.');
-    const pending: ManagedSessionDurableRef[] = [];
-    const visited = new Set<string>();
-    const add = (ref: ManagedSessionDurableRef) => {
-      const stored = resources.get(ref.resourceId);
-      if (!stored) {
-        // Older manifests may name unstaged pages (#13930 R1-43).
-        if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) return;
-        throw corrupt('snapshot resource is missing.');
-      }
-      const revisions = resourceRevisions.get(ref.resourceId)!;
-      if (revisions[0] > revision)
-        throw corrupt('snapshot dependency was not committed at its use.');
-      requireSameRef(stored.ref, ref);
-      if (visited.has(ref.resourceId)) return;
-      visited.add(ref.resourceId);
-      const checked = proven.get(ref.resourceId) ?? new Set<number>();
-      if (revisions.includes(revision)) {
-        checked.add(revision);
-      }
-      proven.set(ref.resourceId, checked);
-      pending.push(ref);
-    };
-    for (const ref of descriptor.refs) add(ref);
-    while (pending.length) {
-      const ref = pending.pop()!;
-      const stored = resources.get(ref.resourceId)!;
-      const bytes = decodeBase64(stored.bytesBase64, 'resource bytes');
-      for (const child of collectNestedResourceRefs(ref, bytes)) add(child);
+  const pending = [...references.values()].flatMap((revisions) =>
+    [...revisions.entries()].map(([revision, ref]) => ({ revision, ref })),
+  );
+  for (const { revision, ref } of pending) {
+    if (!resourceRevisions.get(ref.resourceId)?.includes(revision)) {
+      throw corrupt('snapshot direct resource reference is missing.');
     }
   }
-  if (
-    verified.header === undefined ||
-    verified.committed !== head.committedSequence ||
-    verified.lastMarkerDigest !== head.lastCommitDigest ||
-    (verified.activation?.epoch ?? 0) !== head.activationEpoch ||
-    checkpointResourceId !== head.latestCheckpointResourceId
-  )
-    throw corrupt('snapshot bytes do not match its complete head.');
-  if (resources.size !== proven.size)
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const { revision, ref } = pending.pop()!;
+    const key = `${revision}\u0000${ref.resourceId}`;
+    const stored = resources.get(ref.resourceId);
+    if (stored === undefined) {
+      // A manifest committed before the closure edge shipped names page
+      // envelopes the Session never staged. Keep such a snapshot
+      // inspectable by dropping the dangling page ref from the walk
+      // without registering it — adding it would fire the enumeration
+      // check below for exactly the snapshots this keeps readable
+      // (#13930 R1-43).
+      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      throw corrupt('snapshot resource is missing.');
+    }
+    if (resourceRevisions.get(ref.resourceId)![0] > revision) {
+      throw corrupt('snapshot dependency was not committed at its use.');
+    }
+    requireSameRef(stored.ref, ref);
+    if (visited.has(key)) continue;
+    visited.add(key);
+    const revisions = references.get(ref.resourceId) ?? new Map();
+    for (const prior of revisions.values()) requireSameRef(prior, ref);
+    revisions.set(revision, ref);
+    references.set(ref.resourceId, revisions);
+    const nested = collectNestedResourceRefs(ref, stored.bytes);
+    pending.push(...nested.map((ref) => ({ revision, ref })));
+  }
+  if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
-  for (const [resourceId, revisions] of resourceRevisions)
-    if (revisions.some((revision) => !proven.get(resourceId)?.has(revision)))
+  }
+  for (const [resourceId, revisions] of references) {
+    const actual = resourceRevisions.get(resourceId)!;
+    if (actual.some((revision) => !revisions.has(revision))) {
       throw corrupt('snapshot resource reference revisions conflict.');
+    }
+  }
   const rejectWrite = async (): Promise<never> => {
     throw corrupt('snapshot inspection cannot write.');
   };
   const journal: ManagedSessionJournalHandle = {
     sessionKey,
-    scan: async (consume, options = {}) => {
-      const maximum = options.maxBytes;
-      if (
-        maximum !== undefined &&
-        (!Number.isSafeInteger(maximum) || maximum < 0)
-      )
-        throw corrupt('snapshot byte prefix is invalid.');
-      const limit = Math.min(maximum ?? journalBytes, journalBytes);
-      let offset = 0;
-      let summary = initialSummary();
-      for (const transaction of transactions) {
-        if (offset >= limit) break;
-        const bytes = decodeBase64(
-          transaction.recordBytesBase64,
-          'recordBytes',
-        );
-        const selected = bytes.subarray(
-          0,
-          Math.min(bytes.byteLength, limit - offset),
-        );
-        const parsed = parseBatch(selected, summary, offset);
-        summary = parsed.summary;
-        await consume(parsed.batch);
-        offset += selected.byteLength;
-      }
-      return maximum === undefined
-        ? applyActivationLease(summary, head.activationLease)
-        : summary;
-    },
-    read: async () => {
-      throw corrupt('snapshot history requires incremental scan.');
-    },
+    read: async () =>
+      applyActivationLease(
+        scanManagedSessionJournal(journalBytes, sessionKey),
+        head.activationLease,
+      ),
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
@@ -551,16 +485,10 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       const stored = resources.get(ref.resourceId);
       if (stored === undefined) throw corrupt('snapshot resource is missing.');
       requireSameRef(stored.ref, ref);
-      return decodeBase64(stored.bytesBase64, 'resource bytes');
+      return Buffer.from(stored.bytes);
     },
   };
-  return Object.freeze({
-    sessionKey,
-    head,
-    transactions,
-    journal,
-    resources: resourceStore,
-  });
+  return { sessionKey, head, transactions, journal, resources: resourceStore };
 }
 
 class HttpManagedSessionJournalStore implements ManagedSessionJournalStore {
@@ -596,34 +524,9 @@ class HttpManagedSessionJournalStore implements ManagedSessionJournalStore {
 
 class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
   readonly sessionKey: ManagedSessionKey;
-  readonly history: ManagedSessionNativeHistoryReader;
 
   constructor(private readonly client: ManagedSessionStoreHttpClient) {
     this.sessionKey = client.sessionKey;
-    this.history = {
-      get available() {
-        return client.historyAvailable;
-      },
-      query: (family, identity, options) =>
-        client.queryNativeHistory(family, identity, options),
-      readEvent: (fact) => client.readNativeHistoryEvent(fact),
-      readTransaction: (fact) => client.readNativeHistoryTransaction(fact),
-      repair: (through) => client.repairNativeHistory(through),
-      iterateEvents: (from, through) =>
-        client.iterateNativeHistoryEvents(from, through),
-    };
-  }
-
-  async scan(
-    consume: (batch: ManagedSessionJournalBatch) => Promise<void>,
-    options: { readonly maxBytes?: number } = {},
-  ): Promise<ManagedSessionJournalSummary> {
-    const {
-      events: _events,
-      transactions: _transactions,
-      ...summary
-    } = await this.client.readJournal(options.maxBytes, consume);
-    return summary;
   }
 
   read(
@@ -1134,426 +1037,15 @@ class ManagedSessionStoreHttpClient {
     this.scheduleRenewal();
   }
 
-  private nativeHistorySupported = false;
-  private nativeHistoryGeneration: number | undefined;
-
-  get historyAvailable(): boolean {
-    return this.nativeHistorySupported;
-  }
-
-  private nativeHistoryView() {
-    if (!this.nativeHistorySupported)
-      throw new ManagedSessionRecordError(
-        'The Session store does not advertise native history queries.',
-      );
-    if (this.pendingAppend)
-      throw new ManagedSessionAppendUnsettledError(
-        new Error('Settle the append before reading native history.'),
-      );
-    const grant = this.requireGrant();
-    return {
-      journalRevision: grant.journalRevision,
-      committedSequence: grant.committedSequence,
-      lastCommitDigest: grant.lastCommitDigest,
-    };
-  }
-
-  async queryNativeHistory(
-    family: ManagedSessionNativeHistoryFamily,
-    identity: string,
-    options: {
-      throughSequence: number;
-      mode?: 'first' | 'latest';
-      afterSequence?: number;
-      limit?: number;
-    },
-  ): Promise<readonly ManagedSessionNativeHistoryFact[]> {
-    const view = this.nativeHistoryView();
-    const limit = options.limit ?? 1;
-    if (
-      !Number.isSafeInteger(options.throughSequence) ||
-      options.throughSequence < 0 ||
-      options.throughSequence > view.committedSequence ||
-      !Number.isSafeInteger(limit) ||
-      limit < 1 ||
-      limit > 256
-    )
-      throw new ManagedSessionRecordError(
-        'Native history query is outside its prefix or page bounds.',
-      );
-    if (
-      (options.mode !== undefined &&
-        !['first', 'latest'].includes(options.mode)) ||
-      (options.afterSequence !== undefined &&
-        (!Number.isSafeInteger(options.afterSequence) ||
-          options.afterSequence < 0 ||
-          options.afterSequence > options.throughSequence))
-    )
-      throw new ManagedSessionRecordError(
-        'Native history mode or cursor is invalid.',
-      );
-    if (view.journalRevision === 0) return [];
-    for (let attempt = 0; ; attempt++) {
-      try {
-        this.requireGrant();
-        const result = asRecord(
-          await this.json('/history:query', 'POST', {
-            workspaceId: this.sessionKey.workspaceId,
-            view,
-            family,
-            identity,
-            ...options,
-            limit,
-          }),
-          'native history query',
-        );
-        if (
-          !isDeepStrictEqual(result['view'], view) ||
-          result['throughSequence'] !== options.throughSequence
-        )
-          throw corrupt('native history query changed its frozen prefix.');
-        this.rememberHistoryGeneration(result['generation']);
-        const values = asArray(result['facts'], 'native history facts');
-        if (values.length > limit)
-          throw corrupt('native history page exceeds its limit.');
-        const facts = values.map((value) => {
-          const fact = asRecord(value, 'native history fact');
-          const sequence = safeCounter(fact['sequence'], 'history sequence');
-          const journalRevision = safeCounter(
-            fact['journalRevision'],
-            'history revision',
-          );
-          const eventOrdinal = safeCounter(
-            fact['eventOrdinal'],
-            'history event ordinal',
-          );
-          if (
-            fact['family'] !== family ||
-            fact['identity'] !== identity ||
-            sequence > options.throughSequence ||
-            journalRevision < 1 ||
-            journalRevision > view.journalRevision ||
-            eventOrdinal >= MANAGED_SESSION_LIMITS.maxTransactionEvents
-          )
-            throw corrupt(
-              'native history fact is outside its scope or prefix.',
-            );
-          return {
-            family,
-            identity,
-            journalRevision,
-            sequence,
-            eventOrdinal,
-            recordDigest: digest(fact['recordDigest'], 'history record digest'),
-            metadata: asRecord(fact['metadata'], 'history metadata'),
-          };
-        });
-        const mode = options.mode ?? 'latest';
-        let previous = options.afterSequence;
-        for (const fact of facts) {
-          if (
-            previous !== undefined &&
-            (mode === 'first'
-              ? fact.sequence <= previous
-              : fact.sequence >= previous)
-          )
-            throw corrupt('native history page is not ordered.');
-          previous = fact.sequence;
-        }
-        if (
-          safeCounter(result['nextSequence'], 'history next sequence') !==
-            (facts.at(-1)?.sequence ?? options.afterSequence ?? 0) ||
-          typeof result['hasMore'] !== 'boolean'
-        )
-          throw corrupt('native history cursor is inconsistent.');
-        return facts;
-      } catch (error) {
-        if (
-          attempt > 0 ||
-          !(error instanceof ManagedSessionStoreHttpError) ||
-          ![
-            'managed_session_history_not_ready',
-            'managed_session_history_corrupt',
-          ].includes(error.remoteCode)
-        )
-          throw error;
-        await this.backfillNativeHistory(
-          view,
-          error.remoteCode === 'managed_session_history_corrupt',
-        );
-      }
-    }
-  }
-
-  private rememberHistoryGeneration(value: unknown): number {
-    const generation = safeCounter(value, 'history generation');
-    if (generation < 1) throw corrupt('History generation must be positive.');
-    this.nativeHistoryGeneration = Math.max(
-      this.nativeHistoryGeneration ?? 0,
-      generation,
-    );
-    return generation;
-  }
-
-  async repairNativeHistory(throughSequence: number): Promise<void> {
-    const view = this.nativeHistoryView();
-    if (
-      !Number.isSafeInteger(throughSequence) ||
-      throughSequence < 0 ||
-      throughSequence > view.committedSequence
-    )
-      throw new ManagedSessionRecordError('History repair prefix is invalid.');
-    if (view.journalRevision > 0) await this.backfillNativeHistory(view, true);
-  }
-
-  private async backfillNativeHistory(
-    view: ReturnType<ManagedSessionStoreHttpClient['nativeHistoryView']>,
-    repair: boolean,
-  ): Promise<void> {
-    if (repair && this.nativeHistoryGeneration === undefined) {
-      const coverage = asRecord(
-        await this.json('/history:backfill', 'POST', {
-          workspaceId: this.sessionKey.workspaceId,
-          view,
-          limit: 1,
-        }),
-        'native history coverage',
-      );
-      if (!isDeepStrictEqual(coverage['view'], view))
-        throw corrupt('History coverage changed its source prefix.');
-      this.rememberHistoryGeneration(coverage['generation']);
-    }
-    let previousRevision = -1;
-    let previousGeneration = -1;
-    for (;;) {
-      this.requireGrant();
-      const coverage = asRecord(
-        await this.json('/history:backfill', 'POST', {
-          workspaceId: this.sessionKey.workspaceId,
-          view,
-          limit: 100,
-          ...(repair
-            ? { repair: true, expectedGeneration: this.nativeHistoryGeneration }
-            : {}),
-        }),
-        'native history coverage',
-      );
-      repair = false;
-      if (!isDeepStrictEqual(coverage['view'], view))
-        throw corrupt('History backfill changed its source prefix.');
-      const generation = this.rememberHistoryGeneration(coverage['generation']);
-      const next = safeCounter(coverage['indexedRevision'], 'indexed revision');
-      const sequence = safeCounter(
-        coverage['indexedSequence'],
-        'indexed sequence',
-      );
-      if (boolean(coverage['complete'], 'history complete')) {
-        if (
-          next < view.journalRevision ||
-          sequence < view.committedSequence ||
-          (next === view.journalRevision &&
-            coverage['lastCommitDigest'] !== view.lastCommitDigest)
-        )
-          throw corrupt(
-            'History coverage is incomplete or conflicts with its source.',
-          );
-        return;
-      }
-      if (generation === previousGeneration && next <= previousRevision)
-        throw corrupt('Native history backfill did not advance.');
-      previousGeneration = generation;
-      previousRevision = next;
-    }
-  }
-
-  private async nativeHistoryTransaction(
-    fact: ManagedSessionNativeHistoryFact,
-  ) {
-    this.requireGrant();
-    const page = asRecord(
-      await this.json(
-        `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${fact.journalRevision - 1}&limit=1`,
-        'GET',
-      ),
-      'history source page',
-    );
-    const values = asArray(page['transactions'], 'history source transactions');
-    if (values.length !== 1)
-      throw corrupt('historical source transaction is missing.');
-    const stored = parseStoredTransaction(values[0]);
-    if (
-      stored.journalRevision !== fact.journalRevision ||
-      stored.recordDigest !== fact.recordDigest ||
-      stored.byteLength > MANAGED_SESSION_LIMITS.maxTransactionBytes ||
-      stored.recordBytesBase64.length > Math.ceil(stored.byteLength / 3) * 4
-    )
-      throw corrupt('historical source transaction conflicts with its index.');
-    const bytes = decodeBase64(
-      stored.recordBytesBase64,
-      'history transaction bytes',
-    );
-    if (
-      bytes.byteLength !== stored.byteLength ||
-      sha256(bytes) !== fact.recordDigest
-    )
-      throw corrupt('historical source transaction digest differs.');
-    const records = decodeRecords(bytes);
-    requireStoredTransactionMatches(
-      stored,
-      describeTransaction(
-        records,
-        bytes,
-        stored.activationEpoch,
-        this.sessionKey,
-      ),
-    );
-    return { stored, records };
-  }
-
-  async readNativeHistoryEvent(
-    fact: ManagedSessionNativeHistoryFact,
-  ): Promise<ManagedSessionEvent> {
-    const { records } = await this.nativeHistoryTransaction(fact);
-    const record = asRecord(
-      records[fact.eventOrdinal],
-      'history source record',
-    );
-    if (record['subtype'] !== MANAGED_SESSION_EVENT_SUBTYPE)
-      throw corrupt('history source is not an event.');
-    const event = parseManagedSessionEvent(record['managedSession']);
-    if (
-      event.sequence !== fact.sequence ||
-      !managedSessionKeysEqual(event.sessionKey, this.sessionKey)
-    )
-      throw corrupt('historical event scope or position differs.');
-    return event;
-  }
-
-  async readNativeHistoryTransaction(fact: ManagedSessionNativeHistoryFact) {
-    const { stored } = await this.nativeHistoryTransaction(fact);
-    if (stored.operation === 'session.create')
-      throw corrupt('Header is not a command transaction.');
-    return {
-      contentDigest: stored.contentDigest,
-      receipt: {
-        transactionId: stored.transactionId,
-        commandId: stored.commandId,
-        operation: stored.operation,
-        firstSequence: stored.firstSequence,
-        lastSequence: stored.lastSequence,
-        committedSequence: stored.lastSequence,
-        replayed: false,
-      },
-    };
-  }
-
-  async *iterateNativeHistoryEvents(
-    from: number,
-    through: number,
-  ): AsyncGenerator<ManagedSessionEvent> {
-    if (from > through) return;
-    const view = this.nativeHistoryView();
-    const [first] = await this.queryNativeHistory('event', String(from), {
-      throughSequence: through,
-      mode: 'first',
-    });
-    if (!first) throw corrupt('historical event range has a gap.');
-    let after = first.journalRevision - 1;
-    let expected = from;
-    let previousDigest: string | null | undefined;
-    let previousRecordUuid: string | undefined;
-    while (expected <= through) {
-      this.requireGrant();
-      const page = asRecord(
-        await this.json(
-          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${after}&limit=${Math.min(100, view.journalRevision - after)}`,
-          'GET',
-        ),
-        'history event page',
-      );
-      const values = asArray(page['transactions'], 'history transactions');
-      if (!values.length)
-        throw corrupt('historical event page did not advance.');
-      for (const value of values) {
-        const stored = parseStoredTransaction(value);
-        if (
-          stored.journalRevision !== after + 1 ||
-          stored.journalRevision > view.journalRevision ||
-          (after + 1 === first.journalRevision &&
-            stored.recordDigest !== first.recordDigest) ||
-          (previousDigest !== undefined &&
-            stored.previousCommitDigest !== previousDigest)
-        )
-          throw corrupt('historical transaction chain differs.');
-        const bytes = decodeBase64(
-          stored.recordBytesBase64,
-          'history transaction bytes',
-        );
-        if (
-          bytes.length !== stored.byteLength ||
-          bytes.length > MANAGED_SESSION_LIMITS.maxTransactionBytes ||
-          sha256(bytes) !== stored.recordDigest
-        )
-          throw corrupt('historical transaction bytes differ.');
-        const records = decodeRecords(bytes);
-        requireStoredTransactionMatches(
-          stored,
-          describeTransaction(
-            records,
-            bytes,
-            stored.activationEpoch,
-            this.sessionKey,
-          ),
-        );
-        if (
-          previousRecordUuid !== undefined &&
-          asRecord(records[0], 'history first record')['parentUuid'] !==
-            previousRecordUuid
-        )
-          throw corrupt('historical physical transaction chain differs.');
-        for (const raw of records) {
-          const record = asRecord(raw, 'history source record');
-          if (record['subtype'] !== MANAGED_SESSION_EVENT_SUBTYPE) continue;
-          const event = parseManagedSessionEvent(record['managedSession']);
-          if (event.sequence < from) continue;
-          if (event.sequence > through) return;
-          if (
-            event.sequence !== expected++ ||
-            !managedSessionKeysEqual(event.sessionKey, this.sessionKey)
-          )
-            throw corrupt('historical event range is discontinuous.');
-          yield event;
-        }
-        previousDigest = stored.commitDigest;
-        previousRecordUuid = string(
-          asRecord(records.at(-1), 'history final record')['uuid'],
-          'history final record UUID',
-        );
-        after = stored.journalRevision;
-        if (expected > through) return;
-      }
-    }
-  }
-
-  async readJournal(
-    maxBytes?: number,
-    consume?: (batch: ManagedSessionJournalBatch) => Promise<void>,
-  ): Promise<ManagedSessionJournalScan> {
+  async readJournal(maxBytes?: number): Promise<ManagedSessionJournalScan> {
     await this.ensureWriter();
     const response = asRecord(
       await this.json(
-        `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&includeNativeSnapshot=true&includeNativeHistory=true`,
+        `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&includeNativeSnapshot=true`,
         'GET',
       ),
       'restore head',
     );
-    const nativeHistory = response['nativeHistory'];
-    if (
-      nativeHistory != null &&
-      asRecord(nativeHistory, 'native history capability')['version'] !== 1
-    )
-      throw corrupt('native history query version is incompatible.');
-    this.nativeHistorySupported = nativeHistory != null;
     const head = parseRestoreHead(response);
     const usesSnapshot = response['nativeSnapshot'] != null;
     this.requireHeadMatchesGrant(head);
@@ -1565,49 +1057,12 @@ class ManagedSessionStoreHttpClient {
       `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state} storageVersion=${head.storageVersion}`,
     );
     const chunks: Buffer[] = [];
-    let streamed: ManagedSessionJournalSummary =
-      emptyManagedSessionJournalScan();
-    let streamedBytes = 0;
-    const acceptBytes = async (bytes: Buffer) => {
-      const sourceBytes =
-        maxBytes === undefined
-          ? bytes
-          : bytes.subarray(0, Math.max(0, maxBytes - streamedBytes));
-      if (sourceBytes.byteLength === 0) return;
-      const batch = scanManagedSessionJournal(
-        sourceBytes,
-        this.sessionKey,
-        undefined,
-        streamed,
-      );
-      const offset = streamedBytes;
-      streamedBytes += sourceBytes.byteLength;
-      const { events: _events, transactions: _transactions, ...state } = batch;
-      streamed = {
-        ...state,
-        committedBytes: batch.committedBytes
-          ? offset + batch.committedBytes
-          : streamed.committedBytes,
-        headerBytes: batch.headerBytes
-          ? offset + batch.headerBytes
-          : streamed.headerBytes,
-        foreignRecords: streamed.foreignRecords + batch.foreignRecords,
-        engineRecords: streamed.engineRecords + batch.engineRecords,
-      };
-      streamed = {
-        ...streamed,
-        uncommittedBytes:
-          streamedBytes -
-          Math.max(streamed.committedBytes, streamed.headerBytes),
-      };
-      await consume!({ ...batch, sourceBytes, sourceOffset: offset });
-    };
     let afterRevision = 0;
     let activationEpoch = 0;
     let committedSequence = 0;
     let lastCommitDigest: string | null = null;
     let latestCheckpointResourceId: string | null = null;
-    const append = async (value: unknown): Promise<TransactionDescriptor> => {
+    const append = (value: unknown): TransactionDescriptor => {
       const transaction = parseStoredTransaction(value);
       if (
         transaction.journalRevision !== afterRevision + 1 ||
@@ -1648,8 +1103,7 @@ class ManagedSessionStoreHttpClient {
       lastCommitDigest = transaction.commitDigest;
       latestCheckpointResourceId =
         descriptor.latestCheckpointResourceId ?? latestCheckpointResourceId;
-      if (consume) await acceptBytes(bytes);
-      else chunks.push(bytes);
+      chunks.push(bytes);
       afterRevision = transaction.journalRevision;
       return descriptor;
     };
@@ -1671,7 +1125,9 @@ class ManagedSessionStoreHttpClient {
     }
     while (afterRevision < head.journalRevision) {
       await this.ensureWriter();
-      const limit = Math.min(100, head.journalRevision - afterRevision);
+      const limit = usesSnapshot
+        ? Math.min(100, head.journalRevision - afterRevision)
+        : 100;
       const page = asRecord(
         await this.json(
           `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${afterRevision}&limit=${limit}`,
@@ -1684,7 +1140,7 @@ class ManagedSessionStoreHttpClient {
         throw corrupt('transaction page did not advance the journal.');
       }
       for (const value of transactions) {
-        await append(value);
+        append(value);
       }
       const nextRevision = safeCounter(page['nextRevision'], 'nextRevision');
       const hasMore = boolean(page['hasMore'], 'hasMore');
@@ -1696,13 +1152,11 @@ class ManagedSessionStoreHttpClient {
       }
     }
     const bytes = Buffer.concat(chunks);
-    const scan = consume
-      ? { ...streamed, events: [], transactions: new Map() }
-      : scanManagedSessionJournal(
-          bytes,
-          this.sessionKey,
-          usesSnapshot ? undefined : maxBytes,
-        );
+    const scan = scanManagedSessionJournal(
+      bytes,
+      this.sessionKey,
+      usesSnapshot ? undefined : maxBytes,
+    );
     if (
       (usesSnapshot || maxBytes === undefined) &&
       (scan.committed !== head.committedSequence ||
@@ -1739,7 +1193,7 @@ class ManagedSessionStoreHttpClient {
       activationEpoch: head.activationEpoch,
     };
     const result =
-      !consume && usesSnapshot && maxBytes !== undefined
+      usesSnapshot && maxBytes !== undefined
         ? scanManagedSessionJournal(bytes, this.sessionKey, maxBytes)
         : scan;
     return maxBytes === undefined
@@ -1815,7 +1269,7 @@ class ManagedSessionStoreHttpClient {
   private async readNativeSnapshot(
     value: unknown,
     head: RestoreHead,
-    append: (transaction: unknown) => Promise<TransactionDescriptor>,
+    append: (transaction: unknown) => TransactionDescriptor,
   ): Promise<NativeSnapshotManifest> {
     const descriptor = asRecord(value, 'native snapshot descriptor');
     const raw = asRecord(descriptor['snapshot'], 'native snapshot manifest');
@@ -1870,162 +1324,131 @@ class ManagedSessionStoreHttpClient {
     ) {
       throw corrupt('native snapshot scope, format or coverage is invalid.');
     }
-    const scratch = await FileManagedSessionHistory.create(
-      path.join(tmpdir(), 'qwen-managed-history'),
-    );
-    const resources = scratch.map<ManagedSessionDurableRef>('resource');
-    let resourceCount = 0;
-    try {
-      let after = 0;
-      let previousDigest: string | null = null;
-      while (after < snapshot.coveredJournalRevision) {
-        await this.ensureWriter();
-        const result = asRecord(
-          await this.json(
-            `/journal-snapshots/${encodeURIComponent(snapshot.snapshotId)}/pages?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${after}&limit=100`,
-            'GET',
-          ),
-          'native snapshot pages',
+    const resources = new Map<string, ManagedSessionDurableRef>();
+    let after = 0;
+    let previousDigest: string | null = null;
+    while (after < snapshot.coveredJournalRevision) {
+      await this.ensureWriter();
+      const result = asRecord(
+        await this.json(
+          `/journal-snapshots/${encodeURIComponent(snapshot.snapshotId)}/pages?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${after}&limit=100`,
+          'GET',
+        ),
+        'native snapshot pages',
+      );
+      const pages = asArray(result['pages'], 'native snapshot pages');
+      if (pages.length === 0 || pages.length > 100)
+        throw corrupt('native snapshot pages did not advance.');
+      let responseBytes = 0;
+      for (const item of pages) {
+        const stored = asRecord(item, 'native snapshot page');
+        const ref = assertManagedSessionDurableRef(
+          stored['resource'] as ManagedSessionJsonValue,
+          'native page resource',
         );
-        const pages = asArray(result['pages'], 'native snapshot pages');
-        if (pages.length === 0 || pages.length > 100)
-          throw corrupt('native snapshot pages did not advance.');
-        let responseBytes = 0;
-        for (const item of pages) {
-          const stored = asRecord(item, 'native snapshot page');
-          const ref = assertManagedSessionDurableRef(
-            stored['resource'] as ManagedSessionJsonValue,
-            'native page resource',
-          );
-          if (
-            ref.kind !== 'managed-native-journal-snapshot-page' ||
-            ref.schemaVersion !== 1 ||
-            ref.byteLength > MAX_NATIVE_SNAPSHOT_PAGE_BYTES ||
-            string(stored['bytesBase64'], 'native page bytes').length >
-              Math.ceil(ref.byteLength / 3) * 4
-          ) {
-            throw corrupt('native snapshot page resource is invalid.');
-          }
-          const bytes = decodeBase64(
-            string(stored['bytesBase64'], 'native page bytes'),
-            'native page bytes',
-          );
-          responseBytes += bytes.byteLength;
-          if (
-            bytes.byteLength !== ref.byteLength ||
-            sha256(bytes) !== ref.digest ||
-            responseBytes > MAX_NATIVE_SNAPSHOT_PAGE_BYTES
-          )
-            throw corrupt('native snapshot page digest or size is invalid.');
-          const page = asRecord(
-            parseManagedSessionRecordJson(
-              bytes.toString('utf8'),
-              MAX_NATIVE_SNAPSHOT_PAGE_BYTES,
-            ),
-            'native snapshot page body',
-          );
-          if (
-            stored['journalRevision'] !== after + 1 ||
-            page['journalRevision'] !== after + 1 ||
-            page['previousPageDigest'] !== previousDigest ||
-            after >= snapshot.coveredJournalRevision
-          ) {
-            throw corrupt('native snapshot page chain is discontinuous.');
-          }
-          scratch.begin();
-          const census = asArray(page['resources'], 'native resource census');
-          if (
-            census.length >
-            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
-          )
-            throw corrupt('native resource census is too large.');
-          const seen = new Set<string>();
-          const added: ManagedSessionDurableRef[] = [];
-          for (const item of census) {
-            const { bytesBase64, ...metadata } = asRecord(
-              item,
-              'native resource',
-            );
-            const resource = assertManagedSessionDurableRef(
-              metadata as ManagedSessionJsonValue,
-              'native resource',
-            );
-            if (
-              bytesBase64 != null ||
-              seen.has(resource.resourceId) ||
-              [
-                'managed-native-journal-snapshot',
-                'managed-native-journal-snapshot-page',
-              ].includes(resource.kind) ||
-              ((await resources.has(resource.resourceId)) &&
-                !isDeepStrictEqual(
-                  await resources.get(resource.resourceId),
-                  resource,
-                ))
-            ) {
-              throw corrupt('native resource census conflicts.');
-            }
-            seen.add(resource.resourceId);
-            if (!(await resources.has(resource.resourceId))) {
-              added.push(resource);
-              resourceCount++;
-            }
-            await resources.set(resource.resourceId, resource);
-          }
-          const transaction = asRecord(
-            page['transaction'],
-            'native snapshot transaction',
-          );
-          if (transaction['journalRevision'] !== after + 1)
-            throw corrupt('native snapshot transaction revision conflicts.');
-          const declared = (await append(transaction)).refs;
-          for (const resource of declared) {
-            if (
-              !isDeepStrictEqual(
-                await resources.get(resource.resourceId),
-                resource,
-              )
-            )
-              throw corrupt(
-                'native resource dependency is missing or conflicting.',
-              );
-          }
-          for (const resource of added) {
-            const body = await this.readResource(resource);
-            for (const nested of collectNestedResourceRefs(resource, body)) {
-              if (
-                !isDeepStrictEqual(
-                  await resources.get(nested.resourceId),
-                  nested,
-                )
-              )
-                throw corrupt(
-                  'native resource dependency is missing or conflicting.',
-                );
-            }
-          }
-          await scratch.flush();
-          previousDigest = ref.digest;
-          after++;
-        }
         if (
-          safeCounter(result['nextRevision'], 'nextRevision') !== after ||
-          boolean(result['hasMore'], 'hasMore') !==
-            after < snapshot.coveredJournalRevision
+          ref.kind !== 'managed-native-journal-snapshot-page' ||
+          ref.schemaVersion !== 1 ||
+          ref.byteLength > MAX_NATIVE_SNAPSHOT_PAGE_BYTES ||
+          string(stored['bytesBase64'], 'native page bytes').length >
+            Math.ceil(ref.byteLength / 3) * 4
         ) {
-          throw corrupt('native snapshot cursor is inconsistent.');
+          throw corrupt('native snapshot page resource is invalid.');
         }
+        const bytes = decodeBase64(
+          string(stored['bytesBase64'], 'native page bytes'),
+          'native page bytes',
+        );
+        responseBytes += bytes.byteLength;
+        if (
+          bytes.byteLength !== ref.byteLength ||
+          sha256(bytes) !== ref.digest ||
+          responseBytes > MAX_NATIVE_SNAPSHOT_PAGE_BYTES
+        )
+          throw corrupt('native snapshot page digest or size is invalid.');
+        const page = asRecord(
+          parseManagedSessionRecordJson(
+            bytes.toString('utf8'),
+            MAX_NATIVE_SNAPSHOT_PAGE_BYTES,
+          ),
+          'native snapshot page body',
+        );
+        if (
+          stored['journalRevision'] !== after + 1 ||
+          page['journalRevision'] !== after + 1 ||
+          page['previousPageDigest'] !== previousDigest ||
+          after >= snapshot.coveredJournalRevision
+        ) {
+          throw corrupt('native snapshot page chain is discontinuous.');
+        }
+        const census = asArray(page['resources'], 'native resource census');
+        if (
+          census.length >
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
+        )
+          throw corrupt('native resource census is too large.');
+        const seen = new Set<string>();
+        const added: ManagedSessionDurableRef[] = [];
+        for (const item of census) {
+          const { bytesBase64, ...metadata } = asRecord(
+            item,
+            'native resource',
+          );
+          const resource = assertManagedSessionDurableRef(
+            metadata as ManagedSessionJsonValue,
+            'native resource',
+          );
+          if (
+            bytesBase64 != null ||
+            seen.has(resource.resourceId) ||
+            [
+              'managed-native-journal-snapshot',
+              'managed-native-journal-snapshot-page',
+            ].includes(resource.kind) ||
+            (resources.has(resource.resourceId) &&
+              !isDeepStrictEqual(resources.get(resource.resourceId), resource))
+          ) {
+            throw corrupt('native resource census conflicts.');
+          }
+          seen.add(resource.resourceId);
+          if (!resources.has(resource.resourceId)) added.push(resource);
+          resources.set(resource.resourceId, resource);
+        }
+        const transaction = asRecord(
+          page['transaction'],
+          'native snapshot transaction',
+        );
+        if (transaction['journalRevision'] !== after + 1)
+          throw corrupt('native snapshot transaction revision conflicts.');
+        const declared = append(transaction).refs;
+        for (const resource of added) {
+          const body = await this.readResource(resource);
+          declared.push(...collectNestedResourceRefs(resource, body));
+        }
+        for (const resource of declared) {
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        previousDigest = ref.digest;
+        after++;
       }
       if (
-        previousDigest !== snapshot.lastPageDigest ||
-        resourceCount !== snapshot.resourceCount
+        safeCounter(result['nextRevision'], 'nextRevision') !== after ||
+        boolean(result['hasMore'], 'hasMore') !==
+          after < snapshot.coveredJournalRevision
       ) {
-        throw corrupt('native snapshot digest or resource count conflicts.');
+        throw corrupt('native snapshot cursor is inconsistent.');
       }
-      return snapshot;
-    } finally {
-      await scratch.close();
     }
+    if (
+      previousDigest !== snapshot.lastPageDigest ||
+      resources.size !== snapshot.resourceCount
+    ) {
+      throw corrupt('native snapshot digest or resource count conflicts.');
+    }
+    return snapshot;
   }
 
   async appendTransaction(records: readonly unknown[]): Promise<void> {
@@ -3230,11 +2653,7 @@ class ManagedSessionStoreHttpClient {
       async (timeoutMs) => {
         const response = await this.request(path, method, body, timeoutMs);
         try {
-          return await readBoundedPublicationJson(
-            response,
-            32 * 1024 * 1024,
-            'Session store',
-          );
+          return (await response.json()) as unknown;
         } catch (error) {
           if (
             error instanceof TypeError ||
@@ -3543,38 +2962,6 @@ export function describeTransaction(
   const marker = parseManagedSessionCommitMarker(
     markerRecord['managedSession'],
   );
-  if (
-    bytes.byteLength > MANAGED_SESSION_LIMITS.maxTransactionBytes ||
-    eventRecords.length > MANAGED_SESSION_LIMITS.maxTransactionEvents ||
-    marker.eventCount !== eventRecords.length ||
-    marker.firstSequence !== eventRecords[0].sequence ||
-    marker.lastSequence !== eventRecords.at(-1)!.sequence ||
-    marker.eventsDigest !== managedSessionEventsDigest(eventRecords)
-  )
-    throw corrupt('transaction marker does not cover its event content.');
-  const uuids = new Set<string>();
-  for (let index = 0; index < records.length; index++) {
-    const record = envelope(records[index], 'transaction record');
-    const uuid = string(record['uuid'], 'transaction UUID');
-    if (
-      uuids.has(uuid) ||
-      (index > 0 &&
-        record['parentUuid'] !==
-          asRecord(records[index - 1], 'previous record')['uuid'])
-    )
-      throw corrupt('transaction record UUID chain is inconsistent.');
-    uuids.add(uuid);
-    const event = eventRecords[index];
-    if (
-      event &&
-      (event.sequence !== marker.firstSequence + index ||
-        (event.kind === 'checkpoint.committed' &&
-          Number(event.payload['coveredSequence']) >= marker.firstSequence))
-    )
-      throw corrupt(
-        'transaction event sequence or checkpoint coverage is inconsistent.',
-      );
-  }
   let activationEpoch = currentActivationEpoch;
   let latestCheckpointResourceId: string | null = null;
   for (const event of eventRecords) {
@@ -3849,10 +3236,10 @@ function parseActivationLease(value: unknown): ManagedSessionActivationLease {
   };
 }
 
-function applyActivationLease<T extends ManagedSessionJournalSummary>(
-  scan: T,
+function applyActivationLease(
+  scan: ManagedSessionJournalScan,
   lease?: ManagedSessionActivationLease,
-): T {
+): ManagedSessionJournalScan {
   if (!lease) return scan;
   const activation = scan.activation;
   if (
@@ -4049,11 +3436,9 @@ async function readHttpError(response: Response): Promise<{
 
 async function readBoundedPublicationJson(
   response: Response,
-  maximum = 4 * 1024 * 1024,
-  label = 'Publication',
 ): Promise<unknown> {
   const reader = response.body?.getReader();
-  if (!reader) throw corrupt(`${label} response has no body.`);
+  if (!reader) throw corrupt('Publication response has no body.');
   const chunks: Uint8Array[] = [];
   let length = 0;
   try {
@@ -4061,8 +3446,8 @@ async function readBoundedPublicationJson(
       const item = await reader.read();
       if (item.done) break;
       length += item.value.byteLength;
-      if (length > maximum)
-        throw corrupt(`${label} response exceeds its byte limit.`);
+      if (length > 4 * 1024 * 1024)
+        throw corrupt('Publication response exceeds its byte limit.');
       chunks.push(item.value);
     }
   } finally {

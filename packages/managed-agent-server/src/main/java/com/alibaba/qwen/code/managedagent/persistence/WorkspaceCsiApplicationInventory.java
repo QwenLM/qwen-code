@@ -240,14 +240,6 @@ final class WorkspaceCsiApplicationInventory {
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
                     + "claim_generation:BIGINT,claim_lease_until:BIGINT,wake_pending:BOOLEAN,wake_head_revision:BIGINT,"
                     + "wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN,cleanup_head_revision:BIGINT"),
-            declaration("ma_session_history_fact", "session_scope_key,index_generation,family,identity_hash,source_sequence",
-                    "session_scope_key:CHAR,index_generation:BIGINT,family:VARCHAR,identity_hash:CHAR,identity_bucket:INT,"
-                    + "identity_value:LONGTEXT,source_revision:BIGINT,source_sequence:BIGINT,event_ordinal:INT,"
-                    + "record_digest:CHAR,metadata_json:LONGTEXT"),
-            declaration("ma_session_history_state", "session_scope_key",
-                    "session_scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,"
-                    + "index_generation:BIGINT,indexed_revision:BIGINT,indexed_sequence:BIGINT,last_commit_digest:CHAR,"
-                    + "bucket_counts_json:LONGTEXT"),
             declaration("ma_session_journal_tx", "tenant_id,session_id,journal_revision",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
                     + "command_key_hash:CHAR,transaction_id:VARBINARY,operation:LONGTEXT,command_id:VARBINARY,"
@@ -980,7 +972,7 @@ final class WorkspaceCsiApplicationInventory {
                     && localReferenceMatches(namespace, row.text("tenant_id"), references)) {
                 return true;
             }
-            if (!derivedHistoryTable(table) && (field.getKey().endsWith("_json") || "artifact_refs".equals(field.getKey()))) {
+            if (field.getKey().endsWith("_json") || "artifact_refs".equals(field.getKey())) {
                 JsonNode value = parse(cell.bytes());
                 requireEncoded(value != null);
                 if (savedJsonReference(value, references, 0,
@@ -1187,7 +1179,7 @@ final class WorkspaceCsiApplicationInventory {
             Map<String, Row> fixed = new LinkedHashMap<>();
             wanted.forEach(row -> requireEncoded(fixed.put(key(row), row) == null));
             var current = readFixed(read, declaration, wanted, references);
-            if (!references.isEmpty() && !derivedHistoryTable(declaration.name())) {
+            if (!references.isEmpty()) {
                 var carriers = declaration.columns().stream().filter(column -> structured(column.name())
                         || column.kind() == Kind.MEDIUMBLOB || column.kind() == Kind.LONGBLOB
                         || "object_key".equals(column.name()) || "capture_object_key".equals(column.name())).map(column -> column.name() + " IS NOT NULL").toList();
@@ -1268,10 +1260,6 @@ final class WorkspaceCsiApplicationInventory {
 
     private static boolean structured(String field) {
         return field.endsWith("_json") || "artifact_refs".equals(field);
-    }
-
-    private static boolean derivedHistoryTable(String table) {
-        return "ma_session_history_state".equals(table) || "ma_session_history_fact".equals(table);
     }
 
     @FunctionalInterface
@@ -2377,8 +2365,6 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_runtime_session" -> query(table, "binding_id=bindings", "tenant_id=T&harness_session_id=sessions",
                         "scope_key=Bscope&runtime_session_id=runtime");
                 case "ma_tenant_guard" -> query(table, "tenant_key=BT", "tenant_id=T");
-                case "ma_session_history_state" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions");
-                case "ma_session_history_fact" -> query(table, "session_scope_key=J");
                 case "ma_session_journal_tx" -> query(table, "tenant_id=T&session_id=sessions");
                 case "ma_resource" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions");
                 case "ma_resource_ref" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions", "resource_key=resourceKeys");
@@ -2478,7 +2464,7 @@ final class WorkspaceCsiApplicationInventory {
                                                 && Objects.equals(binding.text("workspace_id"), row.text("workspace_id")));
                     }
                     case "ma_session", "ma_turn", "ma_public_event", "ma_event_stream", "ma_message", "ma_snapshot",
-                            "ma_session_record", "ma_session_journal_tx", "ma_session_history_state", "ma_channel_binding", "ma_schedule", "ma_schedule_occurrence" ->
+                            "ma_session_record", "ma_session_journal_tx", "ma_channel_binding", "ma_schedule", "ma_schedule_occurrence" ->
                             otherSession(row.text("tenant_id"), row.text("workspace_id"), row.text("session_id"))
                                     && (row.cell("session_scope_key") == null || Objects.equals(row.text("session_scope_key"),
                                             ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))));
@@ -2842,10 +2828,6 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         private void expand(String table, Row row) {
-            // Derived history retains bytes; its metadata cannot discover authority associations.
-            if (derivedHistoryTable(table)) {
-                return;
-            }
             for (var field : row.fields.entrySet()) {
                 if (field.getValue().isNull() || field.getValue().kind.binary()
                         && (field.getValue().kind != Kind.VARBINARY || !IDENTITY_FIELDS.contains(field.getKey()))) {
@@ -3150,22 +3132,6 @@ final class WorkspaceCsiApplicationInventory {
                         && row.number("writer_generation") != null && row.number("writer_generation") > 0
                         && row.text("writer_id") != null && row.text("lease_token_hash") != null
                         && row.text("writer_lease_until") != null && row.text("activation_id") != null);
-                case "ma_session_history_state" -> expect(table, row, rawNative(row)
-                        && has("J", row.text("session_scope_key"))
-                        && row.number("index_generation") != null && row.number("index_generation") > 0
-                        && row.number("index_generation") <= ManagedSessionStoreModels.MAX_SAFE_COUNTER
-                        && row.number("indexed_revision") != null && row.number("indexed_revision") >= 0
-                        && row.number("indexed_sequence") != null && row.number("indexed_sequence") >= 0);
-                case "ma_session_history_fact" -> expect(table, row, has("J", row.text("session_scope_key"))
-                        && row.number("index_generation") != null && row.number("index_generation") > 0
-                        && row.number("index_generation") <= ManagedSessionStoreModels.MAX_SAFE_COUNTER
-                        && ManagedSessionHistoryStore.FAMILIES.contains(row.text("family"))
-                        && row.text("identity_value") != null
-                        && ManagedSessionHistoryStore.key(row.text("family"), row.text("identity_value")).equals(row.text("identity_hash"))
-                        && Objects.equals((long) ManagedSessionHistoryStore.bucket(row.text("identity_hash")), row.number("identity_bucket"))
-                        && row.number("source_revision") != null && row.number("source_revision") > 0
-                        && row.number("source_sequence") != null && row.number("source_sequence") > 0
-                        && row.number("event_ordinal") != null && row.number("event_ordinal") >= 0);
                 case "ma_session_journal_tx" -> expect(table, row, rawNative(row)
                         && "identity".equals(row.text("record_encoding")) && row.binary("record_bytes") != null
                         && Objects.equals((long) row.binary("record_bytes").length, row.number("byte_length"))
@@ -3306,76 +3272,6 @@ final class WorkspaceCsiApplicationInventory {
             }
         }
 
-        private void validateNativeHistory(List<Row> transactions, Map<String, Row> resources) {
-            String stateTable = "ma_session_history_state";
-            String factTable = "ma_session_history_fact";
-            var states = rows(stateTable).stream().filter(row -> row.membership == Membership.ORIGINAL).toList();
-            var facts = rows(factTable).stream().filter(row -> row.membership == Membership.ORIGINAL).toList();
-            if (states.isEmpty() && facts.isEmpty()) {
-                return;
-            }
-            try {
-                requireEncoded(states.size() <= 1);
-                Row state = states.isEmpty() ? null : states.getFirst();
-                long indexed = state == null ? 0 : state.number("indexed_revision");
-                long generation = state == null ? 0 : state.number("index_generation");
-                long[] expectedCounts = new long[ManagedSessionHistoryStore.BUCKETS];
-                for (Row row : transactions) {
-                    long revision = row.number("journal_revision");
-                    var transaction = historyTransaction(row);
-                    var records = ManagedSessionHistoryStore.records(transaction,
-                            ManagedSessionStore.sessionScopeKey(tenant, session), workspace, session);
-                    var derived = ManagedSessionHistoryStore.extract(session, transaction, records, resourceId -> {
-                        Row resource = resources.get(resourceId);
-                        return resource == null ? null : new ManagedSessionStoreModels.StoredResource(resourceId,
-                                resource.text("kind"), Math.toIntExact(resource.number("schema_version")),
-                                resource.number("byte_length"), resource.text("sha256"), resource.binary("inline_bytes"));
-                    }, (recordKey, sequence) -> {
-                        throw new IllegalArgumentException("Extensions are outside the original CSI file profile");
-                    });
-                    var present = facts.stream().filter(fact -> Objects.equals(revision, fact.number("source_revision"))).toList();
-                    for (Row fact : present) {
-                        boolean matches = derived.stream().anyMatch(value -> value.family().equals(fact.text("family"))
-                                && value.identity().equals(fact.text("identity_value"))
-                                && Objects.equals(value.sequence(), fact.number("source_sequence"))
-                                && Objects.equals((long) value.eventOrdinal(), fact.number("event_ordinal"))
-                                && value.recordDigest().equals(fact.text("record_digest"))
-                                && value.metadata().toString().equals(fact.text("metadata_json")));
-                        expect(factTable, fact, matches);
-                    }
-                    if (state != null && revision <= indexed) {
-                        expect(stateTable, state, present.stream().filter(fact -> Objects.equals(generation, fact.number("index_generation")))
-                                .count() == derived.size());
-                        for (var fact : derived) {
-                            expectedCounts[ManagedSessionHistoryStore.bucket(ManagedSessionHistoryStore.key(fact.family(), fact.identity()))]++;
-                        }
-                    }
-                }
-                for (Row fact : facts) {
-                    expect(factTable, fact, fact.number("source_revision") != null
-                            && fact.number("source_revision") > 0 && fact.number("source_revision") <= transactions.size());
-                }
-                if (state != null) {
-                    Row at = transactions.stream().filter(row -> Objects.equals(indexed, row.number("journal_revision"))).findFirst().orElse(null);
-                    expect(stateTable, state, indexed == 0 ? Objects.equals(0L, state.number("indexed_sequence")) && state.cell("last_commit_digest").isNull()
-                            : at != null && Objects.equals(at.number("last_sequence"), state.number("indexed_sequence"))
-                                    && Objects.equals(at.text("commit_digest"), state.text("last_commit_digest")));
-                    expect(stateTable, state, Arrays.equals(expectedCounts, ManagedSessionHistoryStore.counts(parse(state.text("bucket_counts_json")))));
-                }
-            } catch (RuntimeException invalid) {
-                block(stateTable, null, "invalid_native_history_source");
-            }
-        }
-
-        private static ManagedSessionStoreModels.StoredTransaction historyTransaction(Row row) {
-            return new ManagedSessionStoreModels.StoredTransaction(row.number("journal_revision"), row.text("transaction_id"),
-                    row.text("operation"), row.text("command_id"), row.text("content_digest"), row.number("first_sequence"),
-                    row.number("last_sequence"), Math.toIntExact(row.number("event_count")), row.text("events_digest"),
-                    row.text("previous_commit_digest"), row.text("commit_digest"), row.number("writer_generation"),
-                    row.number("activation_epoch"), row.text("latest_checkpoint_resource_id"), row.text("record_encoding"),
-                    Base64.getEncoder().encodeToString(row.binary("record_bytes")), row.number("byte_length"), row.text("record_digest"));
-        }
-
         private void validateNativeMembership() {
             validateNativeChunks();
             Row head = originalRow("ma_session_head");
@@ -3413,7 +3309,6 @@ final class WorkspaceCsiApplicationInventory {
             } catch (RuntimeException invalid) {
                 block("ma_session_record", null, "invalid_hosted_model_context");
             }
-            validateNativeHistory(transactions, resources);
             Set<String> referenced = new LinkedHashSet<>();
             for (Row ref : rows("ma_resource_ref").stream().filter(value -> value.membership == Membership.ORIGINAL).toList()) {
                 referenced.add(ref.text("resource_id"));
@@ -3530,7 +3425,7 @@ final class WorkspaceCsiApplicationInventory {
         }
     }
 
-    static JsonNode parse(String text) {
+    private static JsonNode parse(String text) {
         return text == null ? null : parse(utf8(text));
     }
 

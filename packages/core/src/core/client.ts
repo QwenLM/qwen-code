@@ -733,8 +733,7 @@ export class LlmClient {
     if (restoreRuntime) {
       this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
-      for await (const event of restoreRuntime.uiTelemetryHistory ??
-        restoreRuntime.uiTelemetryEvents) {
+      for (const event of restoreRuntime.uiTelemetryEvents) {
         uiTelemetryService.addEvent(event, sessionId);
       }
       this.seedRecentCompletedToolNamesFromHistory(restoreRuntime.apiHistory);

@@ -230,10 +230,10 @@ describe('managed session authority automation enablement', () => {
       );
       const receipt = await commitSchedule(authority, openBody(promptRef));
       expect(receipt.revision).toBe(1);
-      expect(
-        (await authority.extensionRecord('schedule', 'asch_1'))?.record,
-      ).toEqual(openBody(promptRef));
-      expect(await authority.taskViews()).toHaveLength(0);
+      expect(authority.extensionRecord('schedule', 'asch_1')?.record).toEqual(
+        openBody(promptRef),
+      );
+      expect(authority.taskViews()).toHaveLength(0);
     });
   });
 
@@ -247,9 +247,7 @@ describe('managed session authority automation enablement', () => {
       await expect(
         commitSchedule(authority, openBody(promptRef, {}, otherSessionId)),
       ).rejects.toThrow(/must be this Session/);
-      expect(
-        await authority.extensionRecord('schedule', 'asch_1'),
-      ).toBeUndefined();
+      expect(authority.extensionRecord('schedule', 'asch_1')).toBeUndefined();
     });
   });
 
@@ -279,11 +277,9 @@ describe('managed session authority automation enablement', () => {
         TRUSTED,
       );
       expect(replayed.committedSequence).toBe(before + 1);
-      const markers = (
-        await authority
-          .iterateEvents(before + 1, authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'operation.replayed');
+      const markers = authority
+        .eventsInSequenceRange(before + 1, authority.committedSequence)
+        .filter((event) => event.kind === 'operation.replayed');
       expect(markers).toHaveLength(1);
       expect(markers[0]!.payload['recordRef']).toEqual(receipt.recordRef);
       // The landed command identity replayed under another Session's key
@@ -320,9 +316,7 @@ describe('managed session authority automation enablement', () => {
       await expect(commitSchedule(authority, moved)).rejects.toThrow(
         /schedule session mode per_run is not enabled/,
       );
-      expect(
-        (await authority.extensionRecord('schedule', 'asch_1'))?.revision,
-      ).toBe(1);
+      expect(authority.extensionRecord('schedule', 'asch_1')?.revision).toBe(1);
     });
   });
 
@@ -396,7 +390,7 @@ describe('managed session authority automation runs', () => {
       // The current revision binds.
       const receipt = await commitRun(authority, claim, 1);
       expect(receipt.revision).toBe(1);
-      expect((await authority.taskViews()).map((view) => view.kind)).toEqual([
+      expect(authority.taskViews().map((view) => view.kind)).toEqual([
         'automation_run',
       ]);
     });
@@ -458,21 +452,17 @@ describe('managed session authority automation runs', () => {
       const again = await commitRun(authority, claim, 1);
       expect(again.receipt.replayed).toBe(true);
       expect(again.revision).toBe(1);
-      expect(
-        await authority
-          .extensionRecordsInDomain('automation_run')
-          .collect(1_000_000),
-      ).toHaveLength(1);
+      expect(authority.extensionRecordsInDomain('automation_run')).toHaveLength(
+        1,
+      );
       // A fresh command identity re-claiming the same occurrence is a
       // second claim: the committed run answers it, never a no-op revision.
       await expect(
         commitRun(authority, claim, 2, { commandId: 'claim-again' }),
       ).rejects.toThrow(/meets the committed run/);
-      expect(
-        await authority
-          .extensionRecordsInDomain('automation_run')
-          .collect(1_000_000),
-      ).toHaveLength(1);
+      expect(authority.extensionRecordsInDomain('automation_run')).toHaveLength(
+        1,
+      );
     });
   });
 
@@ -544,9 +534,10 @@ describe('managed session authority automation runs', () => {
       // record commit from the input commit would move lastSequence.
       expect(receipt.receipt.firstSequence).toBe(before + 1);
       expect(receipt.receipt.lastSequence).toBe(before + 3);
-      const events = await authority
-        .iterateEvents(before + 1, authority.committedSequence)
-        .collect(1_000_000);
+      const events = authority.eventsInSequenceRange(
+        before + 1,
+        authority.committedSequence,
+      );
       expect(events.map((event) => event.kind)).toEqual([
         'domain.committed',
         'input.accepted',
@@ -582,19 +573,19 @@ describe('managed session authority automation runs', () => {
     await withAuthority(
       harness,
       async (authority) => {
-        expect(
-          (await authority.extensionRecord('schedule', 'asch_1'))?.revision,
-        ).toBe(1);
-        const run = await authority.extensionRecord('automation_run', runId);
+        expect(authority.extensionRecord('schedule', 'asch_1')?.revision).toBe(
+          1,
+        );
+        const run = authority.extensionRecord('automation_run', runId);
         expect(run?.revision).toBe(2);
         expect(run?.record).toEqual(dispatched);
-        const [view] = await authority.taskViews();
+        const [view] = authority.taskViews();
         expect(view?.kind).toBe('automation_run');
         expect(view?.state).toBe('running');
         const settled = automationRunSettleBody(dispatched!, 'settled', true);
         const receipt = await commitRun(authority, settled, 3);
         expect(receipt.revision).toBe(3);
-        expect((await authority.taskViews())[0]?.state).toBe('completed');
+        expect(authority.taskViews()[0]?.state).toBe('completed');
         // A settled run takes no further revision.
         await expect(
           commitRun(authority, automationRunDispatchBody(dispatched!), 4),

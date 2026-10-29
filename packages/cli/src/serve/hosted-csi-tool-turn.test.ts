@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -179,20 +178,19 @@ it.each(['missing_receipt', 'changed_parts', 'foreign_tail'] as const)(
   async (failure) => {
     const { text, successor } = await interruptedReceiptTurn('before_message');
     const authority = successor.authority;
-    const events = await authority
-      .iterateEvents(1, authority.committedSequence)
-      .collect(1_000_000);
-    const receipt = (await events
+    const events = authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
+    );
+    const receipt = events
       .filter((event) => event.kind === 'tool.receipt')
-      .at(-1))!;
+      .at(-1)!;
     const sequence = authority.committedSequence;
     const before = await successor.sink.project();
     const requests = paths.slice();
     if (failure === 'missing_receipt') {
-      vi.spyOn(authority, 'iterateEvents').mockReturnValue(
-        new ManagedHistoryQuery(async function* () {
-          yield* events.filter((event) => event !== receipt);
-        }),
+      vi.spyOn(authority, 'eventsInSequenceRange').mockReturnValue(
+        events.filter((event) => event !== receipt),
       );
     } else if (failure === 'changed_parts') {
       const read = successor.resources.read.bind(successor.resources);
@@ -208,14 +206,10 @@ it.each(['missing_receipt', 'changed_parts', 'foreign_tail'] as const)(
         return Buffer.from(JSON.stringify(outcome));
       });
     } else {
-      vi.spyOn(successor.sink, 'iterateMessageRecords').mockImplementation(
-        async function* () {
-          yield* [
-            ...before,
-            { ...before.at(-1)!, uuid: randomUUID(), type: 'assistant' },
-          ];
-        },
-      );
+      vi.spyOn(successor.sink, 'project').mockResolvedValue([
+        ...before,
+        { ...before.at(-1)!, uuid: randomUUID(), type: 'assistant' },
+      ]);
     }
     await expect(
       recoverHostedCsiReceipts(
@@ -224,13 +218,7 @@ it.each(['missing_receipt', 'changed_parts', 'foreign_tail'] as const)(
         promptId,
         text,
       ),
-    ).rejects.toThrow(
-      {
-        missing_receipt: 'Original CSI installed recovery owner is required.',
-        changed_parts: 'Original CSI outcome identity differs.',
-        foreign_tail: 'Original CSI final output differs.',
-      }[failure],
-    );
+    ).rejects.toThrow(/Original CSI/);
     expect(authority.committedSequence).toBe(sequence);
     expect(paths).toEqual(requests);
   },
@@ -555,11 +543,9 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   expect(commit).toHaveBeenCalledTimes(4);
   expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(3);
   expect(
-    (
-      await managed.authority
-        .iterateEvents(1, managed.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'tool.receipt'),
+    managed.authority
+      .eventsInSequenceRange(1, managed.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(3);
   expect(requests).toHaveLength(3);
   const pinned = JSON.parse(
@@ -1076,11 +1062,9 @@ it.each(['function', 'error'])(
       publish.mock.calls.some(([kind]) => kind === 'managed-tool-outcome'),
     ).toBe(false);
     expect(
-      (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'tool.receipt'),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
     ).toEqual([]);
     const checkpoint = parseHarnessCheckpointV1(
       (await managed.authority.readCheckpointState())!,
@@ -1169,14 +1153,12 @@ it.each(['schema', 'oversized', 'root'])(
     expect(paths).toEqual([]);
     expect(history.requestHostedCsiHistory).not.toHaveBeenCalled();
     expect(
-      (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter(
-        (event) =>
-          event.kind === 'tool.intent' || event.kind === 'tool.receipt',
-      ),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'tool.intent' || event.kind === 'tool.receipt',
+        ),
     ).toEqual([]);
     await turn.consumeResults();
     await turn.finish();
@@ -1222,11 +1204,9 @@ it.each(['outcome-bytes', 'message'])(
       ),
     ).toBe(true);
     expect(
-      (
-        await managed.authority
-          .iterateEvents(1, managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'tool.receipt'),
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
     ).toEqual([]);
   },
 );
@@ -1426,10 +1406,11 @@ async function missingReceiptFixture() {
   expect(before.filter((record) => record.type === 'tool_result')).toHaveLength(
     3,
   );
-  const events = await managed.authority
-    .iterateEvents(1, managed.authority.committedSequence)
-    .collect(1_000_000);
-  const checkpoint = (await events.find(
+  const events = managed.authority.eventsInSequenceRange(
+    1,
+    managed.authority.committedSequence,
+  );
+  const checkpoint = events.find(
     (event) =>
       event.kind === 'checkpoint.committed' &&
       event.sequence >
@@ -1438,7 +1419,7 @@ async function missingReceiptFixture() {
             .filter((candidate) => candidate.kind === 'tool.intent')
             .map((candidate) => candidate.sequence),
         ),
-  ))!;
+  )!;
   const fixture = JSON.parse(
     readFileSync(
       new URL(
@@ -1473,11 +1454,11 @@ async function missingReceiptFixture() {
     );
     grant.authorizationSequence = checkpoint.sequence;
     grant.authorizationRevision = checkpoint.sequence;
-    const intent = (await events.find(
+    const intent = events.find(
       (event) =>
         event.kind === 'tool.intent' &&
         event.payload['executionCallId'] === member['executionCallId'],
-    ))!;
+    )!;
     grant.intent = { sequence: intent.sequence, revision: intent.sequence };
     grant.checkpointRef = checkpoint.payload['stateRef'];
     member['authorizationBytesBase64'] = Buffer.from(
@@ -1620,14 +1601,15 @@ it('recovers complete final output without repair, another model request or a du
     (await resumed.authority.readCheckpointState())!,
   );
   expect(checkpoint.continuation.phase).toBe('before_model');
-  const events = await resumed.authority
-    .iterateEvents(sequence + 1, resumed.authority.committedSequence)
-    .collect(1_000_000);
+  const events = resumed.authority.eventsInSequenceRange(
+    sequence + 1,
+    resumed.authority.committedSequence,
+  );
   expect(events.filter((event) => event.kind === 'turn.settled')).toHaveLength(
     1,
   );
   expect(
-    await events.some((event) =>
+    events.some((event) =>
       [
         'model.attempt',
         'message.committed',
@@ -1654,17 +1636,15 @@ it('repairs the absent receipt from the original settled batch and reuses its fi
       owner,
     ),
   ).rejects.toThrow('Repair message answer lost');
-  const receipts = (
-    await managed.authority
-      .iterateEvents(1, managed.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'tool.receipt');
+  const receipts = managed.authority
+    .eventsInSequenceRange(1, managed.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
   expect(receipts).toHaveLength(3);
   const lastOutcome = JSON.parse(
     (
       await managed.resources.read(
         assertManagedSessionDurableRef(
-          (await receipts.at(-1))!.payload['toolOutcomeRef'],
+          receipts.at(-1)!.payload['toolOutcomeRef'],
           'unit original receipt',
         ),
       )

@@ -245,41 +245,6 @@ CREATE TABLE ma_session_journal_tx (
     CONSTRAINT ck_ma_activation_lease CHECK ((activation_lease_until IS NULL AND activation_renewal_seq IS NULL) OR (activation_lease_until IS NOT NULL AND activation_lease_until <= 9007199254740991 AND activation_renewal_seq IS NOT NULL AND activation_renewal_seq > 0 AND activation_renewal_seq <= 9007199254740991))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
-CREATE TABLE ma_session_history_state (
-    session_scope_key CHAR(64) NOT NULL,
-    tenant_id VARBINARY(512) NOT NULL,
-    workspace_id VARBINARY(2048) NOT NULL,
-    session_id VARBINARY(2048) NOT NULL,
-    index_generation BIGINT NOT NULL,
-    indexed_revision BIGINT NOT NULL,
-    indexed_sequence BIGINT NOT NULL,
-    last_commit_digest CHAR(64),
-    bucket_counts_json LONGTEXT NOT NULL,
-    PRIMARY KEY (session_scope_key),
-    CONSTRAINT ck_ma_history_position CHECK (index_generation > 0 AND indexed_revision >= 0 AND indexed_sequence >= 0)
-) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE TABLE ma_session_history_fact (
-    session_scope_key CHAR(64) NOT NULL,
-    index_generation BIGINT NOT NULL,
-    family VARCHAR(32) NOT NULL,
-    identity_hash CHAR(64) NOT NULL,
-    identity_bucket INT NOT NULL,
-    identity_value LONGTEXT NOT NULL,
-    source_revision BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL,
-    event_ordinal INT NOT NULL,
-    record_digest CHAR(64) NOT NULL,
-    metadata_json LONGTEXT NOT NULL,
-    PRIMARY KEY (session_scope_key, index_generation, family, identity_hash, source_sequence),
-    CONSTRAINT ck_ma_history_fact_position CHECK (index_generation > 0 AND source_revision > 0 AND source_sequence > 0 AND event_ordinal >= 0),
-    CONSTRAINT ck_ma_history_fact_bucket CHECK (identity_bucket >= 0 AND identity_bucket < 256)
-) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_ma_history_revision ON ma_session_history_fact (session_scope_key, index_generation, source_revision);
-
-CREATE INDEX ix_ma_history_bucket ON ma_session_history_fact (session_scope_key, index_generation, identity_bucket, source_revision);
-
 CREATE TABLE ma_event_stream (
     tenant_id VARBINARY(512) NOT NULL,
     session_id VARBINARY(512) NOT NULL,

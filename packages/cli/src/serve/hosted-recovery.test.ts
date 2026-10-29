@@ -202,18 +202,16 @@ it.each([
     const expected = hashed
       ? `hosted-cleanup:${createHash('sha256').update(original).digest('hex')}`
       : original;
-    const cleanupEvents = async () =>
-      (
-        await f.session.authority
-          .iterateEvents(1, f.session.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'hosted.cleanup');
+    const cleanupEvents = () =>
+      f.session.authority
+        .eventsInSequenceRange(1, f.session.authority.committedSequence)
+        .filter((event) => event.kind === 'hosted.cleanup');
     try {
       await oweHostedTurnCleanup(f.session, promptId, f.broker);
       await oweHostedTurnCleanup(f.session, promptId, f.broker);
-      expect(await cleanupEvents()).toHaveLength(1);
-      expect((await cleanupEvents())[0]!.payload['cleanupId']).toBe(expected);
-      expect((await cleanupEvents())[0]!.eventId).toBe(`${expected}:owed`);
+      expect(cleanupEvents()).toHaveLength(1);
+      expect(cleanupEvents()[0]!.payload['cleanupId']).toBe(expected);
+      expect(cleanupEvents()[0]!.eventId).toBe(`${expected}:owed`);
       const release = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'release')
         .mockResolvedValue();
@@ -225,15 +223,16 @@ it.each([
         bindingId: 'original-binding',
         generation: '7',
       });
+      expect(cleanupEvents().map((event) => event.payload['state'])).toEqual([
+        'owed',
+        'confirmed',
+      ]);
+      expect(cleanupEvents()[1]!.payload['cleanupId']).toBe(expected);
+      expect(cleanupEvents()[1]!.eventId).toBe(`${expected}:confirmed`);
       expect(
-        (await cleanupEvents()).map((event) => event.payload['state']),
-      ).toEqual(['owed', 'confirmed']);
-      expect((await cleanupEvents())[1]!.payload['cleanupId']).toBe(expected);
-      expect((await cleanupEvents())[1]!.eventId).toBe(`${expected}:confirmed`);
-      expect(
-        Buffer.byteLength((await cleanupEvents())[1]!.eventId),
+        Buffer.byteLength(cleanupEvents()[1]!.eventId),
       ).toBeLessThanOrEqual(512);
-      expect(await hasHostedCleanupDebt(f.session)).toBe(false);
+      expect(hasHostedCleanupDebt(f.session)).toBe(false);
     } finally {
       await f.session.close();
     }
@@ -251,11 +250,9 @@ it('journals cleanup for a maximum-length stable prompt without changing its own
   broker.runtime = f.broker.runtime;
   try {
     await oweHostedTurnCleanup(f.session, promptId, broker);
-    const event = (await (
-      await f.session.authority
-        .iterateEvents(1, f.session.authority.committedSequence)
-        .collect(1_000_000)
-    ).findLast((event) => event.kind === 'hosted.cleanup'))!;
+    const event = f.session.authority
+      .eventsInSequenceRange(1, f.session.authority.committedSequence)
+      .findLast((event) => event.kind === 'hosted.cleanup')!;
     const original = `hosted-cleanup:${promptId}:${promptId}`;
     expect(event.payload['cleanupId']).toBe(
       `hosted-cleanup:${createHash('sha256').update(original).digest('hex')}`,
@@ -331,15 +328,13 @@ it.each([244, 245])(
       await f.session.close();
     }
     const replacement = await f.reopen();
-    const events = async () =>
-      (
-        await replacement.authority
-          .iterateEvents(1, replacement.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'hosted.cleanup');
+    const events = () =>
+      replacement.authority
+        .eventsInSequenceRange(1, replacement.authority.committedSequence)
+        .filter((event) => event.kind === 'hosted.cleanup');
     try {
       await oweHostedTurnCleanup(replacement, promptId, f.broker);
-      expect(await events()).toHaveLength(1);
+      expect(events()).toHaveLength(1);
       const release = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'release')
         .mockResolvedValue();
@@ -350,15 +345,13 @@ it.each([244, 245])(
         bindingId: 'original-binding',
         generation: '7',
       });
-      expect((await events()).map((event) => event.payload)).toEqual([
+      expect(events().map((event) => event.payload)).toEqual([
         { cleanupId, descriptorRef, state: 'owed' },
         { cleanupId, descriptorRef, state: 'confirmed' },
       ]);
-      expect((await events())[1]!.eventId).not.toBe(`${cleanupId}:confirmed`);
-      expect(
-        Buffer.byteLength((await events())[1]!.eventId),
-      ).toBeLessThanOrEqual(512);
-      expect(await hasHostedCleanupDebt(replacement)).toBe(false);
+      expect(events()[1]!.eventId).not.toBe(`${cleanupId}:confirmed`);
+      expect(Buffer.byteLength(events()[1]!.eventId)).toBeLessThanOrEqual(512);
+      expect(hasHostedCleanupDebt(replacement)).toBe(false);
       await expect(
         oweHostedTurnCleanup(replacement, promptId, f.broker),
       ).rejects.toThrow('already released');
@@ -454,7 +447,7 @@ it('retains terminal cleanup debt across a failed release and a cold replacement
   await expect(
     reconcileHostedTurnCleanup(f.session, f.brokerOptions),
   ).rejects.toThrow('lost release reply');
-  expect(await hasHostedCleanupDebt(f.session)).toBe(true);
+  expect(hasHostedCleanupDebt(f.session)).toBe(true);
   await f.session.close();
   const replacement = await f.reopen();
   try {
@@ -463,15 +456,13 @@ it('retains terminal cleanup debt across a failed release and a cold replacement
       bindingId: 'original-binding',
       generation: '7',
     });
-    expect(await hasHostedCleanupDebt(replacement)).toBe(false);
+    expect(hasHostedCleanupDebt(replacement)).toBe(false);
     await reconcileHostedTurnCleanup(replacement, f.brokerOptions);
     expect(release).toHaveBeenCalledTimes(2);
     expect(
-      (
-        await replacement.authority
-          .iterateEvents(1, replacement.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'turn.settled'),
+      replacement.authority
+        .eventsInSequenceRange(1, replacement.authority.committedSequence)
+        .filter((event) => event.kind === 'turn.settled'),
     ).toHaveLength(1);
     await expect(
       oweHostedTurnCleanup(replacement, f.promptId, f.broker),
@@ -555,22 +546,18 @@ it.each([
           if (mode !== 'snapshot' && release.mock.calls.length === 1) {
             if (mode === 'retired-release-lost')
               throw new Error('lost original release reply');
-            expect(await hasHostedCleanupDebt(f.session)).toBe(true);
+            expect(hasHostedCleanupDebt(f.session)).toBe(true);
             expect(
-              await (
-                await f.session.authority
-                  .iterateEvents(1, f.session.authority.committedSequence)
-                  .collect(1_000_000)
-              ).some((event) => event.kind === 'turn.settled'),
+              f.session.authority
+                .eventsInSequenceRange(1, f.session.authority.committedSequence)
+                .some((event) => event.kind === 'turn.settled'),
             ).toBe(false);
             return;
           }
           expect(
-            (
-              await f.session.authority
-                .iterateEvents(1, f.session.authority.committedSequence)
-                .collect(1_000_000)
-            ).filter((event) => event.kind === 'turn.settled'),
+            f.session.authority
+              .eventsInSequenceRange(1, f.session.authority.committedSequence)
+              .filter((event) => event.kind === 'turn.settled'),
           ).toHaveLength(1);
         });
       const harness = createManagedHarnessHandle(f.session);
@@ -718,7 +705,7 @@ it.each([
         await expect(replacement.finish()).rejects.toThrow(
           'Hosted tool turn requires recovery',
         );
-        expect(await hasHostedCleanupDebt(f.session)).toBe(true);
+        expect(hasHostedCleanupDebt(f.session)).toBe(true);
         expect(acquire).toHaveBeenCalledOnce();
         expect(execute).toHaveBeenCalledOnce();
         expect(release).toHaveBeenCalledTimes(
@@ -756,7 +743,7 @@ it.each([
       expect(prepare).toHaveBeenCalledTimes(
         mode === 'retired-multi-batch' ? 2 : 1,
       );
-      expect(await hasHostedCleanupDebt(f.session)).toBe(true);
+      expect(hasHostedCleanupDebt(f.session)).toBe(true);
       await f.terminal();
       await replacement.cleanup();
       expect(release).toHaveBeenCalledTimes(mode === 'snapshot' ? 1 : 2);
@@ -767,7 +754,7 @@ it.each([
       expect(execute).toHaveBeenCalledTimes(
         mode === 'retired-multi-batch' ? 2 : 1,
       );
-      expect(await hasHostedCleanupDebt(f.session)).toBe(false);
+      expect(hasHostedCleanupDebt(f.session)).toBe(false);
     } finally {
       await f.session.close();
     }
@@ -1007,31 +994,27 @@ it('retracts only the original streamed message after replacement, once', async 
     sourceBootId: 'old-boot',
     sourceEventEpoch: 'old-epoch',
   };
-  const oldDeltas = (
-    await f.session.authority
-      .iterateEvents(1, f.session.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter(
-    (event) =>
-      event.kind === 'message.delta' && event.payload['messageId'] === id,
-  );
+  const oldDeltas = f.session.authority
+    .eventsInSequenceRange(1, f.session.authority.committedSequence)
+    .filter(
+      (event) =>
+        event.kind === 'message.delta' && event.payload['messageId'] === id,
+    );
   await f.session.close();
   const replacement = await f.reopen();
   try {
     const stream = new HostedTextDeltaStream(replacement, f.promptId);
     await stream.retractOriginal(id, source);
     await stream.retractOriginal(id, source);
-    const retracts = (
-      await replacement.authority
-        .iterateEvents(1, replacement.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'message.retracted');
+    const retracts = replacement.authority
+      .eventsInSequenceRange(1, replacement.authority.committedSequence)
+      .filter((event) => event.kind === 'message.retracted');
     expect(retracts).toHaveLength(1);
     expect(retracts[0].payload).toEqual({
       messageId: id,
       turnId: f.promptId,
       fromSequence: oldDeltas[0].sequence,
-      throughSequence: (await oldDeltas.at(-1))!.sequence,
+      throughSequence: oldDeltas.at(-1)!.sequence,
       sourceBootId: 'old-boot',
       sourceEventEpoch: 'old-epoch',
     });
@@ -1105,15 +1088,13 @@ it.each([true, false, 'image-history'])(
       ).toEqual(saved ? request : { promptId: f.promptId });
       await f.terminal();
       expect(
-        (
-          await f.session.authority
-            .iterateEvents(1, f.session.authority.committedSequence)
-            .collect(1_000_000)
-        ).filter(
-          (event) =>
-            event.kind === 'model.attempt' &&
-            event.payload['state'] === 'started',
-        ),
+        f.session.authority
+          .eventsInSequenceRange(1, f.session.authority.committedSequence)
+          .filter(
+            (event) =>
+              event.kind === 'model.attempt' &&
+              event.payload['state'] === 'started',
+          ),
       ).toHaveLength(1);
     } finally {
       await f.session.close();

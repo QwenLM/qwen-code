@@ -9,7 +9,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Part } from '@google/genai';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
@@ -410,11 +409,9 @@ it.each(['none', 'public', 'member'] as const)(
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     expect(
-      await (
-        await session.authority
-          .iterateEvents(1, session.authority.committedSequence)
-          .collect(1_000_000)
-      ).some((event) => event.kind === 'action.changed'),
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .some((event) => event.kind === 'action.changed'),
     ).toBe(false);
     await turn.finish();
     const reloaded = createTurn(false, undefined, undefined, skills);
@@ -492,7 +489,7 @@ it('refuses a mixed Skill and Workspace batch before approval Hooks or tool disp
   expect(responses[1].functionResponse?.response?.['error']).toContain(
     'not executed',
   );
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
@@ -500,11 +497,9 @@ it('refuses a mixed Skill and Workspace batch before approval Hooks or tool disp
     HookEventName.PostToolBatch,
   ]);
   expect(
-    await (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).some((event) => event.kind === 'hosted.batch.planned'),
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some((event) => event.kind === 'hosted.batch.planned'),
   ).toBe(false);
 });
 
@@ -740,7 +735,7 @@ it('preserves a mixed-batch Skill refusal when its result was not committed', as
   expect(JSON.stringify(history[1])).not.toContain(
     'Consult scripts/review.js before reviewing.',
   );
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
@@ -782,7 +777,7 @@ it.each(['deny', 'ask'] as const)(
       HookEventName.PreToolUse,
       HookEventName.PostToolBatch,
     ]);
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
   },
@@ -827,7 +822,7 @@ it('loads the Skill selected by PreToolUse updatedInput without a new approval',
     HookEventName.PostToolUse,
     HookEventName.PostToolBatch,
   ]);
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
 });
@@ -1104,11 +1099,9 @@ async function shellReceiptScenario(
     );
     expect(broker.executeV3).toHaveBeenCalledOnce();
     expect(
-      (
-        await session.authority
-          .iterateEvents(1, session.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'tool.receipt'),
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
     ).toHaveLength(0);
     expect(broker.acknowledgeV3).not.toHaveBeenCalled();
     return;
@@ -1145,11 +1138,9 @@ async function shellReceiptScenario(
     'ack',
   ]);
   expect(
-    (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'tool.receipt'),
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(1);
   expect(broker.acknowledgeV3.mock.calls[0]?.[0]).toBe('shell-execution');
   const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
@@ -1191,11 +1182,9 @@ async function shellReceiptScenario(
     ),
   ).toHaveLength(mode === 'lost-admission' ? 2 : 1);
   expect(
-    (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'tool.receipt'),
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(1);
 }
 
@@ -1203,7 +1192,7 @@ it.each([false, true])(
   'runs Full Access Shell without ordinary Actions through durable result and replay acceptance (foreground-only: %s)',
   async (foregroundOnly) => {
     await shellReceiptScenario('normal', foregroundOnly, { mode: 'yolo' });
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
   },
 );
 
@@ -1281,11 +1270,9 @@ it('records a durable receipt for a proven unstarted Shell', async () => {
     (await session.sink.project()).at(-1)?.message?.parts?.[0]?.functionResponse
       ?.response?.['error'],
   ).toBe(envelope.error.message);
-  const receipts = (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'tool.receipt');
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
   expect(receipts).toHaveLength(1);
   expect(receipts[0]?.payload['resultRef']).toBeNull();
   const ref = assertManagedSessionDurableRef(
@@ -1434,14 +1421,13 @@ it.each(['input', 'intent', 'wait', 'result'] as const)(
 it('anchors every exact input through an intent before dispatch across multiple batches', async () => {
   const seen: string[] = [];
   broker.execute.mockImplementation(async (id, payloadJson) => {
-    const intent = await (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).find(
-      (event) =>
-        event.kind === 'tool.intent' && event.payload['executionCallId'] === id,
-    );
+    const intent = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'tool.intent' &&
+          event.payload['executionCallId'] === id,
+      );
     expect(intent).toBeDefined();
     const ref = intent!.payload[
       'argsRef'
@@ -2012,7 +1998,7 @@ it.each([
       new AbortController().signal,
     );
     expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(
       broker.execute.mock.calls.map(
         (args: unknown[]) => JSON.parse(args[1] as string).toolName,
@@ -2059,7 +2045,7 @@ it.each([
     );
     // The files/1 Session must ask before dispatching even this name.
     const requestId = await requested();
-    expect(await actionIds()).toEqual([requestId]);
+    expect(actionIds()).toEqual([requestId]);
     expect(broker.execute).toHaveBeenCalledOnce();
     await resolveHostedAction(session, waiters, requestId, answer('allow'));
     await running;
@@ -3664,11 +3650,9 @@ it('executes against the declarations actually advertised before a catalog repla
     call.args,
     broker.prepare.mock.calls[0][0],
   );
-  const intent = await (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).find((event) => event.kind === 'tool.intent');
+  const intent = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .find((event) => event.kind === 'tool.intent');
   const saved = await session.resources.read(
     intent!.payload['toolDefinitionRef'] as unknown as ManagedSessionDurableRef,
   );
@@ -4105,14 +4089,11 @@ const answer = (optionId: string, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-async function actionIds(): Promise<string[]> {
+function actionIds(): string[] {
   return [
     ...new Set(
-      (
-        await session.authority
-          .iterateEvents(1, session.authority.committedSequence)
-          .collect(1_000_000)
-      )
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
         .filter((event) => event.kind === 'action.changed')
         .map((event) => event.payload['requestId'] as string),
     ),
@@ -4182,12 +4163,10 @@ async function requested(count = 1): Promise<string> {
   // it, each behind fsynced durable writes.
   await vi.waitFor(
     async () => {
-      const ids = await actionIds();
+      const ids = actionIds();
       expect(ids).toHaveLength(count);
       requestId = ids.at(-1)!;
-      expect((await session.authority.action(requestId))?.state).toBe(
-        'requested',
-      );
+      expect(session.authority.action(requestId)?.state).toBe('requested');
       expect((await checkpoint()).continuation.phase).toBe('await_action');
     },
     { timeout: REQUESTED_TIMEOUT_MS },
@@ -4261,7 +4240,7 @@ it.each(['default', 'auto-edit', 'auto', 'yolo'] as const)(
     expect(JSON.stringify(result)).toContain('permission rules denied');
     expect(broker.execute).not.toHaveBeenCalled();
     expect(classify).not.toHaveBeenCalled();
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
   },
 );
 
@@ -4305,14 +4284,14 @@ it('keeps an explicit ask human-only when live mode changes to Full Access', asy
   const options = JSON.parse(
     (
       await session.resources.read(
-        (await session.authority.action(requestId))!.optionsRef!,
+        session.authority.action(requestId)!.optionsRef!,
       )
     ).toString(),
   );
   expect(options.requiresHumanDecision).toBe(true);
   mode = 'yolo';
   await new Promise((resolve) => setTimeout(resolve, 1100));
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   expect(broker.execute).not.toHaveBeenCalled();
   expect(classify).not.toHaveBeenCalled();
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
@@ -4375,12 +4354,12 @@ it.each(['auto-edit', 'yolo'] as const)(
     ).toEqual([undefined, undefined]);
     expect(
       hostedActionAllowed(
-        (await session.authority.action(requestId))!,
+        session.authority.action(requestId)!,
         HOSTED_TOOL_APPROVAL_POLICY,
       ),
     ).toBe(true);
     expect(broker.execute).toHaveBeenCalledTimes(2);
-    expect(await actionIds()).toEqual([requestId]);
+    expect(actionIds()).toEqual([requestId]);
   },
 );
 
@@ -4478,7 +4457,7 @@ it('keeps a denial that wins while a live policy poll is in flight', async () =>
   expect(JSON.stringify(result)).toContain('denied');
   expect(
     hostedActionAllowed(
-      (await session.authority.action(requestId))!,
+      session.authority.action(requestId)!,
       HOSTED_TOOL_APPROVAL_POLICY,
     ),
   ).toBe(false);
@@ -4516,7 +4495,7 @@ it('does not resolve a pending Action when recovery blocks during the policy rea
   blocked = true;
   release();
   await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   expect(broker.execute).not.toHaveBeenCalled();
 });
 
@@ -4551,7 +4530,7 @@ it('keeps an explicit Hook ask pending under a live Full Access selection', asyn
     fire.mock.calls.find(([event]) => event === HookEventName.PreToolUse)?.[2],
   ).toMatchObject({ permission_mode: 'yolo' });
   await new Promise((resolve) => setTimeout(resolve, 1_100));
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   expect(broker.execute).not.toHaveBeenCalled();
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
   const result = await running;
@@ -4578,7 +4557,7 @@ it('asks before an edit in default mode and runs the batch once the owner allows
   expect((await session.sink.project()).map((record) => record.type)).toEqual([
     'assistant',
   ]);
-  const action = (await session.authority.action(requestId))!;
+  const action = session.authority.action(requestId)!;
   expect(action).toMatchObject({
     kind: 'permission',
     source: 'tool_call',
@@ -4618,13 +4597,10 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     responses.map((part) => part.functionResponse?.response?.['error']),
   ).toEqual([undefined, undefined]);
   expect(broker.execute).toHaveBeenCalledTimes(2);
-  expect(await actionIds()).toEqual([requestId]);
+  expect(actionIds()).toEqual([requestId]);
   expect(
-    (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    )
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
       .filter((event) => event.kind === 'tool.intent')
       .map((event) => event.payload['argsRef']),
   ).toContainEqual(invocationRef);
@@ -4679,11 +4655,9 @@ it('refuses a denied call in the model order and still runs the rest', async () 
     (await checkpoint()).tools?.items.map((item) => item.functionCallId),
   ).toEqual(['call-0']);
   expect(
-    (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'tool.intent'),
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.intent'),
   ).toHaveLength(1);
 });
 
@@ -4759,7 +4733,7 @@ it.each(['allow', 'deny'])(
     const options = JSON.parse(
       (
         await session.resources.read(
-          (await session.authority.action(requestId))!.optionsRef!,
+          session.authority.action(requestId)!.optionsRef!,
         )
       ).toString(),
     );
@@ -4781,11 +4755,9 @@ it.each(['allow', 'deny'])(
       expect(broker.prepare.mock.calls[0][1]).toBe(
         `sha256:${createHash('sha256').update(payload).digest('hex')}`,
       );
-      const intent = (await (
-        await session.authority
-          .iterateEvents(1, session.authority.committedSequence)
-          .collect(1_000_000)
-      ).find((event) => event.kind === 'tool.intent'))!;
+      const intent = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .find((event) => event.kind === 'tool.intent')!;
       const routed = JSON.parse(
         (
           await session.resources.read(
@@ -4831,12 +4803,10 @@ it('binds successive approvals for the same tool to their own inputs', async () 
     new AbortController().signal,
   );
   const first = await requested(1);
-  expect(await actionIds()).toEqual([first]);
+  expect(actionIds()).toEqual([first]);
   const firstOptions = JSON.parse(
     (
-      await session.resources.read(
-        (await session.authority.action(first))!.optionsRef!,
-      )
+      await session.resources.read(session.authority.action(first)!.optionsRef!)
     ).toString(),
   );
   expect(firstOptions.inputRef).toEqual(
@@ -4847,7 +4817,7 @@ it('binds successive approvals for the same tool to their own inputs', async () 
   const options = JSON.parse(
     (
       await session.resources.read(
-        (await session.authority.action(second))!.optionsRef!,
+        session.authority.action(second)!.optionsRef!,
       )
     ).toString(),
   );
@@ -4881,7 +4851,7 @@ it.each(['yolo', 'auto-edit'] as const)(
   async (mode) => {
     turn = createTurn(false, { mode });
     await turn.execute(calls, parts, 'model', new AbortController().signal);
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(broker.execute).toHaveBeenCalledTimes(2);
   },
 );
@@ -4894,8 +4864,8 @@ it('refuses a call whose approval expires unanswered', async () => {
     'model',
     new AbortController().signal,
   );
-  const [requestId] = await actionIds();
-  expect((await session.authority.action(requestId))?.state).toBe('expired');
+  const [requestId] = actionIds();
+  expect(session.authority.action(requestId)?.state).toBe('expired');
   expect(responses[0].functionResponse?.response?.['error']).toContain(
     'expired',
   );
@@ -4945,7 +4915,7 @@ it('cancels a waiting approval and refuses every call when the turn aborts', asy
   const requestId = await requested();
   controller.abort(new Error('turn cancelled'));
   await expect(running).rejects.toThrow('turn cancelled');
-  expect((await session.authority.action(requestId))?.state).toBe('cancelled');
+  expect(session.authority.action(requestId)?.state).toBe('cancelled');
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(await toolResults()).toEqual([['call-0', 'call-1']]);
   expect((await checkpoint()).continuation.phase).toBe(
@@ -4992,7 +4962,7 @@ it('refuses an Action response that does not match the request', async () => {
     await expect(
       resolveHostedAction(session, waiters, requestId, body),
     ).resolves.toEqual({ status: 400, code: 'invalid_action_response' });
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('allow'));
   await running;
   expect(broker.execute).toHaveBeenCalledOnce();
@@ -5016,7 +4986,7 @@ it('keeps an answer retryable when it fails before any write', async () => {
   ).rejects.toThrow('store unavailable');
   now.mockRestore();
   expect(session.authority.writesStopped).toBe(false);
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
   ).resolves.toMatchObject({ status: 200 });
@@ -5052,7 +5022,7 @@ it('stops the Turn when a late answer cannot record the expiry', async () => {
   await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
   expect(broker.prepare).not.toHaveBeenCalled();
   // Still late and still requested: the answer must not try to write.
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
   ).resolves.toEqual({
@@ -5123,7 +5093,7 @@ it('answers what a blocked Session already recorded but writes nothing', async (
     reason: 'turn_blocked',
   });
   expect(publish).not.toHaveBeenCalled();
-  expect((await session.authority.action(waiting))?.state).toBe('requested');
+  expect(session.authority.action(waiting)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, waiting, answer('deny'));
   await running;
 });
@@ -5148,7 +5118,7 @@ it('stops asking once an approval in the Turn has expired', async () => {
     'model',
     new AbortController().signal,
   );
-  expect(await actionIds()).toHaveLength(1);
+  expect(actionIds()).toHaveLength(1);
   expect(
     responses.map((part) => part.functionResponse?.response?.['error']),
   ).toEqual([
@@ -5161,7 +5131,7 @@ it('stops asking once an approval in the Turn has expired', async () => {
     'model',
     new AbortController().signal,
   );
-  expect(await actionIds()).toHaveLength(1);
+  expect(actionIds()).toHaveLength(1);
   expect(broker.execute).toHaveBeenCalledOnce();
   expect(next[1].functionResponse?.response?.['error']).toContain(
     'expired unanswered',
@@ -5189,7 +5159,7 @@ it('keeps a decision that lands just before the waiter ends the Action', async (
   );
   controller.abort(new Error('turn cancelled'));
   await expect(running).rejects.toThrow('turn cancelled');
-  expect((await session.authority.action(requestId))?.state).toBe('decided');
+  expect(session.authority.action(requestId)?.state).toBe('decided');
   expect(broker.prepare).not.toHaveBeenCalled();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
@@ -5275,11 +5245,11 @@ it('does not ask about later calls once the turn is cancelled', async () => {
   const first = await requested();
   controller.abort(new Error('turn cancelled'));
   await expect(running).rejects.toThrow('turn cancelled');
-  expect(await actionIds()).toEqual([first]);
+  expect(actionIds()).toEqual([first]);
   expect(
     publish.mock.calls.filter(([kind]) => kind === 'managed-action-options'),
   ).toHaveLength(1);
-  expect((await session.authority.action(first))?.state).toBe('cancelled');
+  expect(session.authority.action(first)?.state).toBe('cancelled');
   expect(await toolResults()).toEqual([['call-0', 'call-1']]);
   expect(await toolResultErrors()).toEqual([
     'The turn was cancelled before this tool call ran.',
@@ -5301,7 +5271,7 @@ it('opens no Action when the turn is cancelled while one is prepared', async () 
   await expect(
     turn.execute(calls, parts, 'model', controller.signal),
   ).rejects.toThrow('turn cancelled');
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(await toolResults()).toEqual([['call-0', 'call-1']]);
   await turn.finish();
@@ -5330,7 +5300,7 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
     new AbortController().signal,
   );
   const requestId = await requested();
-  const action = (await session.authority.action(requestId))!;
+  const action = session.authority.action(requestId)!;
   const options = JSON.parse(
     (await session.resources.read(action.optionsRef!)).toString(),
   );
@@ -5426,7 +5396,7 @@ it('writes nothing once the Turn blocks during an answer', async () => {
     code: 'hosted_turn_recovery_required',
     reason: 'turn_blocked',
   });
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('allow'));
   await running;
 });
@@ -5527,7 +5497,7 @@ it('answers the loser of two different concurrent decisions with a conflict', as
     resolveHostedAction(session, waiters, requestId, answer('deny')),
   ]);
   const recorded = hostedActionAllowed(
-    (await session.authority.action(requestId))!,
+    session.authority.action(requestId)!,
     HOSTED_TOOL_APPROVAL_POLICY,
   )
     ? 'allow'
@@ -5574,7 +5544,7 @@ it('writes nothing once the Turn blocks while the decision is published', async 
     code: 'hosted_turn_recovery_required',
     reason: 'turn_blocked',
   });
-  expect((await session.authority.action(requestId))?.state).toBe('requested');
+  expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
   await running;
   expect(broker.execute).not.toHaveBeenCalled();
@@ -5677,9 +5647,7 @@ it.each(['decision', 'expiry'])(
       code: 'hosted_turn_recovery_required',
       reason: 'turn_blocked',
     });
-    expect((await session.authority.action(requestId))?.state).toBe(
-      'requested',
-    );
+    expect(session.authority.action(requestId)?.state).toBe('requested');
     expect(session.authority.writesStopped).toBe(false);
     expect(notify).toHaveBeenCalledWith(requestId);
     now?.mockRestore();
@@ -6352,8 +6320,8 @@ it.each<{
       },
       hookControl,
     } as unknown as HostedWorkspaceBroker;
-    const makeHooks = async () =>
-      await HostedHookSession.create(
+    const makeHooks = () =>
+      new HostedHookSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
         session,
         pin,
@@ -6367,7 +6335,7 @@ it.each<{
           ? ('default' as const)
           : ('yolo' as const),
     };
-    const hooks = await makeHooks();
+    const hooks = makeHooks();
     turn = createTurn(true, approval, hooks);
     const shellCall = {
       ...calls[0],
@@ -6511,10 +6479,10 @@ it.each<{
       for (const [kind, bytes] of publish!.mock.calls)
         if (kind === 'managed-hook-result')
           expect(bytes.length).toBeLessThanOrEqual(60 * 1024);
-      const marker = (await session.authority.extensionRecord(
+      const marker = session.authority.extensionRecord(
         'hook_execution',
         hostedHookOccurrenceId(event, `prompt:${shellCall.callId}`),
-      ))!.record as { resultRef: ManagedSessionDurableRef };
+      )!.record as { resultRef: ManagedSessionDurableRef };
       const saved = JSON.parse(
         (await session.resources.read(marker.resultRef)).toString(),
       );
@@ -6564,31 +6532,24 @@ it.each<{
               ? [`${event}:metadata`, event]
               : [event],
     );
-    const restored = createTurn(true, approval, await makeHooks());
+    const restored = createTurn(true, approval, makeHooks());
     const count = hookControl.mock.calls.length;
     const markerRefs = bothEvents
       ? new Set(
-          (
-            await Promise.all(
-              [HookEventName.PermissionRequest, HookEventName.PreToolUse].map(
-                async (eventName) => {
-                  const record = (await session.authority.extensionRecord(
-                    'hook_execution',
-                    hostedHookOccurrenceId(
-                      eventName,
-                      `prompt:${shellCall.callId}`,
-                    ),
-                  ))!.record as {
-                    inputRef: ManagedSessionDurableRef;
-                    resultRef: ManagedSessionDurableRef;
-                  };
-                  return [record.inputRef, record.resultRef].map(
-                    (ref) => ref.resourceId,
-                  );
-                },
-              ),
-            )
-          ).flat(),
+          [HookEventName.PermissionRequest, HookEventName.PreToolUse].flatMap(
+            (eventName) => {
+              const record = session.authority.extensionRecord(
+                'hook_execution',
+                hostedHookOccurrenceId(eventName, `prompt:${shellCall.callId}`),
+              )!.record as {
+                inputRef: ManagedSessionDurableRef;
+                resultRef: ManagedSessionDurableRef;
+              };
+              return [record.inputRef, record.resultRef].map(
+                (ref) => ref.resourceId,
+              );
+            },
+          ),
         )
       : undefined;
     const read = session.resources.read.bind(session.resources);
@@ -6646,8 +6607,8 @@ it.each<{
       );
       const blocked = vi
         .spyOn(session.authority, 'extensionRecord')
-        .mockImplementation(async (domain, id) => {
-          const entry = await originalView(domain, id);
+        .mockImplementation((domain, id) => {
+          const entry = originalView(domain, id);
           if (
             entry &&
             domain === 'hook_execution' &&
@@ -6674,7 +6635,7 @@ it.each<{
         });
       try {
         await expect(
-          createTurn(true, approval, await makeHooks()).resumeHookResults(
+          createTurn(true, approval, makeHooks()).resumeHookResults(
             responses,
             'model',
             new AbortController().signal,
@@ -6787,14 +6748,14 @@ it('keeps Unicode refusal replay blocked by a real unresolved sibling Hook', asy
       workspaceGeneration: '1',
     },
   } as unknown as HostedWorkspaceBroker;
-  const makeHooks = async () =>
-    await HostedHookSession.create(
+  const makeHooks = () =>
+    new HostedHookSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       pin,
       hookBroker,
     );
-  const hooks = await makeHooks();
+  const hooks = makeHooks();
   const malformed = {
     ...calls[0],
     name: 'run_shell_command',
@@ -6828,16 +6789,13 @@ it('keeps Unicode refusal replay blocked by a real unresolved sibling Hook', asy
       new AbortController().signal,
     ),
   ).rejects.toThrow('Hosted Hook requires reconciliation');
-  const child = (await (
-    await session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .collect(1_000_000)
-  )
+  const child = session.authority
+    .extensionRecordsInDomain('hook_execution')
     .map(
       (entry) =>
         entry.record as { hookId: string; run: Record<string, unknown> },
     )
-    .find((record) => record.hookId === 'unresolved'))!;
+    .find((record) => record.hookId === 'unresolved')!;
   expect(child.run).toMatchObject({
     state: 'recovery_blocked',
     execution: 'outcome_unknown',
@@ -6852,7 +6810,7 @@ it('keeps Unicode refusal replay blocked by a real unresolved sibling Hook', asy
   expect(marker.resultRef).toBeNull();
   expect(marker.run.execution).toBe('dispatch_started');
   await expect(
-    createTurn(true, undefined, await makeHooks()).resumeHookResults(
+    createTurn(true, undefined, makeHooks()).resumeHookResults(
       responses,
       'model',
       new AbortController().signal,
@@ -6911,7 +6869,7 @@ it.each(['assistant-commit', 'second-call'] as const)(
       },
       hookControl,
     } as unknown as HostedWorkspaceBroker;
-    const hooks = await HostedHookSession.create(
+    const hooks = new HostedHookSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       pin,
@@ -6947,8 +6905,8 @@ it.each(['assistant-commit', 'second-call'] as const)(
     );
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
-    expect(await hooks.hasPendingOperations()).toBe(false);
-    const restored = await HostedHookSession.create(
+    expect(hooks.hasPendingOperations).toBe(false);
+    const restored = new HostedHookSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       pin,
@@ -7043,7 +7001,7 @@ it('refuses tool dispatch when fail-closed permission evaluation is combined wit
       }),
     ),
   };
-  const hooks = await HostedHookSession.create(
+  const hooks = new HostedHookSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     pin,
@@ -7060,11 +7018,9 @@ it('refuses tool dispatch when fail-closed permission evaluation is combined wit
   expect(broker.execute).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(
-    (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'action.changed'),
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'action.changed'),
   ).toEqual([]);
 });
 
@@ -7102,7 +7058,7 @@ it('asks once, after PreToolUse and PermissionRequest, about the input PreToolUs
     JSON.parse(
       (
         await session.resources.read(
-          (await session.authority.action(approval))!.optionsRef!,
+          session.authority.action(approval)!.optionsRef!,
         )
       ).toString(),
     ),
@@ -7116,18 +7072,14 @@ it('asks once, after PreToolUse and PermissionRequest, about the input PreToolUs
   expect(broker.execute).not.toHaveBeenCalled();
   await resolveHostedAction(session, waiters, approval, answer('allow'));
   await running;
-  expect(await actionIds()).toEqual([approval]);
+  expect(actionIds()).toEqual([approval]);
   expect(broker.execute).toHaveBeenCalledOnce();
   expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(changed);
   // The Runtime is bound to exactly the input the owner approved.
   expect(
-    (
-      await (
-        await session.authority
-          .iterateEvents(1, session.authority.committedSequence)
-          .collect(1_000_000)
-      ).find((event) => event.kind === 'tool.intent')
-    )?.payload['argsRef'],
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .find((event) => event.kind === 'tool.intent')?.payload['argsRef'],
   ).toEqual(inputRef);
   expect(fire.mock.calls.map(([event]) => event)).toEqual([
     HookEventName.PreToolUse,
@@ -7159,7 +7111,7 @@ it.each(['allow', 'deny'] as const)(
       JSON.parse(
         (
           await session.resources.read(
-            (await session.authority.action(approval))!.optionsRef!,
+            session.authority.action(approval)!.optionsRef!,
           )
         ).toString(),
       ).requiresHumanDecision,
@@ -7288,15 +7240,15 @@ it.each<{
       },
       hookControl,
     } as unknown as HostedWorkspaceBroker;
-    const createHooks = async () =>
-      await HostedHookSession.create(
+    const createHooks = () =>
+      new HostedHookSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
         session,
         pin,
         hookBroker,
       );
     const mode = ordered ? 'default' : 'yolo';
-    turn = createTurn(false, { mode }, await createHooks());
+    turn = createTurn(false, { mode }, createHooks());
     const call = ordered
       ? {
           ...calls[0],
@@ -7381,7 +7333,7 @@ it.each<{
     }
     const history = await session.sink.project();
     const controls = hookControl.mock.calls.length;
-    const restored = createTurn(false, { mode }, await createHooks());
+    const restored = createTurn(false, { mode }, createHooks());
     expect(
       await restored.resumeHookResults(
         responses,
@@ -7719,8 +7671,8 @@ it.each([
       },
       hookControl: control,
     } as unknown as HostedWorkspaceBroker;
-    const createHooks = async () => {
-      const hooks = await HostedHookSession.create(
+    const createHooks = () => {
+      const hooks = new HostedHookSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
         session,
         pin,
@@ -7734,7 +7686,7 @@ it.each([
       executionStatus: 'success',
       responseParts: [{ text: 'x'.repeat(snapshotBytes ? 1024 : 36 * 1024) }],
     });
-    turn = createTurn(false, { mode: 'yolo' }, await createHooks());
+    turn = createTurn(false, { mode: 'yolo' }, createHooks());
     await turn.execute(calls, parts, 'model', new AbortController().signal);
     expect(turn.hookStopReason).toContain('60 KiB');
     const saved = await checkpoint();
@@ -7764,7 +7716,7 @@ it.each([
         return publishAfter(kind, bytes);
       },
     );
-    const restored = createTurn(false, { mode: 'yolo' }, await createHooks());
+    const restored = createTurn(false, { mode: 'yolo' }, createHooks());
     await restored.resumeCommittedResults();
     turn = restored;
     expect(
@@ -7859,8 +7811,8 @@ function durableHooks(
     },
     hookControl,
   } as unknown as HostedWorkspaceBroker;
-  const create = async () => {
-    const hooks = await HostedHookSession.create(
+  const create = () => {
+    const hooks = new HostedHookSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       pin,
@@ -7876,10 +7828,10 @@ function durableHooks(
 
 // A saved occurrence as the Session holds it: its marker, plan and result.
 async function savedHook(event: HookEventName, occurrenceId: string) {
-  const marker = (await session.authority.extensionRecord(
+  const marker = session.authority.extensionRecord(
     'hook_execution',
     hostedHookOccurrenceId(event, occurrenceId),
-  ))!;
+  )!;
   const record = parseHookExecution(marker.record);
   const read = async (ref: ManagedSessionDurableRef) =>
     JSON.parse((await session.resources.read(ref)).toString()) as Record<
@@ -7933,7 +7885,7 @@ it.each([
       [HookEventName.PreToolUse]: () => output,
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    turn = createTurn(false, { mode: 'default' }, await create());
+    turn = createTurn(false, { mode: 'default' }, create());
     const signal = new AbortController().signal;
     const responses = await turn.execute(
       [calls[1]],
@@ -7948,7 +7900,7 @@ it.each([
     ]);
     expect(seen[0].input['tool_input']).toEqual(editA);
     expect(reportedInputs(seen[1])).toEqual([editA]);
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     const occurrence = `prompt:${calls[1].callId}`;
@@ -7958,14 +7910,14 @@ it.each([
       output: { hookSpecificOutput: { updatedInput: editC } },
     });
     expect(
-      await session.authority.extensionRecord(
+      session.authority.extensionRecord(
         'hook_execution',
         hostedHookOccurrenceId(HookEventName.PermissionRequest, occurrence),
       ),
     ).toBeUndefined();
     const history = await session.sink.project();
     await expect(
-      createTurn(false, { mode: 'default' }, await create()).resumeHookResults(
+      createTurn(false, { mode: 'default' }, create()).resumeHookResults(
         responses,
         'model',
         signal,
@@ -7988,7 +7940,7 @@ it.each([null, 'text', ['x'], 0, false])(
       [HookEventName.PostToolUse]: () => undefined,
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    turn = createTurn(false, { mode: 'default' }, await create());
+    turn = createTurn(false, { mode: 'default' }, create());
     await turn.execute(
       [calls[1]],
       [parts[1]],
@@ -8006,7 +7958,7 @@ it.each([null, 'text', ['x'], 0, false])(
     expect(seen[1].input['tool_input']).toEqual(editA);
     expect(seen[2].input['tool_input']).toEqual(editB);
     expect(reportedInputs(seen[3])).toEqual([editB]);
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
   },
 );
 
@@ -8025,7 +7977,7 @@ it('reports each call of a batch with the input its PreToolUse decision left', a
     [HookEventName.PostToolUse]: () => undefined,
     [HookEventName.PostToolBatch]: () => undefined,
   });
-  turn = createTurn(false, { mode: 'yolo' }, await create());
+  turn = createTurn(false, { mode: 'yolo' }, create());
   const responses = await turn.execute(
     calls,
     parts,
@@ -8059,12 +8011,7 @@ it('reports the Skill a PreToolUse ask left in place, never the replacement it a
     }),
     [HookEventName.PostToolBatch]: () => undefined,
   });
-  turn = createTurn(
-    false,
-    { mode: 'default' },
-    await create(),
-    publishedSkills(),
-  );
+  turn = createTurn(false, { mode: 'default' }, create(), publishedSkills());
   const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
   const responses = await turn.execute(
     [call],
@@ -8091,7 +8038,7 @@ it('reads an oversized PreToolUse input the earlier order saved back through its
     },
     HookEventName.PreToolUse,
   );
-  const hooks = await create();
+  const hooks = create();
   const signal = new AbortController().signal;
   const occurrence = `prompt:${calls[1].callId}`;
   await commit('assistant', [parts[1]], 'model');
@@ -8131,11 +8078,11 @@ it('reads an oversized PreToolUse input the earlier order saved back through its
   expect(plan['input']).not.toHaveProperty('tool_input');
   expect(plan).not.toHaveProperty('toolInputOrder');
   expect(
-    await createTurn(
-      false,
-      { mode: 'default' },
-      await create(),
-    ).resumeHookResults(refused, 'model', signal),
+    await createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+      refused,
+      'model',
+      signal,
+    ),
   ).toEqual(refused);
   expect(seen.map(({ event }) => event)).toEqual([
     HookEventName.PermissionRequest,
@@ -8154,7 +8101,7 @@ it('proves an oversized PreToolUse plan against the model input and refuses befo
     },
     HookEventName.PreToolUse,
   );
-  turn = createTurn(false, { mode: 'default' }, await create());
+  turn = createTurn(false, { mode: 'default' }, create());
   const signal = new AbortController().signal;
   const responses = await turn.execute([calls[1]], [parts[1]], 'model', signal);
   expect(responses[0].functionResponse?.response?.['error']).toContain(
@@ -8170,20 +8117,20 @@ it('proves an oversized PreToolUse plan against the model input and refuses befo
   });
   expect(plan['input']).not.toHaveProperty('tool_input');
   expect(
-    await session.authority.extensionRecord(
+    session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(HookEventName.PermissionRequest, occurrence),
     ),
   ).toBeUndefined();
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.prepare).not.toHaveBeenCalled();
   const history = await session.sink.project();
   expect(
-    await createTurn(
-      false,
-      { mode: 'default' },
-      await create(),
-    ).resumeHookResults(responses, 'model', signal),
+    await createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+      responses,
+      'model',
+      signal,
+    ),
   ).toEqual(responses);
   expect(seen).toHaveLength(1);
   expect(await session.sink.project()).toEqual(history);
@@ -8231,7 +8178,7 @@ it('completes and replays durable Hook results after a live pending approval cha
     mode: 'default' as const,
     readSettings: async () => ({ mode, timeoutMs: 60_000 }),
   };
-  turn = createTurn(false, approval, await create());
+  turn = createTurn(false, approval, create());
   const controller = new AbortController();
   const { signal } = controller;
   const running = turn.execute([calls[1]], [parts[1]], 'model', signal);
@@ -8240,7 +8187,7 @@ it('completes and replays durable Hook results after a live pending approval cha
     const requestId = await requested();
     mode = 'yolo';
     const responses = await running;
-    expect((await session.authority.action(requestId))?.state).toBe('decided');
+    expect(session.authority.action(requestId)?.state).toBe('decided');
     expect(broker.execute).toHaveBeenCalledOnce();
     expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
     expect(
@@ -8251,7 +8198,7 @@ it('completes and replays durable Hook results after a live pending approval cha
     ).toMatchObject({ permission_mode: 'yolo' });
     const history = await session.sink.project();
     await expect(
-      createTurn(false, approval, await create()).resumeHookResults(
+      createTurn(false, approval, create()).resumeHookResults(
         responses,
         'model',
         signal,
@@ -8280,7 +8227,7 @@ it('preserves each durable Hook mode when the live selection changes within a ba
     mode: 'default' as const,
     readSettings: async () => ({ mode, timeoutMs: 60_000 }),
   };
-  turn = createTurn(false, approval, await create());
+  turn = createTurn(false, approval, create());
   const signal = new AbortController().signal;
   const responses = await turn.execute(calls, parts, 'model', signal);
   expect(
@@ -8292,7 +8239,7 @@ it('preserves each durable Hook mode when the live selection changes within a ba
   const count = seen.length;
   mode = 'yolo';
   await expect(
-    createTurn(false, approval, await create()).resumeHookResults(
+    createTurn(false, approval, create()).resumeHookResults(
       responses,
       'model',
       signal,
@@ -8311,7 +8258,7 @@ it('proves a digest-only Hook refusal after the live approval mode changes', asy
     },
     HookEventName.PreToolUse,
   );
-  const hooks = await create();
+  const hooks = create();
   const fire = hooks.fire.bind(hooks);
   vi.spyOn(hooks, 'fire').mockImplementation(async (...args) => {
     const output = await fire(...args);
@@ -8332,7 +8279,7 @@ it('proves a digest-only Hook refusal after the live approval mode changes', asy
   ).toHaveProperty('refusedInputDigest');
   expect(broker.execute).not.toHaveBeenCalled();
   await expect(
-    createTurn(false, approval, await create()).resumeHookResults(
+    createTurn(false, approval, create()).resumeHookResults(
       responses,
       'model',
       signal,
@@ -8348,7 +8295,7 @@ it('runs what a PermissionRequest allow replaced on the input PreToolUse left, w
     [HookEventName.PostToolUse]: () => undefined,
     [HookEventName.PostToolBatch]: () => undefined,
   });
-  turn = createTurn(false, { mode: 'default' }, await create());
+  turn = createTurn(false, { mode: 'default' }, create());
   const signal = new AbortController().signal;
   const responses = await turn.execute([calls[1]], [parts[1]], 'model', signal);
   expect(hookInputs(seen)).toEqual([
@@ -8357,14 +8304,12 @@ it('runs what a PermissionRequest allow replaced on the input PreToolUse left, w
     [HookEventName.PostToolUse, editC],
     [HookEventName.PostToolBatch, editC],
   ]);
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.execute).toHaveBeenCalledOnce();
   expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editC);
-  const intent = (await (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).find((event) => event.kind === 'tool.intent'))!;
+  const intent = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .find((event) => event.kind === 'tool.intent')!;
   expect(
     await toolInputOf(
       intent.payload['argsRef'] as unknown as ManagedSessionDurableRef,
@@ -8383,11 +8328,11 @@ it('runs what a PermissionRequest allow replaced on the input PreToolUse left, w
   const history = await session.sink.project();
   for (const attempt of [1, 2])
     expect(
-      await createTurn(
-        false,
-        { mode: 'default' },
-        await create(),
-      ).resumeHookResults(responses, 'model', signal),
+      await createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+        responses,
+        'model',
+        signal,
+      ),
       `attempt ${attempt}`,
     ).toEqual(responses);
   expect(seen).toHaveLength(4);
@@ -8413,7 +8358,7 @@ it.each(['allow', 'deny', 'expire', 'cancel'] as const)(
     turn = createTurn(
       false,
       { mode: 'default', timeoutMs: outcome === 'expire' ? 1_000 : 60_000 },
-      await create(),
+      create(),
     );
     const controller = new AbortController();
     const running = turn.execute(
@@ -8434,9 +8379,9 @@ it.each(['allow', 'deny', 'expire', 'cancel'] as const)(
         await running;
       }
     }
-    const [approval, ...others] = await actionIds();
+    const [approval, ...others] = actionIds();
     expect(others).toEqual([]);
-    expect((await session.authority.action(approval))?.state).toBe(
+    expect(session.authority.action(approval)?.state).toBe(
       outcome === 'expire'
         ? 'expired'
         : outcome === 'cancel'
@@ -8446,7 +8391,7 @@ it.each(['allow', 'deny', 'expire', 'cancel'] as const)(
     const options = JSON.parse(
       (
         await session.resources.read(
-          (await session.authority.action(approval))!.optionsRef!,
+          session.authority.action(approval)!.optionsRef!,
         )
       ).toString(),
     );
@@ -8471,7 +8416,7 @@ it('replaces the whole input with each Hook replacement, never merging fields ba
     [HookEventName.PostToolUse]: () => undefined,
     [HookEventName.PostToolBatch]: () => undefined,
   });
-  turn = createTurn(false, { mode: 'default' }, await create());
+  turn = createTurn(false, { mode: 'default' }, create());
   await turn.execute(
     [calls[1]],
     [parts[1]],
@@ -8528,7 +8473,7 @@ it.each([
       [HookEventName.PermissionRequest]: () => output,
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    turn = createTurn(false, { mode: 'default' }, await create());
+    turn = createTurn(false, { mode: 'default' }, create());
     const signal = new AbortController().signal;
     const responses = await turn.execute(
       [calls[1]],
@@ -8542,16 +8487,16 @@ it.each([
       [HookEventName.PermissionRequest, editB],
       [HookEventName.PostToolBatch, editB],
     ]);
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     const history = await session.sink.project();
     expect(
-      await createTurn(
-        false,
-        { mode: 'default' },
-        await create(),
-      ).resumeHookResults(responses, 'model', signal),
+      await createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+        responses,
+        'model',
+        signal,
+      ),
     ).toEqual(responses);
     expect(seen).toHaveLength(3);
     expect(await session.sink.project()).toEqual(history);
@@ -8585,7 +8530,7 @@ it.each([
       [HookEventName.PostToolUse]: () => undefined,
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    turn = createTurn(false, { mode: 'default' }, await create());
+    turn = createTurn(false, { mode: 'default' }, create());
     const running = turn.execute(
       [calls[1]],
       [parts[1]],
@@ -8600,7 +8545,7 @@ it.each([
       await resolveHostedAction(session, waiters, approval, answer('allow'));
     }
     await running;
-    expect(await actionIds()).toHaveLength(asks ? 1 : 0);
+    expect(actionIds()).toHaveLength(asks ? 1 : 0);
     expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(runs);
     expect(hookInputs(seen).slice(2)).toEqual([
       [HookEventName.PostToolUse, runs],
@@ -8637,7 +8582,7 @@ it.each([
       [HookEventName.PostToolUse]: () => undefined,
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    turn = createTurn(false, { mode: 'default' }, await create());
+    turn = createTurn(false, { mode: 'default' }, create());
     const responses = await turn.execute(
       [calls[1]],
       [parts[1]],
@@ -8649,7 +8594,7 @@ it.each([
     );
     expect(seen.map(({ event }) => event)).toEqual(events);
     expect(reportedInputs(seen.at(-1))).toEqual([reported]);
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
   },
@@ -8662,7 +8607,7 @@ it('refuses a Hook replacement whose encoding exceeds the inline Session Store l
     [HookEventName.PermissionRequest]: allowWith(large),
     [HookEventName.PostToolBatch]: () => undefined,
   });
-  turn = createTurn(false, { mode: 'default' }, await create());
+  turn = createTurn(false, { mode: 'default' }, create());
   const responses = await turn.execute(
     [calls[1]],
     [parts[1]],
@@ -8727,7 +8672,7 @@ it.each([
       [HookEventName.PermissionRequest]: allow ? allowWith() : () => undefined,
       [HookEventName.PostToolUse]: () => undefined,
     });
-    turn = createTurn(false, { mode }, await create());
+    turn = createTurn(false, { mode }, create());
     const running = turn.execute(
       [calls[call]],
       [parts[call]],
@@ -8745,7 +8690,7 @@ it.each([
     expect(
       seen.filter(({ event }) => event === HookEventName.PermissionRequest),
     ).toHaveLength(permission ? 1 : 0);
-    expect(await actionIds()).toHaveLength(asks ? 1 : 0);
+    expect(actionIds()).toHaveLength(asks ? 1 : 0);
     expect(broker.execute).toHaveBeenCalledOnce();
   },
 );
@@ -8760,7 +8705,7 @@ it('refuses a PreToolUse ask when the Session has no approval policy', async () 
     }),
     [HookEventName.PermissionRequest]: allowWith(),
   });
-  turn = createTurn(false, undefined, await create());
+  turn = createTurn(false, undefined, create());
   const responses = await turn.execute(
     [calls[1]],
     [parts[1]],
@@ -8783,7 +8728,7 @@ it('refuses the call when the turn is cancelled during its PermissionRequest', a
       return allowWith(editC)();
     },
   });
-  turn = createTurn(false, { mode: 'default' }, await create());
+  turn = createTurn(false, { mode: 'default' }, create());
   await expect(
     turn.execute([calls[1]], [parts[1]], 'model', controller.signal),
   ).rejects.toThrow('turn cancelled');
@@ -8794,7 +8739,7 @@ it('refuses the call when the turn is cancelled during its PermissionRequest', a
   expect(await toolResultErrors()).toEqual([
     'PermissionRequest Hook denied the call.',
   ]);
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
 });
@@ -8808,7 +8753,7 @@ it('proves an oversized PermissionRequest plan against the input PreToolUse left
     },
     HookEventName.PermissionRequest,
   );
-  turn = createTurn(false, { mode: 'default' }, await create());
+  turn = createTurn(false, { mode: 'default' }, create());
   const signal = new AbortController().signal;
   const responses = await turn.execute([calls[1]], [parts[1]], 'model', signal);
   expect(responses[0].functionResponse?.response?.['error']).toBe(
@@ -8829,11 +8774,11 @@ it('proves an oversized PermissionRequest plan against the input PreToolUse left
   expect(broker.prepare).not.toHaveBeenCalled();
   const history = await session.sink.project();
   expect(
-    await createTurn(
-      false,
-      { mode: 'default' },
-      await create(),
-    ).resumeHookResults(responses, 'model', signal),
+    await createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+      responses,
+      'model',
+      signal,
+    ),
   ).toEqual(responses);
   expect(seen).toHaveLength(2);
   expect(await session.sink.project()).toEqual(history);
@@ -8899,7 +8844,7 @@ it('binds an MCP call to the arguments its Hooks left and renews only its grant'
     [HookEventName.PreToolUse, { text: 'A' }],
     [HookEventName.PermissionRequest, { text: 'B' }],
   ]);
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
   expect(broker.execute).toHaveBeenCalledOnce();
   const payload = JSON.parse(broker.execute.mock.calls[0][1]);
   const final = toolInput.mock.calls.at(-1)!;
@@ -8926,7 +8871,7 @@ async function saveEarlierOrder(
     ...(pre ? { [HookEventName.PreToolUse]: pre } : {}),
     [HookEventName.PostToolBatch]: () => undefined,
   });
-  const hooks = await create();
+  const hooks = create();
   const signal = new AbortController().signal;
   const occurrence = `prompt:${calls[1].callId}`;
   await commit('assistant', [parts[1]], 'model');
@@ -9004,7 +8949,7 @@ it.each([
         await createTurn(
           false,
           { mode: 'default' },
-          await create(),
+          create(),
         ).resumeHookResults(refused, 'model', signal),
         `attempt ${attempt}`,
       ).toEqual(refused);
@@ -9102,7 +9047,7 @@ it.each([
       [HookEventName.PermissionRequest]: allowWith(editC),
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    const hooks = await create();
+    const hooks = create();
     const signal = new AbortController().signal;
     await commit('assistant', [parts[1]], 'model');
     await save((event, input, order) =>
@@ -9134,7 +9079,7 @@ it.each([
     const dispatched = seen.length;
     const history = await session.sink.project();
     await expect(
-      createTurn(false, { mode: 'default' }, await create()).resumeHookResults(
+      createTurn(false, { mode: 'default' }, create()).resumeHookResults(
         refused,
         'model',
         signal,
@@ -9143,7 +9088,7 @@ it.each([
     expect(seen).toHaveLength(dispatched);
     expect(await session.sink.project()).toEqual(history);
     expect(
-      await session.authority.extensionRecord(
+      session.authority.extensionRecord(
         'hook_execution',
         hostedHookOccurrenceId(
           HookEventName.PostToolBatch,
@@ -9171,9 +9116,7 @@ it('refuses to guess an oversized PreToolUse input no saved record reproduces', 
   const signal = new AbortController().signal;
   await commit('assistant', [parts[1]], 'model');
   // PreToolUse ran on a replacement whose PermissionRequest record is gone.
-  await (
-    await create()
-  ).fire(
+  await create().fire(
     HookEventName.PreToolUse,
     `prompt:${calls[1].callId}`,
     {
@@ -9194,7 +9137,7 @@ it('refuses to guess an oversized PreToolUse input no saved record reproduces', 
   await commit('tool_result', refused, 'model');
   const history = await session.sink.project();
   await expect(
-    createTurn(false, { mode: 'default' }, await create()).resumeHookResults(
+    createTurn(false, { mode: 'default' }, create()).resumeHookResults(
       refused,
       'model',
       signal,
@@ -9222,7 +9165,7 @@ async function saveRefusedCall(oversized: boolean) {
     },
     oversized ? HookEventName.PostToolBatch : undefined,
   );
-  const hooks = await create();
+  const hooks = create();
   const signal = new AbortController().signal;
   const occurrence = `prompt:${calls[1].callId}`;
   await commit('assistant', [parts[1]], 'model');
@@ -9298,7 +9241,7 @@ it.each([false, true])(
     const dispatched = seen.length;
     const before = await session.sink.project();
     for (const attempt of [1, 2]) {
-      const restored = createTurn(false, { mode: 'default' }, await create());
+      const restored = createTurn(false, { mode: 'default' }, create());
       expect(
         await restored.resumeHookResults(
           await toolResultParts(),
@@ -9351,7 +9294,7 @@ it.each([
     const dispatched = seen.length;
     const history = await session.sink.project();
     await expect(
-      createTurn(false, { mode: 'default' }, await create()).resumeHookResults(
+      createTurn(false, { mode: 'default' }, create()).resumeHookResults(
         refused,
         'model',
         signal,
@@ -9380,7 +9323,7 @@ it.each([
       }),
       [HookEventName.PostToolBatch]: () => undefined,
     });
-    const hooks = await create();
+    const hooks = create();
     const fire = hooks.fire.bind(hooks);
     vi.spyOn(hooks, 'fire').mockImplementation(
       (
@@ -9412,9 +9355,7 @@ it.each([
     ).rejects.toThrow('Harness lost');
     const saved = await toolResultParts();
     // The earlier release reported the raw replacement as the call's input.
-    await (
-      await create()
-    ).fire(
+    await create().fire(
       HookEventName.PostToolUse,
       `prompt:${calls[0].callId}`,
       {
@@ -9427,7 +9368,7 @@ it.each([
       },
       signal,
     );
-    const resumed = createTurn(false, { mode: 'yolo' }, await create());
+    const resumed = createTurn(false, { mode: 'yolo' }, create());
     if (!replays) {
       // A call whose Hooks ran in the new order never had that reading.
       const history = await session.sink.project();
@@ -9794,17 +9735,14 @@ it.each([
   if (failure === 'missing-message-id') delete saved.pendingMessageId;
   if (failure === 'stranger-turn') saved.pendingTurn = 'stranger';
   if (failure === 'incomplete-results') {
-    const iterate = session.sink.iterateMessageRecords.bind(session.sink);
-    vi.spyOn(session.sink, 'iterateMessageRecords').mockImplementation(
-      async function* (...args) {
-        const records: ChatRecord[] = [];
-        for await (const record of iterate(...args)) records.push(record);
-        const lastResult = records.findLastIndex(
-          (item) => item.type === 'tool_result',
-        );
-        yield* records.filter((_, index) => index !== lastResult);
-      },
-    );
+    const project = session.sink.project.bind(session.sink);
+    vi.spyOn(session.sink, 'project').mockImplementation(async (...args) => {
+      const records = await project(...args);
+      const lastResult = records.findLastIndex(
+        (item) => item.type === 'tool_result',
+      );
+      return records.filter((_, index) => index !== lastResult);
+    });
   }
   await commitHostedFileHistory(session, saved);
   broker.fileHistory.mockResolvedValue(
@@ -10295,11 +10233,9 @@ describe('hosted Monitor admission arm', () => {
       deliveryStatus: 'blocked',
       historyRevision: null,
     });
-    const receipts = (
-      await session.authority
-        .iterateEvents(1, session.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter((event) => event.kind === 'tool.receipt');
+    const receipts = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt');
     expect(receipts).toHaveLength(1);
     expect(receipts[0]!.payload).toMatchObject({
       executionCallId: 'monitor-execution',
@@ -11063,11 +10999,9 @@ it('admits a background Shell through its child_run orchestrator and lands the d
     'tool_result',
     'ack',
   ]);
-  const receipts = (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'tool.receipt');
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
   expect(receipts).toHaveLength(1);
   expect(receipts[0]!.payload).toMatchObject({
     executionCallId: 'shell-execution',
@@ -11336,11 +11270,9 @@ it('answers a retried accept from the journal without minting a rerun', async ()
   expect(
     rig.orchestrator.calls.filter(([name]) => name === 'attach'),
   ).toHaveLength(1);
-  const receipts = (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'tool.receipt');
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
   expect(receipts).toHaveLength(1);
 });
 
@@ -11367,11 +11299,9 @@ it('tolerates a crash between attach and journal instead of a rerun', async () =
   expect(
     rig.orchestrator.calls.filter(([name]) => name === 'attach'),
   ).toHaveLength(0);
-  const receipts = (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'tool.receipt');
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
   expect(receipts).toHaveLength(1);
   expect(broker.acknowledgeV3).toHaveBeenCalledWith('shell-execution', {
     executionCallId: 'shell-execution',
@@ -11413,11 +11343,9 @@ it('records a proven-unstarted background refuse as start_failed and lands the u
     'close_not_started',
     'tool_result',
   ]);
-  const receipts = (
-    await session.authority
-      .iterateEvents(1, session.authority.committedSequence)
-      .collect(1_000_000)
-  ).filter((event) => event.kind === 'tool.receipt');
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
   expect(receipts).toHaveLength(1);
   expect(receipts[0]!.payload).toMatchObject({
     resultRef: null,
@@ -12790,7 +12718,7 @@ it.each(['auto', 'yolo'] as const)(
       'outer-command',
     );
     expect(permission).toMatchObject({ allowed: false, approvalMode: mode });
-    expect(await actionIds()).toEqual([]);
+    expect(actionIds()).toEqual([]);
     expect(broker.execute).not.toHaveBeenCalled();
   },
 );
@@ -12820,5 +12748,5 @@ it('honors an explicit Session allow rule for an extension command step', async 
     'outer-command',
   );
   expect(permission.allowed).toBe(true);
-  expect(await actionIds()).toEqual([]);
+  expect(actionIds()).toEqual([]);
 });

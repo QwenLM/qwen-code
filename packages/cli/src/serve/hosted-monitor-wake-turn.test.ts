@@ -19,7 +19,6 @@ import {
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 
 function world() {
-  const readRecords = vi.fn(async () => [] as ChatRecord[]);
   const agents = {
     markConsumed: vi.fn(async (_childRunId: string) => null),
   };
@@ -27,16 +26,13 @@ function world() {
     blocked: false,
     childAgents: agents as unknown as HostedChildAgentSession,
     managed: {
-      authority: { committedSequence: 1 },
       sink: {
-        async *iterateMessageRecords() {
-          yield* await readRecords();
-        },
+        project: vi.fn(async () => [] as ChatRecord[]),
         write: vi.fn(async () => undefined),
       },
     },
   };
-  return { session, agents, readRecords };
+  return { session, agents };
 }
 
 const TURN: HostedMonitorWakeTurn = {
@@ -109,9 +105,9 @@ describe('withChildAgentConsumption', () => {
   });
 
   it('rechecks cancellation after awaiting the attempt read', async () => {
-    const { session, readRecords } = world();
+    const { session } = world();
     let cancelled = false;
-    readRecords.mockImplementationOnce(async () => {
+    session.managed.sink.project.mockImplementationOnce(async () => {
       cancelled = true;
       return [];
     });
@@ -291,8 +287,8 @@ describe('withChildAgentConsumption', () => {
   });
 
   it('consumes nothing when a prior attempt already ran and died', async () => {
-    const { session, agents, readRecords } = world();
-    readRecords.mockResolvedValue([
+    const { session, agents } = world();
+    session.managed.sink.project.mockResolvedValue([
       { daemonPromptId: TURN.turnId } as unknown as ChatRecord,
     ]);
     const turn = withChildAgentConsumption(

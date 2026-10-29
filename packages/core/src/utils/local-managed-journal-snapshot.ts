@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openNoFollow, openSyncNoFollow } from './no-follow-open.js';
+import { openSyncNoFollow } from './no-follow-open.js';
 import {
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
@@ -107,15 +107,9 @@ export function readLocalJournalBytes(
         current.isFile() &&
         current.dev === before.dev &&
         current.ino === before.ino &&
-        (expectedBytes === undefined
-          ? after.size >= size
-          : after.size === expectedBytes) &&
+        after.size >= size &&
         ((after.ctimeMs === before.ctimeMs &&
           after.mtimeMs === before.mtimeMs) ||
-          (expectedBytes !== undefined &&
-            after.mtimeMs === before.mtimeMs &&
-            after.nlink >= 1 &&
-            after.nlink < before.nlink) ||
           (maxBytes !== undefined &&
             after.size > before.size &&
             readDescriptorPrefix(fd, size).equals(bytes))),
@@ -131,127 +125,6 @@ export function readLocalJournalBytes(
     throw error;
   } finally {
     fs.closeSync(fd);
-  }
-}
-
-export async function* readLocalJournalStream(
-  filePath: string,
-  maxBytes?: number,
-): AsyncGenerator<Buffer> {
-  const handle = await openNoFollow(filePath);
-  try {
-    const before = await handle.stat();
-    requireSnapshot(before.isFile(), 'is not a regular file');
-    const size =
-      maxBytes === undefined ? before.size : Math.min(maxBytes, before.size);
-    requireSnapshot(
-      Number.isSafeInteger(size) && size >= 0,
-      'byte bound is invalid',
-    );
-    const hasher = createHash('sha256');
-    let position = 0;
-    while (position < size) {
-      const bytes = Buffer.alloc(Math.min(64 * 1024, size - position));
-      const { bytesRead } = await handle.read(
-        bytes,
-        0,
-        bytes.byteLength,
-        position,
-      );
-      requireSnapshot(bytesRead > 0, 'file ended before its frozen boundary');
-      position += bytesRead;
-      const chunk = bytes.subarray(0, bytesRead);
-      hasher.update(chunk);
-      yield chunk;
-    }
-    const after = await handle.stat();
-    const current = await fs.promises.lstat(filePath);
-    const sameMetadata =
-      after.ctimeMs === before.ctimeMs && after.mtimeMs === before.mtimeMs;
-    let samePrefix = false;
-    if (!sameMetadata && maxBytes !== undefined && after.size > before.size) {
-      const repeated = createHash('sha256');
-      position = 0;
-      while (position < size) {
-        const bytes = Buffer.alloc(Math.min(64 * 1024, size - position));
-        const { bytesRead } = await handle.read(
-          bytes,
-          0,
-          bytes.byteLength,
-          position,
-        );
-        requireSnapshot(bytesRead > 0, 'file ended before its frozen boundary');
-        position += bytesRead;
-        repeated.update(bytes.subarray(0, bytesRead));
-      }
-      samePrefix = repeated.digest('hex') === hasher.digest('hex');
-    }
-    requireSnapshot(
-      !current.isSymbolicLink() &&
-        current.isFile() &&
-        current.dev === before.dev &&
-        current.ino === before.ino &&
-        after.size >= size &&
-        (sameMetadata || samePrefix),
-      'file changed while reading',
-    );
-  } finally {
-    await handle.close();
-  }
-}
-
-/** Retains only ownership/header/base records and at most one read-ahead chunk. */
-export async function readLocalJournalControlPrefix(
-  chunks: AsyncIterable<Buffer>,
-): Promise<{
-  readonly bytes: Buffer;
-  readonly rest: AsyncIterable<Buffer>;
-}> {
-  const iterator = chunks[Symbol.asyncIterator]();
-  let bytes = Buffer.alloc(0);
-  let offset = 0;
-  let owner = false;
-  let header = false;
-  const rest: AsyncIterable<Buffer> = {
-    [Symbol.asyncIterator]: () => iterator,
-  };
-  for (;;) {
-    const next = await iterator.next();
-    if (next.done) return { bytes, rest };
-    bytes = Buffer.concat([bytes, next.value]);
-    let end: number;
-    while ((end = bytes.indexOf(10, offset)) >= 0) {
-      const line = bytes.subarray(offset, end);
-      requireSnapshot(
-        line.byteLength <= MANAGED_SESSION_LIMITS.maxEventBytes,
-        'control record exceeds its byte limit',
-      );
-      const record = localJournalObject(
-        parseManagedSessionRecordJson(
-          line.toString('utf8'),
-          MANAGED_SESSION_LIMITS.maxEventBytes,
-        ),
-      );
-      offset = end + 1;
-      if (header) return { bytes, rest };
-      if (record['subtype'] === 'session_execution_engine' && !owner) {
-        owner = true;
-        continue;
-      }
-      if (record['subtype'] === 'managed_session_header_v1') {
-        header = true;
-        if (
-          localJournalObject(record['managedSession'])['minimumReader'] ===
-          'managed-session/2'
-        )
-          continue;
-      }
-      return { bytes, rest };
-    }
-    requireSnapshot(
-      bytes.byteLength - offset <= MANAGED_SESSION_LIMITS.maxEventBytes,
-      'control record exceeds its byte limit',
-    );
   }
 }
 

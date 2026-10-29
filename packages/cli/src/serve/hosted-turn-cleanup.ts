@@ -92,8 +92,8 @@ export async function oweHostedTurnCleanup(
     promptId,
     broker.runtimeSessionId,
   );
-  const existing = await session.authority
-    .iterateEvents(1, session.authority.committedSequence)
+  const existing = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast(
       (event) =>
         event.kind === 'hosted.cleanup' &&
@@ -146,8 +146,8 @@ export async function confirmReplacedHostedTurnOwner(
     promptId,
     broker.runtimeSessionId,
   );
-  const existing = await session.authority
-    .iterateEvents(1, session.authority.committedSequence)
+  const existing = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast(
       (event) =>
         event.kind === 'hosted.cleanup' &&
@@ -214,23 +214,15 @@ async function readDescriptor(
   return body as unknown as CleanupDescriptor;
 }
 
-export async function hasHostedCleanupDebt(
-  session: ManagedSession,
-): Promise<boolean> {
-  const authority = session.authority;
-  const throughSequence = authority.committedSequence;
-  for await (const event of authority.iterateEvents(1, throughSequence)) {
-    if (event.kind !== 'hosted.cleanup' || event.payload['state'] !== 'owed')
-      continue;
-    const latest = await authority.findEvent(
-      'hosted.cleanup',
-      'cleanupId',
-      event.payload['cleanupId'] as string,
-      { last: true, throughSequence },
-    );
-    if (latest?.sequence === event.sequence) return true;
-  }
-  return false;
+export function hasHostedCleanupDebt(session: ManagedSession): boolean {
+  const states = new Map<string, unknown>();
+  for (const event of session.authority.eventsInSequenceRange(
+    1,
+    session.authority.committedSequence,
+  ))
+    if (event.kind === 'hosted.cleanup')
+      states.set(event.payload['cleanupId'] as string, event.payload['state']);
+  return [...states.values()].some((state) => state === 'owed');
 }
 
 export async function reconcileHostedTurnCleanup(
@@ -239,34 +231,30 @@ export async function reconcileHostedTurnCleanup(
   promptId?: string,
   drain = false,
 ): Promise<Map<string, 'owed' | 'confirmed'>> {
-  const authority = session.authority;
-  const throughSequence = authority.committedSequence;
+  const events = session.authority.eventsInSequenceRange(
+    1,
+    session.authority.committedSequence,
+  );
+  const latest = new Map<string, (typeof events)[number]>();
   const states = new Map<string, 'owed' | 'confirmed'>();
-  for await (const event of authority.iterateEvents(1, throughSequence)) {
-    if (event.kind !== 'hosted.cleanup') continue;
-    const cleanupId = event.payload['cleanupId'] as string;
-    const latest = await authority.findEvent(
-      'hosted.cleanup',
-      'cleanupId',
-      cleanupId,
-      { last: true, throughSequence },
-    );
-    if (latest?.sequence !== event.sequence) continue;
+  for (const event of events)
+    if (event.kind === 'hosted.cleanup')
+      latest.set(event.payload['cleanupId'] as string, event);
+  for (const [cleanupId, event] of latest) {
     const descriptor = await readDescriptor(
       session,
       event.payload['descriptorRef'],
     );
     if (promptId && descriptor.promptId !== promptId) continue;
     const state = event.payload['state'] as 'owed' | 'confirmed';
-    if (promptId || state === 'owed') states.set(descriptor.promptId, state);
+    states.set(descriptor.promptId, state);
     if (state !== 'owed') continue;
     if (
-      !(await authority.findEvent(
-        'turn.settled',
-        'turnId',
-        descriptor.promptId,
-        { throughSequence },
-      ))
+      !events.some(
+        (item) =>
+          item.kind === 'turn.settled' &&
+          item.payload['turnId'] === descriptor.promptId,
+      )
     )
       continue;
     const history = await readHostedFileHistory(session);
@@ -294,8 +282,7 @@ export async function reconcileHostedTurnCleanup(
       ),
       'confirmed',
     );
-    if (promptId) states.set(descriptor.promptId, 'confirmed');
-    else states.delete(descriptor.promptId);
+    states.set(descriptor.promptId, 'confirmed');
   }
   return states;
 }

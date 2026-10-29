@@ -332,9 +332,7 @@ export class LocalManagedSessionResourceStore
 export async function readManagedBranchCheckpoint(
   event: ManagedSessionEvent,
   resources: ManagedSessionResourceStore | undefined,
-  checkpointSequence: (
-    id: string,
-  ) => number | undefined | Promise<number | undefined>,
+  checkpointSequence: (id: string) => number | undefined,
   committedSequence: number,
 ): Promise<ChatRecord | undefined> {
   if (event.kind !== 'checkpoint.committed') return undefined;
@@ -358,9 +356,9 @@ export async function readManagedBranchCheckpoint(
   const covered = event.payload['coveredSequence'] as number;
   const previous = event.payload['previousCheckpointId'] as string | null;
   const previousSequence =
-    previous === null ? undefined : await checkpointSequence(previous);
+    previous === null ? undefined : checkpointSequence(previous);
   if (
-    (await checkpointSequence(id)) !== undefined ||
+    checkpointSequence(id) !== undefined ||
     covered >= event.sequence ||
     covered > committedSequence ||
     (previous !== null &&

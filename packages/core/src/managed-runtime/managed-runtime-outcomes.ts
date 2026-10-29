@@ -34,7 +34,6 @@ import {
 } from '../core/coreToolScheduler.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { readManagedMessageBody } from './managed-message-chunks.js';
-import type { ManagedHistoryMap } from './managed-session-history.js';
 
 /** The tool protocol the local host dispatches over. */
 export const MANAGED_RUNTIME_TOOL_CAPABILITY_VERSION =
@@ -79,15 +78,12 @@ const ROUTE_BODY = {
  */
 export class LocalManagedRuntimeOutcomes {
   private readonly harness: ManagedHarnessHandle;
-  private readonly definitionRefs: ManagedHistoryMap<ManagedSessionDurableRef>;
+  private readonly definitionRefs = new Map<string, ManagedSessionDurableRef>();
   private routeRef?: Promise<ManagedSessionDurableRef>;
   private admitTail: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly session: ManagedSession) {
     this.harness = createManagedHarnessHandle(session);
-    this.definitionRefs = session.authority
-      .createQueryHistory()
-      .map('resource');
   }
 
   /**
@@ -166,18 +162,17 @@ export class LocalManagedRuntimeOutcomes {
       Buffer.from(JSON.stringify(input.params), 'utf8'),
     );
     const definitionRef =
-      (await this.definitionRefs.get(input.toolName)) ??
+      this.definitionRefs.get(input.toolName) ??
       (await session.resources.publish(
         'managed-tool-definition',
         Buffer.from(JSON.stringify(input.toolDefinition), 'utf8'),
       ));
-    await this.definitionRefs.set(input.toolName, definitionRef);
+    this.definitionRefs.set(input.toolName, definitionRef);
     const checkpoint = await this.latestCheckpoint();
     // The factory assigns the shared batch state; the intent records it.
     const batchId =
       checkpoint?.tools?.batchId ?? `batch-${input.functionCallId}`;
-    const current = await authority.readParsedCheckpointState();
-    const ordinal = current?.ok ? current.history.maxOrdinal + 1 : 0;
+    const ordinal = checkpoint?.tools?.items.length ?? 0;
     await authority.appendExecutionEvent(
       {
         operation: 'recordToolIntent',
@@ -309,11 +304,14 @@ export class LocalManagedRuntimeOutcomes {
    * still left that proof behind, and what proves a call may never block —
    * the restore repair settles the checkpoint item from it on the next open.
    */
-  async hasCommittedReceipt(executionCallId: string): Promise<boolean> {
-    return (
-      (await this.session.authority.committedReceipt(executionCallId)) !==
-      undefined
-    );
+  hasCommittedReceipt(executionCallId: string): boolean {
+    return this.session.authority
+      .eventsInSequenceRange(1, this.session.authority.committedSequence)
+      .some(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
   }
 
   /**
@@ -342,12 +340,12 @@ export class LocalManagedRuntimeOutcomes {
         (item) => item.state !== 'settled',
       );
       if (pending.length > 0) {
-        const events = this.session.authority.iterateEvents(
+        const events = this.session.authority.eventsInSequenceRange(
           1,
           this.session.authority.committedSequence,
         );
         for (const item of pending) {
-          const receipt = await events.find(
+          const receipt = events.find(
             (event) =>
               event.kind === 'tool.receipt' &&
               event.payload['executionCallId'] === item.executionCallId,
@@ -375,213 +373,203 @@ export class LocalManagedRuntimeOutcomes {
 
   private async restoreRecordedResults(): Promise<void> {
     const { session } = this;
-    const parsed = await session.authority.readParsedCheckpointState();
-    if (!parsed?.ok) return;
-    const settled = parsed.history.tools.filter(
+    const checkpoint = await this.latestCheckpoint();
+    const settled = (checkpoint?.tools?.items ?? []).filter(
       (item) => item.state === 'settled' && item.outcomeRef !== null,
     );
     // Nothing settled means nothing to re-record: return before the recorded
     // scan below reads a single recorded body.
-    if (!(await settled.some(() => true))) return;
-    const scratch = session.authority.createQueryHistory();
-    try {
-      const recorded = scratch.map<boolean>('receipt');
-      const events = session.authority.iterateEvents(
-        1,
-        session.authority.committedSequence,
-      );
-      // The recovered record continues the chain the live records built: its
-      // parent is the committed tail. A fresh root would truncate the walk the
-      // next restore builds the history from.
-      let parentUuid: string | null = null;
-      for await (const event of events) {
-        if (event.kind !== 'message.committed') continue;
-        const messageId = event.payload['messageId'];
-        if (typeof messageId === 'string') parentUuid = messageId;
+    if (settled.length === 0) return;
+    const events = session.authority.eventsInSequenceRange(
+      1,
+      session.authority.committedSequence,
+    );
+    // The recovered record continues the chain the live records built: its
+    // parent is the committed tail. A fresh root would truncate the walk the
+    // next restore builds the history from.
+    let parentUuid: string | null = null;
+    for (const event of events) {
+      if (event.kind !== 'message.committed') continue;
+      const messageId = event.payload['messageId'];
+      if (typeof messageId === 'string') parentUuid = messageId;
+    }
+    // Whether a call already has its record is decided by the ids the
+    // recorded bodies carry — the toolCallResult call id, the
+    // functionResponse ids and the recovered records' own uuids — never by a
+    // substring of a serialized body: a result's text can quote another
+    // call's id. A body that cannot be read or parsed contributes no ids
+    // rather than failing the restore.
+    const recorded = new Set<string>();
+    for (const event of events) {
+      if (
+        event.kind !== 'message.committed' ||
+        event.payload['role'] !== 'tool_result'
+      ) {
+        continue;
       }
-      // Whether a call already has its record is decided by the ids the
-      // recorded bodies carry — the toolCallResult call id, the
-      // functionResponse ids and the recovered records' own uuids — never by a
-      // substring of a serialized body: a result's text can quote another
-      // call's id. A body that cannot be read or parsed contributes no ids
-      // rather than failing the restore.
-      const remember = async (id: unknown) => {
-        if (typeof id === 'string') await recorded.set(id, true);
-      };
-      for await (const event of events) {
-        if (
-          event.kind !== 'message.committed' ||
-          event.payload['role'] !== 'tool_result'
-        ) {
-          continue;
-        }
-        const ref = assertManagedSessionDurableRef(
-          event.payload['contentRef'],
-          'message.committed.contentRef',
-        );
-        const body = await readManagedMessageBody(
-          (bodyRef) => session.resources.read(bodyRef),
-          ref,
-        )
-          .then((bytes) => bytes.toString())
-          .catch(() => undefined);
-        if (body === undefined) continue;
-        let record: Record<string, unknown>;
-        try {
-          record = JSON.parse(body) as Record<string, unknown>;
-        } catch {
-          continue;
-        }
-        const toolCallResult = record['toolCallResult'] as
-          | Record<string, unknown>
-          | undefined;
-        if (typeof toolCallResult?.['callId'] === 'string') {
-          await remember(toolCallResult['callId']);
-        }
-        const parts = (
-          record['message'] as Record<string, unknown> | undefined
-        )?.['parts'];
-        if (Array.isArray(parts)) {
-          for (const part of parts) {
-            const functionResponse = (
-              part as Record<string, unknown> | null | undefined
-            )?.['functionResponse'] as Record<string, unknown> | undefined;
-            if (typeof functionResponse?.['id'] === 'string') {
-              await remember(functionResponse['id']);
-            }
+      const ref = assertManagedSessionDurableRef(
+        event.payload['contentRef'],
+        'message.committed.contentRef',
+      );
+      const body = await readManagedMessageBody(
+        (bodyRef) => session.resources.read(bodyRef),
+        ref,
+      )
+        .then((bytes) => bytes.toString())
+        .catch(() => undefined);
+      if (body === undefined) continue;
+      let record: Record<string, unknown>;
+      try {
+        record = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const toolCallResult = record['toolCallResult'] as
+        | Record<string, unknown>
+        | undefined;
+      if (typeof toolCallResult?.['callId'] === 'string') {
+        recorded.add(toolCallResult['callId']);
+      }
+      const parts = (
+        record['message'] as Record<string, unknown> | undefined
+      )?.['parts'];
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          const functionResponse = (
+            part as Record<string, unknown> | null | undefined
+          )?.['functionResponse'] as Record<string, unknown> | undefined;
+          if (typeof functionResponse?.['id'] === 'string') {
+            recorded.add(functionResponse['id']);
           }
         }
-        const uuid = record['uuid'];
-        if (
-          typeof uuid === 'string' &&
-          uuid.startsWith('recovered-tool-result:')
-        ) {
-          await remember(uuid.slice('recovered-tool-result:'.length));
-        }
       }
-      const envelope = session.authority.recordEnvelope;
-      // Read for a record this restore writes, never for the check itself:
-      // the lookup blocks on a `git rev-parse`, and a restore with nothing to
-      // re-record must not pay it.
-      let branch: string | undefined;
-      let branchRead = false;
-      const branchForRecord = () => {
-        if (!branchRead) {
-          branchRead = true;
-          branch = getCachedGitBranch(envelope.cwd);
-        }
-        return branch;
-      };
-      for await (const item of settled) {
-        if (await recorded.has(item.executionCallId)) continue;
-        const outcome = await session.resources
-          .read(item.outcomeRef!)
-          .then((bytes) => bytes.toString())
-          .then((body) => {
-            try {
-              return JSON.parse(body) as {
-                result?: {
-                  executionStatus?: unknown;
-                  responseParts?: unknown;
-                  error?: { message?: string; type?: string };
-                };
+      const uuid = record['uuid'];
+      if (
+        typeof uuid === 'string' &&
+        uuid.startsWith('recovered-tool-result:')
+      ) {
+        recorded.add(uuid.slice('recovered-tool-result:'.length));
+      }
+    }
+    const envelope = session.authority.recordEnvelope;
+    // Read for a record this restore writes, never for the check itself:
+    // the lookup blocks on a `git rev-parse`, and a restore with nothing to
+    // re-record must not pay it.
+    let branch: string | undefined;
+    let branchRead = false;
+    const branchForRecord = () => {
+      if (!branchRead) {
+        branchRead = true;
+        branch = getCachedGitBranch(envelope.cwd);
+      }
+      return branch;
+    };
+    for (const item of settled) {
+      if (recorded.has(item.executionCallId)) continue;
+      const outcome = await session.resources
+        .read(item.outcomeRef!)
+        .then((bytes) => bytes.toString())
+        .then((body) => {
+          try {
+            return JSON.parse(body) as {
+              result?: {
+                executionStatus?: unknown;
+                responseParts?: unknown;
+                error?: { message?: string; type?: string };
               };
-            } catch {
-              return undefined;
-            }
-          })
-          .catch(() => undefined);
-        // A settled outcome whose body no longer reads still owes the model
-        // its functionResponse: without one the projected history pairs the
-        // assistant's functionCall with nothing, and the provider rejects the
-        // next request as malformed with no gate left to say why.
-        const result = outcome?.result ?? {
-          executionStatus: 'error',
-          error: {
-            message:
-              'The tool call outcome cannot be read from the session log.',
-          },
-        };
-        const executionStatus =
-          typeof result.executionStatus === 'string'
-            ? result.executionStatus
+            };
+          } catch {
+            return undefined;
+          }
+        })
+        .catch(() => undefined);
+      // A settled outcome whose body no longer reads still owes the model
+      // its functionResponse: without one the projected history pairs the
+      // assistant's functionCall with nothing, and the provider rejects the
+      // next request as malformed with no gate left to say why.
+      const result = outcome?.result ?? {
+        executionStatus: 'error',
+        error: {
+          message: 'The tool call outcome cannot be read from the session log.',
+        },
+      };
+      const executionStatus =
+        typeof result.executionStatus === 'string'
+          ? result.executionStatus
+          : 'error';
+      const status =
+        executionStatus === 'success'
+          ? 'success'
+          : executionStatus === 'cancelled'
+            ? 'cancelled'
             : 'error';
-        const status =
-          executionStatus === 'success'
-            ? 'success'
-            : executionStatus === 'cancelled'
-              ? 'cancelled'
-              : 'error';
-        // A part that is not an object is dropped rather than failing the
-        // open: the durable body is already committed, and the live result
-        // path reports the same payload as an ordinary tool error.
-        const responseParts = managedToolResponseParts(
-          (Array.isArray(result.responseParts)
-            ? result.responseParts
-            : []
-          ).filter((part) => typeof part === 'object' && part !== null),
-        );
-        // The message the live path would have reported, synthesized from the
-        // same durable payload.
-        const failureMessage =
-          status === 'success'
-            ? undefined
-            : managedToolFailureMessage({
-                executionStatus,
-                error: result.error,
-              });
-        // The model-facing parts are functionResponses in the scheduler's call
-        // id space, as the live recorder writes them; the mapped parts stay on
-        // the toolCallResult for UI recovery.
-        const parts =
-          failureMessage === undefined
-            ? convertToFunctionResponse(
-                item.toolName,
-                item.executionCallId,
-                responseParts,
-              )
-            : convertToFunctionErrorResponse(
-                item.toolName,
-                item.executionCallId,
-                responseParts.length > 0 ? responseParts : failureMessage,
-                failureMessage,
-              );
-        // The durable outcome is the recorded history: same tool_result shape
-        // the recorder writes, idempotent by its deterministic id.
-        const uuid = `recovered-tool-result:${item.executionCallId}`;
-        const gitBranch = branchForRecord();
-        await session.sink.write({
-          ...envelope,
-          uuid,
-          parentUuid,
-          sessionId: session.authority.sessionHeader.sessionKey.sessionId,
-          timestamp: new Date().toISOString(),
-          type: 'tool_result',
-          provenance: 'tool_result',
-          ...(gitBranch === undefined ? {} : { gitBranch }),
-          message: {
-            role: 'user',
-            parts,
-          },
-          toolCallResult: {
-            callId: item.executionCallId,
-            status,
-            responseParts,
-            ...(failureMessage === undefined
-              ? {}
-              : { error: new Error(failureMessage) }),
-            errorType:
-              result.error?.type === undefined
-                ? undefined
-                : (result.error.type as ToolErrorType),
-            resultDisplay: undefined,
-          },
-        });
-        await recorded.set(item.executionCallId, true);
-        parentUuid = uuid;
-      }
-    } finally {
-      await scratch.close();
+      // A part that is not an object is dropped rather than failing the
+      // open: the durable body is already committed, and the live result
+      // path reports the same payload as an ordinary tool error.
+      const responseParts = managedToolResponseParts(
+        (Array.isArray(result.responseParts)
+          ? result.responseParts
+          : []
+        ).filter((part) => typeof part === 'object' && part !== null),
+      );
+      // The message the live path would have reported, synthesized from the
+      // same durable payload.
+      const failureMessage =
+        status === 'success'
+          ? undefined
+          : managedToolFailureMessage({
+              executionStatus,
+              error: result.error,
+            });
+      // The model-facing parts are functionResponses in the scheduler's call
+      // id space, as the live recorder writes them; the mapped parts stay on
+      // the toolCallResult for UI recovery.
+      const parts =
+        failureMessage === undefined
+          ? convertToFunctionResponse(
+              item.toolName,
+              item.executionCallId,
+              responseParts,
+            )
+          : convertToFunctionErrorResponse(
+              item.toolName,
+              item.executionCallId,
+              responseParts.length > 0 ? responseParts : failureMessage,
+              failureMessage,
+            );
+      // The durable outcome is the recorded history: same tool_result shape
+      // the recorder writes, idempotent by its deterministic id.
+      const uuid = `recovered-tool-result:${item.executionCallId}`;
+      const gitBranch = branchForRecord();
+      await session.sink.write({
+        ...envelope,
+        uuid,
+        parentUuid,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        provenance: 'tool_result',
+        ...(gitBranch === undefined ? {} : { gitBranch }),
+        message: {
+          role: 'user',
+          parts,
+        },
+        toolCallResult: {
+          callId: item.executionCallId,
+          status,
+          responseParts,
+          ...(failureMessage === undefined
+            ? {}
+            : { error: new Error(failureMessage) }),
+          errorType:
+            result.error?.type === undefined
+              ? undefined
+              : (result.error.type as ToolErrorType),
+          resultDisplay: undefined,
+        },
+      });
+      recorded.add(item.executionCallId);
+      parentUuid = uuid;
     }
   }
 

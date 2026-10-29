@@ -60,10 +60,7 @@ import {
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
-import {
-  getLastApiPromptCancellation,
-  markApiHistoryPrompt,
-} from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
@@ -381,12 +378,6 @@ describe('runNonInteractive', () => {
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getChatRecordingService: vi.fn().mockReturnValue({
         readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
-        async readLastApiPromptCancellation(history: readonly Content[]) {
-          return getLastApiPromptCancellation(
-            history,
-            await this.readActiveTranscriptChain(),
-          );
-        },
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn().mockResolvedValue(undefined),
       }),

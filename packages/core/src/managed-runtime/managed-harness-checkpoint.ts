@@ -5,7 +5,6 @@
  */
 
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
-import type { ManagedHarnessCheckpointView } from './managed-checkpoint-history.js';
 import {
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
@@ -327,11 +326,7 @@ export type HarnessCheckpointParseResult =
 
 export type HarnessRunAuthorization =
   | { readonly status: 'initial' }
-  | {
-      readonly status: 'runnable';
-      readonly checkpoint: HarnessCheckpointV1;
-      readonly history: ManagedHarnessCheckpointView;
-    }
+  | { readonly status: 'runnable'; readonly checkpoint: HarnessCheckpointV1 }
   | {
       readonly status: 'blocked';
       readonly reason:
@@ -708,7 +703,7 @@ function parseAttempt(
   };
 }
 
-export function parseToolItem(
+function parseToolItem(
   value: ManagedSessionJsonValue,
   label: string,
 ): HarnessToolItem {
@@ -818,7 +813,7 @@ function parseTools(
   };
 }
 
-export function parseRuntimeBinding(
+function parseRuntimeBinding(
   value: ManagedSessionJsonValue,
   label: string,
 ): HarnessRuntimeBinding {
@@ -1257,10 +1252,7 @@ function assertRuntimeMatchesTools(
   }
 }
 
-function assertPhaseShape(
-  checkpoint: HarnessCheckpointV1,
-  archivedToolCount = 0,
-): void {
+function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
   const { phase } = checkpoint.continuation;
   const items = toolItems(checkpoint.tools);
   const bindings = runtimeBindings(checkpoint.runtime);
@@ -1272,7 +1264,7 @@ function assertPhaseShape(
     if (checkpoint.attempt !== null) {
       fail('before_model cannot carry a model attempt.');
     }
-    if (items.length > 0 || bindings.length > 0 || archivedToolCount > 0) {
+    if (items.length > 0 || bindings.length > 0) {
       fail('before_model cannot carry tools or runtime bindings.');
     }
     if (checkpoint.approval !== null) {
@@ -1415,7 +1407,7 @@ function assertPhaseShape(
   }
 
   if (phase === 'results_ready') {
-    if (items.length + archivedToolCount === 0 || unsettledTools) {
+    if (items.length === 0 || unsettledTools) {
       fail('results_ready requires every tool item to be settled.');
     }
     if (dispatchRuntime || inFlightTools) {
@@ -1449,21 +1441,6 @@ function assertPhaseShape(
 export function parseHarnessCheckpointObject(
   value: ManagedSessionJsonValue,
 ): HarnessCheckpointV1 {
-  return parseCheckpointState(value, 0, true);
-}
-
-export function parseHarnessCheckpointResidentObject(
-  value: ManagedSessionJsonValue,
-  archivedToolCount: number,
-): HarnessCheckpointV1 {
-  return parseCheckpointState(value, archivedToolCount, false);
-}
-
-function parseCheckpointState(
-  value: ManagedSessionJsonValue,
-  archivedToolCount: number,
-  validateBindings: boolean,
-): HarnessCheckpointV1 {
   const record = object(value, 'harness checkpoint');
   assertNoUnknownKeys(record, ROOT_KEYS, 'harness checkpoint');
   const identity = parseIdentity(record['identity']);
@@ -1481,9 +1458,8 @@ function parseCheckpointState(
     output: parseOutput(record['output']),
     followUp: parseFollowUp(record['followUp']),
   };
-  if (validateBindings)
-    assertRuntimeMatchesTools(checkpoint.tools, checkpoint.runtime);
-  assertPhaseShape(checkpoint, archivedToolCount);
+  assertRuntimeMatchesTools(checkpoint.tools, checkpoint.runtime);
+  assertPhaseShape(checkpoint);
   return checkpoint;
 }
 
@@ -1599,9 +1575,7 @@ export function authorizeParsedHarnessCheckpoint(
     readonly checkpointId: string;
     readonly coveredSequence: number;
   },
-):
-  | { readonly status: 'runnable'; readonly checkpoint: HarnessCheckpointV1 }
-  | Extract<HarnessRunAuthorization, { status: 'blocked' }> {
+): Extract<HarnessRunAuthorization, { status: 'runnable' | 'blocked' }> {
   if (
     !managedSessionKeysEqual(
       checkpoint.identity.sessionKey,
@@ -2237,7 +2211,6 @@ export function createResultsReadyHarnessCheckpoint(input: {
  */
 export function createTurnSettledHarnessCheckpoint(input: {
   readonly previous: HarnessCheckpointV1;
-  readonly toolCount?: number;
   readonly checkpointId: string;
   readonly coveredSequence: number;
   readonly previousCheckpointId: string | null;
@@ -2249,7 +2222,7 @@ export function createTurnSettledHarnessCheckpoint(input: {
   }
   const items = input.previous.tools?.items ?? [];
   if (
-    (input.toolCount ?? items.length) === 0 ||
+    items.length === 0 ||
     items.some((item) => item.state !== 'settled' || item.consumed !== true)
   ) {
     throw new ManagedSessionRecordError(

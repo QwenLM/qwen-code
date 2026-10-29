@@ -5,10 +5,8 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { hostedSessionRecords } from './hosted-session-records.js';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { hasImagePayloadReferences } from '@qwen-code/qwen-code-core/services/image-payload-references.js';
-import type { TurnResultRecordPayload } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   HOSTED_MODEL_REQUEST_BYTES,
@@ -82,15 +80,19 @@ async function readHostedModelRequest(
   session: ManagedSession,
   promptId: string,
   allowCommittedOutput: boolean,
-  throughSequence = session.authority.committedSequence,
 ): Promise<HostedModelRequest | undefined> {
-  const events = session.authority.iterateEvents(1, throughSequence);
-  const attempt = await events.findLast(
-    (event) =>
-      event.kind === 'model.attempt' &&
-      typeof event.payload['attemptId'] === 'string' &&
-      event.payload['attemptId'].startsWith(`${promptId}:main:`),
+  const events = session.authority.eventsInSequenceRange(
+    1,
+    session.authority.committedSequence,
   );
+  const attempt = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.kind === 'model.attempt' &&
+        typeof event.payload['attemptId'] === 'string' &&
+        event.payload['attemptId'].startsWith(`${promptId}:main:`),
+    );
   if (!attempt || !attempt.payload['recoveryRef']) return undefined;
   const ref = assertManagedSessionDurableRef(
     attempt.payload['recoveryRef'],
@@ -189,7 +191,7 @@ async function readHostedModelRequest(
       )
     )
       throw new Error('Invalid saved model content.');
-  const started = await events.find(
+  const started = events.find(
     (event) =>
       event.kind === 'model.attempt' &&
       event.payload['attemptId'] === attempt.payload['attemptId'] &&
@@ -204,20 +206,22 @@ async function readHostedModelRequest(
   // Any committed output after this request belongs to a different recovery path.
   if (
     !allowCommittedOutput &&
-    (await events.some(
+    events.some(
       (event) =>
         event.sequence > saved.throughSequence &&
         ((event.kind === 'message.committed' &&
           event.payload['role'] === 'assistant') ||
           event.kind === 'tool.intent'),
-    ))
+    )
   )
     return undefined;
   const verdict = await session.authority.harnessRunAuthorization();
   if (
     verdict.status !== 'runnable' ||
     verdict.checkpoint.approval ||
-    !verdict.history.allToolsSettled ||
+    !(verdict.checkpoint.tools?.items ?? []).every(
+      (item) => item.state === 'settled',
+    ) ||
     ![
       'before_model',
       'model_output_committed',
@@ -245,9 +249,11 @@ export async function findHostedCommittedModelOutput(
   session: ManagedSession,
   promptId: string,
 ): Promise<{ promptId: string } | undefined> {
-  const throughSequence = session.authority.committedSequence;
-  const events = session.authority.iterateEvents(1, throughSequence);
-  const latestAttempt = await events.findLast(
+  const events = session.authority.eventsInSequenceRange(
+    1,
+    session.authority.committedSequence,
+  );
+  const latestAttempt = events.findLast(
     (event) =>
       event.kind === 'model.attempt' &&
       typeof event.payload['attemptId'] === 'string' &&
@@ -255,18 +261,13 @@ export async function findHostedCommittedModelOutput(
   );
   if (latestAttempt?.payload['state'] !== 'output_committed') return;
   const saved = latestAttempt.payload['recoveryRef']
-    ? await readHostedModelRequest(session, promptId, true, throughSequence)
+    ? await readHostedModelRequest(session, promptId, true)
     : undefined;
   if (latestAttempt.payload['recoveryRef'] && !saved) return;
-  const current = hostedSessionRecords(session, throughSequence).filter(
-    (item) =>
-      item.daemonPromptId === promptId ||
-      (item.type === 'system' &&
-        item.subtype === 'turn_result' &&
-        (item.systemPayload as TurnResultRecordPayload | undefined)
-          ?.promptId === promptId),
+  const current = (await session.sink.project()).filter(
+    (item) => item.daemonPromptId === promptId,
   );
-  const last = await current.at(-1);
+  const last = current.at(-1);
   if (
     last?.type !== 'assistant' ||
     (saved && last.uuid !== saved.messageId) ||
@@ -274,7 +275,7 @@ export async function findHostedCommittedModelOutput(
     last.message.parts.some((part) => part.functionCall)
   )
     return;
-  const committed = await events.findLast(
+  const committed = events.findLast(
     (event) =>
       event.kind === 'message.committed' &&
       event.payload['messageId'] === last.uuid,
@@ -290,7 +291,7 @@ export async function findHostedCommittedModelOutput(
       'results_ready',
       'turn_settled',
     ].includes(verdict.checkpoint.continuation.phase) ||
-    !verdict.history.allToolsConsumed
+    (verdict.checkpoint.tools?.items ?? []).some((item) => !item.consumed)
   )
     return;
   return saved ?? { promptId };

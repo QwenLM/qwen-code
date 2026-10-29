@@ -2647,51 +2647,6 @@ export class SessionWriterLease {
     });
   }
 
-  withTranscriptStream<T>(
-    consume: (
-      chunks: AsyncIterable<Buffer>,
-      proof: { readonly byteLength: number; readonly sha256: string },
-    ) => Promise<T>,
-  ): Promise<T> {
-    return this.runExclusive(async () => {
-      await this.assertOwnedAndUnchangedOnce();
-      const state = this.expectedTranscriptState!;
-      const byteLength = state.exists ? state.byteLength : 0;
-      const sha256 = this.expectedTranscriptHasher!.copy().digest('hex');
-      const handle = await openTranscriptForRead(this.transcriptPath, state);
-      const hasher = createHash('sha256');
-      let position = 0;
-      const chunks = async function* () {
-        while (position < byteLength) {
-          const bytes = Buffer.alloc(
-            Math.min(64 * 1024, byteLength - position),
-          );
-          const { bytesRead } = await handle!.read(
-            bytes,
-            0,
-            bytes.byteLength,
-            position,
-          );
-          if (bytesRead === 0) throw new SessionTranscriptChangedError();
-          position += bytesRead;
-          const chunk = bytes.subarray(0, bytesRead);
-          hasher.update(chunk);
-          yield chunk;
-        }
-      };
-      try {
-        const result = await consume(chunks(), { byteLength, sha256 });
-        if (position !== byteLength || hasher.digest('hex') !== sha256) {
-          throw new SessionTranscriptChangedError();
-        }
-        await this.assertOwnedAndUnchangedOnce();
-        return result;
-      } finally {
-        await handle?.close();
-      }
-    });
-  }
-
   replaceTranscript(text: string, expectedSha256: string): Promise<void> {
     return this.runExclusive(() =>
       this.replaceTranscriptOnce(text, expectedSha256, false),
@@ -2701,7 +2656,7 @@ export class SessionWriterLease {
   replaceManagedTranscript(
     text: string,
     expectedSha256: string,
-    verify: () => void | Promise<void>,
+    verify: () => void,
   ): Promise<void> {
     return this.runExclusive(() =>
       this.replaceTranscriptOnce(text, expectedSha256, true, verify),
@@ -2712,7 +2667,7 @@ export class SessionWriterLease {
     text: string,
     expectedSha256: string,
     managed: boolean,
-    verify?: () => void | Promise<void>,
+    verify?: () => void,
   ): Promise<void> {
     await this.assertOwnedAndUnchangedOnce();
     if (
@@ -2762,7 +2717,7 @@ export class SessionWriterLease {
       await this.readOwnedLock();
       this.expectedTranscriptState = snapshot.state;
       this.expectedTranscriptHasher = snapshot.hasher;
-      await verify?.();
+      verify?.();
       if (managed) await this.assertOwnedAndUnchangedOnce();
     } catch (error) {
       if (managed && replacementAttempted) {
@@ -2793,25 +2748,15 @@ export class SessionWriterLease {
    * outside its writer. The retained prefix must already be verified by the
    * caller — this method checks ownership and identity, not meaning.
    */
-  truncateTo(byteLength: number, expectedSha256?: string): Promise<void> {
-    return this.runExclusive(() =>
-      this.truncateToOnce(byteLength, expectedSha256),
-    );
+  truncateTo(byteLength: number): Promise<void> {
+    return this.runExclusive(() => this.truncateToOnce(byteLength));
   }
 
-  private async truncateToOnce(
-    byteLength: number,
-    expectedSha256?: string,
-  ): Promise<void> {
+  private async truncateToOnce(byteLength: number): Promise<void> {
     if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
       throw new SessionWriterUnavailableError();
     }
     await this.assertOwnedAndUnchangedOnce();
-    if (
-      expectedSha256 !== undefined &&
-      this.expectedTranscriptHasher!.copy().digest('hex') !== expectedSha256
-    )
-      throw new SessionTranscriptChangedError();
     const expected = this.expectedTranscriptState;
     if (!expected?.exists || !this.expectedTranscriptHasher) {
       throw new SessionWriterUnavailableError();

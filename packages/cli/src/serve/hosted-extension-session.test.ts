@@ -229,11 +229,9 @@ describe('Hosted extension Session configuration', () => {
     });
     expect(context.callbacks.drain).not.toHaveBeenCalled();
     expect(
-      (
-        await context.session.authority
-          .iterateEvents(1, context.session.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'config.bound'),
+      context.session.authority
+        .eventsInSequenceRange(1, context.session.authority.committedSequence)
+        .filter((event) => event.kind === 'config.bound'),
     ).toHaveLength(0);
   });
 
@@ -241,11 +239,9 @@ describe('Hosted extension Session configuration', () => {
     const context = await fixture();
     context.callbacks.drain.mockImplementation(async () => {
       expect(
-        (
-          await context.session.authority
-            .iterateEvents(1, context.session.authority.committedSequence)
-            .collect(1_000_000)
-        ).filter((event) => event.kind === 'config.bound'),
+        context.session.authority
+          .eventsInSequenceRange(1, context.session.authority.committedSequence)
+          .filter((event) => event.kind === 'config.bound'),
       ).toHaveLength(1);
     });
     context.failActivation();

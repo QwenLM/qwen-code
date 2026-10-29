@@ -23,10 +23,6 @@ import {
   publishManagedMessageBody,
 } from './managed-message-chunks.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
-import {
-  MANAGED_SESSION_LIMITS,
-  ManagedSessionRecordError,
-} from './managed-session-records.js';
 
 /**
  * The record shapes the message projection can carry today.
@@ -432,21 +428,10 @@ export class ManagedSessionRecordSink {
     // event must continue whatever sequence stands then.
     const fromSequence = this.authority.compactedThroughSequence + 1;
     const toSequence = this.authority.committedSequence;
-    const replacedMessageIds: string[] = [];
-    let identityBytes = 2;
-    for await (const event of this.authority.iterateEvents(
-      fromSequence,
-      toSequence,
-    )) {
-      if (event.kind !== 'message.committed') continue;
-      const id = event.payload['messageId'] as string;
-      identityBytes += Buffer.byteLength(JSON.stringify(id)) + 1;
-      if (identityBytes > MANAGED_SESSION_LIMITS.maxEventBytes)
-        throw new ManagedSessionRecordError(
-          'Compaction identity list exceeds its event byte budget.',
-        );
-      replacedMessageIds.push(id);
-    }
+    const replacedMessageIds = this.authority
+      .eventsInSequenceRange(fromSequence, toSequence)
+      .filter((event) => event.kind === 'message.committed')
+      .map((event) => event.payload['messageId'] as string);
     const bytes = Buffer.from(JSON.stringify(record), 'utf8');
     const summaryRef =
       bytes.byteLength <= MANAGED_MESSAGE_INLINE_BYTES
@@ -519,37 +504,21 @@ export class ManagedSessionRecordSink {
     return this.projection.projectModelRecords(throughSequence);
   }
 
-  projectContextRecords(throughSequence?: number): Promise<ChatRecord[]> {
-    return this.projection.projectContextRecords(throughSequence);
-  }
-
-  iterateRecords(throughSequence?: number): AsyncGenerator<ChatRecord> {
-    return this.projection.iterateRecords(throughSequence);
-  }
-
-  iterateMessageRecords(throughSequence?: number): AsyncGenerator<ChatRecord> {
-    return this.projection.iterateMessageRecords(throughSequence);
-  }
-
-  iterateActiveRecords(throughSequence?: number): AsyncGenerator<ChatRecord> {
-    return this.projection.iterateActiveRecords(throughSequence);
-  }
-
   async projectModelHistory(
     options: {
       throughSequence?: number;
-      includeRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
+      includeRecord?: (record: ChatRecord) => boolean;
     } = {},
   ) {
     const records = await this.projectModelRecords(options.throughSequence);
-    const selected: ChatRecord[] = [];
-    for (const record of records)
-      if (
-        record.subtype === 'chat_compression' ||
-        !options.includeRecord ||
-        (await options.includeRecord(record))
-      )
-        selected.push(record);
-    return buildSessionHistoryFromConversation({ messages: selected });
+    return buildSessionHistoryFromConversation({
+      messages: options.includeRecord
+        ? records.filter(
+            (record) =>
+              record.subtype === 'chat_compression' ||
+              options.includeRecord!(record),
+          )
+        : records,
+    });
   }
 }

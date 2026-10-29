@@ -46,8 +46,8 @@ export async function writeHostedTodos(
     .update(JSON.stringify([promptId, callId]))
     .digest('hex');
   const commandId = `todo:${callKey}`;
-  const replay = await session.authority
-    .iterateEvents(1, session.authority.committedSequence)
+  const replay = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
     .some(
       (event) =>
         event.kind === 'domain.committed' &&

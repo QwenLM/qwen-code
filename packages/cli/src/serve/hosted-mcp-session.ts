@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ManagedHistoryCache } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { FunctionDeclaration } from '@google/genai';
@@ -96,7 +95,7 @@ export class HostedMcpSession {
    * still runs the full release.
    */
   mountHandback(
-    hookWorkUnproven: () => boolean | Promise<boolean>,
+    hookWorkUnproven: () => boolean,
   ): (() => Promise<void>) | undefined {
     const claim = this.broker.mountClaim();
     if (claim === undefined) return undefined;
@@ -105,8 +104,8 @@ export class HostedMcpSession {
         this.initializing ||
         this.refreshing > 0 ||
         this.configuring.size > 0 ||
-        (await this.recoveryBlocked()) ||
-        (await hookWorkUnproven())
+        this.recoveryBlocked ||
+        hookWorkUnproven()
       )
         throw new Error('MCP work on the Workspace mount is unproven.');
       await this.broker.releaseMount(claim);
@@ -114,66 +113,17 @@ export class HostedMcpSession {
   }
 
   private grantsRenewed = false;
-  private readonly bindings = new ManagedHistoryCache<{
-    configuration: McpConfiguration;
-    catalog: ManagedMcpCatalog;
-  }>();
+  private readonly bindings = new Map<
+    string,
+    { configuration: McpConfiguration; catalog: ManagedMcpCatalog }
+  >();
   private readonly catalogs = new Map<
     string,
     { configuration: McpConfiguration; catalog: ManagedMcpCatalog }
   >();
   private extensionServers?: readonly HostedMcpServerPin[];
 
-  static async create(
-    options: HostedWorkspaceBrokerOptions,
-    session: ManagedSession,
-    admissionServers: readonly HostedMcpServerPin[],
-    settings?: HostedMcpSettings,
-    sharedBroker?: HostedWorkspaceBroker,
-    extensionView = false,
-  ): Promise<HostedMcpSession> {
-    let owner: string | undefined;
-    let previous: string | undefined;
-    for await (const entry of session.authority.extensionRecordsInDomain(
-      'mcp_configuration',
-    )) {
-      const configuration = parseMcpConfiguration(entry.record);
-      previous = configuration.configurationId;
-      if (configuration.releaseState === 'released') continue;
-      if (owner !== undefined && owner !== configuration.runtimeSessionId)
-        throw new HostedMcpRecoveryRequiredError();
-      owner = configuration.runtimeSessionId;
-    }
-    const hookOwner =
-      settings && owner === undefined
-        ? await session.authority
-            .extensionRecordsInDomain('hook_execution')
-            .filter((entry) => entry.run.runtime !== null)
-            .map((entry) => parseHookExecution(entry.record).runtimeSessionId)
-            .at(-1)
-        : undefined;
-    const broker =
-      sharedBroker ??
-      new HostedWorkspaceBroker(
-        options,
-        session.authority.sessionHeader.sessionKey,
-        owner ??
-          hookOwner ??
-          `mcp-${digest([session.authority.sessionHeader.sessionKey, previous])}`,
-      );
-    const result = new HostedMcpSession(
-      options,
-      session,
-      admissionServers,
-      settings,
-      broker,
-      extensionView,
-    );
-    result.acquired = owner !== undefined || broker.acquired;
-    return result;
-  }
-
-  private constructor(
+  constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
     private readonly admissionServers: readonly HostedMcpServerPin[],
@@ -183,7 +133,36 @@ export class HostedMcpSession {
   ) {
     this.settings = settings;
     if (extensionView) this.extensionServers = admissionServers;
-    this.broker = sharedBroker!;
+    const configurations = this.configurations();
+    const owners = new Set(
+      configurations
+        .filter((entry) => entry.releaseState !== 'released')
+        .map((entry) => entry.runtimeSessionId),
+    );
+    if (owners.size > 1) throw new HostedMcpRecoveryRequiredError();
+    const hookOwner =
+      settings && !owners.size
+        ? session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter((entry) => entry.run.runtime !== null)
+            .map((entry) => parseHookExecution(entry.record).runtimeSessionId)
+            .at(-1)
+        : undefined;
+    this.acquired = owners.size > 0 || sharedBroker?.acquired === true;
+    const previous = configurations.length
+      ? digest(
+          configurations.map((entry) => entry.configurationId).sort(),
+        ).slice(0, 32)
+      : undefined;
+    this.broker =
+      sharedBroker ??
+      new HostedWorkspaceBroker(
+        options,
+        session.authority.sessionHeader.sessionKey,
+        owners.values().next().value ??
+          hookOwner ??
+          `mcp-${digest([session.authority.sessionHeader.sessionKey, previous])}`,
+      );
   }
 
   get servers(): readonly HostedMcpServerPin[] {
@@ -222,9 +201,7 @@ export class HostedMcpSession {
     );
   }
 
-  async managementStatus(
-    settings: HostedMcpSettings,
-  ): Promise<HostedMcpCommandStatus> {
+  managementStatus(settings: HostedMcpSettings): HostedMcpCommandStatus {
     const { command } = settings;
     const configurations = this.configurations().filter(
       (entry) => entry.serverId === command.serverId,
@@ -234,13 +211,13 @@ export class HostedMcpSession {
       settings.servers.find((pin) => pin.serverId === command.serverId)
         ?.state !== 'enabled'
     ) {
-      const beforeIntent = configurations.filter(async (entry) => {
-        const openedBy = (await this.session.authority.extensionRecord(
+      const beforeIntent = configurations.filter((entry) => {
+        const openedBy = this.session.authority.extensionRecord(
           'mcp_configuration',
           entry.configurationId,
-        ))!.operationId;
-        const event = await this.session.authority
-          .iterateEvents(1, this.session.authority.committedSequence)
+        )!.operationId;
+        const event = this.session.authority
+          .eventsInSequenceRange(1, this.session.authority.committedSequence)
           .find(
             (event) =>
               event.kind === 'domain.committed' &&
@@ -251,13 +228,13 @@ export class HostedMcpSession {
         return event.sequence < settings.sequence;
       });
       if (
-        await beforeIntent.every((entry) =>
+        beforeIntent.every((entry) =>
           ['drained', 'released'].includes(entry.releaseState),
         )
       )
         state = 'settled';
       else if (
-        await beforeIntent.some(
+        beforeIntent.some(
           (entry) =>
             entry.releaseState === 'releasing' ||
             !['settled', 'failed', 'cancelled'].includes(entry.run.state),
@@ -265,7 +242,7 @@ export class HostedMcpSession {
       )
         state = 'recovery_required';
     } else {
-      const configuration = await configurations.find(
+      const configuration = configurations.find(
         (entry) => entry.configurationId === command.operationId,
       );
       if (
@@ -276,9 +253,7 @@ export class HostedMcpSession {
       else if (configuration?.run.state === 'settled') state = 'settled';
       else if (
         configuration ||
-        (await configurations.some(
-          (entry) => entry.releaseState === 'releasing',
-        ))
+        configurations.some((entry) => entry.releaseState === 'releasing')
       )
         state = 'recovery_required';
     }
@@ -330,14 +305,16 @@ export class HostedMcpSession {
           )),
     );
     await this.drainConfigurations(changed);
-    for await (const entry of changed) {
-      const latest = (await this.configurations().find(
+    for (const entry of changed) {
+      const latest = this.configurations().find(
         (value) => value.configurationId === entry.configurationId,
-      ))!;
+      )!;
       if (latest.releaseState !== 'released')
         await this.commitConfiguration({ ...latest, releaseState: 'released' });
       this.catalogs.delete(entry.serverId);
-      this.bindings.clear();
+      for (const [key, binding] of this.bindings)
+        if (binding.configuration.serverId === entry.serverId)
+          this.bindings.delete(key);
     }
     this.extensionServers = servers;
     this.settings = undefined;
@@ -359,7 +336,7 @@ export class HostedMcpSession {
     signal?: AbortSignal,
   ): Promise<void> {
     for (const pin of servers) {
-      const matching = await this.configurations()
+      const matching = this.configurations()
         .filter(
           (entry) =>
             entry.serverId === pin.serverId &&
@@ -378,13 +355,18 @@ export class HostedMcpSession {
         continue;
       }
       const id = `extension-mcp-${digest([operationId, pin.serverId]).slice(0, 48)}`;
-      const previous = await this.session.authority.extensionRecord(
+      const previous = this.session.authority.extensionRecord(
         'mcp_configuration',
         id,
       );
       const revision = previous
         ? parseMcpConfiguration(previous.record).configRevision - 1
-        : await this.maximumRevision(pin.serverId);
+        : Math.max(
+            0,
+            ...this.configurations()
+              .filter((entry) => entry.serverId === pin.serverId)
+              .map((entry) => entry.configRevision),
+          );
       await this.configure(id, pin, revision, signal);
     }
   }
@@ -408,7 +390,7 @@ export class HostedMcpSession {
             serverId: catalog.serverId,
             serverRevision: catalog.serverRevision,
             connectionGeneration: catalog.connectionGeneration,
-            grant: await this.grant(
+            grant: this.grant(
               'mcp_configuration',
               configuration.configurationId,
             ),
@@ -441,7 +423,11 @@ export class HostedMcpSession {
             serverRevision: catalog.serverRevision,
             definitionDigest: catalog.definitionDigest,
           },
-          await this.maximumRevision(catalog.serverId),
+          Math.max(
+            ...this.configurations()
+              .filter((entry) => entry.serverId === catalog.serverId)
+              .map((entry) => entry.configRevision),
+          ),
           signal,
         );
       }
@@ -455,25 +441,21 @@ export class HostedMcpSession {
     try {
       if (
         this.settings &&
-        (await this.managementStatus(this.settings)).state !== 'settled'
+        this.managementStatus(this.settings).state !== 'settled'
       )
         throw new HostedMcpRecoveryRequiredError();
       for (const pin of this.selectedServers.filter(
         (entry) => entry.state === 'enabled',
       )) {
         signal?.throwIfAborted();
-        let latest: McpConfiguration | undefined;
-        let lastRevision = 0;
-        for await (const entry of this.configurations().filter(
-          (entry) => entry.serverId === pin.serverId,
-        )) {
-          lastRevision = Math.max(lastRevision, entry.configRevision);
-          if (
-            !['failed', 'cancelled'].includes(entry.run.state) &&
-            (!latest || entry.configRevision >= latest.configRevision)
-          )
-            latest = entry;
-        }
+        const history = this.session.authority
+          .extensionRecordsInDomain('mcp_configuration')
+          .map((entry) => parseMcpConfiguration(entry.record))
+          .filter((entry) => entry.serverId === pin.serverId)
+          .sort((a, b) => a.configRevision - b.configRevision);
+        const latest = history
+          .filter((entry) => !['failed', 'cancelled'].includes(entry.run.state))
+          .at(-1);
         const previous =
           latest?.releaseState === 'released' ? undefined : latest;
         const effective = latest?.run.definition;
@@ -487,7 +469,7 @@ export class HostedMcpSession {
             : pin,
           previous,
           randomUUID(),
-          lastRevision + 1,
+          (history.at(-1)?.configRevision ?? 0) + 1,
           signal,
         );
       }
@@ -520,7 +502,7 @@ export class HostedMcpSession {
         )
       )
         throw new Error('MCP server is not selected by this Session.');
-      const previous = await this.session.authority.extensionRecord(
+      const previous = this.session.authority.extensionRecord(
         'mcp_configuration',
         operationId,
       );
@@ -538,13 +520,18 @@ export class HostedMcpSession {
         await this.install(pin, saved, undefined, undefined, signal);
         return;
       }
-      const currentRevision = await this.maximumRevision(pin.serverId);
+      const currentRevision = Math.max(
+        0,
+        ...this.configurations()
+          .filter((entry) => entry.serverId === pin.serverId)
+          .map((entry) => entry.configRevision),
+      );
       if (currentRevision !== expectedRevision)
         throw new HostedMcpConflictError(
           'MCP configuration revision conflicts.',
         );
       if (
-        await this.configurations().some(
+        this.configurations().some(
           (entry) =>
             entry.serverId === pin.serverId &&
             !['settled', 'failed', 'cancelled'].includes(entry.run.state),
@@ -627,10 +614,7 @@ export class HostedMcpSession {
           serverRevision: pin.serverRevision,
           definitionDigest: pin.definitionDigest,
           configRevision: configuration.configRevision,
-          grant: await this.grant(
-            'mcp_configuration',
-            configuration.configurationId,
-          ),
+          grant: this.grant('mcp_configuration', configuration.configurationId),
         },
         signal,
       );
@@ -718,6 +702,10 @@ export class HostedMcpSession {
       configuration.configRevision
     )
       this.catalogs.set(pin.serverId, { configuration, catalog });
+    this.bindings.set(configuration.configurationId, {
+      configuration,
+      catalog,
+    });
   }
 
   getCatalogs(): readonly ManagedMcpCatalog[] {
@@ -726,8 +714,8 @@ export class HostedMcpSession {
       .map(({ catalog }) => catalog);
   }
 
-  async hasPendingOperations(): Promise<boolean> {
-    return await this.session.authority
+  hasPendingOperations(): boolean {
+    return this.session.authority
       .extensionRecordsInDomain('mcp_operation')
       .some(
         (entry) =>
@@ -735,7 +723,7 @@ export class HostedMcpSession {
       );
   }
 
-  async hasUnsettledConfigurations(): Promise<boolean> {
+  get hasUnsettledConfigurations(): boolean {
     return this.configurations().some(
       (entry) =>
         !['settled', 'failed', 'cancelled'].includes(entry.run.state) ||
@@ -743,17 +731,17 @@ export class HostedMcpSession {
     );
   }
 
-  async recoveryBlocked(): Promise<boolean> {
+  get recoveryBlocked(): boolean {
     return (
       (this.settings !== undefined &&
-        (await this.managementStatus(this.settings)).state !== 'settled') ||
-      (await this.hasPendingOperations()) ||
-      (await this.configurations().some(
+        this.managementStatus(this.settings).state !== 'settled') ||
+      this.hasPendingOperations() ||
+      this.configurations().some(
         (entry) =>
           !['settled', 'failed', 'cancelled'].includes(entry.run.state) ||
           entry.releaseState === 'releasing' ||
           (entry.releaseState === 'drained' && !this.settings),
-      ))
+      )
     );
   }
 
@@ -772,29 +760,31 @@ export class HostedMcpSession {
       );
   }
 
-  async toolInput(
+  toolInput(
     name: string,
     args: Record<string, unknown>,
     operationId: string,
-  ): Promise<{ toolName: string; input: ManagedMcpInvoke } | undefined> {
-    const select = async (
-      configuration: McpConfiguration,
-      catalog: ManagedMcpCatalog,
-    ) => {
+  ): { toolName: string; input: ManagedMcpInvoke } | undefined {
+    for (const { catalog, configuration } of this.bindings.values()) {
       if (
         !this.enabled(catalog.serverId) ||
         ((this.settings || this.extensionServers !== undefined) &&
-          configuration.releaseState !== 'active')
+          parseMcpConfiguration(
+            this.session.authority.extensionRecord(
+              'mcp_configuration',
+              configuration.configurationId,
+            )!.record,
+          ).releaseState !== 'active')
       )
-        return undefined;
+        continue;
       const tool = catalog.tools.find(
         (candidate) => this.toolName(catalog, candidate.name) === name,
       );
-      if (!tool) return undefined;
+      if (!tool) continue;
       return {
         toolName: MANAGED_MCP_TOOL,
         input: {
-          kind: 'mcp-invoke' as const,
+          kind: 'mcp-invoke',
           sessionKey: this.key,
           operationId,
           serverId: catalog.serverId,
@@ -802,61 +792,10 @@ export class HostedMcpSession {
           configRevision: catalog.configRevision,
           catalogRevision: catalog.catalogRevision,
           connectionGeneration: catalog.connectionGeneration,
-          grant: await this.grant(
-            'mcp_configuration',
-            configuration.configurationId,
-          ),
-          request: {
-            kind: 'tool_call' as const,
-            name: tool.name,
-            arguments: args,
-          },
+          grant: this.grant('mcp_configuration', configuration.configurationId),
+          request: { kind: 'tool_call', name: tool.name, arguments: args },
         },
       };
-    };
-    const cached = this.bindings.get(name);
-    if (cached) {
-      const stored = await this.session.authority.extensionRecord(
-        'mcp_configuration',
-        cached.configuration.configurationId,
-      );
-      if (!stored) throw new HostedMcpRecoveryRequiredError();
-      const configuration = parseMcpConfiguration(stored.record);
-      if (
-        configuration.catalogRef?.digest ===
-        cached.configuration.catalogRef?.digest
-      ) {
-        const selected = await select(configuration, cached.catalog);
-        if (selected) return selected;
-      }
-    }
-    for await (const configuration of this.configurations()) {
-      if (
-        !configuration.catalogRef ||
-        !this.enabled(configuration.serverId) ||
-        ((this.settings || this.extensionServers !== undefined) &&
-          configuration.releaseState !== 'active')
-      )
-        continue;
-      const current = this.catalogs.get(configuration.serverId);
-      const catalog =
-        current?.configuration.configurationId === configuration.configurationId
-          ? current.catalog
-          : (JSON.parse(
-              (
-                await this.session.resources.read(configuration.catalogRef)
-              ).toString('utf8'),
-            ) as ManagedMcpCatalog);
-      const selected = await select(configuration, catalog);
-      if (selected) {
-        const binding = { configuration, catalog };
-        this.bindings.set(
-          name,
-          binding,
-          Buffer.byteLength(name) + Buffer.byteLength(JSON.stringify(binding)),
-        );
-        return selected;
-      }
     }
     return undefined;
   }
@@ -872,7 +811,7 @@ export class HostedMcpSession {
         : !request.name.trim()
     )
       throw new Error('MCP request requires a nonempty name or URI.');
-    const old = await this.session.authority.extensionRecord(
+    const old = this.session.authority.extensionRecord(
       'mcp_operation',
       operationId,
     );
@@ -917,10 +856,8 @@ export class HostedMcpSession {
     if (record.run.execution === 'intent') {
       await this.acquireOwner();
       record = parseMcpOperation(
-        (await this.session.authority.extensionRecord(
-          'mcp_operation',
-          operationId,
-        ))!.record,
+        this.session.authority.extensionRecord('mcp_operation', operationId)!
+          .record,
       );
       saved = await this.localOperationView(record);
       if (saved) return saved;
@@ -940,7 +877,7 @@ export class HostedMcpSession {
         configRevision: record.configRevision,
         connectionGeneration: record.connectionGeneration,
         catalogRevision: record.catalogRevision,
-        grant: await this.grant('mcp_operation', operationId),
+        grant: this.grant('mcp_operation', operationId),
         request,
       });
     } else response = await this.lookup(operationId);
@@ -964,7 +901,7 @@ export class HostedMcpSession {
   }
 
   async status(operationId: string): Promise<ManagedMcpOperationView> {
-    const saved = await this.session.authority.extensionRecord(
+    const saved = this.session.authority.extensionRecord(
       'mcp_operation',
       operationId,
     );
@@ -982,10 +919,10 @@ export class HostedMcpSession {
     response: ManagedMcpOperationView,
   ): Promise<ManagedMcpOperationView> {
     record = parseMcpOperation(
-      (await this.session.authority.extensionRecord(
+      this.session.authority.extensionRecord(
         'mcp_operation',
         record.operationId,
-      ))!.record,
+      )!.record,
     );
     const local = await this.localOperationView(record);
     if (local) return local;
@@ -1017,7 +954,7 @@ export class HostedMcpSession {
   }
 
   async cancel(operationId: string): Promise<ManagedMcpOperationView> {
-    const saved = await this.session.authority.extensionRecord(
+    const saved = this.session.authority.extensionRecord(
       'mcp_operation',
       operationId,
     );
@@ -1026,10 +963,8 @@ export class HostedMcpSession {
     const local = await this.localOperationView(record);
     if (local) return local;
     if (
-      (await this.session.authority.extensionRecord(
-        'mcp_operation',
-        operationId,
-      ))!.revision !== saved.revision
+      this.session.authority.extensionRecord('mcp_operation', operationId)!
+        .revision !== saved.revision
     )
       return this.cancel(operationId);
     if (record.run.execution === 'intent') {
@@ -1066,7 +1001,7 @@ export class HostedMcpSession {
   async reconcileEffects(): Promise<void> {
     if (this.initializing || this.refreshing || this.configuring.size)
       throw new HostedMcpRecoveryRequiredError();
-    for await (const entry of this.session.authority.extensionRecordsInDomain(
+    for (const entry of this.session.authority.extensionRecordsInDomain(
       'mcp_operation',
     )) {
       if (['settled', 'failed', 'cancelled'].includes(entry.run.state))
@@ -1076,9 +1011,8 @@ export class HostedMcpSession {
         await this.cancel(operation.operationId);
       else await this.status(operation.operationId);
     }
-    if (await this.hasPendingOperations())
-      throw new HostedMcpRecoveryRequiredError();
-    for await (const configuration of this.configurations()) {
+    if (this.hasPendingOperations()) throw new HostedMcpRecoveryRequiredError();
+    for (const configuration of this.configurations()) {
       if (['settled', 'failed', 'cancelled'].includes(configuration.run.state))
         continue;
       if (configuration.run.execution !== 'intent') {
@@ -1092,10 +1026,10 @@ export class HostedMcpSession {
             configuration,
           );
         } catch (cause) {
-          const current = (await this.session.authority.extensionRecord(
+          const current = this.session.authority.extensionRecord(
             'mcp_configuration',
             configuration.configurationId,
-          ))!;
+          )!;
           if (
             current.run.state !== 'failed' ||
             current.run.execution !== 'settled'
@@ -1119,41 +1053,36 @@ export class HostedMcpSession {
 
   async closeResources(): Promise<void> {
     if (
-      (await this.hasPendingOperations()) ||
-      (await this.configurations().some(
+      this.hasPendingOperations() ||
+      this.configurations().some(
         (entry) =>
           !['settled', 'failed', 'cancelled'].includes(entry.run.state),
-      ))
+      )
     )
       throw new HostedMcpRecoveryRequiredError();
     const configurations = this.configurations().filter(
       (entry) => entry.releaseState !== 'released',
     );
-    const hookOwner = await this.session.authority
+    const hookOwner = this.session.authority
       .extensionRecordsInDomain('hook_execution')
       .some(
         (entry) =>
           parseHookExecution(entry.record).runtimeSessionId ===
             this.broker.runtimeSessionId && entry.run.runtime !== null,
       );
+    if (!this.acquired && !configurations.length && !hookOwner) return;
     if (
-      !this.acquired &&
-      !(await configurations.some(() => true)) &&
-      !hookOwner
-    )
-      return;
-    if (
-      (await configurations.some(
+      configurations.some(
         (entry) =>
           entry.releaseState === 'releasing' &&
           entry.connectionGeneration !== null,
-      )) &&
-      (await configurations.every((entry) => entry.releaseState !== 'active'))
+      ) &&
+      configurations.every((entry) => entry.releaseState !== 'active')
     ) {
       await this.acquireOwner();
     }
     if (
-      await configurations.some(
+      configurations.some(
         (entry) =>
           entry.releaseState === 'active' &&
           entry.run.execution !== 'not_started_proven' &&
@@ -1168,11 +1097,9 @@ export class HostedMcpSession {
   }
 
   private async drainConfigurations(
-    configurations:
-      | AsyncIterable<McpConfiguration>
-      | readonly McpConfiguration[],
+    configurations: readonly McpConfiguration[],
   ): Promise<void> {
-    for await (let configuration of configurations) {
+    for (let configuration of configurations) {
       if (configuration.releaseState === 'drained') continue;
       if (
         (configuration.run.state === 'failed' &&
@@ -1212,10 +1139,7 @@ export class HostedMcpSession {
           serverId: configuration.serverId,
           serverRevision: configuration.serverRevision,
           connectionGeneration: configuration.connectionGeneration!,
-          grant: await this.grant(
-            'mcp_configuration',
-            configuration.configurationId,
-          ),
+          grant: this.grant('mcp_configuration', configuration.configurationId),
         });
       }
       if (response.state !== 'settled' || response.error)
@@ -1228,8 +1152,7 @@ export class HostedMcpSession {
   }
 
   async manage(settings: HostedMcpSettings): Promise<void> {
-    if (await this.hasPendingOperations())
-      throw new HostedMcpRecoveryRequiredError();
+    if (this.hasPendingOperations()) throw new HostedMcpRecoveryRequiredError();
     this.settings = settings;
     this.ready = undefined;
     const { command } = settings;
@@ -1252,21 +1175,24 @@ export class HostedMcpSession {
         entry.serverId === command.serverId && entry.state === 'enabled',
     );
     if (!pin) throw new HostedMcpConflictError('MCP server is not enabled.');
-    const saved = await this.configurations().find(
+    const saved = this.configurations().find(
       (entry) => entry.configurationId === command.operationId,
     );
     const revision = saved
       ? saved.configRevision - 1
-      : await this.maximumRevision(command.serverId);
+      : Math.max(
+          0,
+          ...this.configurations()
+            .filter((entry) => entry.serverId === command.serverId)
+            .map((entry) => entry.configRevision),
+        );
     await this.configure(command.operationId, pin, revision);
   }
 
   private async markReleased(
-    configurations:
-      | AsyncIterable<McpConfiguration>
-      | readonly McpConfiguration[],
+    configurations: readonly McpConfiguration[],
   ): Promise<void> {
-    for await (const configuration of configurations)
+    for (const configuration of configurations)
       await this.commitConfiguration({
         ...configuration,
         releaseState: 'released',
@@ -1275,13 +1201,7 @@ export class HostedMcpSession {
     this.ownerReady = false;
   }
 
-  private maximumRevision(serverId: string): Promise<number> {
-    return this.configurations()
-      .filter((entry) => entry.serverId === serverId)
-      .reduce((maximum, entry) => Math.max(maximum, entry.configRevision), 0);
-  }
-
-  private configurations() {
+  private configurations(): McpConfiguration[] {
     return this.session.authority
       .extensionRecordsInDomain('mcp_configuration')
       .map((entry) => parseMcpConfiguration(entry.record));
@@ -1293,31 +1213,32 @@ export class HostedMcpSession {
     this.acquired = true;
     try {
       if (this.options.lifecycleAuthority?.()) {
-        let expected: ExtensionRun['runtime'] = null;
-        const observe = (pin: ExtensionRun['runtime']) => {
-          if (!pin) return;
-          if (
-            expected &&
-            (pin.runtimeBindingId !== expected.runtimeBindingId ||
-              pin.generation !== expected.generation)
+        const pins = [
+          ...this.configurations()
+            .filter(
+              (entry) =>
+                entry.runtimeSessionId === this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : [])),
+          ...this.session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter(
+              (entry) =>
+                parseHookExecution(entry.record).runtimeSessionId ===
+                this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : [])),
+        ];
+        const expected = pins[0];
+        if (
+          !expected ||
+          pins.some(
+            (pin) =>
+              pin.runtimeBindingId !== expected.runtimeBindingId ||
+              pin.generation !== expected.generation,
           )
-            throw new HostedMcpRecoveryRequiredError();
-          expected = pin;
-        };
-        for await (const entry of this.configurations()) {
-          if (entry.runtimeSessionId === this.broker.runtimeSessionId)
-            observe(entry.run.runtime);
-        }
-        for await (const entry of this.session.authority.extensionRecordsInDomain(
-          'hook_execution',
-        )) {
-          if (
-            parseHookExecution(entry.record).runtimeSessionId ===
-            this.broker.runtimeSessionId
-          )
-            observe(entry.run.runtime);
-        }
-        if (!expected) throw new HostedMcpRecoveryRequiredError();
+        )
+          throw new HostedMcpRecoveryRequiredError();
         await this.broker.acquire(expected);
       } else {
         await this.broker.acquire();
@@ -1330,18 +1251,18 @@ export class HostedMcpSession {
     const runtime = this.broker.runtime;
     if (
       !runtime ||
-      (await this.configurations().some(
+      this.configurations().some(
         (entry) =>
           entry.runtimeSessionId === this.broker.runtimeSessionId &&
           entry.run.runtime !== null &&
           (entry.run.runtime.runtimeBindingId !== runtime.bindingId ||
             entry.run.runtime.generation !== runtime.generation),
-      ))
+      )
     )
       throw new HostedMcpRecoveryRequiredError();
     if (!this.grantsRenewed) {
       // A restored writer needs a higher durable revision to replace the old grant owner.
-      for await (const configuration of this.configurations()) {
+      for (const configuration of this.configurations()) {
         if (
           configuration.catalogRef &&
           configuration.releaseState !== 'released'
@@ -1386,11 +1307,11 @@ export class HostedMcpSession {
     };
   }
 
-  private async grant(
+  private grant(
     domain: 'mcp_configuration' | 'mcp_operation',
     recordId: string,
   ) {
-    return await this.session.authority.issueOperationGrant({
+    return this.session.authority.issueOperationGrant({
       domain,
       recordId,
       ownerId: this.session.authority.currentActivation!.workerId,
@@ -1428,7 +1349,7 @@ export class HostedMcpSession {
     record: unknown,
     renew = false,
   ): Promise<void> {
-    const previous = await this.session.authority.extensionRecord(domain, id);
+    const previous = this.session.authority.extensionRecord(domain, id);
     if (!renew && previous && digest(previous.record) === digest(record))
       return;
     await this.session.authority.commitExtensionRecord(

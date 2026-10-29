@@ -2444,7 +2444,7 @@ class HostedAutomationFaultGatesIT {
                     }
                 })
                 .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
+        jdbc = spring.getBean(JdbcTemplate.class);
     }
 
     private void register(Path root) {

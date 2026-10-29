@@ -21,6 +21,78 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedSnapshotNumericPagingTest {
     @Test
+    void recentItemsKeepReadsBoundedAndPageBackwardInChronologicalOrder() {
+        for (int count : List.of(1000, 10000)) {
+            try (Fixture fixture = new Fixture(count, false)) {
+                fixture.jdbc.bodyReads = 0;
+                var page = fixture.store.findRecentSnapshotPage("tenant", "session", null, 2);
+                assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId)
+                        .containsExactly(id(count - 1), id(count));
+                assertThat(page.hasMore()).isTrue();
+                assertThat(fixture.jdbc.bodyReads).isEqualTo(2);
+                var older = fixture.store.findRecentSnapshotPage("tenant", "session", page.nextCursor(), 2);
+                assertThat(older.items()).extracting(StoreModels.ItemRecord::itemId)
+                        .containsExactly(id(count - 3), id(count - 2));
+                assertThat(older.coveredSequence()).isEqualTo(page.coveredSequence());
+            }
+        }
+    }
+
+    @Test
+    void recentItemsCrossPhysicalPagesAndTerminateWithoutDuplicates() {
+        try (Fixture fixture = new Fixture(205, true)) {
+            List<String> ids = new ArrayList<>();
+            String cursor = null;
+            do {
+                var page = fixture.store.findRecentSnapshotPage("tenant", "session", cursor, 37);
+                assertThat(page.items()).hasSizeLessThanOrEqualTo(37);
+                ids.addAll(0, page.items().stream().map(StoreModels.ItemRecord::itemId).toList());
+                cursor = page.nextCursor();
+                assertThat(page.hasMore()).isEqualTo(cursor != null);
+            } while (cursor != null);
+            assertThat(ids).containsExactlyElementsOf(java.util.stream.IntStream.rangeClosed(1, 205)
+                    .mapToObj(ManagedSnapshotNumericPagingTest::id).toList());
+        }
+    }
+
+    @Test
+    void recentCursorCannotBeUsedAsForwardCursorOrChanged() {
+        try (Fixture fixture = new Fixture(205, false)) {
+            var page = fixture.store.findRecentSnapshotPage("tenant", "session", null, 1);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> fixture.store.findSnapshotPage(
+                    "tenant", "session", page.nextCursor(), 0, 1)).hasMessageContaining("cursor");
+            var forward = fixture.store.findSnapshotPage("tenant", "session", null, 0, 1);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> fixture.store.findRecentSnapshotPage(
+                    "tenant", "session", forward.nextCursor(), 1)).hasMessageContaining("cursor");
+            String cursor = page.nextCursor();
+            String tampered = cursor.substring(0, cursor.indexOf('.') + 1) + "AAAA";
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> fixture.store.findRecentSnapshotPage(
+                    "tenant", "session", tampered, 1)).hasMessageContaining("cursor");
+        }
+    }
+
+    @Test
+    void recentCursorKeepsItsSnapshotWhenANewerProjectionIsPublished() {
+        try (Fixture fixture = new Fixture(205, false)) {
+            var first = fixture.store.findRecentSnapshotPage("tenant", "session", null, 2);
+            fixture.transaction.executeWithoutResult(status -> {
+                fixture.jdbc.update("UPDATE ma_message SET item_status='retracted'"
+                        + " WHERE tenant_id=? AND session_id=? AND item_id=?", "tenant", "session", id(203));
+                fixture.jdbc.update("UPDATE ma_event_stream SET projection_version=projection_version+1"
+                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
+                        "tenant", "session");
+                fixture.project();
+            });
+            var latest = fixture.store.findRecentSnapshotPage("tenant", "session", null, 3);
+            assertThat(latest.items().getFirst().status()).isEqualTo("retracted");
+            var next = fixture.store.findRecentSnapshotPage("tenant", "session", first.nextCursor(), 2);
+            assertThat(next.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(202), id(203));
+            assertThat(next.items().getLast().status()).isEqualTo("completed");
+            assertThat(next.coveredSequence()).isEqualTo(first.coveredSequence());
+        }
+    }
+
+    @Test
     void tenfoldHistoryKeepsInitialNumericPageReadsBounded() {
         List<Integer> reads = new ArrayList<>();
         for (int count : List.of(1000, 10000)) {

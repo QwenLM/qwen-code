@@ -620,9 +620,10 @@ describe('managed harness factory', () => {
     const refs = await waitRefs(session);
     const beforeWait = session.authority.committedSequence;
     const boundary = await handle.commitDurableWait(waitCommit(refs));
-    const waitEvents = await session.authority
-      .iterateEvents(beforeWait + 1, session.authority.committedSequence)
-      .collect(1_000_000);
+    const waitEvents = session.authority.eventsInSequenceRange(
+      beforeWait + 1,
+      session.authority.committedSequence,
+    );
     expect(waitEvents.map((event) => event.kind)).toEqual([
       'action.changed',
       'checkpoint.committed',
@@ -654,7 +655,7 @@ describe('managed harness factory', () => {
     await expect(handle.resolveDurableWait()).rejects.toThrow(
       /before a final action decision/,
     );
-    expect((await session.authority.action('fc-1'))?.state).toBe('requested');
+    expect(session.authority.action('fc-1')?.state).toBe('requested');
     await handle.detach();
     expect(handle.isDetached()).toBe(true);
     await expect(handle.resolveDurableWait()).rejects.toThrow(/detached/);
@@ -679,13 +680,11 @@ describe('managed harness factory', () => {
       workerId: 'worker-1',
       activationLeaseDurationMs: 60_000,
     });
-    expect(await reopened.authority.action('fc-1')).toMatchObject({
+    expect(reopened.authority.action('fc-1')).toMatchObject({
       state: 'decided',
       requestId: 'fc-1',
     });
-    expect(
-      (await reopened.authority.action('fc-1'))?.decisionRef,
-    ).not.toBeNull();
+    expect(reopened.authority.action('fc-1')?.decisionRef).not.toBeNull();
     await reopened.close();
   });
 
@@ -711,7 +710,7 @@ describe('managed harness factory', () => {
       workerId: 'worker-1',
       activationLeaseDurationMs: 60_000,
     });
-    expect((await reopened.authority.action('fc-1'))?.state).toBe('decided');
+    expect(reopened.authority.action('fc-1')?.state).toBe('decided');
     expect(reopened.authority.latestCheckpoint?.boundary).toBe(
       HARNESS_DURABLE_WAIT_BOUNDARY,
     );
@@ -730,7 +729,7 @@ describe('managed harness factory', () => {
     await handle.ensureRunnable();
     await handle.commitDurableWait(waitCommit(await waitRefs(session)));
     await handle.detach();
-    expect((await session.authority.action('fc-1'))?.state).toBe('requested');
+    expect(session.authority.action('fc-1')?.state).toBe('requested');
     await session.close();
 
     const reopened = await openManagedSession({
@@ -743,7 +742,7 @@ describe('managed harness factory', () => {
       workerId: 'worker-1',
       activationLeaseDurationMs: 60_000,
     });
-    expect((await reopened.authority.action('fc-1'))?.state).toBe('requested');
+    expect(reopened.authority.action('fc-1')?.state).toBe('requested');
     expect(reopened.authority.latestCheckpoint?.boundary).toBe(
       HARNESS_DURABLE_WAIT_BOUNDARY,
     );
@@ -779,7 +778,7 @@ describe('managed harness factory', () => {
       /before a final action decision/,
     );
     await decideAction(session);
-    expect((await session.authority.action('fc-1'))?.state).toBe('decided');
+    expect(session.authority.action('fc-1')?.state).toBe('decided');
     expect(await handle.resolveDurableWait()).not.toBeNull();
     expect(await handle.resolveDurableWait()).toBeNull();
     await expect(
@@ -1223,9 +1222,7 @@ describe('managed harness factory', () => {
       if (runtimeFirst) {
         expect(checkpoint.tools?.items).toHaveLength(1);
         expect(checkpoint.tools?.items[0]?.executionCallId).toBe('ex-1');
-        expect(
-          await session.authority.action(approval.requestId),
-        ).toBeUndefined();
+        expect(session.authority.action(approval.requestId)).toBeUndefined();
         const outcome = await session.resources.publish(
           'managed-tool-outcome',
           Buffer.from('{}', 'utf8'),
@@ -1374,7 +1371,7 @@ describe('managed harness factory', () => {
         promptId: 'turn-2',
       }),
     ).rejects.toThrow(/cannot change the current unfinished turn/);
-    expect(await session.authority.action('fc-1')).toBeUndefined();
+    expect(session.authority.action('fc-1')).toBeUndefined();
     expect(session.authority.committedSequence).toBe(sequence);
     await expect(
       handle.commitDurableWait(waitCommit(await waitRefs(session)), {
@@ -1451,7 +1448,7 @@ describe('managed harness factory', () => {
     await expect(
       next.commitDurableWait(waitCommit(await waitRefs(session)), turn),
     ).rejects.toThrow(/cannot continue a prior activation/);
-    expect(await session.authority.action('fc-1')).toBeUndefined();
+    expect(session.authority.action('fc-1')).toBeUndefined();
     expect(session.authority.committedSequence).toBe(sequence);
     await session.close();
   });

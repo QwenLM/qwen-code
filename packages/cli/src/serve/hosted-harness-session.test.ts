@@ -4,9 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
-import { ManagedHarnessCheckpointView } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
-import type { HarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   mkdir,
@@ -901,9 +898,6 @@ describe('settleCancelledHookTurn', () => {
   const preToolParkedSession = (
     records: unknown[],
     read: (ref: unknown) => Promise<Buffer>,
-    attempts: ReadonlyArray<{ sequence: number; state: string }> = [
-      { sequence: 6, state: 'output_committed' },
-    ],
   ) => {
     const events = [
       {
@@ -911,76 +905,48 @@ describe('settleCancelledHookTurn', () => {
         sequence: 5,
         payload: { turnId: 'prompt', source: 'hosted-harness' },
       } as unknown as ManagedSessionEvent,
-      ...attempts.map(
-        ({ sequence, state }) =>
-          ({
-            kind: 'model.attempt',
-            sequence,
-            payload: { attemptId: 'attempt-1', state },
-          }) as unknown as ManagedSessionEvent,
-      ),
+      {
+        kind: 'model.attempt',
+        sequence: 6,
+        payload: { attemptId: 'attempt-1', state: 'output_committed' },
+      } as unknown as ManagedSessionEvent,
     ];
     return {
       blocked: true,
-      hooks: { hasPendingOperations: async () => false },
+      hooks: { hasPendingOperations: false },
       managed: {
         authority: {
-          committedSequence: events.at(-1)!.sequence,
+          committedSequence: 6,
           sessionHeader: { sessionKey: { sessionId: 's' } },
-          createQueryHistory: fixtureQueryHistory,
-          iterateEvents: () => historyQuery(events),
-          findEvent: async (
-            kind: string,
-            field: string,
-            value: string,
-            { throughSequence }: { throughSequence: number },
-          ) =>
-            events.findLast(
-              (event) =>
-                event.kind === kind &&
-                event.payload[field] === value &&
-                event.sequence <= throughSequence,
-            ),
-          pendingInputsAt: async (through: number) =>
-            events.filter(
-              (event) =>
-                event.kind === 'input.accepted' && event.sequence <= through,
-            ),
-          extensionRecordsInDomain: () => historyQuery(records),
+          eventsInSequenceRange: () => events,
+          extensionRecordsInDomain: () => records,
           domainRecord: () => undefined,
           harnessRunAuthorization: async () => ({
             status: 'runnable',
             checkpoint: { continuation: { phase: 'model_output_committed' } },
-            history: {
-              toolCount: 0,
-              allToolsSettled: true,
-              allToolsConsumed: true,
-            },
           }),
         },
         resources: { read },
         sink: {
-          async *iterateMessageRecords() {
-            yield* [
-              {
-                daemonPromptId: 'prompt',
-                type: 'assistant',
-                uuid: 'u-assistant',
-                model: 'test-model',
-                message: {
-                  parts: [
-                    {
-                      functionCall: {
-                        id: 'call-0',
-                        name: 'write_file',
-                        args: {},
-                      },
+          project: async () => [
+            {
+              daemonPromptId: 'prompt',
+              type: 'assistant',
+              uuid: 'u-assistant',
+              model: 'test-model',
+              message: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call-0',
+                      name: 'write_file',
+                      args: {},
                     },
-                  ],
-                },
+                  },
+                ],
               },
-            ];
-          },
+            },
+          ],
         },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
@@ -1049,47 +1015,6 @@ describe('settleCancelledHookTurn', () => {
     expect(read).not.toHaveBeenCalledWith(resultRef);
     expect(read).not.toHaveBeenCalled();
     // The unrelated record is no fence: the parked turn stays parked.
-    expect(session.blocked).toBe(true);
-  });
-
-  it('queries the latest attempt at the same prefix as canonical recovery records', async () => {
-    const session = preToolParkedSession(
-      [],
-      vi.fn(async () => Buffer.from('{}')),
-      [
-        { sequence: 6, state: 'started' },
-        { sequence: 7, state: 'output_committed' },
-      ],
-    );
-    const find = vi.spyOn(session.managed.authority, 'findEvent');
-    const records = vi.spyOn(session.managed.sink, 'iterateMessageRecords');
-    await settleCancelledHookTurn(session);
-    expect(find).toHaveBeenCalledTimes(2);
-    expect(find).toHaveBeenCalledWith(
-      'model.attempt',
-      'attemptId',
-      'attempt-1',
-      {
-        last: true,
-        throughSequence: 7,
-      },
-    );
-    expect(records).toHaveBeenCalledWith(7);
-    expect(session.blocked).toBe(true);
-  });
-
-  it('does not recover a superseded committed attempt as current model output', async () => {
-    const session = preToolParkedSession(
-      [],
-      vi.fn(async () => Buffer.from('{}')),
-      [
-        { sequence: 6, state: 'output_committed' },
-        { sequence: 7, state: 'started' },
-      ],
-    );
-    const records = vi.spyOn(session.managed.sink, 'iterateMessageRecords');
-    await settleCancelledHookTurn(session);
-    expect(records).not.toHaveBeenCalled();
     expect(session.blocked).toBe(true);
   });
 
@@ -1295,26 +1220,16 @@ describe('settleCancelledHookTurn', () => {
     });
     const session = {
       blocked: true,
-      hooks: { hasPendingOperations: async () => false },
+      hooks: { hasPendingOperations: false },
       managed: {
         authority: {
           committedSequence: 6,
           sessionHeader: { sessionKey: { sessionId: 's' } },
-          createQueryHistory: fixtureQueryHistory,
-          iterateEvents: () => historyQuery(events),
-          pendingInputsAt: async (through: number) =>
-            events.filter(
-              (event) =>
-                event.kind === 'input.accepted' && event.sequence <= through,
-            ),
-          extensionRecordsInDomain: () => historyQuery([{ record }]),
+          eventsInSequenceRange: () => events,
+          extensionRecordsInDomain: () => [{ record }],
         },
         resources: { read },
-        sink: {
-          async *iterateMessageRecords() {
-            yield* [];
-          },
-        },
+        sink: { project: async () => [] },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
     await expect(settleCancelledHookTurn(session)).resolves.toBeUndefined();
@@ -1330,40 +1245,23 @@ describe('settleCancelledHookTurn', () => {
     aborted.abort(reason);
     const session = {
       blocked: true,
-      hooks: { hasPendingOperations: async () => false },
+      hooks: { hasPendingOperations: false },
       managed: {
         authority: {
           committedSequence: 5,
           sessionHeader: { sessionKey: { sessionId: 's' } },
-          createQueryHistory: fixtureQueryHistory,
-          iterateEvents: () =>
-            historyQuery([
-              {
-                kind: 'input.accepted',
-                sequence: 5,
-                payload: { turnId: 'prompt', source: 'hosted-harness' },
-              } as unknown as ManagedSessionEvent,
-            ]),
-          pendingInputsAt: async (through: number) =>
-            [
-              {
-                kind: 'input.accepted',
-                sequence: 5,
-                payload: { turnId: 'prompt', source: 'hosted-harness' },
-              } as unknown as ManagedSessionEvent,
-            ].filter(
-              (event) =>
-                event.kind === 'input.accepted' && event.sequence <= through,
-            ),
+          eventsInSequenceRange: () => [
+            {
+              kind: 'input.accepted',
+              sequence: 5,
+              payload: { turnId: 'prompt', source: 'hosted-harness' },
+            } as unknown as ManagedSessionEvent,
+          ],
           // The record body is never parsed: the abort lands first.
-          extensionRecordsInDomain: () => historyQuery([{ record: {} }]),
+          extensionRecordsInDomain: () => [{ record: {} }],
         },
         resources: { read: async () => Buffer.from('{}') },
-        sink: {
-          async *iterateMessageRecords() {
-            yield* [];
-          },
-        },
+        sink: { project: async () => [] },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
     await expect(settleCancelledHookTurn(session, aborted.signal)).rejects.toBe(
@@ -1402,29 +1300,19 @@ describe('settleCancelledHookTurn', () => {
         payload: { turnId: 'monitor:1:notify:1', source: 'monitor' },
       } as unknown as ManagedSessionEvent,
     ];
-    const extensionRecordsInDomain = vi.fn(() => historyQuery([]));
+    const extensionRecordsInDomain = vi.fn(() => []);
     const session = {
       blocked: true,
-      hooks: { hasPendingOperations: async () => false },
+      hooks: { hasPendingOperations: false },
       managed: {
         authority: {
           committedSequence: 7,
           sessionHeader: { sessionKey: { sessionId: 's' } },
-          createQueryHistory: fixtureQueryHistory,
-          iterateEvents: () => historyQuery(events),
-          pendingInputsAt: async (through: number) =>
-            events.filter(
-              (event) =>
-                event.kind === 'input.accepted' && event.sequence <= through,
-            ),
+          eventsInSequenceRange: () => events,
           extensionRecordsInDomain,
         },
         resources: { read: async () => Buffer.from('{}') },
-        sink: {
-          async *iterateMessageRecords() {
-            yield* [];
-          },
-        },
+        sink: { project: async () => [] },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
     await settleCancelledHookTurn(session);
@@ -1448,29 +1336,19 @@ describe('settleCancelledHookTurn', () => {
         payload: { turnId: 'arun_1:input', source: AUTOMATION_INPUT_SOURCE },
       } as unknown as ManagedSessionEvent,
     ];
-    const extensionRecordsInDomain = vi.fn(() => historyQuery([]));
+    const extensionRecordsInDomain = vi.fn(() => []);
     const session = {
       blocked: true,
-      hooks: { hasPendingOperations: async () => false },
+      hooks: { hasPendingOperations: false },
       managed: {
         authority: {
           committedSequence: 7,
           sessionHeader: { sessionKey: { sessionId: 's' } },
-          createQueryHistory: fixtureQueryHistory,
-          iterateEvents: () => historyQuery(events),
-          pendingInputsAt: async (through: number) =>
-            events.filter(
-              (event) =>
-                event.kind === 'input.accepted' && event.sequence <= through,
-            ),
+          eventsInSequenceRange: () => events,
           extensionRecordsInDomain,
         },
         resources: { read: async () => Buffer.from('{}') },
-        sink: {
-          async *iterateMessageRecords() {
-            yield* [];
-          },
-        },
+        sink: { project: async () => [] },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
     await settleCancelledHookTurn(session);
@@ -1489,28 +1367,20 @@ describe('settleCancelledHookTurn', () => {
         payload: { turnId: 'monitor:1:notify:1', source: 'monitor' },
       } as unknown as ManagedSessionEvent,
     ];
-    const extensionRecordsInDomain = vi.fn(() => historyQuery([]));
+    const extensionRecordsInDomain = vi.fn(() => []);
     const session = {
       blocked: true,
-      hooks: { hasPendingOperations: async () => false },
+      hooks: { hasPendingOperations: false },
       managed: {
         authority: {
           committedSequence: 8,
           sessionHeader: { sessionKey: { sessionId: 's' } },
-          createQueryHistory: fixtureQueryHistory,
-          iterateEvents: () => historyQuery(events),
-          pendingInputsAt: async (through: number) =>
-            events.filter(
-              (event) =>
-                event.kind === 'input.accepted' && event.sequence <= through,
-            ),
+          eventsInSequenceRange: () => events,
           extensionRecordsInDomain,
         },
         resources: { read: async () => Buffer.from('{}') },
         sink: {
-          async *iterateMessageRecords() {
-            yield* [{ daemonPromptId: 'monitor:1:notify:1' }];
-          },
+          project: async () => [{ daemonPromptId: 'monitor:1:notify:1' }],
         },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
@@ -4452,7 +4322,7 @@ describe('Hosted Harness no-tool session', () => {
         },
         key,
       );
-      const run = await automations
+      const run = automations
         .runs()
         .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
       expect(run?.run.state).toBe('failed');
@@ -4474,126 +4344,72 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
-  it.each([false, true])(
-    'registers a wake Runtime a background run still holds, for the close drain (#13856 R1-28, archive-only=%s)',
-    async (archiveOnly) => {
-      const inputId = await prewriteAutomationParkedWakeSession();
-      const key = {
-        tenantId: 'tenant',
-        workspaceId: 'workspace',
-        sessionId: SESSION_ID,
-      };
-      const managed = await openManagedSession({
+  it('registers a wake Runtime a background run still holds, for the close drain (#13856 R1-28)', async () => {
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
         runtimeBaseDir: state.root,
-        transcriptPath: '',
         sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
         sessionKey: key,
-        cwd: state.root,
-        version: 'hosted-harness/1',
-        workerId: BOOT_ID,
-        activationLeaseDurationMs: 60_000,
-        journalStore: new LocalJsonlManagedSessionJournalStore({
-          runtimeBaseDir: state.root,
-          sessionId: SESSION_ID,
-          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
-        }),
-        resourceStore: LocalManagedSessionResourceStore.create({
-          runtimeBaseDir: state.root,
-          sessionKey: key,
-        }),
-      });
-      try {
-        if (archiveOnly) {
-          const response = {
-            id: 'fc-wake-1',
-            name: 'read_file',
-            response: { executionStatus: 'success' },
-          };
-          const outcomeRef = await managed.resources.publish(
-            'managed-tool-outcome',
-            Buffer.from(
-              JSON.stringify({
-                executionCallId: 'ex-wake-1',
-                functionResponse: response,
-              }),
-            ),
-          );
-          const handle = createManagedHarnessHandle(managed);
-          await handle.resolveAwaitRuntime('ex-wake-1', outcomeRef);
-          await managed.sink.write({
-            uuid: randomUUID(),
-            parentUuid: 'msg-wake-1',
-            sessionId: SESSION_ID,
-            timestamp: new Date().toISOString(),
-            type: 'tool_result',
-            cwd: state.root,
-            version: 'hosted-harness/1',
-            daemonPromptId: inputId,
-            message: { role: 'user', parts: [{ functionResponse: response }] },
-          });
-          await handle.consumeRuntimeResults();
-          const authorize = managed.authority.harnessRunAuthorization.bind(
-            managed.authority,
-          );
-          vi.spyOn(
-            managed.authority,
-            'harnessRunAuthorization',
-          ).mockImplementation(async () => {
-            const verdict = await authorize();
-            if (verdict.status !== 'runnable') return verdict;
-            const checkpoint = {
-              ...verdict.checkpoint,
-              tools: { ...verdict.checkpoint.tools!, items: [] },
-            };
-            return {
-              ...verdict,
-              checkpoint,
-            };
-          });
-        }
-        // The wake turn started a background Shell that still holds its Runtime,
-        // so the routine release refuses `runtime_session_held`. The aftermath
-        // must read that as the designed hold — register it for the close's
-        // drain and keep settling — never drain (that would stop a run the user
-        // meant to keep), and never wedge the Session on the refusal.
-        const repair = mockRepairBroker();
-        vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
-          () =>
-            Promise.reject(
-              new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
-            ),
-        );
-        repair.unlatch();
-        const heldRuntimeTurns = new Set<string>();
-        const session = {
-          managed,
-          automations: new HostedAutomationSession(
-            {
-              authority: managed.authority,
-              resources: managed.resources,
-              sink: managed.sink,
-            },
-            key,
+      }),
+    });
+    try {
+      // The wake turn started a background Shell that still holds its Runtime,
+      // so the routine release refuses `runtime_session_held`. The aftermath
+      // must read that as the designed hold — register it for the close's
+      // drain and keep settling — never drain (that would stop a run the user
+      // meant to keep), and never wedge the Session on the refusal.
+      const repair = mockRepairBroker();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+        () =>
+          Promise.reject(
+            new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
           ),
-          heldRuntimeTurns,
-        } as never;
-        const aftermath = await settleCrashedWakeTurnAftermath({
-          session,
-          sessionId: SESSION_ID,
-          cwd: state.root,
-          brokerOptions: {
-            token: '',
-            baseUrl: 'http://127.0.0.1:8080',
-          } as never,
-          turnId: inputId,
-        });
-        expect(aftermath).toBe('settled');
-        expect(heldRuntimeTurns.has(inputId)).toBe(true);
-      } finally {
-        await managed.close().catch(() => undefined);
-      }
-    },
-  );
+      );
+      repair.unlatch();
+      const heldRuntimeTurns = new Set<string>();
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+        heldRuntimeTurns,
+      } as never;
+      const aftermath = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: '', baseUrl: 'http://127.0.0.1:8080' } as never,
+        turnId: inputId,
+      });
+      expect(aftermath).toBe('settled');
+      expect(heldRuntimeTurns.has(inputId)).toBe(true);
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
 
   // H4e-b1: a wake Turn that died after a team call committed and before
   // its tool_result landed: the aftermath answers it from its record before
@@ -4755,7 +4571,7 @@ describe('Hosted Harness no-tool session', () => {
         },
         key,
       );
-      const run = await automations
+      const run = automations
         .runs()
         .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
       expect(run?.run.state).toBe('failed');
@@ -6060,12 +5876,11 @@ describe('Hosted Harness no-tool session', () => {
         return read.call(this, ref);
       });
     } else {
-      const iterateRecords =
-        ManagedSessionRecordSink.prototype.iterateMessageRecords;
+      const project = ManagedSessionRecordSink.prototype.project;
       vi.spyOn(
         ManagedSessionRecordSink.prototype,
-        'iterateMessageRecords',
-      ).mockImplementation(async function* (
+        'project',
+      ).mockImplementation(async function (
         this: ManagedSessionRecordSink,
         through?: number,
       ) {
@@ -6077,7 +5892,7 @@ describe('Hosted Harness no-tool session', () => {
           held = true;
           await opened;
         }
-        yield* iterateRecords.call(this, through);
+        return project.call(this, through);
       });
     }
     return { held: () => held, open };
@@ -6535,27 +6350,22 @@ describe('Hosted Harness no-tool session', () => {
     // hangs until the test lets go: only the prompt route's own
     // checkpoint probe may answer this refusal, never the pump's later
     // classification (which would also refuse, from a shadowing cause).
-    const originalRecords =
-      ManagedSessionRecordSink.prototype.iterateMessageRecords;
+    const originalProject = ManagedSessionRecordSink.prototype.project;
     let afterLoad = false;
     let hanging = false;
     let releaseClassify!: () => void;
     const classifyGate = new Promise<void>((resolve) => {
       releaseClassify = resolve;
     });
-    vi.spyOn(
-      ManagedSessionRecordSink.prototype,
-      'iterateMessageRecords',
-    ).mockImplementation(async function* (
-      this: ManagedSessionRecordSink,
-      through?: number,
-    ) {
-      if (afterLoad && !hanging) {
-        hanging = true;
-        await classifyGate;
-      }
-      yield* originalRecords.call(this, through);
-    });
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'project').mockImplementation(
+      function (this: ManagedSessionRecordSink) {
+        if (afterLoad && !hanging) {
+          hanging = true;
+          return classifyGate.then(() => originalProject.call(this));
+        }
+        return originalProject.call(this);
+      },
+    );
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -7373,7 +7183,7 @@ describe('Hosted Harness no-tool session', () => {
           sessionId: SESSION_ID,
         },
       );
-      const run = await automations
+      const run = automations
         .runs()
         .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
       expect(run?.run.state).toBe('cancelled');
@@ -8711,14 +8521,12 @@ describe('Hosted Harness no-tool session', () => {
     scheduler.deps.failed(new Error('wake pump failure'));
     await scheduler.deps.recoverBlocked();
     expect(resident.blocked).toBe(false);
-    const settlements = (
-      await resident.managed.authority
-        .iterateEvents(1, resident.managed.authority.committedSequence)
-        .collect(1_000_000)
-    ).filter(
-      (event) =>
-        event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
-    );
+    const settlements = resident.managed.authority
+      .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+      .filter(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+      );
     expect(settlements).toHaveLength(1);
     expect(settlements[0]!.payload).toMatchObject({
       outcome: 'cancelled',
@@ -8749,14 +8557,12 @@ describe('Hosted Harness no-tool session', () => {
     await scheduler.deps.recoverBlocked();
     expect(resident.blocked).toBe(true);
     expect(
-      (
-        await resident.managed.authority
-          .iterateEvents(1, resident.managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter(
-        (event) =>
-          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
-      ),
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        ),
     ).toHaveLength(0);
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -8777,18 +8583,15 @@ describe('Hosted Harness no-tool session', () => {
     await scheduler.deps.recoverBlocked();
     expect(resident.blocked).toBe(false);
     expect(
-      (await resident.managed.authority.action('channel-recovery-approval'))
-        ?.state,
+      resident.managed.authority.action('channel-recovery-approval')?.state,
     ).toBe('requested');
     expect(
-      await (
-        await resident.managed.authority
-          .iterateEvents(1, resident.managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some(
-        (event) =>
-          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
-      ),
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        ),
     ).toBe(false);
     expect(state.model).not.toHaveBeenCalled();
     await headers(
@@ -8804,8 +8607,7 @@ describe('Hosted Harness no-tool session', () => {
       })
       .expect(200);
     expect(
-      (await resident.managed.authority.action('channel-recovery-approval'))
-        ?.state,
+      resident.managed.authority.action('channel-recovery-approval')?.state,
     ).toBe('decided');
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -8841,14 +8643,12 @@ describe('Hosted Harness no-tool session', () => {
       checkpoint?.mockRestore();
       await scheduler.deps.recoverBlocked();
       expect(resident.blocked).toBe(false);
-      const settlements = (
-        await resident.managed.authority
-          .iterateEvents(1, resident.managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter(
-        (event) =>
-          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
-      );
+      const settlements = resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        );
       expect(settlements).toHaveLength(1);
       expect(settlements[0]!.payload).toMatchObject({
         outcome: 'cancelled',
@@ -8881,15 +8681,13 @@ describe('Hosted Harness no-tool session', () => {
       .expect(409);
     expect(response.body.code).toBe('hosted_turn_recovery_in_progress');
     expect(
-      await (
-        await resident.managed.authority
-          .iterateEvents(1, resident.managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some(
-        (event) =>
-          event.kind === 'input.accepted' &&
-          event.payload['turnId'] === promptId,
-      ),
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === promptId,
+        ),
     ).toBe(false);
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -9570,9 +9368,10 @@ describe('Hosted Harness no-tool session', () => {
         async () => {
           const session = capturedWakeSession();
           expect(
-            await session.managed.authority
-              .iterateEvents(1, session.managed.authority.committedSequence)
-              .collect(1_000_000),
+            session.managed.authority.eventsInSequenceRange(
+              1,
+              session.managed.authority.committedSequence,
+            ),
           ).toContainEqual(
             expect.objectContaining({
               kind: 'turn.settled',
@@ -9583,13 +9382,9 @@ describe('Hosted Harness no-tool session', () => {
             }),
           );
           expect(
-            (
-              await (
-                await session.managed.authority
-                  .extensionRecordsInDomain('child_run')
-                  .collect(1_000_000)
-              ).at(-1)
-            )?.record,
+            session.managed.authority
+              .extensionRecordsInDomain('child_run')
+              .at(-1)?.record,
           ).toMatchObject({ run: { delivery: { state: 'consumed' } } });
         },
         { timeout: SETTLE_TIMEOUT_MS },
@@ -9609,19 +9404,20 @@ describe('Hosted Harness no-tool session', () => {
             entry.daemonPromptId === continuation,
         ),
       ).toHaveLength(1);
-      const events = await session.managed.authority
-        .iterateEvents(1, session.managed.authority.committedSequence)
-        .collect(1_000_000);
-      const accepted = (await events.find(
+      const events = session.managed.authority.eventsInSequenceRange(
+        1,
+        session.managed.authority.committedSequence,
+      );
+      const accepted = events.find(
         (event) =>
           event.kind === 'input.accepted' &&
           event.payload['turnId'] === continuation,
-      ))!;
-      const settled = (await events.find(
+      )!;
+      const settled = events.find(
         (event) =>
           event.kind === 'turn.settled' &&
           event.payload['turnId'] === notificationTurnId,
-      ))!;
+      )!;
       expect(accepted.sequence).toBeLessThan(settled.sequence);
       await vi.waitFor(
         async () => {
@@ -10785,7 +10581,7 @@ describe('Hosted Harness no-tool session', () => {
         const children = new HostedChildAgentSession(store, key);
         const teams = new HostedTeamSession(store, key, children);
         await teams.run('team_create', { team_name: 'review' }, 'p:team');
-        const member = await teams.admitMember('alice');
+        const member = teams.admitMember('alice');
         await children.admit({
           childRunId: 'run-1',
           ownerScopeId: SESSION_ID,
@@ -16083,16 +15879,6 @@ describe('Hosted Harness no-tool session', () => {
         { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(modelRequests).toBe(0);
-      await vi.waitFor(
-        async () => {
-          const status = await authorize(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          );
-          expect(status.body.hasActivePrompt).toBe(false);
-          expect(status.body.recoveryBlocked).toBe(false);
-        },
-        { timeout: SETTLE_TIMEOUT_MS },
-      );
       expect((await send(randomUUID())).status).toBe(202);
       await vi.waitFor(
         async () => {
@@ -17147,13 +16933,12 @@ describe('Hosted Harness no-tool session', () => {
               event.payload['domain'] === 'session_command',
           ),
         ).toBe(commandLane);
-        const commands = await ((
-          commandCalls.mock.contexts[0] as
-            | HostedSessionCommandSession
-            | undefined
-        )
-          ?.commands()
-          .collect(1_000_000) ?? []);
+        const commands =
+          (
+            commandCalls.mock.contexts[0] as
+              | HostedSessionCommandSession
+              | undefined
+          )?.commands() ?? [];
         if (commandLane) {
           expect(commandCalls).toHaveBeenCalledOnce();
           expect(commandCalls.mock.calls[0][0]).toMatchObject({
@@ -18310,21 +18095,22 @@ describe('Hosted Harness no-tool session', () => {
       }),
     ).toEqual({ status: 'ok', result: Buffer.alloc(0) });
     await reader.close();
-    const events = LocalManagedSessionAuthority.prototype.iterateEvents;
+    const events = LocalManagedSessionAuthority.prototype.eventsInSequenceRange;
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
-      'iterateEvents',
+      'eventsInSequenceRange',
     ).mockImplementation(function (
       this: LocalManagedSessionAuthority,
       start,
       end,
     ) {
-      return historyQuery(events.call(this, start, end), [
+      return [
+        ...events.call(this, start, end),
         {
           kind: 'tool.receipt',
           payload: { resultRef: manifest },
         } as unknown as ManagedSessionEvent,
-      ]);
+      ];
     });
     const sealId = createHash('sha256')
       .update(JSON.stringify([captureId, 'stderr', 'seal']))
@@ -18401,10 +18187,7 @@ describe('Hosted Harness no-tool session', () => {
       }
       return read.call(this, reference);
     });
-    const projection = vi.spyOn(
-      ManagedSessionRecordSink.prototype,
-      'iterateRecords',
-    );
+    const projection = vi.spyOn(ManagedSessionRecordSink.prototype, 'project');
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store() });
@@ -18436,15 +18219,17 @@ describe('Hosted Harness no-tool session', () => {
         'X-Qwen-Client-Id',
         created.body.clientId as string,
       );
-      const events = LocalManagedSessionAuthority.prototype.iterateEvents;
+      const events =
+        LocalManagedSessionAuthority.prototype.eventsInSequenceRange;
       const damaged = vi
-        .spyOn(LocalManagedSessionAuthority.prototype, 'iterateEvents')
+        .spyOn(LocalManagedSessionAuthority.prototype, 'eventsInSequenceRange')
         .mockImplementation(function (
           this: LocalManagedSessionAuthority,
           start,
           end,
         ) {
-          return historyQuery(events.call(this, start, end), [
+          return [
+            ...events.call(this, start, end),
             {
               kind:
                 fault === 'extension-domain'
@@ -18460,7 +18245,7 @@ describe('Hosted Harness no-tool session', () => {
                       },
                     },
             } as unknown as ManagedSessionEvent,
-          ]);
+          ];
         });
       const refused = await headers(
         supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -20735,10 +20520,7 @@ describe('Hosted Harness no-tool session', () => {
       await headers(supertest(third).delete('/session/' + SESSION_ID)).expect(
         204,
       );
-      const project = vi.spyOn(
-        ManagedSessionRecordSink.prototype,
-        'iterateRecords',
-      );
+      const project = vi.spyOn(ManagedSessionRecordSink.prototype, 'project');
       const fourth = await app(true);
       const settled = await headers(
         supertest(fourth).post('/session/' + SESSION_ID + '/load'),
@@ -20752,8 +20534,6 @@ describe('Hosted Harness no-tool session', () => {
         204,
       );
     },
-    // Multiple cold replays rebuild disk indexes before the final retry.
-    45_000,
   );
 
   it('recovers a proven unstarted Shell after its history reply is lost', async () => {
@@ -21305,16 +21085,11 @@ describe('Hosted Harness no-tool session', () => {
       );
       expect(failed).toBe(true);
       expect(state.model).toHaveBeenCalledTimes(modelCalls);
-      await vi.waitFor(
-        async () => {
-          const status = await headers(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          ).set('X-Qwen-Client-Id', clientId);
-          expect(status.body.hasActivePrompt).toBe(false);
-          expect(status.body.recoveryBlocked).toBe(false);
-        },
-        { timeout: SETTLE_TIMEOUT_MS },
-      );
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
       const retried = await send();
       expect(retried.status).toBe(202);
       expect(retried.body).toEqual(admitted.body);
@@ -22236,11 +22011,9 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.model).toHaveBeenCalledOnce();
     const authority = f.resident.managed.authority;
     expect(
-      (
-        await authority
-          .iterateEvents(1, authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'cancel.requested'),
+      authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .filter((event) => event.kind === 'cancel.requested'),
     ).toEqual([]);
   });
 
@@ -22344,23 +22117,23 @@ describe('Hosted Harness no-tool session', () => {
         trigger: 'scheduled',
         firedAt: Date.now(),
       });
-      const originalRun = await managed.authority.extensionRecord(
+      const originalRun = managed.authority.extensionRecord(
         'automation_run',
         queued.run!.automationRunId,
       );
       expect(originalRun).toBeDefined();
-      const before = await managed.authority
-        .iterateEvents(1, managed.authority.committedSequence)
-        .collect(1_000_000);
+      const before = managed.authority.eventsInSequenceRange(
+        1,
+        managed.authority.committedSequence,
+      );
       expect(
-        (await before.findLast((event) => event.kind === 'input.accepted'))
-          ?.payload,
+        before.findLast((event) => event.kind === 'input.accepted')?.payload,
       ).toMatchObject({
         turnId: queued.inputId,
         source: AUTOMATION_INPUT_SOURCE,
       });
       expect(
-        await before.some(
+        before.some(
           (event) =>
             event.kind === 'turn.settled' &&
             event.payload['turnId'] === PROMPT_ID,
@@ -22400,9 +22173,10 @@ describe('Hosted Harness no-tool session', () => {
       const current = cold ? capturedWakeSession() : f.resident;
       current.monitorWake?.close();
       const authority = current.managed.authority;
-      const after = await authority
-        .iterateEvents(1, authority.committedSequence)
-        .collect(1_000_000);
+      const after = authority.eventsInSequenceRange(
+        1,
+        authority.committedSequence,
+      );
       expect(
         after
           .filter((event) => event.kind === 'turn.settled')
@@ -22412,7 +22186,7 @@ describe('Hosted Harness no-tool session', () => {
           })),
       ).toEqual([{ turnId: PROMPT_ID, outcome: 'cancelled' }]);
       expect(
-        await after.some(
+        after.some(
           (event) =>
             event.kind === 'cancel.requested' &&
             (event.payload['target'] as { turnId?: string } | undefined)
@@ -22420,7 +22194,7 @@ describe('Hosted Harness no-tool session', () => {
         ),
       ).toBe(false);
       expect(
-        await authority.extensionRecord(
+        authority.extensionRecord(
           'automation_run',
           queued.run!.automationRunId,
         ),
@@ -22525,11 +22299,12 @@ describe('Hosted Harness no-tool session', () => {
       expect(loaded.status).toBe(failSettlement ? 409 : 200);
       expect(f.resident.hooksBusy).toBe(false);
       expect(state.model).toHaveBeenCalledOnce();
-      const events = await f.resident.managed.authority
-        .iterateEvents(1, f.resident.managed.authority.committedSequence)
-        .collect(1_000_000);
+      const events = f.resident.managed.authority.eventsInSequenceRange(
+        1,
+        f.resident.managed.authority.committedSequence,
+      );
       expect(
-        await events.some(
+        events.some(
           (event) =>
             event.kind === 'turn.settled' &&
             event.payload['turnId'] === PROMPT_ID,
@@ -22646,12 +22421,13 @@ describe('Hosted Harness no-tool session', () => {
       f.resident.recoveredTurn = later;
       f.resident.runtimeLeaseHeld = lease;
       f.resident.runtimeLeaseOwedByTerminalRoute = true;
-      const before = await authority
-        .iterateEvents(1, authority.committedSequence)
-        .collect(1_000_000);
-      expect(
-        await before.some((event) => event.kind === 'hosted.cleanup'),
-      ).toBe(false);
+      const before = authority.eventsInSequenceRange(
+        1,
+        authority.committedSequence,
+      );
+      expect(before.some((event) => event.kind === 'hosted.cleanup')).toBe(
+        false,
+      );
       const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
       release.mockClear();
       const response = await f
@@ -22673,19 +22449,17 @@ describe('Hosted Harness no-tool session', () => {
       expect(f.resident.runtimeLeaseOwedByTerminalRoute).toBe(true);
       expect(f.resident.recoveredTurn).toBe(later);
       expect(
-        await authority
-          .iterateEvents(1, authority.committedSequence)
-          .collect(1_000_000),
+        authority.eventsInSequenceRange(1, authority.committedSequence),
       ).toEqual(before);
       expect(
-        await before.some(
+        before.some(
           (event) =>
             event.kind === 'turn.settled' &&
             event.payload['turnId'] === PROMPT_ID,
         ),
       ).toBe(true);
       expect(
-        await before.some(
+        before.some(
           (event) =>
             event.kind === 'turn.settled' && event.payload['turnId'] === later,
         ),
@@ -23140,18 +22914,19 @@ describe('Hosted Harness no-tool session', () => {
         activationId: f.resident.managed.activation.activationId,
       })
       .expect(409);
-    await vi.waitFor(async () => {
+    await vi.waitFor(() => {
       expect(f.resident.runtimeLeaseHeld).toBeUndefined();
       expect(
-        await (
-          await f.resident.managed.authority
-            .iterateEvents(1, f.resident.managed.authority.committedSequence)
-            .collect(1_000_000)
-        ).some(
-          (event) =>
-            event.kind === 'hosted.cleanup' &&
-            event.payload['state'] === 'confirmed',
-        ),
+        f.resident.managed.authority
+          .eventsInSequenceRange(
+            1,
+            f.resident.managed.authority.committedSequence,
+          )
+          .some(
+            (event) =>
+              event.kind === 'hosted.cleanup' &&
+              event.payload['state'] === 'confirmed',
+          ),
       ).toBe(true);
     });
     const loaded = await headers(
@@ -23168,50 +22943,6 @@ describe('Hosted Harness no-tool session', () => {
     await f
       .authorize(supertest(f.server).delete(`/session/${SESSION_ID}`))
       .expect(204);
-  });
-
-  it('authorizes lifecycle recovery before reading settled resident cleanup history', async () => {
-    const f = await recoveryFileSession();
-    await f.submit();
-    await f.idle();
-    await f.owe();
-    f.resident.monitorWake?.close();
-    const authority = { operationId: 'expired-resident', claimGeneration: 2 };
-    let authorized = false;
-    state.authorizeLifecycle.mockImplementationOnce(async () => {
-      expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(authority);
-      authorized = true;
-    });
-    const iterate = f.resident.managed.authority.iterateEvents.bind(
-      f.resident.managed.authority,
-    );
-    const history = vi
-      .spyOn(f.resident.managed.authority, 'iterateEvents')
-      .mockImplementation((...args) => {
-        if (!authorized)
-          throw new ManagedSessionStoreHttpError(
-            409,
-            'managed_session_writer_fenced',
-            'The resident read grant expired before lifecycle renewal.',
-          );
-        return iterate(...args);
-      });
-    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
-    try {
-      await f
-        .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
-        .send({
-          kind: 'close',
-          sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
-          authority,
-        })
-        .expect(200);
-      expect(authorized).toBe(true);
-      expect(history).toHaveBeenCalled();
-      expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
-    } finally {
-      history.mockRestore();
-    }
   });
 
   it('leaves a parked owner operable after lifecycle close requires recovery (R3-5)', async () => {
@@ -23301,18 +23032,16 @@ describe('Hosted Harness no-tool session', () => {
       .authorize(supertest(f.server).post(`/session/${SESSION_ID}/cancel`))
       .expect(204);
     await f.idle();
-    const events = async () =>
-      await f.resident.managed.authority
-        .iterateEvents(1, f.resident.managed.authority.committedSequence)
-        .collect(1_000_000);
-    const deadline = (await (
-      await events()
-    ).find((event) => event.kind === 'input.accepted'))!.payload[
-      'deadline'
-    ] as number;
-    const cancellation = (await (
-      await events()
-    ).find((event) => event.kind === 'cancel.requested'))!;
+    const events = () =>
+      f.resident.managed.authority.eventsInSequenceRange(
+        1,
+        f.resident.managed.authority.committedSequence,
+      );
+    const deadline = events().find((event) => event.kind === 'input.accepted')!
+      .payload['deadline'] as number;
+    const cancellation = events().find(
+      (event) => event.kind === 'cancel.requested',
+    )!;
     expect(cancellation.occurredAt).toBeLessThan(deadline);
     const now = Date.now.bind(Date);
     const elapsedStart = now();
@@ -23332,15 +23061,14 @@ describe('Hosted Harness no-tool session', () => {
         })
         .expect(200);
       await vi.waitFor(
-        async () =>
+        () =>
           expect(
-            (await events()).filter((event) => event.kind === 'turn.settled'),
+            events().filter((event) => event.kind === 'turn.settled'),
           ).toHaveLength(1),
         { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(
-        (await (await events()).find((event) => event.kind === 'turn.settled'))!
-          .payload,
+        events().find((event) => event.kind === 'turn.settled')!.payload,
       ).toMatchObject({ outcome: 'cancelled', stopReason: 'cancelled' });
     } finally {
       clock.mockRestore();
@@ -23580,9 +23308,10 @@ describe('Hosted Harness no-tool session', () => {
         expect(state.model).toHaveBeenCalledOnce();
         expect(prepare).toHaveBeenCalledOnce();
         expect(execute).toHaveBeenCalledOnce();
-        const events = await f.resident.managed.authority
-          .iterateEvents(1, f.resident.managed.authority.committedSequence)
-          .collect(1_000_000);
+        const events = f.resident.managed.authority.eventsInSequenceRange(
+          1,
+          f.resident.managed.authority.committedSequence,
+        );
         expect(
           events.filter(
             (event) =>
@@ -23591,9 +23320,8 @@ describe('Hosted Harness no-tool session', () => {
           ),
         ).toHaveLength(1);
         expect(
-          (await events
-            .filter((event) => event.kind === 'hosted.cleanup')
-            .at(-1))!.payload['state'],
+          events.filter((event) => event.kind === 'hosted.cleanup').at(-1)!
+            .payload['state'],
         ).toBe('confirmed');
       } finally {
         unavailable = false;
@@ -23681,9 +23409,10 @@ describe('Hosted Harness no-tool session', () => {
     expect(resident.blocked).toBe(false);
     expect(resident.cleanupBlocked).toBe(false);
     expect(state.model).not.toHaveBeenCalled();
-    const events = await resident.managed.authority
-      .iterateEvents(1, resident.managed.authority.committedSequence)
-      .collect(1_000_000);
+    const events = resident.managed.authority.eventsInSequenceRange(
+      1,
+      resident.managed.authority.committedSequence,
+    );
     expect(
       events.filter(
         (event) =>
@@ -23692,8 +23421,9 @@ describe('Hosted Harness no-tool session', () => {
       ),
     ).toHaveLength(1);
     expect(
-      (await events.filter((event) => event.kind === 'hosted.cleanup').at(-1))!
-        .payload['state'],
+      events.filter((event) => event.kind === 'hosted.cleanup').at(-1)!.payload[
+        'state'
+      ],
     ).toBe('confirmed');
     await headers(supertest(server).delete(`/session/${SESSION_ID}`))
       .set('X-Qwen-Client-Id', loaded.body.clientId)
@@ -23752,9 +23482,10 @@ describe('Hosted Harness no-tool session', () => {
     ).resolves.toBe('settled');
     expect(resident.blocked).toBe(false);
     expect(state.model).not.toHaveBeenCalled();
-    const events = await resident.managed.authority
-      .iterateEvents(1, resident.managed.authority.committedSequence)
-      .collect(1_000_000);
+    const events = resident.managed.authority.eventsInSequenceRange(
+      1,
+      resident.managed.authority.committedSequence,
+    );
     expect(
       events.filter(
         (event) =>
@@ -23763,8 +23494,9 @@ describe('Hosted Harness no-tool session', () => {
       ),
     ).toHaveLength(1);
     expect(
-      (await events.filter((event) => event.kind === 'hosted.cleanup').at(-1))!
-        .payload['state'],
+      events.filter((event) => event.kind === 'hosted.cleanup').at(-1)!.payload[
+        'state'
+      ],
     ).toBe('confirmed');
     await headers(supertest(server).delete(`/session/${SESSION_ID}`))
       .set('X-Qwen-Client-Id', loaded.body.clientId)
@@ -24955,15 +24687,13 @@ describe('Hosted Harness tool approvals', () => {
       }
     ).session;
     expect(
-      await (
-        await resident.managed.authority
-          .iterateEvents(1, resident.managed.authority.committedSequence)
-          .collect(1_000_000)
-      ).some(
-        (event) =>
-          event.kind === 'turn.settled' &&
-          event.payload['turnId'] === PROMPT_ID,
-      ),
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === PROMPT_ID,
+        ),
     ).toBe(true);
     const broker = new HostedWorkspaceBroker(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -25262,7 +24992,7 @@ describe('Hosted Harness tool approvals', () => {
     ).mockReturnValue(true);
     const pending = vi
       .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
-      .mockResolvedValue(true);
+      .mockReturnValue(true);
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
     ).send({
@@ -25679,9 +25409,7 @@ describe('Hosted Harness tool approvals', () => {
     release.mockClear();
     expect(mcp.mountHeld).toBe(false);
     expect(
-      await managed.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .collect(1_000_000),
+      managed.authority.extensionRecordsInDomain('mcp_configuration'),
     ).toHaveLength(0);
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
@@ -26683,7 +26411,7 @@ describe('Hosted Harness refusal reasons', () => {
     const { server, authorize } = await mcpApp();
     const pending = vi
       .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
-      .mockResolvedValue(true);
+      .mockReturnValue(true);
     const prompt = [{ type: 'text', text: 'hello' }];
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
@@ -26705,7 +26433,7 @@ describe('Hosted Harness refusal reasons', () => {
     const { server, authorize } = await mcpApp();
     const pending = vi
       .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
-      .mockResolvedValue(true);
+      .mockReturnValue(true);
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
     ).send({
@@ -26725,8 +26453,8 @@ describe('Hosted Harness refusal reasons', () => {
   it('names pending Hook operations on prompt and rewind refusals', async () => {
     const { server, authorize } = await hookApp();
     const pending = vi
-      .spyOn(HostedHookSession.prototype, 'hasPendingOperations')
-      .mockResolvedValue(true);
+      .spyOn(HostedHookSession.prototype, 'hasPendingOperations', 'get')
+      .mockReturnValue(true);
     const prompt = [{ type: 'text', text: 'hello' }];
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
@@ -26755,7 +26483,8 @@ describe('Hosted Harness refusal reasons', () => {
     vi.spyOn(
       HostedHookSession.prototype,
       'hasUnsettledExecutions',
-    ).mockResolvedValue(true);
+      'get',
+    ).mockReturnValue(true);
     const rewound = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
     ).send({ requestId: randomUUID(), promptId: PROMPT_ID });
@@ -29225,7 +28954,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
   it.each([
     {
       exit: 'the compensating settle after a lost resume',
-      fault: () => failNextCanonicalRead(),
+      fault: () =>
+        vi
+          .spyOn(ManagedSessionRecordSink.prototype, 'project')
+          .mockRejectedValueOnce(new Error('projection lost')),
     },
     {
       exit: 'the direct settle after a raw drive failure',
@@ -29583,16 +29315,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
 
   it('bounds a forged line separator in a journal-read unsettled turnId on the gate tag', async () => {
     await parkToolTurn();
-    const pending = Object.getOwnPropertyDescriptor(
-      LocalManagedSessionAuthority.prototype,
-      'pendingInputEvents',
-    )!.get!;
+    const events = LocalManagedSessionAuthority.prototype.eventsInSequenceRange;
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
-      'pendingInputEvents',
-      'get',
-    ).mockImplementation(function (this: LocalManagedSessionAuthority) {
-      return (pending.call(this) as ManagedSessionEvent[]).map((event) =>
+      'eventsInSequenceRange',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      start,
+      end,
+    ) {
+      return events.call(this, start, end).map((event) =>
         event.kind === 'input.accepted'
           ? {
               ...event,
@@ -31277,22 +31009,20 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
       const result = await authorize.call(this);
       if (result.status !== 'runnable') return result;
-      const checkpoint = {
-        ...result.checkpoint,
-        approval: null,
-        tools: {
-          ...result.checkpoint.tools!,
-          items: result.checkpoint.tools!.items.map((item) => ({
-            ...item,
-            state: 'settled' as const,
-            consumed: true,
-          })),
-        },
-      };
       return {
         ...result,
-        checkpoint,
-        history: inlineAuthorizationHistory(this, checkpoint),
+        checkpoint: {
+          ...result.checkpoint,
+          approval: null,
+          tools: {
+            ...result.checkpoint.tools,
+            items: result.checkpoint.tools!.items.map((item) => ({
+              ...item,
+              state: 'settled',
+              consumed: true,
+            })),
+          },
+        },
       } as never;
     });
     let started!: () => void;
@@ -31865,38 +31595,20 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
       const authorization = await original.call(this);
       if (authorization.status !== 'runnable') return authorization;
-      const checkpoint = {
-        ...authorization.checkpoint,
-        continuation: {
-          ...authorization.checkpoint.continuation,
-          phase: 'await_action',
-        },
-        approval: { state: 'requested', requestId: 'request-1' },
-        tools: null,
-        runtime: null,
-      } as HarnessCheckpointV1;
       return {
         ...authorization,
-        checkpoint,
-        history: inlineAuthorizationHistory(this, checkpoint),
+        checkpoint: {
+          ...authorization.checkpoint,
+          continuation: {
+            ...authorization.checkpoint.continuation,
+            phase: 'await_action',
+          },
+          approval: { state: 'requested', requestId: 'request-1' },
+          tools: null,
+          runtime: null,
+        },
       } as never;
     });
-  }
-
-  function inlineAuthorizationHistory(
-    authority: LocalManagedSessionAuthority,
-    checkpoint: HarnessCheckpointV1,
-  ) {
-    return new ManagedHarnessCheckpointView(
-      checkpoint,
-      {
-        read: async () => {
-          throw new Error('The inline authorization fixture has no archive.');
-        },
-      },
-      authority.createQueryHistory(),
-      undefined,
-    );
   }
 
   it.each(['allow', 'deny'])(
@@ -35065,14 +34777,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
             }),
           ]),
         );
-        const idle = await replacementHeaders(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(idle.body.hasActivePrompt).toBe(false);
-        expect(idle.body.recoveryBlocked).toBe(false);
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
+    const idle = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(idle.body.hasActivePrompt).toBe(false);
+    expect(idle.body.recoveryBlocked).toBe(false);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
@@ -36093,7 +35805,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ] as { checkpointId: string; activationId: string };
     // The drive's first projection read fails before any resume runs, so
     // the marker is still pending when the compensating settle lands.
-    failNextCanonicalRead();
+    vi.spyOn(
+      ManagedSessionRecordSink.prototype,
+      'project',
+    ).mockRejectedValueOnce(new Error('projection lost'));
     const continued = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
     )
@@ -36293,7 +36008,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // The drive's first projection read fails before any resume runs, so
       // the compensating settle owns the fold as well as the terminal
       // record.
-      failNextCanonicalRead();
+      vi.spyOn(
+        ManagedSessionRecordSink.prototype,
+        'project',
+      ).mockRejectedValueOnce(new Error('projection lost'));
       const continued = await replacementHeaders(
         supertest(server).post(
           `/session/${SESSION_ID}/managed-runtime/continue`,
@@ -36550,7 +36268,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const recovery = loaded.body._meta?.[
       'qwen.daemon.managedRuntimeRecovery'
     ] as { checkpointId: string; activationId: string };
-    failNextCanonicalRead();
+    vi.spyOn(
+      ManagedSessionRecordSink.prototype,
+      'project',
+    ).mockRejectedValueOnce(new Error('projection lost'));
     // The compensating settle's retirement write fails once: the marker
     // stays durable-owed rather than silently dropped.
     let failHistoryCommit = true;
@@ -39796,37 +39517,3 @@ describe('Hosted Harness stored definitions', () => {
     );
   });
 });
-
-function failNextCanonicalRead() {
-  return vi
-    .spyOn(ManagedSessionRecordSink.prototype, 'iterateMessageRecords')
-    .mockImplementationOnce(async function* () {
-      yield await Promise.reject(new Error('canonical history read lost'));
-    });
-}
-
-function historyQuery<T>(
-  values: readonly T[] | AsyncIterable<T>,
-  tail: readonly T[] = [],
-): ManagedHistoryQuery<T> {
-  return new ManagedHistoryQuery(async function* () {
-    yield* values;
-    yield* tail;
-  });
-}
-
-function fixtureQueryHistory() {
-  const entries = new Map<string, unknown>();
-  return {
-    map: () => ({
-      get: async (id: string) => entries.get(id),
-      has: async (id: string) => entries.has(id),
-      set: async (id: string, value: unknown) => {
-        entries.set(id, value);
-      },
-    }),
-    close: async () => {
-      entries.clear();
-    },
-  };
-}

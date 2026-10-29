@@ -78,11 +78,6 @@ class WorkspaceMigrationMySqlIT {
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema"
                                         + " = ?", Integer.class, schema)).isEqualTo(ManagedSchemaContract.TABLES.size());
-        assertThat(jdbc.queryForList(
-                                "SELECT table_name FROM information_schema.tables WHERE table_schema"
-                                        + " = ? AND table_name IN ('ma_session_history_fact', 'ma_session_history_state')",
-                                String.class, schema))
-                .containsExactlyInAnyOrder("ma_session_history_fact", "ma_session_history_state");
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
                                         + " 'SESSION_RESOURCE_GC'", Integer.class)).isZero();

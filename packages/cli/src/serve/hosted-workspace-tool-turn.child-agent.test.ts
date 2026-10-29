@@ -221,7 +221,6 @@ function createTurn(
                 'hook-owner',
               ),
               mountHeld: hooksMountHeld,
-              hasMountableToolResultHooks: async () => false,
               ensureReady: () => Promise.resolve(),
               acquire: () => Promise.resolve(),
               refresh: () => Promise.resolve(),
@@ -388,18 +387,14 @@ it('public scope exposes only agent orchestration and rechecks the live deployme
     call({ description: 'audit', prompt: 'review', isolation: 'worktree' }),
   );
   expect(JSON.stringify(isolated)).toContain('isolation');
-  expect(
-    await children.launchedChildRunsOf(sessionKey.sessionId).collect(1_000_000),
-  ).toEqual([]);
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
   enabled = false;
   const refused = await executeAgent(
     turn,
     call({ description: 'audit', prompt: 'review' }, 'call-disabled'),
   );
   expect(JSON.stringify(refused)).toContain('error');
-  expect(
-    await children.launchedChildRunsOf(sessionKey.sessionId).collect(1_000_000),
-  ).toEqual([]);
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
 });
 
 it('declares the agent tool at the root and hides it from a child Session', async () => {
@@ -483,11 +478,9 @@ it('refuses a worktree launch on a host without child Workspaces before any reco
     call({ description: 'audit', prompt: 'review', isolation: 'worktree' }),
   );
   expect(JSON.stringify(responses)).toContain('(workspace_mode)');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 it('refuses an isolation other than worktree or snapshot as an argument error', async () => {
@@ -518,11 +511,9 @@ it('refuses an isolation other than worktree or snapshot as an argument error', 
   expect(JSON.stringify(worktreeOnly)).toContain(
     'isolation must be \\"worktree\\" or omitted',
   );
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // #13753 I3: `snapshot` joins the enum only where the host serves
@@ -617,11 +608,9 @@ it('declares only the read tools on the read profile, whatever the turn has', as
   await expect(
     executeAgent(reader, call({ description: 'audit', prompt: 'review' })),
   ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 it('refuses a snapshot launch on a host without snapshots before any record', async () => {
@@ -656,11 +645,9 @@ it('refuses a snapshot launch on a host without snapshots before any record', as
   // Neither refusal steers a read-only request to a child that can write.
   for (const refused of [withoutSnapshots, withoutWorkspaces])
     expect(JSON.stringify(refused)).not.toContain('to share this Workspace.');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 it('records a snapshot launch on a host that serves snapshots', async () => {
@@ -669,18 +656,14 @@ it('records a snapshot launch on a host that serves snapshots', async () => {
     turn,
     call({ description: 'reader', prompt: 'review', isolation: 'snapshot' }),
   );
-  expect((await children.record('prompt:call-1'))?.workspaceMode).toBe(
-    'snapshot',
-  );
+  expect(children.record('prompt:call-1')?.workspaceMode).toBe('snapshot');
   // Serving snapshots changes no default: a launch naming no isolation
   // still runs shared.
   await executeAgent(
     turn,
     call({ description: 'writer', prompt: 'fix it' }, 'call-2'),
   );
-  expect((await children.record('prompt:call-2'))?.workspaceMode).toBe(
-    'shared',
-  );
+  expect(children.record('prompt:call-2')?.workspaceMode).toBe('shared');
 });
 
 it('records the launch isolation and replays it after the capability is gone', async () => {
@@ -693,12 +676,8 @@ it('records the launch isolation and replays it after the capability is gone', a
     isolated,
     call({ description: 'shared', prompt: 'review' }, 'call-2'),
   );
-  expect((await children.record('prompt:call-1'))?.workspaceMode).toBe(
-    'worktree',
-  );
-  expect((await children.record('prompt:call-2'))?.workspaceMode).toBe(
-    'shared',
-  );
+  expect(children.record('prompt:call-1')?.workspaceMode).toBe('worktree');
+  expect(children.record('prompt:call-2')?.workspaceMode).toBe('shared');
   // A re-driven batch names the committed launch: it replays, never
   // re-admits against a host that has since lost the capability.
   const replayed = await executeAgent(
@@ -706,11 +685,9 @@ it('records the launch isolation and replays it after the capability is gone', a
     call({ description: 'isolated', prompt: 'review', isolation: 'worktree' }),
   );
   expect(JSON.stringify(replayed)).toContain('started in the background');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(2);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    2,
+  );
 });
 
 /** A turn on a host that serves both worktrees and snapshots. */
@@ -740,7 +717,7 @@ async function foregroundWorktreeAnswer(
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
-      if ((await children.record(childRunId)) !== undefined) break;
+      if (children.record(childRunId) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -768,7 +745,7 @@ async function foregroundWorktreeAnswer(
       driving,
     ])
   )[0];
-  expect((await children.record(childRunId))?.workspaceMode).toBe(isolation);
+  expect(children.record(childRunId)?.workspaceMode).toBe(isolation);
   return (
     (responses[0]?.functionResponse?.response as { output?: string })?.output ??
     JSON.stringify(responses)
@@ -822,7 +799,7 @@ async function foregroundFailure(
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
-      if ((await children.record(childRunId)) !== undefined) break;
+      if (children.record(childRunId) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     if (started) {
@@ -951,11 +928,9 @@ it('refuses v1-unsupported agent arguments with a named scope', async () => {
   );
   expect(JSON.stringify(responses)).toContain('unsupported argument');
   expect(JSON.stringify(responses)).toContain('subagent_type');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 it('refuses a malformed background flag and an oversized description', async () => {
@@ -974,11 +949,9 @@ it('refuses a malformed background flag and an oversized description', async () 
     call({ description: 'd'.repeat(513), prompt: 'review' }),
   );
   expect(JSON.stringify(oversized)).toContain('description');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // R1-8: a prompt inside the generic inline budget but past the launch
@@ -996,11 +969,9 @@ it('answers an over-size prompt with the byte_limit refusal, not recovery', asyn
   );
   expect(JSON.stringify(responses)).toContain('byte_limit');
   expect(JSON.stringify(responses)).not.toContain('audit-started');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 it('commits the launch intent on the sent arm and answers with the task id', async () => {
@@ -1010,7 +981,7 @@ it('commits the launch intent on the sent arm and answers with the task id', asy
     call({ description: 'audit the diff', prompt: 'review the change' }),
   );
   const childRunId = `prompt:call-1`;
-  const record = (await children.record(childRunId))!;
+  const record = children.record(childRunId)!;
   expect(record).toMatchObject({
     kind: 'child_agent',
     completion: 'sent',
@@ -1024,7 +995,7 @@ it('commits the launch intent on the sent arm and answers with the task id', asy
   const taskId = `task_${managedExtensionRecordKey(sessionKey.sessionId, 'child_run', childRunId)}`;
   expect(JSON.stringify(responses)).toContain(taskId);
   expect(JSON.stringify(responses)).toContain('notification');
-  expect(await session.authority.taskViews()).toHaveLength(1);
+  expect(session.authority.taskViews()).toHaveLength(1);
 });
 
 it('refuses a fifth concurrent launch with the count limit', async () => {
@@ -1043,11 +1014,9 @@ it('refuses a fifth concurrent launch with the count limit', async () => {
     call({ description: 'task 5', prompt: 'work 5' }, 'call-5'),
   );
   expect(JSON.stringify(responses)).toContain('count_limit');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(4);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    4,
+  );
 });
 
 // #13708: two foreground calls in one batch wait in series — the second
@@ -1058,7 +1027,7 @@ it('waits two foreground calls in one batch in series', async () => {
     for (const callId of ['call-1', 'call-2']) {
       const childRunId = `prompt:${callId}`;
       for (;;) {
-        if ((await children.record(childRunId)) !== undefined) break;
+        if (children.record(childRunId) !== undefined) break;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       await children.dispatchStarted(childRunId, {
@@ -1139,7 +1108,7 @@ it('waits the sibling of a failed foreground child in the same batch', async () 
   const turn = createTurn();
   const driving = (async () => {
     for (;;) {
-      if ((await children.record('prompt:call-1')) !== undefined) break;
+      if (children.record('prompt:call-1') !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.settleFailed('prompt:call-1', {
@@ -1148,7 +1117,7 @@ it('waits the sibling of a failed foreground child in the same batch', async () 
       started: false,
     });
     for (;;) {
-      if ((await children.record('prompt:call-2')) !== undefined) break;
+      if (children.record('prompt:call-2') !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted('prompt:call-2', {
@@ -1320,15 +1289,11 @@ it('refuses a launch past the spent launch budget, replaying the refusal', async
   );
   expect(JSON.stringify(last)).toContain('started in the background');
   const launched = MANAGED_CHILD_LIMITS.maxLaunchesPerScope;
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(launched);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    launched,
+  );
   await children.settleCancelled('prompt:call-last', { started: false });
-  expect(
-    await children.activeChildRunsOf(sessionKey.sessionId).collect(1_000_000),
-  ).toHaveLength(0);
+  expect(children.activeChildRunsOf(sessionKey.sessionId)).toHaveLength(0);
   for (const turn of [createTurn(), createTurn()]) {
     const refused = await executeAgent(
       turn,
@@ -1336,9 +1301,7 @@ it('refuses a launch past the spent launch budget, replaying the refusal', async
     );
     expect(JSON.stringify(refused)).toContain('budget_exhausted');
     expect(
-      await session.authority
-        .extensionRecordsInDomain('child_run')
-        .collect(1_000_000),
+      session.authority.extensionRecordsInDomain('child_run'),
     ).toHaveLength(launched);
   }
 });
@@ -1349,7 +1312,7 @@ it('answers the tool arm from the committed acceptance, accepting it', async () 
   const driving = (async () => {
     // The relay's side: watch the launch commit, then drive its chain.
     for (;;) {
-      if ((await children.record(childRunId)) !== undefined) break;
+      if (children.record(childRunId) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -1381,12 +1344,12 @@ it('answers the tool arm from the committed acceptance, accepting it', async () 
   // against its own Session is exactly the deadlock a shared Workspace
   // creates between the waiting parent and the child's first tool call.
   expect(broker.acquire).not.toHaveBeenCalled();
-  const record = (await children.record(childRunId))!;
+  const record = children.record(childRunId)!;
   expect(record.run.delivery).toEqual({
     target: 'session',
     state: 'accepted',
   });
-  expect(await children.acceptance(childRunId)).toMatchObject({
+  expect(children.acceptance(childRunId)).toMatchObject({
     parentExecutionCallId: childRunId,
   });
   expect(consumption).toEqual([childRunId]);
@@ -1403,7 +1366,7 @@ it('degrades an oversized foreground answer to its truncation marker', async () 
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
-      if ((await children.record(childRunId)) !== undefined) break;
+      if (children.record(childRunId) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -1433,7 +1396,7 @@ it('degrades an oversized foreground answer to its truncation marker', async () 
   expect(JSON.stringify(responses)).toContain(
     'truncated: the full result is on the acceptance record',
   );
-  expect(await children.acceptance(childRunId)).toMatchObject({
+  expect(children.acceptance(childRunId)).toMatchObject({
     parentExecutionCallId: childRunId,
   });
   expect(consumption).toEqual([childRunId]);
@@ -1444,7 +1407,7 @@ it('tells a failed child without waiting for an acceptance', async () => {
   const childRunId = `prompt:call-1`;
   const driving = (async () => {
     for (;;) {
-      if ((await children.record(childRunId)) !== undefined) break;
+      if (children.record(childRunId) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.settleFailed(childRunId, {
@@ -1485,7 +1448,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
     abort.signal,
   );
   expect(JSON.stringify(responses)).toContain('cancelled');
-  const record = (await children.record(childRunId))!;
+  const record = children.record(childRunId)!;
   expect(record.run.state).toBe('admitted');
   expect(record.run.execution).toBe('intent');
 });
@@ -1546,12 +1509,10 @@ it('a cancelled turn never admits children queued behind its abandoned wait', as
   );
   const text = JSON.stringify(batch);
   expect(text).toContain('cancelled');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(1);
-  expect(await children.record('prompt:call-2')).toBeUndefined();
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
+  expect(children.record('prompt:call-2')).toBeUndefined();
 });
 
 it('replays a re-driven batch into the original record, never a second one', async () => {
@@ -1565,11 +1526,9 @@ it('replays a re-driven batch into the original record, never a second one', asy
     second,
     call({ description: 'audit the diff', prompt: 'review the change' }),
   );
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(1);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
 });
 
 // The same replay behind a full quota: counting the replayed child
@@ -1615,11 +1574,9 @@ it('replays an existing background child past a full quota', async () => {
   )) as Part[];
   expect(JSON.stringify(replays)).toContain('started in the background');
   expect(JSON.stringify(replays)).not.toContain('count_limit');
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(4);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    4,
+  );
 });
 
 // A refused background launch on a Session-owned mount: the Hook catalog
@@ -1639,11 +1596,9 @@ it('refuses a background agent while the Session owner holds the mount', async (
   expect(JSON.stringify(responses)).toContain(
     HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
   );
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 it.each([
@@ -1763,7 +1718,7 @@ it.each([
       }),
     );
     await vi.waitFor(
-      async () => expect(await children.record('prompt:call-1')).toBeDefined(),
+      () => expect(children.record('prompt:call-1')).toBeDefined(),
       { timeout: 10_000 },
     );
     expect(await children.publicLaunchSnapshot('prompt:call-1')).toMatchObject({
@@ -1810,11 +1765,7 @@ it('bounds chained background launches from wake turns', async () => {
       run_in_background: true,
     }),
   );
-  const hopOne = (
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000)
-  )[0];
+  const hopOne = session.authority.extensionRecordsInDomain('child_run')[0];
   expect(hopOne?.recordId).toMatch(/^[0-9a-f]{16}:call-1$/);
   const wakeTwo = createTurn(0, undefined, `${hopOne?.recordId}:accept:notify`);
   await executeAgent(
@@ -1828,14 +1779,12 @@ it('bounds chained background launches from wake turns', async () => {
       'call-9',
     ),
   );
-  const ids = (
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000)
-  ).map((record) => record.recordId);
+  const ids = session.authority
+    .extensionRecordsInDomain('child_run')
+    .map((record) => record.recordId);
   expect(ids).toHaveLength(2);
   expect(ids[1]).toMatch(/^[0-9a-f]{16}:call-9$/);
-  expect(await ids.every((id) => id.length <= 48)).toBe(true);
+  expect(ids.every((id) => id.length <= 48)).toBe(true);
 });
 
 it('refuses a foreground agent call that shares its batch with a non-agent tool', async () => {
@@ -1936,10 +1885,10 @@ async function restoredHooks(
         }),
   }));
   const options = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
-  const initial = await HostedHookSession.create(options, session, pin);
+  const initial = new HostedHookSession(options, session, pin);
   await initial.ensureReady();
   await initial.close();
-  const restored = await HostedHookSession.create(options, session, pin);
+  const restored = new HostedHookSession(options, session, pin);
   await restored.ensureReady();
   expect(restored.mountHeld).toBe(false);
   return restored;
@@ -1966,7 +1915,7 @@ it.each(
     });
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
-      expect(await hooks.hasMountableToolResultHooks()).toBe(true);
+      expect(hooks.hasMountableToolResultHooks).toBe(true);
       const result = await executeAgent(
         turn,
         call({
@@ -1981,9 +1930,7 @@ it.each(
       // The marker above survives any reword; this pins the in-turn remedy.
       expect(JSON.stringify(result)).toContain('ordinary tools');
       expect(
-        await session.authority
-          .extensionRecordsInDomain('child_run')
-          .collect(1_000_000),
+        session.authority.extensionRecordsInDomain('child_run'),
       ).toHaveLength(0);
     } finally {
       await turn.finish();
@@ -2003,7 +1950,7 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
   });
   const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   try {
-    expect(await hooks.hasMountableToolResultHooks()).toBe(true);
+    expect(hooks.hasMountableToolResultHooks).toBe(true);
     const result = await executeAgent(
       turn,
       call({
@@ -2014,9 +1961,7 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
     );
     expect(JSON.stringify(result)).toContain(mountRefusal);
     expect(
-      await session.authority
-        .extensionRecordsInDomain('child_run')
-        .collect(1_000_000),
+      session.authority.extensionRecordsInDomain('child_run'),
     ).toHaveLength(0);
   } finally {
     await turn.finish();
@@ -2057,7 +2002,7 @@ it.each([false, true])(
       config: { type: 'command' },
       onceKey: 'result-once',
     });
-    const hooks = await HostedHookSession.create(
+    const hooks = new HostedHookSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
       original.getCatalog()!,
@@ -2065,7 +2010,7 @@ it.each([false, true])(
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     const childSession = children;
     try {
-      expect(await original.hasMountableToolResultHooks()).toBe(true);
+      expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
         HookEventName.PostToolUse,
         'seed-once',
@@ -2092,8 +2037,7 @@ it.each([false, true])(
         (async () => {
           if (background) return;
           await vi.waitFor(
-            async () =>
-              expect(await childSession.record('prompt:call-1')).toBeDefined(),
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
             { timeout: 10_000 },
           );
           await childSession.settleFailed('prompt:call-1', {
@@ -2104,7 +2048,7 @@ it.each([false, true])(
         })(),
       ]);
       expect(JSON.stringify(result)).not.toContain(mountRefusal);
-      expect(await childSession.record('prompt:call-1')).toBeDefined();
+      expect(childSession.record('prompt:call-1')).toBeDefined();
       expect(
         broker.hookControl.mock.calls.filter(
           ([operation]) => operation.kind === 'hook-execute',
@@ -2152,7 +2096,7 @@ it('refuses a child while a once Hook is committed but unsettled', async () => {
     { tool_name: 'agent', tool_use_id: 'seed-once' },
     new AbortController().signal,
   );
-  const hooks = await HostedHookSession.create(
+  const hooks = new HostedHookSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     catalog,
@@ -2160,8 +2104,8 @@ it('refuses a child while a once Hook is committed but unsettled', async () => {
   const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   await hooks.ensureReady();
   expect(hooks.mountHeld).toBe(false);
-  expect(await hooks.hasUnsettledExecutions()).toBe(true);
-  expect(await hooks.hasMountableToolResultHooks()).toBe(true);
+  expect(hooks.hasUnsettledExecutions).toBe(true);
+  expect(hooks.hasMountableToolResultHooks).toBe(true);
   const result = await executeAgent(
     turn,
     call({
@@ -2171,12 +2115,10 @@ it('refuses a child while a once Hook is committed but unsettled', async () => {
     }),
   );
   expect(JSON.stringify(result)).toContain(mountRefusal);
-  expect(await children.record('prompt:call-1')).toBeUndefined();
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(children.record('prompt:call-1')).toBeUndefined();
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
   await turn.finish();
 });
 
@@ -2210,8 +2152,7 @@ it.each(
         (async () => {
           if (background) return;
           await vi.waitFor(
-            async () =>
-              expect(await childSession.record('prompt:call-1')).toBeDefined(),
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
             { timeout: 10_000 },
           );
           await childSession.settleFailed('prompt:call-1', {
@@ -2222,7 +2163,7 @@ it.each(
         })(),
       ]);
       expect(JSON.stringify(result)).not.toContain(mountRefusal);
-      expect(await childSession.record('prompt:call-1')).toBeDefined();
+      expect(childSession.record('prompt:call-1')).toBeDefined();
     } finally {
       await turn.finish();
       await hooks.close();
@@ -2246,11 +2187,9 @@ it('refuses a foreground agent call while this Turn holds the mount', async () =
   );
   expect(JSON.stringify(refused)).toContain(HOSTED_CHILD_MOUNT_REFUSALS.turn);
   expect(JSON.stringify(refused)).not.toContain(mountRefusal);
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // The `!agentBackground` half of that arm: a Turn-owned mount releases at
@@ -2269,7 +2208,7 @@ it('admits a background agent call while this Turn holds the mount', async () =>
   expect(JSON.stringify(await admitted)).not.toContain(
     HOSTED_CHILD_MOUNT_REFUSALS.turn,
   );
-  expect(await children.record('prompt:call-1')).toBeDefined();
+  expect(children.record('prompt:call-1')).toBeDefined();
   await turn.finish();
 });
 
@@ -2293,11 +2232,9 @@ it('answers a foreground child with the Session refusal when both holds are live
   expect(JSON.stringify(refused)).not.toContain(
     HOSTED_CHILD_MOUNT_REFUSALS.turn,
   );
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // The 1292-refusal must key off the Session's actual mount owners, not
@@ -2323,7 +2260,7 @@ it('refuses a foreground agent call while a Session owner holds the mount', asyn
   const driving = (async () => {
     const childRunId = 'prompt:call-1';
     for (;;) {
-      if ((await children.record(childRunId)) !== undefined) break;
+      if (children.record(childRunId) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.settleFailed(childRunId, {
@@ -2437,11 +2374,9 @@ it('refuses a foreground agent call whose PreToolUse Hook took the mount', async
     }),
   );
   expect(JSON.stringify(refused)).toContain(mountRefusal);
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // A PermissionRequest Hook runs after the call's PreToolUse and may take
@@ -2470,11 +2405,9 @@ it('refuses a foreground agent call whose PermissionRequest Hook took the mount'
     HookEventName.PermissionRequest,
   ]);
   expect(JSON.stringify(refused)).toContain(mountRefusal);
-  expect(
-    await session.authority
-      .extensionRecordsInDomain('child_run')
-      .collect(1_000_000),
-  ).toHaveLength(0);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // The launch reads the input the Hooks left: its envelope carries the final
@@ -2513,7 +2446,7 @@ it('launches a child agent from the input its Hooks left', async () => {
   );
   const responses = await executeAgent(turn, call(model));
   expect(inputs.slice(0, 2)).toEqual([model, pre]);
-  const record = (await children.record('prompt:call-1'))!;
+  const record = children.record('prompt:call-1')!;
   expect(record.completion).toBe('sent');
   expect(
     decodeChildLaunchEnvelope(await session.resources.read(record.inputRef)),
@@ -2554,7 +2487,6 @@ function createTurnWithOwnerMount(
   const sessionOwner = {
     broker: ownerBroker,
     mountHeld: held,
-    hasMountableToolResultHooks: async () => false,
     ensureReady: () => Promise.resolve(),
     acquire: () => Promise.resolve(),
     refresh: () => Promise.resolve(),

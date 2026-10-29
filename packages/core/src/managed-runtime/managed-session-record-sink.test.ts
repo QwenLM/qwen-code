@@ -11,8 +11,6 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
-import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
-import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import {
   createInitialHarnessCheckpoint,
@@ -373,10 +371,8 @@ describe('managed session record sink', () => {
     );
     expect(result.receipt.lastSequence).toBe(result.receipt.firstSequence + 1);
     const saved = parseHistoryMaintenance(
-      (await harness.authority.extensionRecord(
-        'history_maintenance',
-        'manual',
-      ))!.record,
+      harness.authority.extensionRecord('history_maintenance', 'manual')!
+        .record,
     );
     expect(saved.compactionRevision).toBe(result.receipt.firstSequence);
     expect(harness.authority.activeHistoryMaintenance).toBeUndefined();
@@ -401,20 +397,14 @@ describe('managed session record sink', () => {
     );
     expect(replay.receipt.replayed).toBe(true);
     expect(
-      (
-        await harness.authority
-          .iterateEvents(1, harness.authority.committedSequence)
-          .collect(1_000_000)
-      ).filter((event) => event.kind === 'context.compacted'),
+      harness.authority
+        .eventsInSequenceRange(1, harness.authority.committedSequence)
+        .filter((event) => event.kind === 'context.compacted'),
     ).toHaveLength(1);
     expect(
-      (
-        await (
-          await harness.authority
-            .iterateEvents(1, harness.authority.committedSequence)
-            .collect(1_000_000)
-        ).find((event) => event.kind === 'input.accepted')
-      )?.payload['inputId'],
+      harness.authority
+        .eventsInSequenceRange(1, harness.authority.committedSequence)
+        .find((event) => event.kind === 'input.accepted')?.payload['inputId'],
     ).toBe('wake-input');
     await harness.close();
   });
@@ -495,162 +485,6 @@ describe('managed session record sink', () => {
     expect(await harness.sink.project()).toEqual([snapshot]);
     await harness.close();
   });
-
-  it('streams the active branch with metadata before compaction and a physical root anchor', async () => {
-    const harness = await createHarness();
-    try {
-      const entries = [
-        record({
-          uuid: 'start',
-          parentUuid: 'physical-root',
-          message: { role: 'user', parts: [{ text: 'Start' }] },
-        }),
-        record({
-          uuid: 'abandoned',
-          parentUuid: 'start',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Old branch' }] },
-        }),
-        record({
-          uuid: 'branch',
-          parentUuid: 'start',
-          type: 'system',
-          subtype: 'branch_checkpoint',
-          systemPayload: {
-            v: 1,
-            startExclusiveRecordUuid: null,
-            assistantRecordUuid: 'abandoned',
-          },
-        }),
-        record({
-          uuid: 'new-answer',
-          parentUuid: 'branch',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Current branch' }] },
-        }),
-        record({
-          uuid: 'attempt',
-          parentUuid: 'new-answer',
-          type: 'system',
-          subtype: 'turn_attempt',
-          promptId: 'client',
-          daemonPromptId: 'daemon',
-        }),
-        record({
-          uuid: 'compaction',
-          parentUuid: 'attempt',
-          type: 'system',
-          subtype: 'chat_compression',
-          systemPayload: {
-            compressedHistory: [{ role: 'user', parts: [{ text: 'Summary' }] }],
-          },
-        } as Partial<ChatRecord>),
-      ];
-      for (const entry of entries) await harness.sink.write(entry);
-      const active: ChatRecord[] = [];
-      for await (const entry of harness.sink.iterateActiveRecords())
-        active.push(entry);
-      expect(active).toEqual(prepareTranscriptRecords(entries).records);
-      expect(active.map((entry) => entry.uuid)).toEqual([
-        'start',
-        'branch',
-        'new-answer',
-        'attempt',
-        'compaction',
-      ]);
-      expect(
-        (await harness.sink.projectModelRecords()).map((entry) => entry.uuid),
-      ).toEqual(['compaction']);
-      expect(active[0].parentUuid).toBe('physical-root');
-    } finally {
-      await harness.close();
-    }
-  });
-
-  it('keeps historical metadata and local commands out of resident model context', async () => {
-    const harness = await createHarness();
-    const history: ChatRecord[] = [];
-    const write = async (entry: ChatRecord) => {
-      history.push(entry);
-      await harness.sink.write(entry);
-    };
-    try {
-      const input = record({
-        uuid: 'context-input',
-        message: { role: 'user', parts: [{ text: 'Keep this context' }] },
-      });
-      await write(input);
-      for (let i = 0; i < 8; i++) {
-        await write(
-          record({
-            uuid: `telemetry-${i}`,
-            type: 'system',
-            subtype: 'ui_telemetry',
-            systemPayload: { uiEvent: { event: 'turn_complete' } },
-          } as unknown as Partial<ChatRecord>),
-        );
-        await write(
-          record({
-            uuid: `attempt-${i}`,
-            type: 'system',
-            subtype: 'turn_attempt',
-            promptId: `client-${i}`,
-            daemonPromptId: `daemon-${i}`,
-          }),
-        );
-        await write(
-          record({
-            uuid: `local-input-${i}`,
-            message: { role: 'user', parts: [{ text: '/local' }] },
-          }),
-        );
-        await write(
-          record({
-            uuid: `local-result-${i}`,
-            type: 'system',
-            subtype: 'slash_command',
-            systemPayload: {
-              phase: 'result',
-              rawCommand: '/local',
-              sentToModel: false,
-              outputHistoryItems: [{ type: 'assistant', text: 'Local output' }],
-            },
-          } as Partial<ChatRecord>),
-        );
-        await write(
-          record({
-            uuid: `memory-${i}`,
-            type: 'system',
-            subtype: 'memory_catalog_snapshot',
-            message: {
-              role: 'user',
-              parts: [
-                {
-                  text: 'Unchanged catalog',
-                  partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
-                },
-              ],
-            },
-          }),
-        );
-      }
-      const context = await harness.sink.projectModelRecords();
-      expect(context.map((entry) => entry.uuid)).toEqual([
-        'context-input',
-        'memory-0',
-      ]);
-      expect(await harness.sink.projectModelHistory()).toEqual(
-        buildSessionHistoryFromConversation({ messages: history }),
-      );
-      const original: ChatRecord[] = [];
-      for await (const entry of harness.sink.iterateRecords())
-        original.push(entry);
-      expect(original).toStrictEqual(history);
-      expect(Object.hasOwn(original[0], 'subtype')).toBe(false);
-    } finally {
-      await harness.close();
-    }
-  }, 60_000);
 
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();
@@ -826,7 +660,7 @@ describe('managed session record sink', () => {
       ),
     ).toEqual([checkpoint('rec-checkpoint-1'), checkpoint('rec-checkpoint-2')]);
     await harness.close();
-  }, 60_000);
+  });
 
   it('commits a compaction as the range of history it replaces', async () => {
     const harness = await createHarness();
@@ -847,9 +681,9 @@ describe('managed session record sink', () => {
     } as Partial<ChatRecord>);
     await harness.sink.write(compression);
 
-    const compacted = (await harness.authority.readEvents()).filter(
-      (event) => event.kind === 'context.compacted',
-    );
+    const compacted = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'context.compacted');
     expect(compacted).toHaveLength(1);
     expect(compacted[0].payload['replacedMessageIds']).toEqual(['rec-user-1']);
     expect(compacted[0].payload['fromSequence']).toBe(1);
@@ -908,7 +742,7 @@ describe('managed session record sink', () => {
       } as Partial<ChatRecord>),
     );
 
-    const events = await harness.authority.readEvents();
+    const events = harness.authority.readEvents();
     expect(events.find((event) => event.sequence === renewedAt)?.kind).toBe(
       'activation.changed',
     );
@@ -954,7 +788,6 @@ describe('managed session record sink', () => {
         systemPayload: { customTitle: 'Recorded title', titleSource: 'manual' },
       } as Partial<ChatRecord>),
     );
-    expect(await harness.sink.project()).toEqual([]);
     await harness.close();
 
     /* A title is not message content, so it must reach the directory through
@@ -965,6 +798,7 @@ describe('managed session record sink', () => {
         harness.runtimeBaseDir,
       ),
     ).toEqual({ title: 'Recorded title', source: 'manual' });
+    expect(await harness.sink.project()).toEqual([]);
   });
 
   it('commits a re-delivered title record only once', async () => {
@@ -1012,9 +846,9 @@ describe('managed session record sink', () => {
     } as Partial<ChatRecord>);
     await harness.sink.write(result);
 
-    const settled = (await harness.authority.readEvents()).filter(
-      (event) => event.kind === 'turn.settled',
-    );
+    const settled = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'turn.settled');
     expect(settled).toHaveLength(1);
     expect(settled[0].payload['turnId']).toBe('turn-1');
     expect(settled[0].payload['outcome']).toBe('completed');
@@ -1074,9 +908,9 @@ describe('managed session record sink', () => {
     ).rejects.toThrow(/invalid reader-facing record/);
     expect(harness.authority.committedSequence).toBe(before);
     expect(
-      (await harness.authority.readEvents()).some(
-        (event) => event.kind === 'turn.settled',
-      ),
+      harness.authority
+        .readEvents()
+        .some((event) => event.kind === 'turn.settled'),
     ).toBe(false);
     await harness.close();
   });
@@ -1135,7 +969,7 @@ describe('managed session record sink', () => {
     } as Partial<ChatRecord>);
     await harness.sink.write(result);
 
-    const events = await harness.authority.readEvents();
+    const events = harness.authority.readEvents();
     const settled = events.filter((event) => event.kind === 'turn.settled');
     const checkpoints = events.filter(
       (event) => event.kind === 'checkpoint.committed',
@@ -1198,9 +1032,9 @@ describe('managed session record sink', () => {
       reason: 'opaque_state',
     });
     expect(
-      (await harness.authority.readEvents()).filter(
-        (event) => event.kind === 'turn.settled',
-      ),
+      harness.authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled'),
     ).toHaveLength(1);
     await harness.close();
   });
@@ -1219,9 +1053,9 @@ describe('managed session record sink', () => {
     } as unknown as Partial<ChatRecord>);
     await harness.sink.write(goal);
 
-    const committed = (await harness.authority.readEvents()).filter(
-      (event) => event.kind === 'domain.committed',
-    );
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
     expect(committed).toHaveLength(1);
     expect(committed[0].payload['domain']).toBe('goal_state');
 
@@ -1266,9 +1100,9 @@ describe('managed session record sink', () => {
     } as Partial<ChatRecord>);
     await harness.sink.write(snapshot);
 
-    const committed = (await harness.authority.readEvents()).filter(
-      (event) => event.kind === 'domain.committed',
-    );
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
     expect(committed).toHaveLength(1);
     expect(committed[0].payload['domain']).toBe('file_history');
     await harness.close();
@@ -1292,9 +1126,9 @@ describe('managed session record sink', () => {
     } as Partial<ChatRecord>);
     await harness.sink.write(source);
 
-    const committed = (await harness.authority.readEvents()).filter(
-      (event) => event.kind === 'domain.committed',
-    );
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
     expect(committed).toHaveLength(1);
     expect(committed[0].payload['domain']).toBe('session_source');
     await harness.close();
@@ -1326,7 +1160,7 @@ describe('managed session record sink', () => {
       // The name names the channel: a carried subtype lands as one
       // message.committed event and no domain record, or the live
       // projection silently drops it.
-      const events = await harness.authority.readEvents();
+      const events = harness.authority.readEvents();
       expect(
         events.filter((event) => event.kind === 'message.committed'),
       ).toHaveLength(1);

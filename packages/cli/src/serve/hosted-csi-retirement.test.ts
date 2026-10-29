@@ -42,10 +42,6 @@ vi.mock(
   () => ({
     ManagedSessionRecordSink: class {
       project = components.project;
-      async *iterateRecords() {
-        const { messages } = await components.project();
-        yield* messages;
-      }
     },
   }),
 );

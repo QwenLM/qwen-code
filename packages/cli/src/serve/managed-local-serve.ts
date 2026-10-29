@@ -295,7 +295,7 @@ export async function runManagedLocalServe(
     start(
       'server',
       runtime.java,
-      ['-Djdk.nio.maxCachedBufferSize=1048576', '-jar', runtime.serverJar],
+      ['-jar', runtime.serverJar],
       managedLocalJavaEnvironment(state, directory, runtime, models),
       false,
     );

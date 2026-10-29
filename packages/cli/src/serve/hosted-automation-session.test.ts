@@ -148,14 +148,7 @@ async function withSession<T>(
       {
         authority,
         resources: harness.store,
-        sink: {
-          async *iterateMessageRecords() {
-            yield* harness.records;
-          },
-          async *iterateRecords() {
-            yield* harness.records;
-          },
-        },
+        sink: { project: async () => [...harness.records] },
       },
       sessionKey,
       {
@@ -253,25 +246,23 @@ describe('hosted automation definitions', () => {
       const before = authority.committedSequence;
       await automations.requestCancel(runId);
       expect(authority.committedSequence).toBe(before);
-      expect(await automations.cancelRequested(automationInputId(runId))).toBe(
-        true,
+      expect(automations.cancelRequested(automationInputId(runId))).toBe(true);
+      expect(automations.cancelRequested(automationInputId(siblingId))).toBe(
+        false,
       );
-      expect(
-        await automations.cancelRequested(automationInputId(siblingId)),
-      ).toBe(false);
-      expect((await automations.run(runId))?.run.state).toBe('running');
-      expect((await automations.schedule(SCHEDULE_ID))?.enabled).toBe(true);
+      expect(automations.run(runId)?.run.state).toBe('running');
+      expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
     });
     await withSession(
       harness,
       async (automations) => {
-        expect(
-          await automations.cancelRequested(automationInputId(runId)),
-        ).toBe(true);
-        expect(
-          await automations.cancelRequested(automationInputId(siblingId)),
-        ).toBe(false);
-        expect((await automations.schedule(SCHEDULE_ID))?.enabled).toBe(true);
+        expect(automations.cancelRequested(automationInputId(runId))).toBe(
+          true,
+        );
+        expect(automations.cancelRequested(automationInputId(siblingId))).toBe(
+          false,
+        );
+        expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
       },
       { create: false },
     );
@@ -293,7 +284,7 @@ describe('hosted automation definitions', () => {
       expect(
         (await automations.requestCancel(fired.run!.automationRunId)).run.state,
       ).toBe('settled');
-      expect(await automations.cancelRequested(fired.inputId)).toBe(false);
+      expect(automations.cancelRequested(fired.inputId)).toBe(false);
       const before = authority.committedSequence;
       await automations.requestCancel(fired.run!.automationRunId);
       expect(authority.committedSequence).toBe(before);
@@ -329,12 +320,10 @@ describe('hosted automation definitions', () => {
       });
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ),
       ).toEqual([]);
-      expect((await automations.schedule(SCHEDULE_ID))?.enabled).toBe(true);
+      expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
       expect((await automations.fire(fireParams())).run).toEqual(cancelled);
       expect(
         (await automations.fire(fireParams(1, 'manual:next'))).run!.run.state,
@@ -420,9 +409,9 @@ describe('hosted automation definitions', () => {
           definition,
         }),
       ).rejects.toThrow(AutomationRetiredError);
-      expect(
-        (await authority.extensionRecord('schedule', SCHEDULE_ID))?.revision,
-      ).toBe(4);
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        4,
+      );
     });
   });
 
@@ -581,12 +570,12 @@ describe('hosted automation definitions', () => {
       expect(retried.schedule.definitionRevision).toBe(1);
       expect(retried.schedule.cron).toBe(definition.cron);
       expect(retried.schedule.promptRef).toEqual(opened.schedule.promptRef);
-      const chain = (await automations.schedule(SCHEDULE_ID))!;
+      const chain = automations.schedule(SCHEDULE_ID)!;
       expect(chain.definitionRevision).toBe(2);
       expect(chain.cron).toBe('15 3 * * *');
-      expect(
-        (await authority.extensionRecord('schedule', SCHEDULE_ID))?.revision,
-      ).toBe(2);
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        2,
+      );
       // A retried retire answers its own cancel revision, once.
       const retireOp = randomUUID();
       const retired = await automations.retire(SCHEDULE_ID, retireOp);
@@ -604,9 +593,9 @@ describe('hosted automation definitions', () => {
       });
       expect(afterRetire.replayed).toBe(true);
       expect(afterRetire.revision).toBe(1);
-      expect(
-        (await authority.extensionRecord('schedule', SCHEDULE_ID))?.revision,
-      ).toBe(3);
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        3,
+      );
     });
   });
 
@@ -638,9 +627,7 @@ describe('hosted automation definitions', () => {
         expect(retried.replayed).toBe(true);
         expect(retried.revision).toBe(1);
         expect(retried.schedule.definitionRevision).toBe(1);
-        expect(
-          (await automations.schedule(SCHEDULE_ID))?.definitionRevision,
-        ).toBe(2);
+        expect(automations.schedule(SCHEDULE_ID)?.definitionRevision).toBe(2);
       },
       { create: false },
     );
@@ -673,7 +660,7 @@ describe('hosted automation definitions', () => {
           },
         }),
       ).rejects.toThrow(/final execution input would exceed/);
-      expect(await automations.schedule(SCHEDULE_ID)).toBeUndefined();
+      expect(automations.schedule(SCHEDULE_ID)).toBeUndefined();
       expect(authority.committedSequence).toBe(before);
       // A prompt that carries the wrapping defines and fires.
       await automations.define({
@@ -707,11 +694,9 @@ describe('hosted automation definitions', () => {
       expect(honored.replayed).toBe(true);
       expect(honored.revision).toBe(1);
       expect(
-        (
-          await authority
-            .iterateEvents(before + 1, authority.committedSequence)
-            .collect(1_000_000)
-        ).map((event) => event.kind),
+        authority
+          .eventsInSequenceRange(before + 1, authority.committedSequence)
+          .map((event) => event.kind),
       ).toEqual(['operation.replayed']);
       await automations.define({
         scheduleId: SCHEDULE_ID,
@@ -727,12 +712,8 @@ describe('hosted automation definitions', () => {
       expect(retried.revision).toBe(1);
       expect(retried.schedule.definitionRevision).toBe(1);
       expect(retried.schedule.cron).toBe(definition.cron);
-      expect(
-        (await automations.schedule(SCHEDULE_ID))?.definitionRevision,
-      ).toBe(2);
-      expect((await automations.schedule(SCHEDULE_ID))?.cron).toBe(
-        '10 5 * * *',
-      );
+      expect(automations.schedule(SCHEDULE_ID)?.definitionRevision).toBe(2);
+      expect(automations.schedule(SCHEDULE_ID)?.cron).toBe('10 5 * * *');
       // The marker and the moved chain are all that committed since.
       expect(authority.committedSequence).toBe(before + 2);
       // A no-op retire on a frozen chain honors the same way.
@@ -742,11 +723,9 @@ describe('hosted automation definitions', () => {
       const again = await automations.retire(SCHEDULE_ID, randomUUID());
       expect(again.replayed).toBe(true);
       expect(
-        (
-          await authority
-            .iterateEvents(beforeRetire + 1, authority.committedSequence)
-            .collect(1_000_000)
-        ).map((event) => event.kind),
+        authority
+          .eventsInSequenceRange(beforeRetire + 1, authority.committedSequence)
+          .map((event) => event.kind),
       ).toEqual(['domain.committed', 'operation.replayed']);
     });
     // The honored replay survives a reopen, over the moved chain.
@@ -760,9 +739,7 @@ describe('hosted automation definitions', () => {
         });
         expect(retried.replayed).toBe(true);
         expect(retried.schedule.cron).toBe(definition.cron);
-        expect((await automations.schedule(SCHEDULE_ID))?.run.state).toBe(
-          'cancelled',
-        );
+        expect(automations.schedule(SCHEDULE_ID)?.run.state).toBe('cancelled');
       },
       { create: false },
     );
@@ -789,7 +766,7 @@ describe('hosted automation definitions', () => {
       await expect(automations.retire(otherId, retireOp)).rejects.toThrow(
         AutomationOperationConflictError,
       );
-      expect((await automations.schedule(otherId))?.run.state).toBe('admitted');
+      expect(automations.schedule(otherId)?.run.state).toBe('admitted');
       // A define under one identity commits; the same identity with
       // another body conflicts, the chain untouched.
       const defineOp = randomUUID();
@@ -808,7 +785,7 @@ describe('hosted automation definitions', () => {
         }),
       ).rejects.toThrow(AutomationOperationConflictError);
       expect(authority.committedSequence).toBe(before);
-      expect((await automations.schedule(otherId))?.definitionRevision).toBe(2);
+      expect(automations.schedule(otherId)?.definitionRevision).toBe(2);
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
@@ -868,12 +845,12 @@ describe('hosted automation definitions', () => {
       await expect(
         automations.retire(SCHEDULE_ID, createOp),
       ).rejects.toBeInstanceOf(AutomationOperationConflictError);
-      expect((await automations.schedule(SCHEDULE_ID))?.run.state).not.toBe(
+      expect(automations.schedule(SCHEDULE_ID)?.run.state).not.toBe(
         'cancelled',
       );
-      expect(
-        (await authority.extensionRecord('schedule', SCHEDULE_ID))?.revision,
-      ).toBe(1);
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        1,
+      );
     });
     await withSession(
       harness,
@@ -885,7 +862,7 @@ describe('hosted automation definitions', () => {
           automations.retire(SCHEDULE_ID, createOp),
         ).rejects.toBeInstanceOf(AutomationOperationConflictError);
         expect(
-          (await authority.extensionRecord('schedule', SCHEDULE_ID))?.revision,
+          authority.extensionRecord('schedule', SCHEDULE_ID)?.revision,
         ).toBe(1);
         const retried = await automations.define({
           scheduleId: SCHEDULE_ID,
@@ -961,9 +938,10 @@ describe('hosted automation runs', () => {
       expect(fired.run!.run.state).toBe('running');
       expect(fired.run!.run.execution).toBe('dispatch_started');
       expect(fired.inputId).toBe(automationInputId(runId));
-      const events = await authority
-        .iterateEvents(before + 1, authority.committedSequence)
-        .collect(1_000_000);
+      const events = authority.eventsInSequenceRange(
+        before + 1,
+        authority.committedSequence,
+      );
       expect(events.map((event) => event.kind)).toEqual([
         'domain.committed',
         'domain.committed',
@@ -1006,7 +984,7 @@ describe('hosted automation runs', () => {
       expect(manual.run!.automationRunId).toBe(
         automationRunId(SCHEDULE_ID, 'manual:key-1'),
       );
-      expect(await automations.runs().collect(1_000_000)).toHaveLength(2);
+      expect(automations.runs()).toHaveLength(2);
     });
   });
 
@@ -1037,11 +1015,9 @@ describe('hosted automation runs', () => {
       expect(fired.replayed).toBe(true);
       expect(fired.run!.run.execution).toBe('dispatch_started');
       expect(
-        (
-          await authority
-            .iterateEvents(before + 1, authority.committedSequence)
-            .collect(1_000_000)
-        ).map((event) => event.kind),
+        authority
+          .eventsInSequenceRange(before + 1, authority.committedSequence)
+          .map((event) => event.kind),
       ).toEqual(['domain.committed', 'input.accepted', 'wake.requested']);
     });
   });
@@ -1075,7 +1051,7 @@ describe('hosted automation runs', () => {
       await expect(automations.fire(fireParams(3))).rejects.toThrow(
         AutomationRetiredError,
       );
-      expect(await automations.runs().collect(1_000_000)).toHaveLength(0);
+      expect(automations.runs()).toHaveLength(0);
     });
   });
 
@@ -1114,7 +1090,7 @@ describe('hosted automation runs', () => {
           trigger: 'manual',
         }),
       ).rejects.toThrow(AutomationRetiredError);
-      expect(await automations.runs().collect(1_000_000)).toHaveLength(1);
+      expect(automations.runs()).toHaveLength(1);
     });
   });
 
@@ -1133,11 +1109,9 @@ describe('hosted automation runs', () => {
       expect(failed?.run.execution).toBe('outcome_unknown');
       expect(failed?.automationRunId).toBe(fired.run!.automationRunId);
       expect(
-        (
-          await authority
-            .iterateEvents(before + 1, authority.committedSequence)
-            .collect(1_000_000)
-        ).map((event) => event.kind),
+        authority
+          .eventsInSequenceRange(before + 1, authority.committedSequence)
+          .map((event) => event.kind),
       ).toEqual(['domain.committed']);
       // Terminal and idempotent: calling again, reconciling, or reading the
       // turn result commits nothing more.
@@ -1186,17 +1160,13 @@ describe('hosted automation runs', () => {
       // One settle revision, no input, no wake: nothing of this
       // occurrence ever reached a turn.
       expect(
-        (
-          await authority
-            .iterateEvents(before + 1, authority.committedSequence)
-            .collect(1_000_000)
-        ).map((event) => event.kind),
+        authority
+          .eventsInSequenceRange(before + 1, authority.committedSequence)
+          .map((event) => event.kind),
       ).toEqual(['domain.committed']);
       expect(
         pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         ),
       ).toEqual([]);
       // Asked again: the ended run, nothing more.
@@ -1251,9 +1221,7 @@ describe('hosted automation runs', () => {
         expect(await automations.reconcileRuns()).toEqual([
           automationRunId(SCHEDULE_ID, secondKey),
         ]);
-        const run = await automations.run(
-          automationRunId(SCHEDULE_ID, secondKey),
-        );
+        const run = automations.run(automationRunId(SCHEDULE_ID, secondKey));
         expect(run?.run.state).toBe('failed');
         expect(run?.run.execution).toBe('settled');
         expect(await automations.reconcileRuns()).toEqual([]);
@@ -1274,10 +1242,6 @@ describe('hosted automation runs', () => {
       await automations.fire(fireParams());
       const sink = {
         project: async () => [...harness.records],
-        projectContextRecords: async () => [...harness.records],
-        async *iterateMessageRecords() {
-          yield* harness.records;
-        },
         write: async (record: ChatRecord) => {
           harness.records.push(record);
         },
@@ -1292,7 +1256,7 @@ describe('hosted automation runs', () => {
         }),
       ).toBe(1);
       expect(await automations.reconcileRuns()).toEqual([runId]);
-      const run = await automations.run(runId);
+      const run = automations.run(runId);
       expect(run?.run.state).toBe('cancelled');
       expect(run?.run.execution).toBe('not_started_proven');
       // Without the automation source, the close path leaves it alone.
@@ -1390,7 +1354,7 @@ describe('hosted automation gates', () => {
           gate: { outcome: 'quiet', durationMs: 12 },
         });
         expect(authority.committedSequence).toBe(before);
-        expect(await automations.runs().collect(1_000_000)).toHaveLength(0);
+        expect(automations.runs()).toHaveLength(0);
         expect(gate.calls).toEqual([
           expect.objectContaining({
             automationRunId: automationRunId(SCHEDULE_ID, SLOT_KEY),
@@ -1579,9 +1543,10 @@ describe('hosted automation gates', () => {
         expect(fired.gate).toEqual({ outcome: 'delivered', durationMs: 40 });
         expect(fired.run!.gateOutputRef).not.toBeNull();
         expect(fired.run!.run.execution).toBe('dispatch_started');
-        const events = await authority
-          .iterateEvents(1, authority.committedSequence)
-          .collect(1_000_000);
+        const events = authority.eventsInSequenceRange(
+          1,
+          authority.committedSequence,
+        );
         const [pending] = pendingSessionInputs(events);
         const envelope = decodeAutomationInputEnvelope(
           await harness.store.read(
@@ -1649,9 +1614,7 @@ describe('hosted automation gates', () => {
         expect(fired.gate).toEqual({ outcome: 'delivered' });
         expect(fired.run!.run.execution).toBe('dispatch_started');
         const [pending] = pendingSessionInputs(
-          await authority
-            .iterateEvents(1, authority.committedSequence)
-            .collect(1_000_000),
+          authority.eventsInSequenceRange(1, authority.committedSequence),
         );
         const envelope = decodeAutomationInputEnvelope(
           await harness.store.read(
@@ -1713,7 +1676,7 @@ describe('hosted automation gates', () => {
         const fired = await automations.fire(fireParams());
         expect(fired.run).toBeUndefined();
         expect(fired.gate).toEqual(summary);
-        expect(await automations.runs().collect(1_000_000)).toHaveLength(0);
+        expect(automations.runs()).toHaveLength(0);
       },
       { gate: gate.runner },
     );
@@ -1858,9 +1821,7 @@ describe('hosted automation gates', () => {
             definition: gated,
           }),
         ).rejects.toThrow(/pins a Hook catalog for this Session/);
-        expect(await automations.schedules().collect(1_000_000)).toHaveLength(
-          0,
-        );
+        expect(automations.schedules()).toHaveLength(0);
       },
       { gate: gate.runner, hooksConfigured: () => true },
     );
@@ -1899,9 +1860,7 @@ describe('hosted automation gates', () => {
             definition: gated,
           }),
         ).rejects.toBeInstanceOf(AutomationGateUnsupportedError);
-        expect(await automations.schedules().collect(1_000_000)).toHaveLength(
-          0,
-        );
+        expect(automations.schedules()).toHaveLength(0);
       },
       { shellAvailable: () => false },
     );

@@ -255,9 +255,10 @@ export async function runHostedFileTurn({
     assert.deepEqual(failures, []);
     assert.equal(requests, 2);
     assert.equal(terminal.systemPayload.state, 'completed');
-    const events = await session.authority
-      .iterateEvents(before + 1, session.authority.committedSequence)
-      .collect(1_000_000);
+    const events = session.authority.eventsInSequenceRange(
+      before + 1,
+      session.authority.committedSequence,
+    );
     const attempts = events.filter(
       (event) =>
         event.kind === 'model.attempt' &&

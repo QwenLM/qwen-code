@@ -4,11 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  type FileManagedSessionHistory,
-  type ManagedHistoryQuery,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
-
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration } from '@google/genai';
@@ -67,6 +62,7 @@ import {
   teamPlanOpenBody,
   teamPlanDecisionBody,
   teamPlanWithdrawBody,
+  teamTaskOpenBlockers,
   teamTaskOpenBody,
   teamTaskRevisionBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
@@ -99,23 +95,17 @@ import {
 /** The narrow authority/resource pair a HostedTeamSession commits through. */
 export interface HostedTeamStore {
   readonly authority: {
-    createQueryHistory(): FileManagedSessionHistory;
-    readonly committedSequence: number;
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
-      options?: { readonly throughSequence?: number },
-    ): Promise<
-      { readonly record: unknown; readonly revision: number } | undefined
-    >;
+    ): { readonly record: unknown; readonly revision: number } | undefined;
     extensionRecordsInDomain(
       domain: ManagedSessionDomain,
-      options?: { readonly throughSequence?: number },
-    ): ManagedHistoryQuery<{ readonly record: unknown }>;
+    ): ReadonlyArray<{ readonly record: unknown }>;
     committedExtensionOperation(
       operation: string,
       commandId: string,
-    ): Promise<CommittedExtensionOperation | undefined>;
+    ): CommittedExtensionOperation | undefined;
     commitExtensionRecord(
       command: ManagedSessionCommand,
       request: {
@@ -377,18 +367,6 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
           type: 'string',
           description: 'Filter for tasks still blocked by this task number.',
         },
-        limit: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 256,
-          description: 'Tasks per page (default 100).',
-        },
-        cursor: {
-          type: 'string',
-          maxLength: 512,
-          description:
-            'Continue with the cursor from the previous page, using the same filters.',
-        },
       },
       additionalProperties: false,
     },
@@ -414,7 +392,7 @@ const ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
     'addBlocks',
     'addBlockedBy',
   ],
-  task_list: ['status', 'owner', 'blockedBy', 'limit', 'cursor'],
+  task_list: ['status', 'owner', 'blockedBy'],
   request_shutdown: ['to'],
   team_plan_approval: ['request_id', 'action', 'message'],
 };
@@ -432,45 +410,6 @@ function lineError(
   )
     return `${label} must be one line of at most ${maxChars} characters.`;
   return undefined;
-}
-
-interface TaskListCursor {
-  teamId: string;
-  after: number;
-  throughSequence: number;
-}
-
-function parseTaskListCursor(value: unknown): TaskListCursor | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== 'string' ||
-    value.length > 512 ||
-    !/^[A-Za-z0-9_-]+$/.test(value)
-  )
-    throw new HostedTeamRefusal('Invalid task list cursor.');
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
-  } catch {
-    throw new HostedTeamRefusal('Invalid task list cursor.');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-    throw new HostedTeamRefusal('Invalid task list cursor.');
-  const cursor = parsed as Record<string, unknown>;
-  if (
-    Object.keys(cursor).sort().join(',') !== 'after,teamId,throughSequence' ||
-    typeof cursor['teamId'] !== 'string' ||
-    !Number.isSafeInteger(cursor['after']) ||
-    Number(cursor['after']) < 0 ||
-    !Number.isSafeInteger(cursor['throughSequence']) ||
-    Number(cursor['throughSequence']) < 0
-  )
-    throw new HostedTeamRefusal('Invalid task list cursor.');
-  return {
-    teamId: cursor['teamId'],
-    after: Number(cursor['after']),
-    throughSequence: Number(cursor['throughSequence']),
-  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -557,19 +496,6 @@ export function hostedTeamArgumentError(
   }
   if (toolName === 'task_list') {
     if (
-      args['limit'] !== undefined &&
-      (!Number.isSafeInteger(args['limit']) ||
-        Number(args['limit']) < 1 ||
-        Number(args['limit']) > 256)
-    )
-      return 'limit must be an integer between 1 and 256.';
-    try {
-      parseTaskListCursor(args['cursor']);
-    } catch {
-      return 'cursor must be copied from the previous task_list page.';
-    }
-
-    if (
       args['status'] !== undefined &&
       !['pending', 'in_progress', 'completed'].includes(
         args['status'] as string,
@@ -611,19 +537,19 @@ function isOpenTeam(team: TeamState): boolean {
 }
 
 /** The roster entry naming one child run, among a Session's team records. */
-export async function hostedTeamMembership(
-  teams: ManagedHistoryQuery<{ readonly record: unknown }>,
+export function hostedTeamMembership(
+  teams: ReadonlyArray<{ readonly record: unknown }>,
   childRunId: string,
-): Promise<HostedTeamMembership | undefined> {
+): HostedTeamMembership | undefined {
   return membershipAmong(teams, childRunId, () => true);
 }
 
-async function membershipAmong(
-  teams: ManagedHistoryQuery<{ readonly record: unknown }>,
+function membershipAmong(
+  teams: ReadonlyArray<{ readonly record: unknown }>,
   childRunId: string,
   admits: (team: TeamState) => boolean,
-): Promise<HostedTeamMembership | undefined> {
-  for await (const entry of teams) {
+): HostedTeamMembership | undefined {
+  for (const entry of teams) {
     const team = parseTeamState(entry.record);
     if (!admits(team)) continue;
     const member = team.members.find((each) => each.childRunId === childRunId);
@@ -642,20 +568,13 @@ export class HostedTeamSession {
     private readonly stops?: HostedTeamStops,
   ) {}
 
-  async team(
-    teamId: string,
-    throughSequence?: number,
-  ): Promise<TeamState | undefined> {
-    const existing = await this.store.authority.extensionRecord(
-      'team_state',
-      teamId,
-      throughSequence === undefined ? undefined : { throughSequence },
-    );
+  team(teamId: string): TeamState | undefined {
+    const existing = this.store.authority.extensionRecord('team_state', teamId);
     return existing === undefined ? undefined : parseTeamState(existing.record);
   }
 
   /** The lead's one open team: active, or closing until it is deleted. */
-  async openTeam(): Promise<TeamState | undefined> {
+  openTeam(): TeamState | undefined {
     return this.store.authority
       .extensionRecordsInDomain('team_state')
       .map((entry) => parseTeamState(entry.record))
@@ -663,7 +582,7 @@ export class HostedTeamSession {
   }
 
   /** The member a child run joined as, in any team of this Session. */
-  membership(childRunId: string): Promise<HostedTeamMembership | undefined> {
+  membership(childRunId: string): HostedTeamMembership | undefined {
     return hostedTeamMembership(
       this.store.authority.extensionRecordsInDomain('team_state'),
       childRunId,
@@ -676,10 +595,10 @@ export class HostedTeamSession {
    * head, the newest continuation that did not prove it never started.
    * A caller reading several members passes one index for all of them.
    */
-  async memberView(
+  memberView(
     rootChildRunId: string,
     chains: HostedChildChains = this.chains(),
-  ): Promise<HostedMemberView> {
+  ): HostedMemberView {
     return hostedMemberView(chains, rootChildRunId);
   }
 
@@ -692,44 +611,31 @@ export class HostedTeamSession {
    * a call that never ran, and the keyed evidence survives a continuation
    * that later never started.
    */
-  async committedBy(toolName: string, callKey: string): Promise<boolean> {
+  committedBy(toolName: string, callKey: string): boolean {
     if (toolName === 'team_plan_approval')
       return (
-        (await this.committed('decideTeamPlan', callKey)) !== undefined ||
-        (await this.plans().some(
-          async (plan) =>
-            (await this.committed(
+        this.committed('decideTeamPlan', callKey) !== undefined ||
+        this.plans().some(
+          (plan) =>
+            this.committed(
               'withdrawTeamPlan',
               `decision:${callKey}:${plan.requestId}`,
-            )) !== undefined,
-        ))
+            ) !== undefined,
+        )
       );
     if (toolName === 'request_shutdown') {
       return (
-        (await this.committed(
-          'commitChildRunRecord',
-          `shutdown:${callKey}`,
-        )) !== undefined ||
-        (await this.plans().some(
-          async (plan) =>
-            (await this.committed(
+        this.committed('commitChildRunRecord', `shutdown:${callKey}`) !==
+          undefined ||
+        this.plans().some(
+          (plan) =>
+            this.committed(
               'withdrawTeamPlan',
               `shutdown:${callKey}:${plan.requestId}`,
-            )) !== undefined,
-        ))
+            ) !== undefined,
+        )
       );
     }
-    if (
-      toolName === 'team_delete' &&
-      (await this.plans().some(
-        async (plan) =>
-          (await this.committed(
-            'withdrawTeamPlan',
-            `delete:${callKey}:${plan.requestId}`,
-          )) !== undefined,
-      ))
-    )
-      return true;
     const commands: ReadonlyArray<readonly [string, string]> =
       toolName === 'team_create'
         ? [['createTeam', callKey]]
@@ -739,6 +645,13 @@ export class HostedTeamSession {
             ? [
                 ['deleteTeam', `${callKey}:closing`],
                 ['deleteTeam', `${callKey}:deleted`],
+                ...this.plans().map(
+                  (plan) =>
+                    [
+                      'withdrawTeamPlan',
+                      `delete:${callKey}:${plan.requestId}`,
+                    ] as const,
+                ),
               ]
             : toolName === 'task_update'
               ? Array.from(
@@ -747,11 +660,10 @@ export class HostedTeamSession {
                     ['updateTeamTask', `${callKey}:${place + 1}`] as const,
                 )
               : [];
-    for await (const [operation, commandId] of commands) {
-      if ((await this.committed(operation, commandId)) !== undefined)
-        return true;
-    }
-    return false;
+    return commands.some(
+      ([operation, commandId]) =>
+        this.committed(operation, commandId) !== undefined,
+    );
   }
 
   /**
@@ -798,8 +710,8 @@ export class HostedTeamSession {
    * the open team must be active, and the sanitized name new to its
    * roster, which must still have room. Returns the member it would be.
    */
-  async admitMember(rawName: string): Promise<HostedTeamMembership> {
-    const team = await this.openTeam();
+  admitMember(rawName: string): HostedTeamMembership {
+    const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal(
         'Hosted child agent name joins the team, and this Session has none. Create one with team_create first, or omit name to launch an unnamed child agent.',
@@ -851,12 +763,12 @@ export class HostedTeamSession {
   }): Promise<{ readonly joined: true } | { readonly ended: ChildSessionRun }> {
     return this.serial(async () => {
       const commandId = `${params.childRunId}:join`;
-      if ((await this.committed('joinTeam', commandId)) !== undefined)
+      if (this.committed('joinTeam', commandId) !== undefined)
         return { joined: true };
       try {
         await this.commit(
           'team_state',
-          teamJoinBody((await this.team(params.teamId))!, {
+          teamJoinBody(this.team(params.teamId)!, {
             name: params.name,
             childRunId: params.childRunId,
             planModeRequired: params.planModeRequired ?? false,
@@ -868,7 +780,7 @@ export class HostedTeamSession {
         // The relay runs on its own, so the run can end at any moment
         // before the join; the authority then refuses it, as it admits
         // only a live run to the roster.
-        const child = await this.childRun(params.childRunId);
+        const child = this.childRun(params.childRunId);
         if (child !== undefined && isTerminalRunState(child.run.state))
           return { ended: child };
         throw cause;
@@ -877,29 +789,20 @@ export class HostedTeamSession {
     });
   }
 
-  async plan(requestId: string): Promise<TeamPlan | undefined> {
-    const record = await this.store.authority.extensionRecord(
-      'team_plan',
-      requestId,
-    );
+  plan(requestId: string): TeamPlan | undefined {
+    const record = this.store.authority.extensionRecord('team_plan', requestId);
     return record === undefined ? undefined : parseTeamPlan(record.record);
   }
 
-  plans(
-    teamId?: string,
-    throughSequence?: number,
-  ): ManagedHistoryQuery<TeamPlan> {
+  plans(teamId?: string): TeamPlan[] {
     return this.store.authority
-      .extensionRecordsInDomain(
-        'team_plan',
-        throughSequence === undefined ? undefined : { throughSequence },
-      )
+      .extensionRecordsInDomain('team_plan')
       .map((entry) => parseTeamPlan(entry.record))
       .filter((plan) => teamId === undefined || plan.teamId === teamId);
   }
 
   async showPlan(requestId: string): Promise<string> {
-    const plan = await this.plan(requestId);
+    const plan = this.plan(requestId);
     if (plan === undefined)
       throw new HostedTeamRefusal(`No plan ${requestId}.`);
     const feedback =
@@ -915,14 +818,14 @@ export class HostedTeamSession {
     text: string,
   ): Promise<string> {
     return this.serial(async () => {
-      const prior = await this.plan(commandId);
+      const prior = this.plan(commandId);
       if (prior !== undefined) return this.submissionAnswer(prior);
-      const superseded = await this.supersededPlan(commandId);
+      const superseded = this.supersededPlan(commandId);
       if (superseded !== undefined)
         return this.finishSupersede(commandId, superseded, text);
       assertManagedSessionDomainEnabled('team_plan');
       const chains = this.chains();
-      const member = await hostedOpenTeamChainMember(
+      const member = hostedOpenTeamChainMember(
         this.store.authority.extensionRecordsInDomain('team_state'),
         chains,
         childRunId,
@@ -931,7 +834,7 @@ export class HostedTeamSession {
         throw new HostedTeamRefusal(
           'Plan submission requires an active team membership.',
         );
-      const view = await hostedMemberView(chains, member.rootChildRunId);
+      const view = hostedMemberView(chains, member.rootChildRunId);
       if (
         !isRunningMember(view) ||
         view.stopping ||
@@ -971,19 +874,19 @@ export class HostedTeamSession {
         'managed-team-content',
         Buffer.from(text, 'utf8'),
       );
-      const checkHead = async () => {
-        const current = await this.memberView(member.rootChildRunId);
+      const checkHead = () => {
+        const current = this.memberView(member.rootChildRunId);
         if (
           current.head?.childRunId !== childRunId ||
           !isRunningMember(current) ||
           current.stopping ||
-          (await this.team(member.team.teamId))?.lifecycle !== 'active'
+          this.team(member.team.teamId)?.lifecycle !== 'active'
         )
           throw new HostedTeamRefusal(
             'The submitting member is no longer the running, unstopped head.',
           );
       };
-      await checkHead();
+      checkHead();
       const plans = this.plans(member.team.teamId).filter(
         (plan) => plan.member === member.name,
       );
@@ -994,17 +897,13 @@ export class HostedTeamSession {
       );
       // A committed cancellation owes its successor even if the run settled.
       // Without that evidence this is still a fresh admission.
-      if ((await this.supersededPlan(commandId)) === undefined)
-        await checkHead();
+      if (this.supersededPlan(commandId) === undefined) checkHead();
       const plan = teamPlanOpenBody({
         teamId: member.team.teamId,
         requestId: commandId,
         member: member.name,
         planRevision:
-          (await plans.reduce(
-            (maximum, entry) => Math.max(maximum, entry.planRevision),
-            0,
-          )) + 1,
+          Math.max(0, ...plans.map((entry) => entry.planRevision)) + 1,
         planRef,
       });
       await this.commit('team_plan', plan, 'submitTeamPlan', commandId);
@@ -1012,20 +911,16 @@ export class HostedTeamSession {
     });
   }
 
-  supersededPlan(commandId: string): Promise<TeamPlan | undefined> {
+  supersededPlan(commandId: string): TeamPlan | undefined {
     return this.plans()
       .filter(
-        async (plan) =>
-          (await this.committed(
+        (plan) =>
+          this.committed(
             'withdrawTeamPlan',
             `supersede:${commandId}:${plan.requestId}`,
-          )) !== undefined,
+          ) !== undefined,
       )
-      .reduce<TeamPlan | undefined>(
-        (latest, plan) =>
-          !latest || plan.planRevision > latest.planRevision ? plan : latest,
-        undefined,
-      );
+      .sort((a, b) => b.planRevision - a.planRevision)[0];
   }
 
   private async finishSupersede(
@@ -1034,7 +929,7 @@ export class HostedTeamSession {
     text: string,
   ): Promise<string> {
     const revision = previous.planRevision + 1;
-    const newer = await this.plans(previous.teamId).find(
+    const newer = this.plans(previous.teamId).find(
       (plan) =>
         plan.member === previous.member && plan.planRevision >= revision,
     );
@@ -1070,7 +965,7 @@ export class HostedTeamSession {
       if (!(cause instanceof ManagedSessionRecordError)) throw cause;
       return;
     }
-    for await (const plan of this.plans(teamId)) {
+    for (const plan of this.plans(teamId)) {
       if (
         plan.run.state !== 'waiting' ||
         (member !== undefined && plan.member !== member)
@@ -1087,26 +982,27 @@ export class HostedTeamSession {
 
   /** Recovery reads only this call's settlement and continuation, never another decision. */
   async planDecisionEvidence(callKey: string): Promise<string | undefined> {
-    const requestId = await this.committed('decideTeamPlan', callKey);
+    const requestId = this.committed('decideTeamPlan', callKey);
     if (requestId === undefined) {
       const withdrawn = this.plans().filter(
-        async (plan) =>
-          (await this.committed(
+        (plan) =>
+          this.committed(
             'withdrawTeamPlan',
             `decision:${callKey}:${plan.requestId}`,
-          )) !== undefined,
+          ) !== undefined,
       );
-      if ((await withdrawn.count()) === 0) return undefined;
-      return withdrawn.reduce(
-        (text, plan) =>
-          `${text}${text ? '\n' : ''}Plan ${plan.requestId} was withdrawn because ${plan.member} ended or was stopped.`,
-        '',
-      );
+      if (withdrawn.length === 0) return undefined;
+      return withdrawn
+        .map(
+          (plan) =>
+            `Plan ${plan.requestId} was withdrawn because ${plan.member} ended or was stopped.`,
+        )
+        .join('\n');
     }
-    const plan = (await this.plan(requestId))!;
-    const continued = await this.committed('continueChildRun', callKey);
+    const plan = this.plan(requestId)!;
+    const continued = this.committed('continueChildRun', callKey);
     if (continued !== undefined) {
-      const run = (await this.childRun(continued))!;
+      const run = this.childRun(continued)!;
       if (run.run.execution === 'not_started_proven')
         return `The decision on ${plan.member}'s plan ${requestId} revision ${plan.planRevision} was recorded (${plan.decision}), but its continuation never started. Send the decision again with send_message, quoting the plan (team_plan_approval action "show", request_id "${requestId}").`;
       return `The decision on ${plan.member}'s plan ${requestId} revision ${plan.planRevision} was recorded (${plan.decision}) and the member was continued.`;
@@ -1126,14 +1022,14 @@ export class HostedTeamSession {
     const requestId = args['request_id'] as string;
     if (args['action'] === 'show') return this.showPlan(requestId);
     assertManagedSessionDomainEnabled('team_plan');
-    const plan = await this.plan(requestId);
+    const plan = this.plan(requestId);
     if (plan === undefined)
       throw new HostedTeamRefusal(`No plan ${requestId}.`);
     if (plan.run.state !== 'waiting')
       return `Plan ${requestId} is ${plan.decision ?? plan.run.state}.`;
-    const team = (await this.team(plan.teamId))!;
+    const team = this.team(plan.teamId)!;
     const member = team.members.find((entry) => entry.name === plan.member)!;
-    const view = await this.memberView(member.childRunId);
+    const view = this.memberView(member.childRunId);
     if (isEndedMember(view) || view.stopping) {
       await this.withdrawPlans(team.teamId, member.name, `decision:${callKey}`);
       return `Plan ${requestId} was withdrawn because ${member.name} ended or was stopped.`;
@@ -1141,7 +1037,7 @@ export class HostedTeamSession {
     if (team.lifecycle !== 'active')
       throw new HostedTeamRefusal('The team is not active.');
     if (
-      await this.plans(team.teamId).some(
+      this.plans(team.teamId).some(
         (entry) =>
           entry.member === member.name &&
           entry.planRevision > plan.planRevision,
@@ -1186,7 +1082,7 @@ export class HostedTeamSession {
     });
     if (preflight.kind === 'refused')
       throw new HostedTeamRefusal(preflight.reason);
-    const current = await this.memberView(member.childRunId);
+    const current = this.memberView(member.childRunId);
     if (
       !current.continuable ||
       current.head?.childRunId !== view.head.childRunId
@@ -1204,15 +1100,15 @@ export class HostedTeamSession {
   }
 
   private async createTeam(teamId: string, rawName: string): Promise<string> {
-    if ((await this.committed('createTeam', teamId)) !== undefined)
-      return `Team "${(await this.team(teamId))!.name}" created.`;
+    if (this.committed('createTeam', teamId) !== undefined)
+      return `Team "${this.team(teamId)!.name}" created.`;
     const name = sanitizeName(rawName);
     if (!name) throw new HostedTeamRefusal('Team name is required.');
     if (name.length > MANAGED_TEAM_LIMITS.maxNameLength)
       throw new HostedTeamRefusal(
         `Team name "${name}" is longer than ${MANAGED_TEAM_LIMITS.maxNameLength} characters.`,
       );
-    if ((await this.openTeam()) !== undefined)
+    if (this.openTeam() !== undefined)
       throw new HostedTeamRefusal(
         'A team is already active. Delete it before creating a new one.',
       );
@@ -1226,23 +1122,23 @@ export class HostedTeamSession {
   }
 
   private async deleteTeam(callKey: string): Promise<string> {
-    const deleted = await this.committed('deleteTeam', `${callKey}:deleted`);
+    const deleted = this.committed('deleteTeam', `${callKey}:deleted`);
     if (deleted !== undefined)
-      return `Team "${(await this.team(deleted))!.name}" deleted.`;
+      return `Team "${this.team(deleted)!.name}" deleted.`;
     // A call that already closed its team checked the members then.
-    const closed = await this.committed('deleteTeam', `${callKey}:closing`);
-    const team =
-      closed === undefined ? await this.openTeam() : await this.team(closed);
+    const closed = this.committed('deleteTeam', `${callKey}:closing`);
+    const team = closed === undefined ? this.openTeam() : this.team(closed);
     if (team === undefined)
       throw new HostedTeamRefusal('No active team to delete.');
     let closing = team;
     if (closed === undefined) {
       // H4e-b2: a continued member runs in its chain's head.
       const chains = this.chains();
-      const running: string[] = [];
-      for (const member of team.members)
-        if (isRunningMember(await hostedMemberView(chains, member.childRunId)))
-          running.push(member.name);
+      const running = team.members
+        .filter((member) =>
+          isRunningMember(hostedMemberView(chains, member.childRunId)),
+        )
+        .map((member) => member.name);
       if (running.length > 0)
         throw new HostedTeamRefusal(
           `Team "${team.name}" still has running members: ${running.join(', ')}. Stop them with request_shutdown and wait until task_list shows them ended, then delete the team.`,
@@ -1279,7 +1175,7 @@ export class HostedTeamSession {
     callKey: string,
     rawName: string,
   ): Promise<string> {
-    const team = await this.openTeam();
+    const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal('No active team. Create a team first.');
     const name = sanitizeName(rawName);
@@ -1292,14 +1188,14 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `"${name}" is not a member of team "${team.name}".`,
       );
-    let view = await hostedMemberView(this.chains(), member.childRunId);
-    const checkWithdrawal = async () => {
+    let view = hostedMemberView(this.chains(), member.childRunId);
+    const checkWithdrawal = () => {
       if (
         !isRunningMember(view) &&
         !isEndedMember(view) &&
-        (await this.plans(team.teamId).some(
+        this.plans(team.teamId).some(
           (plan) => plan.member === name && plan.run.state === 'waiting',
-        ))
+        )
       ) {
         try {
           assertManagedSessionDomainEnabled('team_plan');
@@ -1311,7 +1207,7 @@ export class HostedTeamSession {
         }
       }
     };
-    await checkWithdrawal();
+    checkWithdrawal();
     await this.withdrawPlans(team.teamId, name, `shutdown:${callKey}`);
     if (isRunningMember(view) && !view.stopping && view.head !== undefined) {
       // A lane without the child funnel has nothing to stop through, and
@@ -1333,9 +1229,9 @@ export class HostedTeamSession {
         return `${name} is being stopped. Delete the team once task_list shows it ended.`;
       } catch (cause) {
         if (!(cause instanceof ManagedSessionConflictError)) throw cause;
-        view = await hostedMemberView(this.chains(), member.childRunId);
+        view = hostedMemberView(this.chains(), member.childRunId);
         if (view.state === 'running' && !view.stopping) throw cause;
-        await checkWithdrawal();
+        checkWithdrawal();
       }
     }
     if (view.stoppingBeforeStart)
@@ -1356,8 +1252,8 @@ export class HostedTeamSession {
    * H4e-b3 decision 9's composition rule, read through the open team:
    * whether a continuation of this member composes in plan mode.
    */
-  async memberPlanMode(member: HostedTeamMembership): Promise<boolean> {
-    const team = await this.team(member.teamId);
+  memberPlanMode(member: HostedTeamMembership): boolean {
+    const team = this.team(member.teamId);
     if (team === undefined) return false;
     return memberPlanModeRequired(
       team,
@@ -1372,17 +1268,14 @@ export class HostedTeamSession {
   ): Promise<string> {
     // The number is allocated only for a call that has not committed its
     // task, so a replay answers with the number it already took.
-    const created = await this.committed('createTeamTask', callKey);
+    const created = this.committed('createTeamTask', callKey);
     if (created !== undefined) {
-      const task = await this.task(created);
+      const task = this.task(created);
       return `Task #${task.number} created: "${task.subject}"`;
     }
-    const team = await this.activeTeam();
+    const team = this.activeTeam();
     const number =
-      (await this.tasksOf(team.teamId).reduce(
-        (maximum, task) => Math.max(maximum, task.number),
-        0,
-      )) + 1;
+      Math.max(0, ...this.tasksOf(team.teamId).map((task) => task.number)) + 1;
     const metadata = metadataBytes(mergeMetadata({}, args['metadata']));
     const task = teamTaskOpenBody({
       teamId: team.teamId,
@@ -1408,9 +1301,12 @@ export class HostedTeamSession {
     args: Record<string, unknown>,
     turnPrefix: string | undefined,
   ): Promise<string> {
-    const team = await this.openTeam();
+    const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal('No active team. Create a team first.');
+    const board = new Map(
+      this.tasksOf(team.teamId).map((task) => [task.number, task]),
+    );
     const number = taskNumber(args['taskId'] as string);
     const deleting = args['status'] === 'deleted';
     const blocks = deleting
@@ -1419,19 +1315,13 @@ export class HostedTeamSession {
     const blockedBy = deleting
       ? []
       : ((args['addBlockedBy'] as string[] | undefined) ?? []).map(taskNumber);
-    const board = await this.memberBoardOf(team.teamId, [
-      number,
-      ...blocks,
-      ...blockedBy,
-    ]);
     const commandId = (place: number) => `${callKey}:${place + 1}`;
-    const pending: number[] = [];
-    for (const [place] of [number, ...blocks].entries()) {
-      if (
-        (await this.committed('updateTeamTask', commandId(place))) === undefined
-      )
-        pending.push(place);
-    }
+    const pending = [number, ...blocks]
+      .map((_, place) => place)
+      .filter(
+        (place) =>
+          this.committed('updateTeamTask', commandId(place)) === undefined,
+      );
     const replaying = pending.length < blocks.length + 1;
     const owner =
       args['owner'] === undefined
@@ -1440,7 +1330,7 @@ export class HostedTeamSession {
           ? null
           : sanitizeName(args['owner'] as string);
     if (!replaying)
-      await this.validateUpdate(
+      this.validateUpdate(
         team,
         board,
         number,
@@ -1453,7 +1343,7 @@ export class HostedTeamSession {
     for (const place of pending) {
       const target = board.get(place === 0 ? number : blocks[place - 1]!)!;
       // Re-read: an earlier place of this call may have revised it.
-      const current = await this.task(target.taskId);
+      const current = this.task(target.taskId);
       const revision =
         place > 0
           ? teamTaskRevisionBody(current, {
@@ -1469,7 +1359,7 @@ export class HostedTeamSession {
         commandId(place),
       );
     }
-    const task = await this.task(board.get(number)!.taskId);
+    const task = this.task(board.get(number)!.taskId);
     if (deleting) return `Task #${number} deleted.`;
     // H4e-b2 decision 7: the board is a record, never a delivery. The
     // answer never asks for a send outright: the launch prompt or a send
@@ -1485,28 +1375,28 @@ export class HostedTeamSession {
         : undefined;
     if (member !== undefined && task.status !== 'completed') {
       const chains = this.chains();
-      const view = await hostedMemberView(chains, member.childRunId);
+      const view = hostedMemberView(chains, member.childRunId);
       const recorded = ` "${owner}" was not notified: task_update records the board only.`;
       if (view.stoppingBeforeStart) {
         notice = `${recorded} ${owner}'s latest continuation is being stopped before it started; if it ends without starting, ${owner} can take work again. Check task_list once it settles.`;
       } else if (isEndedMember(view)) {
         notice = `${recorded} ${owner} cannot take more work: it ${view.stopping ? 'is being stopped' : view.stopRequestedCompletion ? 'completed after a stop was requested' : `has ${view.state}`}.`;
       } else if (view.neverStarted !== undefined) {
-        const neverStarted = await hostedNeverStarted(
+        const neverStarted = hostedNeverStarted(
           view.neverStarted,
           this.messagesTo(view.neverStarted.childRunId),
         );
         notice = `${recorded} Its latest continuation ${neverStartedClause(neverStarted)}. ${neverStartedAction(neverStarted, member.name)}.`;
       } else if (
         turnPrefix !== undefined &&
-        (await givenWorkThisTurn(
+        givenWorkThisTurn(
           chains,
           member.childRunId,
           outboundChildMessages(
             this.store.authority.extensionRecordsInDomain('session_message'),
           ),
           turnPrefix,
-        ))
+        )
       ) {
         notice = `${recorded} A send_message earlier in this turn gave ${owner} work; if it did not carry this task, give it with send_message to "${owner}".`;
       } else {
@@ -1521,7 +1411,7 @@ export class HostedTeamSession {
   }
 
   /** Every refusal of a task_update, before its first commit. */
-  private async validateUpdate(
+  private validateUpdate(
     team: TeamState,
     board: ReadonlyMap<number, TeamTask>,
     number: number,
@@ -1530,7 +1420,7 @@ export class HostedTeamSession {
     blocks: readonly number[],
     blockedBy: readonly number[],
     turnPrefix: string | undefined,
-  ): Promise<void> {
+  ): void {
     const live = (each: number) => {
       const task = board.get(each);
       return task !== undefined && task.status !== 'deleted';
@@ -1567,10 +1457,10 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `Cannot update task #${number}: task #${crowded[0]} would have more than ${MANAGED_TEAM_LIMITS.maxBlockers} blockers.`,
       );
-    const cycle = await this.cycle(board, number, blocks, blockedBy);
+    const cycle = dependencyCycle(board, number, blocks, blockedBy);
     if (cycle)
       throw new HostedTeamRefusal(
-        `Cannot update task #${number}: this would create a dependency cycle (${cycle.map((each) => (typeof each === 'number' ? `#${each}` : each)).join(' → ')}).`,
+        `Cannot update task #${number}: this would create a dependency cycle (${cycle.map((each) => `#${each}`).join(' → ')}).`,
       );
     if (owner === '')
       throw new HostedTeamRefusal(
@@ -1583,14 +1473,14 @@ export class HostedTeamSession {
     // call moves the task to another open status, so a member that ended
     // never lands on open work.
     if (owner != null && owner !== task.owner) {
-      await this.assertOwner(team, owner, status === 'completed', turnPrefix);
+      this.assertOwner(team, owner, status === 'completed', turnPrefix);
     } else if (
       (owner === undefined || owner === task.owner) &&
       task.owner !== null &&
       status !== task.status &&
       status !== 'completed'
     ) {
-      await this.assertOwner(team, task.owner, false, turnPrefix, number);
+      this.assertOwner(team, task.owner, false, turnPrefix, number);
     }
     if (
       status === 'in_progress' &&
@@ -1641,13 +1531,8 @@ export class HostedTeamSession {
     });
   }
 
-  private async listTasks(args: Record<string, unknown>): Promise<string> {
-    const cursor = parseTaskListCursor(args['cursor']);
-    const throughSequence =
-      cursor?.throughSequence ?? this.store.authority.committedSequence;
-    const team = cursor
-      ? await this.team(cursor.teamId, cursor.throughSequence)
-      : await this.openTeam();
+  private listTasks(args: Record<string, unknown>): string {
+    const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal('No active team. Create a team first.');
     let owner: string | undefined;
@@ -1658,32 +1543,49 @@ export class HostedTeamSession {
           'Cannot filter by owner: owner must include at least one letter, number, or hyphen.',
         );
     }
-    const lines = await this.taskLines(
-      team.teamId,
-      args,
-      owner,
-      throughSequence,
-    );
-    const chains = this.chains(throughSequence);
-    const roster = await Promise.all(
-      team.members.map((member) => this.rosterLine(member, chains)),
-    );
-    const plans: string[] = [];
-    for await (const plan of this.plans(team.teamId, throughSequence).filter(
-      (plan) => plan.run.state === 'waiting',
-    )) {
-      const member = team.members.find((entry) => entry.name === plan.member)!;
-      const view = await this.memberView(member.childRunId, chains);
-      plans.push(
-        `Pending plan: ${plan.member}, request ${plan.requestId}, revision ${plan.planRevision}, ${plan.planRef.byteLength} bytes${isEndedMember(view) || view.stopping ? ' (member ended/stopped)' : ''}`,
-      );
-    }
+    const tasks = this.tasksOf(team.teamId);
+    const byId = new Map(tasks.map((task) => [task.taskId, task]));
+    const blocker =
+      typeof args['blockedBy'] === 'string' && args['blockedBy'].trim()
+        ? `${team.teamId}#${taskNumber(args['blockedBy'])}`
+        : undefined;
+    const lines = tasks
+      .filter(
+        (task) =>
+          task.status !== 'deleted' &&
+          (args['status'] === undefined || task.status === args['status']) &&
+          (owner === undefined || task.owner === owner) &&
+          (blocker === undefined ||
+            teamTaskOpenBlockers(task, byId).includes(blocker)),
+      )
+      .map((task) => {
+        const open = teamTaskOpenBlockers(task, byId).map(
+          (each) => `#${byId.get(each)!.number}`,
+        );
+        return (
+          `#${task.number} [${task.status}]` +
+          (task.owner ? ` @${task.owner}` : '') +
+          ` — ${task.subject}` +
+          (open.length > 0 ? ` (blocked by ${open.join(', ')})` : '')
+        );
+      });
+    const chains = this.chains();
     return [
       ...(lines.length > 0 ? lines : ['No tasks found.']),
       '',
       `--- Team "${team.name}" members ---`,
-      ...(roster.length ? roster : ['No members yet.']),
-      ...plans,
+      ...(team.members.length > 0
+        ? team.members.map((member) => this.rosterLine(member, chains))
+        : ['No members yet.']),
+      ...this.plans(team.teamId)
+        .filter((plan) => plan.run.state === 'waiting')
+        .map((plan) => {
+          const member = team.members.find(
+            (entry) => entry.name === plan.member,
+          )!;
+          const view = this.memberView(member.childRunId, chains);
+          return `Pending plan: ${plan.member}, request ${plan.requestId}, revision ${plan.planRevision}, ${plan.planRef.byteLength} bytes${isEndedMember(view) || view.stopping ? ' (member ended/stopped)' : ''}`;
+        }),
     ].join('\n');
   }
 
@@ -1698,11 +1600,11 @@ export class HostedTeamSession {
    * not its own task id, which names no live run: the head's reaches the
    * member.
    */
-  private async rosterLine(
+  private rosterLine(
     member: { readonly name: string; readonly childRunId: string },
     chains: HostedChildChains,
-  ): Promise<string> {
-    const view = await this.memberView(member.childRunId, chains);
+  ): string {
+    const view = this.memberView(member.childRunId, chains);
     const head = view.head;
     const label = view.stopping
       ? 'running (stopping)'
@@ -1720,7 +1622,7 @@ export class HostedTeamSession {
       view.neverStarted === undefined
         ? ''
         : ` (its latest continuation ${neverStartedClause(
-            await hostedNeverStarted(
+            hostedNeverStarted(
               view.neverStarted,
               this.messagesTo(view.neverStarted.childRunId),
             ),
@@ -1733,15 +1635,15 @@ export class HostedTeamSession {
         : '') +
       note +
       (view.neverStarted !== undefined &&
-      (await this.committed('decideTeamPlan', view.neverStarted.childRunId)) !==
+      this.committed('decideTeamPlan', view.neverStarted.childRunId) !==
         undefined
-        ? ` Send the decision again with send_message, quoting the plan (team_plan_approval action "show", request_id "${await this.committed('decideTeamPlan', view.neverStarted.childRunId)}").`
+        ? ` Send the decision again with send_message, quoting the plan (team_plan_approval action "show", request_id "${this.committed('decideTeamPlan', view.neverStarted.childRunId)}").`
         : '')
     );
   }
 
-  private async activeTeam(): Promise<TeamState> {
-    const team = await this.openTeam();
+  private activeTeam(): TeamState {
+    const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal('No active team. Create a team first.');
     if (team.lifecycle !== 'active')
@@ -1770,13 +1672,13 @@ export class HostedTeamSession {
    * a send to a task, and none offers to skip a send for work that never
    * arrived.
    */
-  private async assertOwner(
+  private assertOwner(
     team: TeamState,
     owner: string,
     completing: boolean,
     turnPrefix: string | undefined,
     keptOn?: number,
-  ): Promise<void> {
+  ): void {
     if (owner === MANAGED_TEAM_LEADER) return;
     const member = team.members.find((each) => each.name === owner);
     if (member === undefined)
@@ -1784,7 +1686,7 @@ export class HostedTeamSession {
         `"${owner}" is not a member of team "${team.name}". An owner is "leader" or a member name.`,
       );
     const chains = this.chains();
-    const view = await hostedMemberView(chains, member.childRunId);
+    const view = hostedMemberView(chains, member.childRunId);
     const kept = keptOn !== undefined;
     // "Member X has finished", or for a kept owner "Member X cannot keep
     // task #N open: it has finished".
@@ -1798,8 +1700,7 @@ export class HostedTeamSession {
       // so the member may still be recorded on the task the call completes,
       // whatever a later run did — a head that settled after a stop request
       // among them.
-      if (completing && (await hasCompletedRun(chains, member.childRunId)))
-        return;
+      if (completing && hasCompletedRun(chains, member.childRunId)) return;
       if (view.stopRequestedCompletion)
         throw new HostedTeamRefusal(
           `${who('completed after a stop was requested, so it cannot be continued')}. If it did this task's work, set status "completed" with this owner; otherwise launch a new member for it${unassign}.`,
@@ -1836,7 +1737,7 @@ export class HostedTeamSession {
     // Turn gave: no later started run exists, or it would be the head.
     // One cancelled at a user's request is resent only if still wanted.
     if (view.neverStarted !== undefined) {
-      const neverStarted = await hostedNeverStarted(
+      const neverStarted = hostedNeverStarted(
         view.neverStarted,
         this.messagesTo(view.neverStarted.childRunId),
       );
@@ -1846,14 +1747,14 @@ export class HostedTeamSession {
     }
     if (
       turnPrefix !== undefined &&
-      (await givenWorkThisTurn(
+      givenWorkThisTurn(
         chains,
         member.childRunId,
         outboundChildMessages(
           this.store.authority.extensionRecordsInDomain('session_message'),
         ),
         turnPrefix,
-      ))
+      )
     )
       return;
     throw new HostedTeamRefusal(
@@ -1874,13 +1775,8 @@ export class HostedTeamSession {
     return this.serial(async () => this.memberListIn(args));
   }
 
-  private async memberListIn(args: Record<string, unknown>): Promise<string> {
-    const cursor = parseTaskListCursor(args['cursor']);
-    const throughSequence =
-      cursor?.throughSequence ?? this.store.authority.committedSequence;
-    const team = cursor
-      ? await this.team(cursor.teamId, cursor.throughSequence)
-      : await this.openTeam();
+  private memberListIn(args: Record<string, unknown>): string {
+    const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal(
         'You are not a member of an open team. Ask the leader how the team ended.',
@@ -1893,31 +1789,49 @@ export class HostedTeamSession {
           'Cannot filter by owner: owner must include at least one letter, number, or hyphen.',
         );
     }
-    const lines = await this.taskLines(
-      team.teamId,
-      args,
-      owner,
-      throughSequence,
-    );
-    const chains = this.chains(throughSequence);
+    const tasks = this.tasksOf(team.teamId);
+    const byId = new Map(tasks.map((task) => [task.taskId, task]));
+    const blocker =
+      typeof args['blockedBy'] === 'string' && args['blockedBy'].trim()
+        ? `${team.teamId}#${taskNumber(args['blockedBy'])}`
+        : undefined;
+    const lines = tasks
+      .filter(
+        (task) =>
+          task.status !== 'deleted' &&
+          (args['status'] === undefined || task.status === args['status']) &&
+          (owner === undefined || task.owner === owner) &&
+          (blocker === undefined ||
+            teamTaskOpenBlockers(task, byId).includes(blocker)),
+      )
+      .map((task) => {
+        const open = teamTaskOpenBlockers(task, byId).map(
+          (each) => `#${byId.get(each)!.number}`,
+        );
+        return (
+          `#${task.number} [${task.status}]` +
+          (task.owner ? ` @${task.owner}` : '') +
+          ` — ${task.subject}` +
+          (open.length > 0 ? ` (blocked by ${open.join(', ')})` : '')
+        );
+      });
+    const chains = this.chains();
     return [
       ...(lines.length > 0 ? lines : ['No tasks found.']),
       '',
       `--- Team "${team.name}" members ---`,
       ...(team.members.length > 0
-        ? await Promise.all(
-            team.members.map((member) => this.memberRosterLine(member, chains)),
-          )
+        ? team.members.map((member) => this.memberRosterLine(member, chains))
         : ['No members yet.']),
     ].join('\n');
   }
 
   /** The roster line a member sees: state only, never the child task id. */
-  private async memberRosterLine(
+  private memberRosterLine(
     member: { readonly name: string; readonly childRunId: string },
     chains: HostedChildChains,
-  ): Promise<string> {
-    const view = await this.memberView(member.childRunId, chains);
+  ): string {
+    const view = this.memberView(member.childRunId, chains);
     const head = view.head;
     const label = view.stopping
       ? 'running (stopping)'
@@ -1944,15 +1858,12 @@ export class HostedTeamSession {
     args: Record<string, unknown>,
   ): Promise<string> {
     return this.serial(async () => {
-      const created = await this.committed(
-        'createTeamTask',
-        `${commandId}:create`,
-      );
+      const created = this.committed('createTeamTask', `${commandId}:create`);
       if (created !== undefined) {
-        const task = await this.task(created);
+        const task = this.task(created);
         return `Task #${task.number} created: "${task.subject}"`;
       }
-      const team = await this.openTeam();
+      const team = this.openTeam();
       if (team === undefined)
         throw new HostedTeamRefusal(
           'You are not a member of an open team. Ask the leader how the team ended.',
@@ -1962,10 +1873,8 @@ export class HostedTeamSession {
           `Team "${team.name}" is closing and takes no new tasks.`,
         );
       const number =
-        (await this.tasksOf(team.teamId).reduce(
-          (maximum, task) => Math.max(maximum, task.number),
-          0,
-        )) + 1;
+        Math.max(0, ...this.tasksOf(team.teamId).map((task) => task.number)) +
+        1;
       const metadata = metadataBytes(mergeMetadata({}, args['metadata']));
       const task = teamTaskOpenBody({
         teamId: team.teamId,
@@ -2002,7 +1911,7 @@ export class HostedTeamSession {
     args: Record<string, unknown>,
   ): Promise<string> {
     return this.serial(async () => {
-      const team = await this.openTeam();
+      const team = this.openTeam();
       if (team === undefined)
         throw new HostedTeamRefusal(
           'You are not a member of an open team. Ask the leader how the team ended.',
@@ -2017,22 +1926,19 @@ export class HostedTeamSession {
         : ((args['addBlockedBy'] as string[] | undefined) ?? []).map(
             taskNumber,
           );
-      const board = await this.memberBoardOf(team.teamId, [
-        number,
-        ...blocks,
-        ...blockedBy,
-      ]);
+      const board = new Map(
+        this.tasksOf(team.teamId).map((task) => [task.number, task]),
+      );
       const commandId_ = (place: number) => `${commandId}:${place + 1}`;
-      const pending: number[] = [];
-      for (const [place] of [number, ...blocks].entries())
-        if (
-          (await this.committed('updateTeamTask', commandId_(place))) ===
-          undefined
-        )
-          pending.push(place);
+      const pending = [number, ...blocks]
+        .map((_, place) => place)
+        .filter(
+          (place) =>
+            this.committed('updateTeamTask', commandId_(place)) === undefined,
+        );
       const replaying = pending.length < blocks.length + 1;
       if (!replaying)
-        await this.validateMemberUpdate(
+        this.validateMemberUpdate(
           team,
           board,
           memberName,
@@ -2048,11 +1954,7 @@ export class HostedTeamSession {
         // it committed: a target can be gone, and an edge the original
         // validation allowed can now close a cycle. Deterministic
         // refusals ride the receipt; they never escape as faults.
-        const liveBoard = await this.memberBoardOf(team.teamId, [
-          number,
-          ...blocks,
-          ...blockedBy,
-        ]);
+        const liveBoard = this.memberBoardOf(team.teamId);
         if (place > 0) {
           const targetNumber = blocks[place - 1]!;
           const target = liveBoard.get(targetNumber);
@@ -2071,16 +1973,16 @@ export class HostedTeamSession {
             notCommitted.push(`#${number} not found`);
             continue;
           }
-          const cycle = await this.cycle(liveBoard, number, [targetNumber], []);
+          const cycle = dependencyCycle(liveBoard, number, [targetNumber], []);
           if (cycle !== null) {
             notCommitted.push(
               `#${targetNumber} would create a dependency cycle (${cycle
-                .map((each) => (typeof each === 'number' ? `#${each}` : each))
+                .map((each) => `#${each}`)
                 .join(' → ')})`,
             );
             continue;
           }
-          const current = await this.task(target.taskId);
+          const current = this.task(target.taskId);
           const nextBlocks = new Set([...current.blockedBy, selfTask.taskId]);
           if (nextBlocks.size > MANAGED_TEAM_LIMITS.maxBlockers) {
             notCommitted.push(
@@ -2110,7 +2012,7 @@ export class HostedTeamSession {
           continue;
         }
         try {
-          await this.validateMemberUpdate(
+          this.validateMemberUpdate(
             team,
             liveBoard,
             memberName,
@@ -2125,7 +2027,7 @@ export class HostedTeamSession {
           notCommitted.push(cause.message);
           continue;
         }
-        const current = await this.task(board.get(number)!.taskId);
+        const current = this.task(board.get(number)!.taskId);
         const revision = deleting
           ? teamTaskRevisionBody(current, { status: 'deleted' })
           : await this.memberUpdatedTask(
@@ -2142,7 +2044,7 @@ export class HostedTeamSession {
           commandId_(place),
         );
       }
-      const task = await this.task(board.get(number)!.taskId);
+      const task = this.task(board.get(number)!.taskId);
       if (deleting) return `Task #${number} deleted.`;
       const done = `Task #${number} updated (status: ${task.status}${task.owner ? `, owner: ${task.owner}` : ''}).`;
       if (notCommitted.length === 0) return done;
@@ -2150,52 +2052,9 @@ export class HostedTeamSession {
     });
   }
 
-  private async memberBoardOf(
-    teamId: string,
-    numbers: readonly number[],
-  ): Promise<ReadonlyMap<number, TeamTask>> {
-    const board = new Map<number, TeamTask>();
-    for (const number of new Set(numbers)) {
-      const task = await this.tasksOf(teamId).find(
-        (task) => task.number === number,
-      );
-      if (task) board.set(number, task);
-    }
-    for (const task of [...board.values()]) {
-      for (const id of task.blockedBy) {
-        const entry = await this.store.authority.extensionRecord(
-          'team_task',
-          id,
-        );
-        if (entry) {
-          const blocker = parseTeamTask(entry.record);
-          if (blocker.teamId === teamId && !board.has(blocker.number))
-            board.set(blocker.number, blocker);
-        }
-      }
-    }
-    return board;
-  }
-
-  private cycle(
-    board: ReadonlyMap<number, TeamTask>,
-    number: number,
-    blocks: readonly number[],
-    blockedBy: readonly number[],
-  ) {
-    return dependencyCycle(
-      board,
-      number,
-      blocks,
-      blockedBy,
-      async (id) => {
-        const entry = await this.store.authority.extensionRecord(
-          'team_task',
-          id,
-        );
-        return entry ? parseTeamTask(entry.record) : undefined;
-      },
-      () => this.store.authority.createQueryHistory(),
+  private memberBoardOf(teamId: string): ReadonlyMap<number, TeamTask> {
+    return new Map(
+      this.tasksOf(teamId).map((each) => [each.number, each] as const),
     );
   }
 
@@ -2210,7 +2069,7 @@ export class HostedTeamSession {
    * task to be the member's own or unowned; activeForm and metadata are
    * unrestricted.
    */
-  private async validateMemberUpdate(
+  private validateMemberUpdate(
     team: TeamState,
     board: ReadonlyMap<number, TeamTask>,
     memberName: string,
@@ -2219,7 +2078,7 @@ export class HostedTeamSession {
     blocks: readonly number[],
     blockedBy: readonly number[],
     _revisited = false,
-  ): Promise<void> {
+  ): void {
     const task = board.get(number);
     if (task === undefined || task.status === 'deleted') {
       throw new HostedTeamRefusal(`Task #${number} not found.`);
@@ -2287,10 +2146,10 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `Cannot update task #${number}: task #${crowded[0]} would have more than ${MANAGED_TEAM_LIMITS.maxBlockers} blockers.`,
       );
-    const cycle = await this.cycle(board, number, blocks, blockedBy);
+    const cycle = dependencyCycle(board, number, blocks, blockedBy);
     if (cycle)
       throw new HostedTeamRefusal(
-        `Cannot update task #${number}: this would create a dependency cycle (${cycle.map((each) => (typeof each === 'number' ? `#${each}` : each)).join(' → ')}).`,
+        `Cannot update task #${number}: this would create a dependency cycle (${cycle.map((each) => `#${each}`).join(' → ')}).`,
       );
     const status =
       (args['status'] as TeamTaskStatus | undefined) ?? task.status;
@@ -2364,18 +2223,9 @@ export class HostedTeamSession {
   }
 
   /** The lead's child Session runs, indexed for one call. */
-  private chains(throughSequence?: number): HostedChildChains {
-    const authority = this.store.authority;
+  private chains(): HostedChildChains {
     return new HostedChildChains(
-      throughSequence === undefined
-        ? authority
-        : {
-            committedSequence: throughSequence,
-            extensionRecord: (domain, id) =>
-              authority.extensionRecord(domain, id, { throughSequence }),
-            extensionRecordsInDomain: (domain) =>
-              authority.extensionRecordsInDomain(domain, { throughSequence }),
-          },
+      this.store.authority.extensionRecordsInDomain('child_run'),
     );
   }
 
@@ -2386,90 +2236,16 @@ export class HostedTeamSession {
     ).filter((message) => message.childRunId === childRunId);
   }
 
-  private tasksOf(
-    teamId: string,
-    throughSequence?: number,
-  ): ManagedHistoryQuery<TeamTask> {
+  private tasksOf(teamId: string): TeamTask[] {
     return this.store.authority
-      .extensionRecordsInDomain(
-        'team_task',
-        throughSequence === undefined ? undefined : { throughSequence },
-      )
+      .extensionRecordsInDomain('team_task')
       .map((entry) => parseTeamTask(entry.record))
-      .filter((task) => task.teamId === teamId);
+      .filter((task) => task.teamId === teamId)
+      .sort((left, right) => left.number - right.number);
   }
 
-  private async taskLines(
-    teamId: string,
-    args: Record<string, unknown>,
-    owner: string | undefined,
-    throughSequence: number,
-  ) {
-    const limit = Number(args['limit'] ?? 100);
-    const cursor = parseTaskListCursor(args['cursor']);
-    const after = cursor?.after ?? 0;
-    if (
-      cursor &&
-      (cursor.teamId !== teamId ||
-        throughSequence > this.store.authority.committedSequence)
-    )
-      throw new HostedTeamRefusal(
-        'Task list cursor does not match this Session.',
-      );
-    const blocker =
-      typeof args['blockedBy'] === 'string' && args['blockedBy'].trim()
-        ? taskNumber(args['blockedBy'])
-        : undefined;
-    const page: Array<{ task: TeamTask; blockers: number[] }> = [];
-    for await (const task of this.tasksOf(teamId, throughSequence)) {
-      if (
-        task.number <= after ||
-        task.status === 'deleted' ||
-        (args['status'] !== undefined && task.status !== args['status']) ||
-        (owner !== undefined && task.owner !== owner)
-      )
-        continue;
-      const blockers: number[] = [];
-      for (const id of task.blockedBy) {
-        const saved = await this.store.authority.extensionRecord(
-          'team_task',
-          id,
-          { throughSequence },
-        );
-        if (!saved)
-          throw new HostedTeamRefusal(
-            `Task #${task.number} has a missing blocker.`,
-          );
-        const each = parseTeamTask(saved.record);
-        if (each.teamId !== teamId)
-          throw new HostedTeamRefusal(
-            `Task #${task.number} has a blocker from another team.`,
-          );
-        if (each.status !== 'completed' && each.status !== 'deleted')
-          blockers.push(each.number);
-      }
-      if (blocker !== undefined && !blockers.includes(blocker)) continue;
-      page.push({ task, blockers });
-      page.sort((a, b) => a.task.number - b.task.number);
-      if (page.length > limit + 1) page.pop();
-    }
-    const hasMore = page.length > limit;
-    if (hasMore) page.pop();
-    const lines = page.map(
-      ({ task, blockers }) =>
-        `#${task.number} [${task.status}]${task.owner ? ` @${task.owner}` : ''} — ${task.subject}${blockers.length ? ` (blocked by ${blockers.map((each) => `#${each}`).join(', ')})` : ''}`,
-    );
-    if (hasMore)
-      lines.push(
-        `More tasks available; call task_list with cursor "${Buffer.from(JSON.stringify({ teamId, after: page.at(-1)!.task.number, throughSequence })).toString('base64url')}" and the same filters (limit ${limit}).`,
-      );
-    return lines;
-  }
-
-  private async childRun(
-    childRunId: string,
-  ): Promise<ChildSessionRun | undefined> {
-    const existing = await this.store.authority.extensionRecord(
+  private childRun(childRunId: string): ChildSessionRun | undefined {
+    const existing = this.store.authority.extensionRecord(
       'child_run',
       childRunId,
     );
@@ -2500,10 +2276,10 @@ export class HostedTeamSession {
    * answers from what is committed and re-validates what remains instead
    * of running the fresh admission gates again.
    */
-  async commandWriteCommitted(recordId: string): Promise<boolean> {
+  commandWriteCommitted(recordId: string): boolean {
     return (
-      (await this.committed('createTeamTask', recordId)) !== undefined ||
-      (await this.committed('updateTeamTask', recordId)) !== undefined
+      this.committed('createTeamTask', recordId) !== undefined ||
+      this.committed('updateTeamTask', recordId) !== undefined
     );
   }
 
@@ -2511,11 +2287,8 @@ export class HostedTeamSession {
    * The record a call's command already committed (decision 11): such a
    * command is done, and a write is computed only for one that is not.
    */
-  private async committed(
-    operation: string,
-    commandId: string,
-  ): Promise<string | undefined> {
-    const prior = await this.store.authority.committedExtensionOperation(
+  private committed(operation: string, commandId: string): string | undefined {
+    const prior = this.store.authority.committedExtensionOperation(
       operation,
       commandId,
     );
@@ -2523,9 +2296,9 @@ export class HostedTeamSession {
     return prior.kind === 'record' ? prior.result.recordId : prior.recordId;
   }
 
-  private async task(taskId: string): Promise<TeamTask> {
+  private task(taskId: string): TeamTask {
     return parseTeamTask(
-      (await this.store.authority.extensionRecord('team_task', taskId))!.record,
+      this.store.authority.extensionRecord('team_task', taskId)!.record,
     );
   }
 
@@ -2536,7 +2309,7 @@ export class HostedTeamSession {
     operation: string,
     commandId: string,
   ): Promise<void> {
-    const existing = await this.store.authority.extensionRecord(
+    const existing = this.store.authority.extensionRecord(
       domain,
       domain === 'team_state'
         ? (record as TeamState).teamId
@@ -2600,72 +2373,40 @@ function mergeMetadata(
  * to itself, or null. The board is acyclic, so only a path through a new
  * edge can return to `number`.
  */
-async function dependencyCycle(
+function dependencyCycle(
   board: ReadonlyMap<number, TeamTask>,
   number: number,
   blocks: readonly number[],
   blockedBy: readonly number[],
-  load: (id: string) => Promise<TeamTask | undefined>,
-  createHistory: () => FileManagedSessionHistory,
-): Promise<Array<number | string> | null> {
-  if (!blocks.length && !blockedBy.length) return null;
-  const start = board.get(number);
-  if (!start) return null;
-  const scratch = createHistory();
-  type Frame = {
-    taskId: string;
-    number: number;
-    next: string[];
-    cursor: number;
+): number[] | null {
+  const numberOf = new Map(
+    [...board.values()].map((task) => [task.taskId, task.number]),
+  );
+  // Edges run from a blocker to the task it blocks.
+  const next = new Map<number, Set<number>>();
+  const edge = (from: number, to: number) => {
+    const set = next.get(from) ?? new Set<number>();
+    set.add(to);
+    next.set(from, set);
   };
-  const stack = scratch.map<Frame>('resource-pending');
-  const visited = scratch.map<boolean>('resource');
-  const frame = (task: TeamTask): Frame => ({
-    taskId: task.taskId,
-    number: task.number,
-    next: [
-      ...new Set([
-        ...task.blockedBy,
-        ...(task.number === number
-          ? blockedBy.flatMap((each) => board.get(each)?.taskId ?? [])
-          : []),
-        ...(blocks.includes(task.number) ? [start.taskId] : []),
-      ]),
-    ],
-    cursor: 0,
-  });
-  try {
-    let depth = 0;
-    await stack.set('0', frame(start));
-    await visited.set(start.taskId, true);
-    while (depth >= 0) {
-      const current = await stack.get(String(depth));
-      if (!current) throw new Error('Task dependency traversal is incomplete.');
-      const following = current.next[current.cursor++];
-      if (following === undefined) {
-        depth--;
-        continue;
-      }
-      await stack.set(String(depth), current);
-      if (following === start.taskId) {
-        const path: Array<number | string> = [number];
-        for (let index = depth; index >= 0 && depth - index < 255; index--) {
-          const member = await stack.get(String(index));
-          if (!member)
-            throw new Error('Task dependency traversal is incomplete.');
-          path.push(member.number);
-        }
-        if (depth >= 255) path.push('…', number);
-        return path;
-      }
-      if (await visited.has(following)) continue;
-      await visited.set(following, true);
-      const next = await load(following);
-      if (!next || next.teamId !== start.teamId) continue;
-      await stack.set(String(++depth), frame(next));
+  for (const task of board.values())
+    for (const blocker of task.blockedBy)
+      edge(numberOf.get(blocker)!, task.number);
+  for (const each of blocks) edge(number, each);
+  for (const each of blockedBy) edge(each, number);
+  const path: number[] = [];
+  const visited = new Set<number>([number]);
+  const walk = (node: number): number[] | null => {
+    path.push(node);
+    for (const following of next.get(node) ?? []) {
+      if (following === number) return [...path, number];
+      if (visited.has(following)) continue;
+      visited.add(following);
+      const found = walk(following);
+      if (found) return found;
     }
+    path.pop();
     return null;
-  } finally {
-    await scratch.close();
-  }
+  };
+  return walk(number);
 }

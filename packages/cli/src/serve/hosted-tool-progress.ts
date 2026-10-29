@@ -81,11 +81,11 @@ export async function hostedToolProgress(
     };
   }
   if (event.kind !== 'tool.intent' && event.kind !== 'tool.receipt') return;
-  const events = session.authority.iterateEvents(1, event.sequence);
+  const events = session.authority.eventsInSequenceRange(1, event.sequence);
   const intent =
     event.kind === 'tool.intent'
       ? event
-      : await events.findLast(
+      : events.findLast(
           (entry) =>
             entry.kind === 'tool.intent' &&
             entry.sequence < event.sequence &&
@@ -93,7 +93,7 @@ export async function hostedToolProgress(
               event.payload['executionCallId'],
         );
   if (!intent) return;
-  const batch = await events.find(
+  const batch = events.find(
     (entry) =>
       entry.kind === 'message.committed' &&
       entry.sequence < intent.sequence &&

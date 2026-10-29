@@ -282,7 +282,7 @@ async function leadWithTeam(): Promise<
     lead.session.authority.sessionHeader.sessionKey,
   );
   await teams.run('team_create', { team_name: 'Review' }, 'prompt:call-team');
-  const member = await teams.admitMember('bob');
+  const member = teams.admitMember('bob');
   expect(await teams.join({ ...member, childRunId: LEAF_RUN })).toEqual({
     joined: true,
   });
@@ -317,7 +317,7 @@ async function leadWithMembers(
       runtime: { runtimeBindingId: `binding-${index + 2}`, generation: '1' },
     });
     await lead.children.attach(childRunId, sessionId);
-    const member = await lead.teams.admitMember(name);
+    const member = lead.teams.admitMember(name);
     expect(await lead.teams.join({ ...member, childRunId })).toEqual({
       joined: true,
     });
@@ -335,15 +335,12 @@ function memberMessageIdOf(commandId: string, position: number): string {
 }
 
 /** The lead's outbound messages to one member's run, parsed. */
-async function sentToHead(
+function sentToHead(
   lead: Side,
   childRunId: string,
-): Promise<ReadonlyArray<ReturnType<typeof parseSessionMessage>>> {
-  return (
-    await lead.session.authority
-      .extensionRecordsInDomain('session_message')
-      .collect(1_000_000)
-  )
+): ReadonlyArray<ReturnType<typeof parseSessionMessage>> {
+  return lead.session.authority
+    .extensionRecordsInDomain('session_message')
     .map((entry) => parseSessionMessage(entry.record))
     .filter(
       (message) =>
@@ -352,11 +349,8 @@ async function sentToHead(
 }
 
 /** The Session a child run attached as — the target its messages must name. */
-async function attachedSessionOf(
-  lead: Side,
-  childRunId: string,
-): Promise<string> {
-  const record = await lead.session.authority.extensionRecord(
+function attachedSessionOf(lead: Side, childRunId: string): string {
+  const record = lead.session.authority.extensionRecord(
     'child_run',
     childRunId,
   );
@@ -406,7 +400,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     );
     await teams.run('team_create', { team_name: 'Review' }, 'create');
     await teams.join({
-      ...(await teams.admitMember('bob')),
+      ...teams.admitMember('bob'),
       childRunId: LEAF_RUN,
       planModeRequired: true,
     });
@@ -436,15 +430,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       ).outcome,
     ).toBe('refused');
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_plan')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_plan'),
     ).toHaveLength(1);
     expect(await lead.commands.execute(teams, params)).toEqual(reply);
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_plan')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_plan'),
     ).toHaveLength(1);
     expect(await lead.commands.existingReply(params.commandId)).toEqual(reply);
   });
@@ -460,7 +450,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     const teams = new HostedTeamSession(store, key, lead.children);
     await teams.run('team_create', { team_name: 'Review' }, 'create');
     await teams.join({
-      ...(await teams.admitMember('bob')),
+      ...teams.admitMember('bob'),
       childRunId: LEAF_RUN,
       planModeRequired: true,
     });
@@ -507,12 +497,12 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       SessionCommandBlockedError,
     );
     expect(await lead.commands.existingReply(params.commandId)).toBeUndefined();
-    expect(await teams.plan(params.commandId)).toBeUndefined();
+    expect(teams.plan(params.commandId)).toBeUndefined();
     planGate.enabled = true;
     expect(await lead.commands.execute(teams, params)).toMatchObject({
       outcome: 'answered',
     });
-    expect(await teams.plan(params.commandId)).toMatchObject({
+    expect(teams.plan(params.commandId)).toMatchObject({
       planRevision: 2,
       run: { state: 'waiting' },
     });
@@ -533,7 +523,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       );
       await teams.run('team_create', { team_name: 'Review' }, 'create');
       await teams.join({
-        ...(await teams.admitMember('bob')),
+        ...teams.admitMember('bob'),
         childRunId: LEAF_RUN,
         planModeRequired: true,
       });
@@ -589,11 +579,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       await lead.children.accept(notified, {
         notification: { description: 'audit' },
       });
-      const input = (await lead.session.authority.findEvent(
-        'input.accepted',
-        'kind',
-        'input.accepted',
-      ))!;
+      const input = lead.session.authority
+        .readEvents({ afterSequence: 0, limit: 1024 })
+        .find((event) => event.kind === 'input.accepted')!;
       const ref = (input.payload as Record<string, unknown>)[
         'contentRef'
       ] as Parameters<typeof lead.session.resources.read>[0];
@@ -677,7 +665,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       executionCallId: 'prompt-1:call-1',
       closing: false,
     });
-    const committed = (await member.commands.commands().at(-1))!;
+    const committed = member.commands.commands().at(-1)!;
     expect(committed.direction).toBe('outbound');
     expect(committed.kind).toBe('board_write');
     expect(committed.childRunId).toBe(LEAF_RUN);
@@ -691,7 +679,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       executionCallId: 'prompt-1:call-1',
       closing: false,
     });
-    expect(await member.commands.commands().collect(1_000_000)).toHaveLength(1);
+    expect(member.commands.commands()).toHaveLength(1);
     await expect(
       member.commands.runCommand({
         commandId,
@@ -753,9 +741,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       closing: false,
     });
     await member.commands.handover(commandId, PARENT);
-    expect(
-      (await member.commands.command(commandId))?.run.delivery?.state,
-    ).toBe('accepting');
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepting',
+    );
     await member.commands.handover(commandId, PARENT);
     await expect(
       member.commands.handover(commandId, randomUUID()),
@@ -766,9 +754,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       text: 'Task #1 created: "ship the fix"',
     };
     await member.commands.answered(commandId, reply);
-    expect(
-      (await member.commands.command(commandId))?.run.delivery?.state,
-    ).toBe('accepted');
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepted',
+    );
     await member.commands.answered(commandId, reply);
     await expect(
       member.commands.answered(commandId, {
@@ -779,9 +767,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
 
     expect(await member.commands.readReply(commandId)).toEqual(reply);
     await member.commands.commitConsumed(commandId);
-    expect(
-      (await member.commands.command(commandId))?.run.delivery?.state,
-    ).toBe('consumed');
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'consumed',
+    );
   });
 
   it('settles a landed answered append before replay, so a lost-acknowledgement retry publishes once', async () => {
@@ -803,13 +791,13 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     await expect(member.commands.answered(commandId, reply)).rejects.toThrow(
       ManagedSessionAppendUnsettledError,
     );
-    expect(
-      (await member.commands.command(commandId))?.run.delivery?.state,
-    ).toBe('accepting');
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepting',
+    );
     await member.commands.answered(commandId, reply);
-    expect(
-      (await member.commands.command(commandId))?.run.delivery?.state,
-    ).toBe('accepted');
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepted',
+    );
     expect(publications('managed-command-reply')).toBe(1);
     expect(await member.commands.readReply(commandId)).toEqual(reply);
   });
@@ -828,11 +816,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     await expect(member.commands.runCommand(params)).rejects.toThrow(
       ManagedSessionAppendUnsettledError,
     );
-    expect(await member.commands.command(commandId)).toBeUndefined();
+    expect(member.commands.command(commandId)).toBeUndefined();
     await member.commands.runCommand(params);
-    expect(
-      (await member.commands.command(commandId))?.run.delivery?.state,
-    ).toBe('planned');
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'planned',
+    );
     expect(publications('managed-command-args')).toBe(1);
   });
 
@@ -868,7 +856,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     await member.commands.handover(other, PARENT);
     await member.commands.settle(other, 'unknown');
     await member.commands.settle(other, 'rejected');
-    const record = (await member.commands.command(other))!;
+    const record = member.commands.command(other)!;
     expect(record.run.delivery?.state).toBe('rejected');
   });
 
@@ -890,7 +878,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
         });
         // Persist history through the real authority, reusing the first command's
         // immutable arguments instead of publishing the same bytes 254 more times.
-        const argsRef = (await member.commands.command(commandId))!.argsRef;
+        const argsRef = member.commands.command(commandId)!.argsRef;
         for (let index = 0; index < 254; index += 1) {
           signal.throwIfAborted();
           const seededId = `cmd_extra_${index}`;
@@ -916,9 +904,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
           );
         }
         signal.throwIfAborted();
-        expect(
-          await member.commands.commands().collect(1_000_000),
-        ).toHaveLength(255);
+        expect(member.commands.commands()).toHaveLength(255);
         await member.commands.runCommand({
           commandId: 'cmd_extra_254',
           kind: 'board_read',
@@ -927,9 +913,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
           closing: false,
         });
         signal.throwIfAborted();
-        expect(
-          await member.commands.commands().collect(1_000_000),
-        ).toHaveLength(256);
+        expect(member.commands.commands()).toHaveLength(256);
         await expect(
           member.commands.runCommand({
             commandId: commandIdOf('call-9'),
@@ -939,12 +923,8 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
             closing: false,
           }),
         ).rejects.toThrow(/budget_exhausted/);
-        expect(
-          await member.commands.commands().collect(1_000_000),
-        ).toHaveLength(256);
-        expect(
-          await member.commands.command(commandIdOf('call-9')),
-        ).toBeUndefined();
+        expect(member.commands.commands()).toHaveLength(256);
+        expect(member.commands.command(commandIdOf('call-9'))).toBeUndefined();
       })();
       pendingBudgetTests.push(work);
       return work;
@@ -977,7 +957,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       args: TASK_CREATE_ARGS,
       reply,
     });
-    expect(await lead.commands.commands().collect(1_000_000)).toHaveLength(1);
+    expect(lead.commands.commands()).toHaveLength(1);
   });
 
   it('executes a board write, commits the receipt, and answers a re-execution from it', async () => {
@@ -996,13 +976,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'Task #1 created: "ship the fix"',
     });
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
     // The receipt is the whole answer: a re-execution writes nothing more.
     expect(await execute()).toEqual(first);
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(1);
   });
 
@@ -1034,9 +1012,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(await execute()).toEqual(first);
     // The update revised the one task; a re-execution writes nothing more.
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(1);
   });
 
@@ -1052,9 +1028,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       }),
     ).rejects.toThrow(SessionCommandRefusalError);
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(0);
   });
 
@@ -1089,11 +1063,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       }),
     ).rejects.toThrow(SessionCommandBlockedError);
     // A wait commits nothing: no receipt, no task.
-    expect(await lead.commands.command(commandId)).toBeUndefined();
+    expect(lead.commands.command(commandId)).toBeUndefined();
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(0);
   });
 
@@ -1129,13 +1101,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'refused',
       text: 'This Session is not a member of an open team.',
     });
-    const receipt = await lead.commands.command(commandId);
+    const receipt = lead.commands.command(commandId);
     expect(receipt?.direction).toBe('inbound');
     expect(receipt?.run.delivery?.state).toBe('consumed');
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(0);
   });
 
@@ -1175,8 +1145,8 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'refused',
       text: 'This Session is not a member of an open team.',
     });
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(0);
   });
 
   it('answers a board read for a running member without committing a receipt', async () => {
@@ -1192,7 +1162,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(reply.outcome).toBe('answered');
     expect(reply.text).toContain('--- Team "review" members ---');
     expect(reply.text).toContain('bob: running');
-    expect(await lead.commands.command(commandId)).toBeUndefined();
+    expect(lead.commands.command(commandId)).toBeUndefined();
   });
 
   it('refuses the kind a later batch owns and commits the refusal', async () => {
@@ -1207,7 +1177,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     });
     expect(reply.outcome).toBe('refused');
     expect(reply.text).toContain('not accepted yet');
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('sends a member message to a running member and replays from the receipt', async () => {
@@ -1225,7 +1195,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'Message sent to alice.\n- alice: sent.',
     });
-    const sent = await sentToHead(lead, 'run-alice');
+    const sent = sentToHead(lead, 'run-alice');
     expect(sent).toHaveLength(1);
     const message = sent[0]!;
     expect(message.messageId).toBe(memberMessageIdOf(commandId, 2));
@@ -1235,10 +1205,10 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(
       (await lead.session.resources.read(message.contentRef!)).toString('utf8'),
     ).toBe('<member-message from="bob">\nlook at task 2\n</member-message>');
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
     const again = await lead.commands.execute(lead.teams, params);
     expect(again).toEqual(reply);
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
   });
 
   it('rejects a re-sent member message id that carries different evidence (R1-6)', async () => {
@@ -1257,7 +1227,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     await expect(lead.children.sendToRunningMember(route)).resolves.toEqual({
       kind: 'sent',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
     await expect(
       lead.children.sendToRunningMember({
         ...route,
@@ -1267,7 +1237,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
         ),
       }),
     ).rejects.toThrow(ManagedSessionConflictError);
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
   });
 
   it('sends a member message to the head of a continued member chain (R1-5)', async () => {
@@ -1300,7 +1270,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'Message sent to alice.\n- alice: sent.',
     });
-    const entry = await lead.session.authority.extensionRecord(
+    const entry = lead.session.authority.extensionRecord(
       'session_message',
       memberMessageIdOf(commandId, 2),
     );
@@ -1322,13 +1292,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'Message sent to every other member of team "review".\n- alice: sent.\n- carol: sent.',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(1);
-    expect(await sentToHead(lead, 'run-carol')).toHaveLength(1);
-    expect(await sentToHead(lead, LEAF_RUN)).toHaveLength(0);
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-carol')).toHaveLength(1);
+    expect(sentToHead(lead, LEAF_RUN)).toHaveLength(0);
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(2);
   });
 
@@ -1351,9 +1319,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'Message sent to 1 of 2 other members of team "review":\n- alice: sent.\n- carol: not reached: it has finished; the leader may give it more work, a peer cannot.',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(1);
-    expect(await sentToHead(lead, 'run-carol')).toHaveLength(0);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-carol')).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('names what a finished or ended recipient cannot take', async () => {
@@ -1377,11 +1345,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       text: 'The message reached no member of team "review":\n- alice: not reached: it has finished; the leader may give it more work, a peer cannot.\n- carol: not reached: it has ended.',
     });
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('names what a stopping recipient cannot take', async () => {
@@ -1399,8 +1365,8 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'refused',
       text: 'The message was not sent:\n- alice: not reached: it is being stopped.',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(0);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('names what a member that completed after a stop cannot take (R1-3)', async () => {
@@ -1423,8 +1389,8 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'refused',
       text: 'The message was not sent:\n- alice: not reached: it completed after a stop was requested; for more work, the leader can launch a new member under a new name — a peer cannot reach it.',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(0);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('refuses the stranger, the reserved names and the sender itself', async () => {
@@ -1463,9 +1429,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(wild.text).toContain('sanitizes to an empty string');
     expect(wild.text).not.toContain(' is not a member');
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
     const only = await leadWithTeam();
     const reply = await only.commands.execute(only.teams, {
@@ -1527,13 +1491,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(Buffer.byteLength(JSON.stringify(cut), 'utf8')).toBeLessThanOrEqual(
       MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes,
     );
-    expect((await lead.commands.command(oversizedCommandId))?.direction).toBe(
+    expect(lead.commands.command(oversizedCommandId)?.direction).toBe(
       'inbound',
     );
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
     // A legal-size address doubling through JSON must still answer its
     // refusal inside one storable receipt (R2-1).
@@ -1552,9 +1514,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(
       Buffer.byteLength(JSON.stringify(escaped), 'utf8'),
     ).toBeLessThanOrEqual(MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes);
-    expect((await lead.commands.command(escapedCommandId))?.direction).toBe(
-      'inbound',
-    );
+    expect(lead.commands.command(escapedCommandId)?.direction).toBe('inbound');
     // The old receipt-store throw left existingReply empty; the replay
     // must now return the committed reply identically.
     await expect(
@@ -1589,9 +1549,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'Message sent to every other member of team "review".\n- alice: sent.\n- carol: sent.',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(1);
-    expect(await sentToHead(lead, 'run-carol')).toHaveLength(1);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-carol')).toHaveLength(1);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('reports the sends of a team that changed before re-execution', async () => {
@@ -1607,7 +1567,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     // hand it over and mark it accepted first.
     const relay = leadRelay(lead);
     const messageId = memberMessageIdOf(commandId, 2);
-    await relay.handover(messageId, await attachedSessionOf(lead, 'run-alice'));
+    await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
     await relay.accepted(messageId, sessionMessageInputId(messageId));
     await lead.children.settleCompleted('run-alice', {
       result: Buffer.from('done'),
@@ -1631,7 +1591,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'answered',
       text: 'The message was sent to 1 member before its team changed; nothing more was sent.',
     });
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('bounds member messages beside the shared edge limits', async () => {
@@ -1662,10 +1622,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     const relay = leadRelay(lead);
     for (let i = 0; i < 4; i += 1) {
       const messageId = memberMessageIdOf(commandIdOf(`cap-4-${i}`), 2);
-      await relay.handover(
-        messageId,
-        await attachedSessionOf(lead, 'run-alice'),
-      );
+      await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
       await relay.accepted(messageId, sessionMessageInputId(messageId));
     }
     for (let i = 0; i < 8; i += 1) {
@@ -1714,10 +1671,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
         executionCallId: commandIdOf(`cap-16-${i}`),
       });
       expect(route).toEqual({ kind: 'sent' });
-      await messages.handover(
-        messageId,
-        await attachedSessionOf(lead, 'run-alice'),
-      );
+      await messages.handover(messageId, attachedSessionOf(lead, 'run-alice'));
       await messages.accepted(messageId, sessionMessageInputId(messageId));
       await messages.settle(messageId, 'consumed');
     }
@@ -1750,10 +1704,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
         closing: false,
       });
       expect(route.kind).toBe('message');
-      await relay.handover(
-        messageId,
-        await attachedSessionOf(lead, 'run-alice'),
-      );
+      await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
       await relay.accepted(messageId, sessionMessageInputId(messageId));
     }
     const commandId = commandIdOf('cap-64-next');
@@ -1769,13 +1720,13 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       text: 'The message was not sent:\n- alice: not reached: it has received its 64 messages (budget_exhausted).',
     });
     expect(
-      await lead.session.authority.extensionRecord(
+      lead.session.authority.extensionRecord(
         'session_message',
         memberMessageIdOf(commandId, 2),
       ),
     ).toBeUndefined();
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
-  }, 45_000);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+  });
 
   it('counts only member messages toward the member in-flight sub-cap (R1-6)', async () => {
     const lead = await leadWithMembers(['alice']);
@@ -1820,11 +1771,9 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       text: 'Task #1 created: "ship the fix"',
     });
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(1);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('refuses a member message from a run that ended, with the fixed sentence (R1-6)', async () => {
@@ -1845,8 +1794,8 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       outcome: 'refused',
       text: 'Your run has ended or is being stopped; it takes no more team commands.',
     });
-    expect(await sentToHead(lead, 'run-alice')).toHaveLength(0);
-    expect((await lead.commands.command(commandId))?.direction).toBe('inbound');
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
   it('refuses a fresh command from a run that ended, with the fixed sentence', async () => {
@@ -1867,9 +1816,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       text: 'Your run has ended or is being stopped; it takes no more team commands.',
     });
     expect(
-      await lead.session.authority
-        .extensionRecordsInDomain('team_task')
-        .collect(1_000_000),
+      lead.session.authority.extensionRecordsInDomain('team_task'),
     ).toHaveLength(0);
   });
 });

@@ -163,7 +163,6 @@ function hostedHooks(events: HookEventName[] = []) {
   const session = {
     ensureReady: vi.fn().mockResolvedValue(undefined),
     getCatalog: () => ({ hooks: events.map((eventName) => ({ eventName })) }),
-    hasPendingOperations: vi.fn().mockResolvedValue(false),
     hasCompletedOccurrence,
     wasStopBlocked: vi.fn().mockResolvedValue(false),
     setMessagesProvider: vi.fn(),

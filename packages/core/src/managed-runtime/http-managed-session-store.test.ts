@@ -13,7 +13,6 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
-import { FileManagedSessionHistory } from './managed-session-history.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
@@ -41,8 +40,6 @@ import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
   type ManagedSessionActivationLease,
-  type ManagedSessionJournalReader,
-  type ManagedSessionJournalScan,
 } from './managed-session-storage.js';
 import type {
   ManagedSessionDurableRef,
@@ -90,52 +87,6 @@ const SESSION_KEY: ManagedSessionKey = {
 };
 const TOKEN_A = 'a'.repeat(32);
 const TOKEN_B = 'b'.repeat(32);
-const pendingHistoryIo = new Set<Promise<unknown>>();
-
-function trackHistoryIo(): void {
-  for (const method of ['get', 'set', 'flush', 'writeBlock'] as const) {
-    const original = FileManagedSessionHistory.prototype[method];
-    vi.spyOn(FileManagedSessionHistory.prototype, method).mockImplementation(
-      function (this: FileManagedSessionHistory, ...args: unknown[]) {
-        const operation = (
-          original as (...args: unknown[]) => Promise<unknown>
-        ).apply(this, args);
-        pendingHistoryIo.add(operation);
-        void operation.then(
-          () => pendingHistoryIo.delete(operation),
-          () => pendingHistoryIo.delete(operation),
-        );
-        return operation;
-      },
-    );
-  }
-}
-
-async function advanceWithHistoryIo(milliseconds: number): Promise<void> {
-  // The fake clock must not outrun real index I/O before scheduling retries.
-  let remaining = milliseconds;
-  do {
-    const step = Math.min(200, remaining);
-    await vi.advanceTimersByTimeAsync(step);
-    remaining -= step;
-    do {
-      await Promise.allSettled([...pendingHistoryIo]);
-      await vi.advanceTimersByTimeAsync(0);
-    } while (pendingHistoryIo.size);
-  } while (remaining > 0);
-}
-
-async function collectSnapshotJournal(
-  journal: ManagedSessionJournalReader,
-): Promise<ManagedSessionJournalScan> {
-  const events: ManagedSessionJournalScan['events'] = [];
-  const transactions: ManagedSessionJournalScan['transactions'] = new Map();
-  const summary = await journal.scan(async (batch) => {
-    events.push(...batch.events);
-    for (const [key, value] of batch.transactions) transactions.set(key, value);
-  });
-  return { ...summary, events, transactions };
-}
 
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
@@ -804,327 +755,6 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it('backfills and repairs a frozen native history view without trusting source corruption', async () => {
-    const server = new FakeManagedSessionStore();
-    const backfills: Array<Record<string, unknown>> = [];
-    let generation = 1;
-    let indexed = 0;
-    let refusal: 'not_ready' | 'corrupt' | undefined = 'not_ready';
-    let changedView = false;
-    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      if (!url.endsWith('/history:query') && !url.endsWith('/history:backfill'))
-        return server.fetch(input, init);
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      const view = body['view'] as Record<string, unknown>;
-      if (url.endsWith('/history:backfill')) {
-        backfills.push(body);
-        if (body['repair']) {
-          expect(body['expectedGeneration']).toBe(generation);
-          generation++;
-          indexed = Number(view['journalRevision']);
-        } else indexed++;
-        const through = server.storedTransactions[indexed - 1];
-        return jsonResponse({
-          view,
-          generation,
-          indexedRevision: indexed,
-          indexedSequence: through['lastSequence'],
-          lastCommitDigest: through['commitDigest'],
-          complete: indexed === view['journalRevision'],
-        });
-      }
-      if (refusal) {
-        const code = refusal;
-        refusal = undefined;
-        return jsonResponse(
-          {
-            error: {
-              code: `managed_session_history_${code}`,
-              message: 'index needs rebuild',
-            },
-          },
-          409,
-        );
-      }
-      const stored = server.storedTransactions[1];
-      return jsonResponse({
-        view: changedView ? { ...view, committedSequence: 2 } : view,
-        throughSequence: body['throughSequence'],
-        generation,
-        facts: [
-          {
-            family: body['family'],
-            identity: body['identity'],
-            journalRevision: 2,
-            sequence: 1,
-            eventOrdinal: 0,
-            recordDigest: stored['recordDigest'],
-            metadata: {},
-          },
-        ],
-        nextSequence: 1,
-        hasMore: false,
-      });
-    });
-    const { stores, authority } = await bootOriginalCsiAuthority(
-      server,
-      fetchFn,
-    );
-    try {
-      server.headOverrides['nativeHistory'] = { version: 1 };
-      const journal = await stores.journalStore.open({
-        sessionKey: SESSION_KEY,
-      });
-      await journal.scan(async () => {});
-      const native = journal.history!;
-      expect(native.available).toBe(true);
-      const [first] = await native.query('event', '1', {
-        throughSequence: 1,
-        mode: 'first',
-      });
-      expect(backfills.map((item) => item['limit'])).toEqual([100, 100]);
-      expect(await native.readEvent(first)).toMatchObject({
-        sequence: 1,
-        kind: 'activation.changed',
-      });
-      refusal = 'corrupt';
-      await native.query('event', '1', { throughSequence: 1, mode: 'first' });
-      expect(backfills.at(-1)).toMatchObject({
-        repair: true,
-        expectedGeneration: 1,
-      });
-      expect(generation).toBe(2);
-      const count = backfills.length;
-      changedView = true;
-      await expect(
-        native.query('event', '1', { throughSequence: 1 }),
-      ).rejects.toThrow(/frozen prefix/);
-      expect(backfills).toHaveLength(count);
-      changedView = false;
-      server.editStoredTransaction(1, { recordDigest: '0'.repeat(64) });
-      await expect(native.readEvent(first)).rejects.toThrow(
-        /conflicts with its index/,
-      );
-      const original = { ...server.storedTransactions[1] };
-      const rows = Buffer.from(String(original['recordBytesBase64']), 'base64')
-        .toString('utf8')
-        .trimEnd()
-        .split('\n')
-        .map(
-          (line) =>
-            JSON.parse(line) as { managedSession: { occurredAt: number } },
-        );
-      rows[0].managedSession.occurredAt++;
-      const damagedBytes = Buffer.from(
-        `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
-      );
-      server.editStoredTransaction(1, {
-        recordBytesBase64: damagedBytes.toString('base64'),
-        byteLength: damagedBytes.byteLength,
-        recordDigest: createHash('sha256').update(damagedBytes).digest('hex'),
-      });
-      const [damaged] = await native.query('event', '1', {
-        throughSequence: 1,
-      });
-      await expect(native.readEvent(damaged)).rejects.toThrow(
-        /marker does not cover its event content/,
-      );
-      const iterator = native.iterateEvents(1, 1)[Symbol.asyncIterator]();
-      await expect(iterator.next()).rejects.toThrow(
-        /marker does not cover its event content/,
-      );
-      await expect(
-        native.query('event', '1', { throughSequence: NaN }),
-      ).rejects.toThrow(/prefix or page bounds/);
-      await expect(
-        native.query('event', '1', { throughSequence: 1, limit: 1.5 }),
-      ).rejects.toThrow(/prefix or page bounds/);
-    } finally {
-      await authority.disposeHistory();
-      await stores.stopLocal();
-    }
-  });
-
-  it('reads frozen native history during cleanup without renewing the ordinary writer', async () => {
-    const server = new FakeManagedSessionStore();
-    let indexed = false;
-    let readRefused = false;
-    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      if (url.endsWith('/writers:renew'))
-        return jsonResponse(
-          {
-            error: { code: 'workspace_lifecycle_blocked', message: 'claimed' },
-          },
-          409,
-        );
-      if (!url.endsWith('/history:query') && !url.endsWith('/history:backfill'))
-        return server.fetch(input, init);
-      if (readRefused)
-        return jsonResponse(
-          {
-            error: {
-              code: 'managed_session_writer_conflict',
-              message: 'expired',
-            },
-          },
-          409,
-        );
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      if (url.endsWith('/history:backfill')) {
-        indexed = true;
-        const head = server.storedTransactions.at(-1)!;
-        return jsonResponse({
-          view: body['view'],
-          indexedRevision: head['journalRevision'],
-          indexedSequence: head['lastSequence'],
-          lastCommitDigest: head['commitDigest'],
-          generation: 1,
-          complete: true,
-        });
-      }
-      if (!indexed)
-        return jsonResponse(
-          {
-            error: {
-              code: 'managed_session_history_not_ready',
-              message: 'indexing',
-            },
-          },
-          409,
-        );
-      return jsonResponse({
-        view: body['view'],
-        throughSequence: body['throughSequence'],
-        generation: 1,
-        facts: [
-          {
-            family: body['family'],
-            identity: body['identity'],
-            journalRevision: 2,
-            sequence: 1,
-            eventOrdinal: 0,
-            recordDigest: server.storedTransactions[1]['recordDigest'],
-            metadata: {},
-          },
-        ],
-        nextSequence: 1,
-        hasMore: false,
-      });
-    });
-    const { stores, authority } = await bootOriginalCsiAuthority(
-      server,
-      fetchFn,
-    );
-    try {
-      server.headOverrides['nativeHistory'] = { version: 1 };
-      const journal = await stores.journalStore.open({
-        sessionKey: SESSION_KEY,
-      });
-      await journal.scan(async () => {});
-      const native = journal.history!;
-      const now = Date.now();
-      vi.spyOn(Date, 'now').mockReturnValue(now + 299_800);
-      const [fact] = await native.query('event', '1', { throughSequence: 1 });
-      expect(await native.readEvent(fact)).toMatchObject({ sequence: 1 });
-      const events = [];
-      for await (const event of native.iterateEvents(1, 1)) events.push(event);
-      expect(events).toHaveLength(1);
-      expect(
-        fetchFn.mock.calls.filter(([url]) =>
-          requestUrl(url).endsWith('/writers:renew'),
-        ),
-      ).toHaveLength(0);
-      readRefused = true;
-      await expect(
-        native.query('event', '1', { throughSequence: 1 }),
-      ).rejects.toMatchObject({
-        remoteCode: 'managed_session_writer_conflict',
-      });
-      await stores.stopLocal();
-      await expect(native.readEvent(fact)).rejects.toThrow(
-        'writer is not active',
-      );
-    } finally {
-      vi.restoreAllMocks();
-      await authority.disposeHistory();
-      await stores.stopLocal();
-    }
-  });
-
-  it('rejects a broken physical transaction chain across native history pages before yielding it', async () => {
-    const server = new FakeManagedSessionStore();
-    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
-      const url = new URL(requestUrl(input));
-      if (url.pathname.endsWith('/history:query')) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return jsonResponse({
-          view: body['view'],
-          throughSequence: body['throughSequence'],
-          generation: 1,
-          facts: [
-            {
-              family: 'event',
-              identity: '1',
-              journalRevision: 2,
-              sequence: 1,
-              eventOrdinal: 0,
-              recordDigest: server.storedTransactions[1]['recordDigest'],
-              metadata: {},
-            },
-          ],
-          nextSequence: 1,
-          hasMore: false,
-        });
-      }
-      if (url.pathname.endsWith('/transactions'))
-        url.searchParams.set('limit', '1');
-      return server.fetch(url.toString(), init);
-    });
-    const { stores, authority } = await bootOriginalCsiAuthority(
-      server,
-      fetchFn,
-    );
-    try {
-      await authority.releaseActivation();
-      server.headOverrides['nativeHistory'] = { version: 1 };
-      const journal = await stores.journalStore.open({
-        sessionKey: SESSION_KEY,
-      });
-      await journal.scan(async () => {});
-      const native = journal.history!;
-      const before = native.iterateEvents(1, 2)[Symbol.asyncIterator]();
-      expect((await before.next()).value?.sequence).toBe(1);
-      expect((await before.next()).value?.sequence).toBe(2);
-      expect((await before.next()).done).toBe(true);
-
-      const stored = server.storedTransactions[2];
-      const rows = Buffer.from(String(stored['recordBytesBase64']), 'base64')
-        .toString('utf8')
-        .trimEnd()
-        .split('\n')
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
-      rows[0]['parentUuid'] = randomUUID();
-      const bytes = Buffer.from(
-        `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
-      );
-      server.editStoredTransaction(2, {
-        recordBytesBase64: bytes.toString('base64'),
-        byteLength: bytes.byteLength,
-        recordDigest: createHash('sha256').update(bytes).digest('hex'),
-      });
-      const damaged = native.iterateEvents(1, 2)[Symbol.asyncIterator]();
-      expect((await damaged.next()).value?.sequence).toBe(1);
-      await expect(damaged.next()).rejects.toThrow(
-        /physical transaction chain/,
-      );
-    } finally {
-      await authority.disposeHistory();
-      await stores.stopLocal();
-    }
-  });
-
   it('retries the frozen ownership release after a lost acknowledgement without reacquiring', async () => {
     const server = new FakeManagedSessionStore();
     const attempts: Array<Record<string, unknown>> = [];
@@ -1319,12 +949,12 @@ describe('HTTP Managed Session store', () => {
       fetchFn,
     );
     try {
-      await advanceWithHistoryIo(500);
+      await vi.advanceTimersByTimeAsync(500);
       let joined = false;
       const pending = stores.csiRetirement.joinWriter().then(() => {
         joined = true;
       });
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(joined).toBe(false);
       finishRenewal();
       await pending;
@@ -1332,7 +962,7 @@ describe('HTTP Managed Session store', () => {
       await expect(
         stores.csiRetirement.prepare(records),
       ).resolves.toHaveProperty('commitBodyBase64');
-      await advanceWithHistoryIo(5000);
+      await vi.advanceTimersByTimeAsync(5000);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).endsWith('/writers:renew'),
@@ -1357,7 +987,7 @@ describe('HTTP Managed Session store', () => {
     );
     const { stores } = await bootOriginalCsiAuthority(server, fetchFn);
     try {
-      await advanceWithHistoryIo(500);
+      await vi.advanceTimersByTimeAsync(500);
       await expect(stores.csiRetirement.joinWriter()).rejects.toBeInstanceOf(
         ManagedSessionStoreHttpError,
       );
@@ -1698,11 +1328,6 @@ describe('HTTP Managed Session store', () => {
     );
     temporaryDirectories.push(runtimeBaseDir);
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-    if (
-      vi.isFakeTimers() &&
-      !vi.isMockFunction(FileManagedSessionHistory.prototype.get)
-    )
-      trackHistoryIo();
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
       allowInsecureHttp: true,
@@ -3344,40 +2969,9 @@ describe('HTTP Managed Session store', () => {
       transactions,
       resources: [...snapshotResources.values()],
     });
-    let batches = 0;
-    let sourceOffset = 0;
-    const summary = await snapshot.journal.scan(async (batch) => {
-      const transaction = snapshot.transactions[batches++]!;
-      expect(batch.sourceOffset).toBe(sourceOffset);
-      expect(batch.sourceBytes.byteLength).toBe(transaction.byteLength);
-      expect(batch.events).toHaveLength(transaction.eventCount);
-      expect(batch.transactions.size).toBeLessThanOrEqual(1);
-      sourceOffset += batch.sourceBytes.byteLength;
-      if (batch.header)
-        Object.assign(batch.header.sessionKey, { sessionId: 'changed' });
-      if (batch.activation) Object.assign(batch.activation, { epoch: 9999 });
-      if (batches === 1) {
-        Object.assign(transactions[1]!, { recordBytesBase64: 'AAAA' });
-        const original = snapshotResources.get(historyRef.resourceId)!;
-        original.bytesBase64 = 'AAAA';
-        original.referencedRevisions.length = 0;
-        Object.assign(original.ref, { digest: '0'.repeat(64) });
-      }
-      await Promise.resolve();
-    });
-    expect(batches).toBe(snapshot.transactions.length);
-    expect(summary.committed).toBe(first.authority.committedSequence);
-    expect(summary.header?.sessionKey).toEqual(SESSION_KEY);
-    expect(summary.activation?.epoch).toBe(first.activation.epoch);
-    expect(Object.isFrozen(snapshot.transactions)).toBe(true);
-    expect(Object.isFrozen(snapshot.transactions[0])).toBe(true);
-    expect(Object.isFrozen(snapshot.head)).toBe(true);
-    await expect(snapshot.journal.read()).rejects.toThrow(
-      'snapshot history requires incremental scan.',
+    expect((await snapshot.journal.read()).committed).toBe(
+      first.authority.committedSequence,
     );
-    expect(await snapshot.resources.read(historyRef)).toEqual(historyBytes);
-    const returned = await snapshot.resources.read(historyRef);
-    returned[0] ^= 1;
     expect(await snapshot.resources.read(historyRef)).toEqual(historyBytes);
     expect(server.fetch.mock.calls.length).toBe(fetchCount);
     await first.close();
@@ -3728,11 +3322,11 @@ describe('HTTP Managed Session store', () => {
           Buffer.from('after-transient-outage'),
         );
         unavailable = true;
-        await advanceWithHistoryIo(21_000);
+        await vi.advanceTimersByTimeAsync(21_000);
         expect(failedRequests).toHaveLength(3);
         expect(new Set(failedRequests).size).toBe(1);
         unavailable = false;
-        await advanceWithHistoryIo(44_000);
+        await vi.advanceTimersByTimeAsync(44_000);
         const outcome = await session.authority
           .submitInput(
             {
@@ -3772,11 +3366,13 @@ describe('HTTP Managed Session store', () => {
           currentActivationExpiry:
             session.authority.currentActivation?.expiresAt,
           now: Date.now(),
-          inputAccepted: (await session.authority.readEvents()).filter(
-            (event) =>
-              event.kind === 'input.accepted' &&
-              event.payload['inputId'] === 'after-transient-outage',
-          ).length,
+          inputAccepted: session.authority
+            .readEvents()
+            .filter(
+              (event) =>
+                event.kind === 'input.accepted' &&
+                event.payload['inputId'] === 'after-transient-outage',
+            ).length,
           submitError: outcome.error,
         };
         console.info('ACTIVATION_RENEWAL_OUTAGE_OBSERVATION', observation);
@@ -3831,7 +3427,7 @@ describe('HTTP Managed Session store', () => {
       return originalFetch(input, init);
     });
     try {
-      await advanceWithHistoryIo(22_000);
+      await vi.advanceTimersByTimeAsync(22_000);
       await expect(renewal.mock.results[0]?.value).rejects.toMatchObject({
         status: 503,
         remoteCode: 'tenant_guard_contended',
@@ -3845,7 +3441,7 @@ describe('HTTP Managed Session store', () => {
         1200,
       );
       const spentAttempts = attempts.length;
-      await advanceWithHistoryIo(90_000);
+      await vi.advanceTimersByTimeAsync(90_000);
       expect(attempts).toHaveLength(spentAttempts);
       expect(server.renewCount).toBe(0);
       expect(server.sealCount).toBe(0);
@@ -3856,7 +3452,7 @@ describe('HTTP Managed Session store', () => {
       ).toHaveLength(1);
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -3904,12 +3500,12 @@ describe('HTTP Managed Session store', () => {
       const { stores, session } = await bootStoresAndSession(server, 1200);
       const renewal = vi.spyOn(session.authority, 'renewActivation');
       try {
-        await advanceWithHistoryIo(24_000);
+        await vi.advanceTimersByTimeAsync(24_000);
         const after24s = {
           attempts: attempts.length,
           writesStopped: session.authority.writesStopped,
         };
-        await advanceWithHistoryIo(41_000);
+        await vi.advanceTimersByTimeAsync(41_000);
         console.info('ACTIVATION_CONTENTION_WITHOUT_GUARD_RETRY', {
           failure,
           after24s,
@@ -3935,7 +3531,7 @@ describe('HTTP Managed Session store', () => {
         expect(server.sealCount).toBe(0);
       } finally {
         await stores.close().catch(() => undefined);
-        await advanceWithHistoryIo(2000);
+        await vi.advanceTimersByTimeAsync(2000);
         await session.close().catch(() => undefined);
         vi.clearAllTimers();
         vi.useRealTimers();
@@ -3965,13 +3561,13 @@ describe('HTTP Managed Session store', () => {
     });
     const { stores, session } = await bootStoresAndSession(server);
     try {
-      await advanceWithHistoryIo(20_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(waiting).toBe(true);
       expect(server.renewCount).toBe(0);
-      await advanceWithHistoryIo(11_000);
+      await vi.advanceTimersByTimeAsync(11_000);
       expect(server.renewCount).toBe(1);
       releaseCommit();
-      await advanceWithHistoryIo(0);
+      await vi.advanceTimersByTimeAsync(0);
       expect(session.authority.writesStopped).toBe(false);
       expect(session.authority.currentActivation?.renewalSeq).toBe(1);
       expect(
@@ -4040,13 +3636,13 @@ describe('HTTP Managed Session store', () => {
     });
     const { stores, session } = await bootStoresAndSession(server);
     try {
-      await advanceWithHistoryIo(21_000);
+      await vi.advanceTimersByTimeAsync(21_000);
       expect(session.authority.writesStopped).toBe(true);
       const stoppedAt = {
         renewals: server.renewCount,
         activationRequests,
       };
-      await advanceWithHistoryIo(90_000);
+      await vi.advanceTimersByTimeAsync(90_000);
       expect(server.renewCount).toBe(stoppedAt.renewals);
       expect(activationRequests).toBe(stoppedAt.activationRequests);
       expect(
@@ -4058,7 +3654,7 @@ describe('HTTP Managed Session store', () => {
       expect(server.state).toBe('ACTIVE');
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -4090,10 +3686,10 @@ describe('HTTP Managed Session store', () => {
     const { stores, session } = await bootStoresAndSession(server);
     try {
       unavailable = true;
-      await advanceWithHistoryIo(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
-      await advanceWithHistoryIo(25_000);
+      await vi.advanceTimersByTimeAsync(25_000);
       expect(session.authority.writesStopped).toBe(false);
       expect(session.authority.currentActivation?.phase).toBe('active');
       // The outage's failed re-acquisitions come first; the recovered one is
@@ -4119,7 +3715,7 @@ describe('HTTP Managed Session store', () => {
       ).toHaveLength(1);
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -4163,10 +3759,10 @@ describe('HTTP Managed Session store', () => {
     try {
       const committedBefore = session.authority.committedSequence;
       unavailable = true;
-      await advanceWithHistoryIo(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
-      await advanceWithHistoryIo(25_000);
+      await vi.advanceTimersByTimeAsync(25_000);
       expect(session.authority.writesStopped).toBe(false);
       expect(session.authority.committedSequence).toBe(committedBefore + 1);
       expect(session.authority.currentActivation?.renewalSeq).toBe(1);
@@ -4187,7 +3783,7 @@ describe('HTTP Managed Session store', () => {
       ).toHaveLength(1);
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -4231,7 +3827,7 @@ describe('HTTP Managed Session store', () => {
     try {
       const committedBefore = session.authority.committedSequence;
       unavailable = true;
-      await advanceWithHistoryIo(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
       // The funnel's new entry settles on demand before it reads replay.
@@ -4246,7 +3842,7 @@ describe('HTTP Managed Session store', () => {
       ).toHaveLength(1);
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -4289,23 +3885,23 @@ describe('HTTP Managed Session store', () => {
     const { stores, session } = await bootStoresAndSession(server);
     try {
       unavailable = true;
-      await advanceWithHistoryIo(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       unavailable = false;
       // The revision our renewal occupied now holds a different transaction,
       // as if another writer had extended the log while ours was unknown.
       server.editStoredTransaction(server.storedTransactions.length - 1, {
         recordDigest: 'f'.repeat(64),
       });
-      await advanceWithHistoryIo(25_000);
+      await vi.advanceTimersByTimeAsync(25_000);
       expect(session.authority.writesStopped).toBe(true);
       // A fenced log must not keep extending the lease it just acquired:
       // the takeover this error asks for can only start once it lapses.
       const renewalsAtFence = server.renewCount;
-      await advanceWithHistoryIo(90_000);
+      await vi.advanceTimersByTimeAsync(90_000);
       expect(server.renewCount).toBe(renewalsAtFence);
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -4478,10 +4074,10 @@ describe('HTTP Managed Session store', () => {
     const { stores, session } = await bootStoresAndSession(server);
     try {
       unavailable = true;
-      await advanceWithHistoryIo(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       unavailable = false;
       duringSettlement = true;
-      await advanceWithHistoryIo(25_000);
+      await vi.advanceTimersByTimeAsync(25_000);
       expect(lapsedRead).toBe(true);
       expect(session.authority.writesStopped).toBe(false);
       const messageRef = await stores.resourceStore.publish(
@@ -4495,7 +4091,7 @@ describe('HTTP Managed Session store', () => {
       );
     } finally {
       await stores.close().catch(() => undefined);
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       await session.close().catch(() => undefined);
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -4547,7 +4143,7 @@ describe('HTTP Managed Session store', () => {
           appendMessage(session, 1, messageRef, operation),
         ).rejects.toThrow(ManagedSessionCommitRejectedError);
         expect(session.authority.writesStopped).toBe(false);
-        await advanceWithHistoryIo(30_000);
+        await vi.advanceTimersByTimeAsync(30_000);
         expect(server.renewCount).toBe(1);
         await appendMessage(session, 2, messageRef, operation);
         expect(session.authority.writesStopped).toBe(false);
@@ -4589,13 +4185,13 @@ describe('HTTP Managed Session store', () => {
     });
     const { stores, session } = await bootStoresAndSession(server);
     try {
-      await advanceWithHistoryIo(21_000);
+      await vi.advanceTimersByTimeAsync(21_000);
       expect(activationRequests).toBe(3);
       expect(session.authority.writesStopped).toBe(false);
       await stores.close();
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('SEALED');
-      await advanceWithHistoryIo(90_000);
+      await vi.advanceTimersByTimeAsync(90_000);
       expect(activationRequests).toBe(3);
       expect(session.authority.writesStopped).toBe(true);
       expect(server.renewCount).toBe(0);
@@ -4639,15 +4235,15 @@ describe('HTTP Managed Session store', () => {
       });
       try {
         await stores.journalStore.open({ sessionKey: SESSION_KEY });
-        await advanceWithHistoryIo(500);
-        if (exhausted) await advanceWithHistoryIo(1000);
+        await vi.advanceTimersByTimeAsync(500);
+        if (exhausted) await vi.advanceTimersByTimeAsync(1000);
         expect(
           fetchFn.mock.calls.filter(([input]) =>
             requestUrl(input).endsWith('/writers:renew'),
           ).length,
         ).toBeGreaterThanOrEqual(exhausted ? 3 : 1);
         unavailable = false;
-        await advanceWithHistoryIo(1500);
+        await vi.advanceTimersByTimeAsync(1500);
         expect(server.renewCount).toBeGreaterThan(0);
       } finally {
         await stores.close();
@@ -4680,7 +4276,7 @@ describe('HTTP Managed Session store', () => {
       });
       try {
         await stores.journalStore.open({ sessionKey: SESSION_KEY });
-        await advanceWithHistoryIo(10_000);
+        await vi.advanceTimersByTimeAsync(10_000);
         expect(
           fetchFn.mock.calls.filter(([input]) =>
             requestUrl(input).endsWith('/writers:renew'),
@@ -4725,12 +4321,12 @@ describe('HTTP Managed Session store', () => {
     });
     try {
       await stores.journalStore.open({ sessionKey: SESSION_KEY });
-      await advanceWithHistoryIo(5000);
+      await vi.advanceTimersByTimeAsync(5000);
       const renewals = fetchFn.mock.calls.filter(([input]) =>
         requestUrl(input).endsWith('/writers:renew'),
       ).length;
       expect(renewals).toBeGreaterThan(1);
-      await advanceWithHistoryIo(10_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).endsWith('/writers:renew'),
@@ -4772,16 +4368,16 @@ describe('HTTP Managed Session store', () => {
       await stores.journalStore.open({ sessionKey: SESSION_KEY });
       const bytes = Buffer.from('{"retained":true}');
       const ref = await stores.resourceStore.publish('managed-input', bytes);
-      await advanceWithHistoryIo(500);
+      await vi.advanceTimersByTimeAsync(500);
       let joined = false;
       const stopped = stores.stopLocal().then(() => {
         joined = true;
       });
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(joined).toBe(false);
       finishRenewal();
       await stopped;
-      await advanceWithHistoryIo(5000);
+      await vi.advanceTimersByTimeAsync(5000);
       await expect(stores.assertWritable()).rejects.toThrow('locally stopped');
       await expect(stores.close()).rejects.toThrow('locally stopped');
       expect(
@@ -4826,7 +4422,7 @@ describe('HTTP Managed Session store', () => {
     });
     try {
       await stores.journalStore.open({ sessionKey: SESSION_KEY });
-      await advanceWithHistoryIo(500);
+      await vi.advanceTimersByTimeAsync(500);
       expect(
         fetchFn.mock.calls.some(([input]) =>
           requestUrl(input).endsWith('/writers:renew'),
@@ -4834,10 +4430,10 @@ describe('HTTP Managed Session store', () => {
       ).toBe(true);
       const closing = stores.close();
       finishRenewal();
-      await advanceWithHistoryIo(0);
+      await vi.advanceTimersByTimeAsync(0);
       finishSeal();
       await closing;
-      await advanceWithHistoryIo(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).endsWith('/writers:renew'),
@@ -4874,7 +4470,7 @@ describe('HTTP Managed Session store', () => {
     const second = createHttpManagedSessionStores(options);
     try {
       await first.journalStore.open({ sessionKey: SESSION_KEY });
-      await advanceWithHistoryIo(30_000);
+      await vi.advanceTimersByTimeAsync(30_000);
       expect(server.renewCount).toBe(1);
 
       server.sealFailuresRemaining = 1;
@@ -4885,7 +4481,7 @@ describe('HTTP Managed Session store', () => {
       // the failed close's cadence surviving; the later assertions cannot
       // see it, because both stores share one writer identity (review round
       // 2, R2-10).
-      await advanceWithHistoryIo(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(server.renewCount).toBe(1);
 
       // The broker redrives the attach with byte-identical credentials; the
@@ -4897,7 +4493,7 @@ describe('HTTP Managed Session store', () => {
 
       // No renewal cadence survives the failed close: nothing seals the
       // journal from the stale client while the re-attached one works.
-      await advanceWithHistoryIo(400_000);
+      await vi.advanceTimersByTimeAsync(400_000);
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('ACTIVE');
       await expect(secondJournal.read()).resolves.toBeDefined();
@@ -4944,12 +4540,12 @@ describe('HTTP Managed Session store', () => {
     process.on('unhandledRejection', onUnhandledRejection);
     try {
       await stores.journalStore.open({ sessionKey: SESSION_KEY });
-      await advanceWithHistoryIo(500);
+      await vi.advanceTimersByTimeAsync(500);
       const closing = stores.close();
-      await advanceWithHistoryIo(0);
+      await vi.advanceTimersByTimeAsync(0);
       finishRenewal();
       await closing;
-      await advanceWithHistoryIo(0);
+      await vi.advanceTimersByTimeAsync(0);
       expect(fencedRenewals).toBe(1);
       expect(unhandled).toHaveLength(0);
     } finally {
@@ -5785,7 +5381,7 @@ describe('HTTP Managed Session store', () => {
         resources: [...snapshotResources.values()],
       };
       const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
-      expect((await collectSnapshotJournal(snapshot.journal)).committed).toBe(
+      expect((await snapshot.journal.read()).committed).toBe(
         first.authority.committedSequence,
       );
       expect(await snapshot.resources.read(messagesRef)).toEqual(
@@ -5809,18 +5405,14 @@ describe('HTTP Managed Session store', () => {
         }),
       ).toThrow('snapshot resource enumeration conflicts.');
     }
-    const views = await first.authority.taskViews();
+    const views = first.authority.taskViews();
     expect(views).toHaveLength(1);
     await first.close();
 
     const restored = await open('harness-b', TOKEN_B);
-    expect(await restored.authority.taskViews()).toEqual(views);
+    expect(restored.authority.taskViews()).toEqual(views);
     expect(
-      (
-        await restored.authority
-          .extensionRecordsInDomain('mcp_configuration')
-          .collect(1_000_000)
-      )[0],
+      restored.authority.extensionRecordsInDomain('mcp_configuration')[0],
     ).toMatchObject({
       task: null,
       record: configured,
@@ -5829,13 +5421,13 @@ describe('HTTP Managed Session store', () => {
       Buffer.from('{"tools":[]}'),
     );
     expect(
-      await restored.authority.extensionRecord('monitor_run', 'monitor-1'),
+      restored.authority.extensionRecord('monitor_run', 'monitor-1'),
     ).toMatchObject({ revision: 1, recordRef: committed.recordRef });
     for (const [index, messages] of messageCases.entries()) {
-      const execution = (await restored.authority.extensionRecord(
+      const execution = restored.authority.extensionRecord(
         'hook_execution',
         `messages-${index}`,
-      ))!.record as HookExecution;
+      )!.record as HookExecution;
       const plan = JSON.parse(
         (await restored.resources.read(execution.planRef)).toString(),
       ) as { messagesRef: ManagedSessionDurableRef };
@@ -6015,7 +5607,7 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         commits: server.commits,
-        tasks: await session.authority.taskViews(),
+        tasks: session.authority.taskViews(),
       };
       await session.close();
       if (process.env['QWEN_WRITE_GOLDEN'] === '1') {
@@ -7359,10 +6951,9 @@ describe('HTTP Managed Session store', () => {
       subtype: string,
       managedSession: unknown,
       uuid: string,
-      parentUuid: string | null = null,
     ) => ({
       uuid,
-      parentUuid,
+      parentUuid: null,
       sessionId: SESSION_KEY.sessionId,
       timestamp: '2026-01-01T00:00:00.000Z',
       type: 'system',
@@ -7374,18 +6965,8 @@ describe('HTTP Managed Session store', () => {
     await expect(
       journal.appendTransaction([
         envelope('managed_session_event_v1', events[0], 'rec-missing-event'),
-        envelope(
-          'managed_session_event_v1',
-          events[1],
-          'rec-staged-event',
-          'rec-missing-event',
-        ),
-        envelope(
-          'managed_session_commit_v1',
-          marker,
-          'rec-missing-marker',
-          'rec-staged-event',
-        ),
+        envelope('managed_session_event_v1', events[1], 'rec-staged-event'),
+        envelope('managed_session_commit_v1', marker, 'rec-missing-marker'),
       ]),
     ).rejects.toMatchObject({
       status: 409,
@@ -7397,18 +6978,8 @@ describe('HTTP Managed Session store', () => {
     await expect(
       journal.appendTransaction([
         envelope('managed_session_event_v1', events[0], 'rec-retry-event'),
-        envelope(
-          'managed_session_event_v1',
-          events[1],
-          'rec-retry-event-2',
-          'rec-retry-event',
-        ),
-        envelope(
-          'managed_session_commit_v1',
-          marker,
-          'rec-retry-marker',
-          'rec-retry-event-2',
-        ),
+        envelope('managed_session_event_v1', events[1], 'rec-retry-event-2'),
+        envelope('managed_session_commit_v1', marker, 'rec-retry-marker'),
       ]),
     ).rejects.toMatchObject({ status: 409 });
     const retried = server.commits.at(-1);
@@ -7629,7 +7200,7 @@ describe('HTTP Managed Session store', () => {
     const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
     await expect(
       projectManagedSessionRecords({
-        scan: await collectSnapshotJournal(snapshot.journal),
+        scan: await snapshot.journal.read(),
         resources: snapshot.resources,
       }),
     ).resolves.toEqual([record]);

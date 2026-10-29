@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import type {
   Config,
   ConfigInitializeOptions,
@@ -601,9 +603,10 @@ class Session {
       chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
-    const cancellation = await this.config
-      .getChatRecordingService()!
-      .readLastApiPromptCancellation(chat.getHistoryShallow());
+    const cancellation = getLastApiPromptCancellation(
+      chat.getHistoryShallow(),
+      await this.config.getChatRecordingService()!.readActiveTranscriptChain(),
+    );
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory: cancellation ? [] : historyTail,

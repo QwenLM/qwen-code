@@ -387,7 +387,7 @@ it.each([
         call({ to: 'bob', message: 'sync at noon' }, callId, 'send_message'),
       ]);
       await vi.waitFor(
-        async () => expect(await commands.command(commandId)).toBeDefined(),
+        () => expect(commands.command(commandId)).toBeDefined(),
         { timeout: 10_000 },
       );
     } else {
@@ -433,9 +433,7 @@ it.each([
     );
     expect(answered).not.toMatch(/read the board/i);
     expect(answered).toContain('Do not send it again');
-    expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-      'unknown',
-    );
+    expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
   },
 );
 
@@ -492,10 +490,10 @@ it('gates the member plan tool and submits it through the durable command wait',
   ] as const) {
     const running = execute(turn, [call(args, id, name)]);
     await vi.waitFor(
-      async () => expect(await commands.command(commandIdOf(id))).toBeDefined(),
+      () => expect(commands.command(commandIdOf(id))).toBeDefined(),
       { timeout: 5000 },
     );
-    expect((await commands.command(commandIdOf(id)))?.kind).toBe(
+    expect(commands.command(commandIdOf(id))?.kind).toBe(
       name === 'task_list' ? 'board_read' : 'plan_submit',
     );
     await commands.handover(commandIdOf(id), PARENT);
@@ -541,8 +539,7 @@ it.each(['execute', 'resume', 'refused'] as const)(
       call({ plan: 'read' }, 'hook-plan', 'exit_plan_mode'),
     ]);
     await vi.waitFor(
-      async () =>
-        expect(await commands.command(commandIdOf('hook-plan'))).toBeDefined(),
+      () => expect(commands.command(commandIdOf('hook-plan'))).toBeDefined(),
       { timeout: 5000 },
     );
     await commands.handover(commandIdOf('hook-plan'), PARENT);
@@ -621,7 +618,7 @@ it('refuses a command sharing its batch with Workspace or Runtime work', async (
   );
   expect(parts).toHaveLength(2);
   // The batch died at validation: no command checkpoint, no outbox entry.
-  expect(await commands.command(commandIdOf('call-c1'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-c1'))).toBeUndefined();
 });
 
 it('parks on the command checkpoint, answers from the reply, and marks it consumed', async () => {
@@ -637,8 +634,8 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
   // The turn's append chain can outlast vitest's 1 s waitFor default on a
   // loaded host (#15593); this is the budget the file's other projections use.
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -656,9 +653,7 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
   });
   const parts = await running;
   expect(texts(parts)).toContain('#1 pending: ship the fix');
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'consumed',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
   const settled = await session.authority.harnessRunAuthorization();
   if (settled.status !== 'runnable')
     throw new Error(`expected runnable, got ${settled.status}`);
@@ -696,7 +691,7 @@ it('propagates an unsettled command append instead of answering the tool call', 
     expect((failure as Error).cause).toBe(unsettled);
     // The outbound landed; the failure is the store's, not the call's
     // answer, so the parked wait stays for recovery.
-    expect(await commands.command(commandIdOf('call-unsettled'))).toBeDefined();
+    expect(commands.command(commandIdOf('call-unsettled'))).toBeDefined();
     const checkpoint = await runnableCheckpoint();
     expect(checkpoint.continuation.phase).toBe('await_command');
   } finally {
@@ -716,17 +711,15 @@ it('answers a never-handed command as not sent when the wait bound ends', async 
   ]);
   const commandId = commandIdOf('call-cx');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
   vi.setSystemTime(Date.now() + 121_000);
   const parts = await running;
   expect(texts(parts)).toContain('was not sent and nothing happened');
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'cancelled',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('cancelled');
 });
 
 it('answers a handed command as unknown past the bound and locks the batch after it', async () => {
@@ -740,8 +733,8 @@ it('answers a handed command as unknown past the bound and locks the batch after
   ]);
   const commandId = commandIdOf('call-cw');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -752,11 +745,9 @@ it('answers a handed command as unknown past the bound and locks the batch after
   const text = texts(parts);
   expect(text).toContain('reached the leader, but its reply did not arrive');
   expect(text).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'unknown',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
   // The later call never minted an outbox entry of its own.
-  expect(await commands.command(commandIdOf('call-lw'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-lw'))).toBeUndefined();
 });
 
 // The checkpoint names the whole batch, so an owner that dies between
@@ -790,7 +781,7 @@ it('on resume folds a checkpointed call whose outbound never committed, as not s
       attempt: { attemptId: 'assistant-lost', routeRef: argsRef },
     },
   );
-  expect(await commands.command(commandId)).toBeUndefined();
+  expect(commands.command(commandId)).toBeUndefined();
   const parked = await session.authority.harnessRunAuthorization();
   if (parked.status !== 'runnable')
     throw new Error(`expected runnable, got ${parked.status}`);
@@ -820,7 +811,7 @@ it('on resume folds a checkpointed call whose outbound never committed, as not s
     throw new Error(`expected runnable, got ${settled.status}`);
   expect(settled.checkpoint.continuation.phase).toBe('model_output_committed');
   // Nothing settled a record: none exists, and that is the point.
-  expect(await commands.command(commandId)).toBeUndefined();
+  expect(commands.command(commandId)).toBeUndefined();
 });
 
 // The cancelled-signal arm of the same wait: a cancelled recovery must
@@ -881,7 +872,7 @@ it('on resume folds a checkpointed call whose outbound never committed, as not s
   expect(settled.checkpoint.commandWait?.runs.every((run) => run.folded)).toBe(
     true,
   );
-  expect(await commands.command(commandId)).toBeUndefined();
+  expect(commands.command(commandId)).toBeUndefined();
 });
 
 // Decision 4's lock is durable: once one command of the Turn timed out
@@ -898,8 +889,8 @@ it('keeps a timed-out Turn locked across owners', async () => {
   ]);
   const commandId = commandIdOf('call-live');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -907,9 +898,7 @@ it('keeps a timed-out Turn locked across owners', async () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(Date.now() + 121_000);
   await running;
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'unknown',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
   vi.useRealTimers();
   const stamped = await session.authority.harnessRunAuthorization();
   if (stamped.status !== 'runnable')
@@ -922,7 +911,7 @@ it('keeps a timed-out Turn locked across owners', async () => {
     call({ subject: 'z', description: 'w' }, 'call-after', 'task_create'),
   ]);
   expect(texts(parts)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(commandIdOf('call-after'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-after'))).toBeUndefined();
   const restamped = await session.authority.harnessRunAuthorization();
   if (restamped.status !== 'runnable')
     throw new Error(`expected runnable, got ${restamped.status}`);
@@ -934,7 +923,7 @@ it('keeps a timed-out Turn locked across owners', async () => {
     call({ status: 'pending' }, 'call-final', 'task_list'),
   ]);
   expect(texts(again)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(commandIdOf('call-final'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-final'))).toBeUndefined();
 });
 
 // A reply's text is board data, never this Turn's own timeout: a
@@ -950,8 +939,8 @@ it('does not arm the timeout lock from reply text shaped like the timeout eviden
   ]);
   const commandId = commandIdOf('call-1');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -961,9 +950,7 @@ it('does not arm the timeout lock from reply text shaped like the timeout eviden
     text: `#1 pending: ${SESSION_COMMAND_LEADER_UNANSWERING_TEXT}`,
   });
   await first;
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'consumed',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
   const checkpoint = await session.authority.harnessRunAuthorization();
   if (checkpoint.status !== 'runnable')
     throw new Error(`expected runnable, got ${checkpoint.status}`);
@@ -975,8 +962,8 @@ it('does not arm the timeout lock from reply text shaped like the timeout eviden
   ]);
   const later = commandIdOf('call-2');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(later)).toBeDefined();
+    () => {
+      expect(commands.command(later)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -987,7 +974,7 @@ it('does not arm the timeout lock from reply text shaped like the timeout eviden
   });
   const parts = await second;
   expect(texts(parts)).toContain('Task #1 created');
-  expect((await commands.command(later))?.run.delivery?.state).toBe('consumed');
+  expect(commands.command(later)?.run.delivery?.state).toBe('consumed');
 });
 
 // The durable lock rides the stamp, never a journaled text: a command
@@ -1003,8 +990,8 @@ it('does not arm the timeout lock from a not-sent journal answer', async () => {
   ]);
   const commandId = commandIdOf('call-1');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -1013,9 +1000,7 @@ it('does not arm the timeout lock from a not-sent journal answer', async () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(Date.now() + 121_000);
   await first;
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'cancelled',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('cancelled');
   vi.useRealTimers();
 
   const checkpoint = await session.authority.harnessRunAuthorization();
@@ -1031,7 +1016,7 @@ it('does not arm the timeout lock from a not-sent journal answer', async () => {
     call({ subject: 'again', description: 'w' }, 'call-2', 'task_create'),
   ]);
   expect(texts(parts)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(commandIdOf('call-2'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-2'))).toBeUndefined();
 });
 
 // Decision 4 stamps the lock at detection, before the timed-out call
@@ -1055,9 +1040,7 @@ it('on resume settles a timed-out planned call by its journal, never by the lock
     closing: false,
   });
   await createManagedHarnessHandle(session).markCommandWaitTimeout();
-  expect((await commands.command(run!.commandId))?.run.delivery?.state).toBe(
-    'planned',
-  );
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe('planned');
 
   await createTurn().resumeCommandWaitRuns(
     [run!],
@@ -1068,7 +1051,7 @@ it('on resume settles a timed-out planned call by its journal, never by the lock
   const answered = await journaledResults();
   expect(answered).toContain('was not sent and nothing happened');
   expect(answered).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect((await commands.command(run!.commandId))?.run.delivery?.state).toBe(
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
     'cancelled',
   );
   // The relay can no longer hand over a command whose wait has ended.
@@ -1083,7 +1066,7 @@ it('on resume settles a timed-out planned call by its journal, never by the lock
     call({ status: 'pending' }, 'call-next', 'task_list'),
   ]);
   expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(commandIdOf('call-next'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
 });
 
 it('on resume settles a timed-out handed-over call as unknown, never by the lock', async () => {
@@ -1115,9 +1098,7 @@ it('on resume settles a timed-out handed-over call as unknown, never by the lock
     'reached the leader, but its reply did not arrive',
   );
   expect(answered).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect((await commands.command(run!.commandId))?.run.delivery?.state).toBe(
-    'unknown',
-  );
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe('unknown');
   expect((await runnableCheckpoint()).continuation.phase).toBe(
     'model_output_committed',
   );
@@ -1204,7 +1185,7 @@ it('on resume never consumes a timed-out call that was answered before a late re
     outcome: 'answered',
     text: 'Task #1 created: "x".',
   });
-  expect((await commands.command(run!.commandId))?.run.delivery?.state).toBe(
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
     'accepted',
   );
 
@@ -1214,7 +1195,7 @@ it('on resume never consumes a timed-out call that was answered before a late re
     'model',
     new AbortController().signal,
   );
-  expect((await commands.command(run!.commandId))?.run.delivery?.state).toBe(
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
     'accepted',
   );
   const answered = await journaledResults();
@@ -1286,7 +1267,7 @@ it.each([
       'model',
       signal.signal,
     );
-    expect((await commands.command(run!.commandId))?.run.delivery?.state).toBe(
+    expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
       'accepted',
     );
     expect(await journaledResults()).not.toContain('Task #1 created');
@@ -1334,7 +1315,7 @@ it('on resume answers a locked batch call that never sent with the leader-unansw
   const held = results.find((each) => each.includes('call-held'));
   expect(cut).toContain('reached the leader, but its reply did not arrive');
   expect(held).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(runs[1]!.commandId)).toBeUndefined();
+  expect(commands.command(runs[1]!.commandId)).toBeUndefined();
 });
 
 // A re-driven batch names the timed-out call again: its outbound exists,
@@ -1349,8 +1330,8 @@ it('answers a re-driven timed-out call by its journal under the lock', async () 
   ]);
   const commandId = commandIdOf('call-live');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -1359,9 +1340,7 @@ it('answers a re-driven timed-out call by its journal under the lock', async () 
   vi.setSystemTime(Date.now() + 121_000);
   await first;
   vi.useRealTimers();
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'unknown',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
 
   const again = await execute(createTurn(), [
     call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
@@ -1383,8 +1362,8 @@ it("keeps the Turn locked when the owner dies between the next batch's park and 
   ]);
   const commandId = commandIdOf('call-live');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -1408,12 +1387,12 @@ it("keeps the Turn locked when the owner dies between the next batch's park and 
   expect(await journaledResults()).toContain(
     SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
   );
-  expect(await commands.command(runs[0]!.commandId)).toBeUndefined();
+  expect(commands.command(runs[0]!.commandId)).toBeUndefined();
   const next = await execute(createTurn(), [
     call({ status: 'pending' }, 'call-next', 'task_list'),
   ]);
   expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(commandIdOf('call-next'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
 });
 
 // Ordinary Runtime work of the same Turn clears the wait group; a
@@ -1428,8 +1407,8 @@ it('keeps the Turn locked across Runtime work and a takeover after it', async ()
   ]);
   const commandId = commandIdOf('call-live');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -1471,7 +1450,7 @@ it('keeps the Turn locked across Runtime work and a takeover after it', async ()
     call({ status: 'pending' }, 'call-next', 'task_list'),
   ]);
   expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(await commands.command(commandIdOf('call-next'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
 });
 
 // The load routes answer an interrupted Turn's owed calls before they
@@ -1529,9 +1508,7 @@ it.each([
     const results = await journaledResults();
     expect(results).toContain(text);
     expect(results).not.toContain('The tool call never ran');
-    expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-      settled,
-    );
+    expect(commands.command(commandId)?.run.delivery?.state).toBe(settled);
     // Replayed, the answer stays single.
     await answerResumedTurnCalls({
       session,
@@ -1651,12 +1628,12 @@ it('rides a member message through the command channel (b3c)', async () => {
   ]);
   const commandId = commandIdOf('call-msg-1');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
-  expect(await commands.command(commandId)).toMatchObject({
+  expect(commands.command(commandId)).toMatchObject({
     kind: 'member_message',
     direction: 'outbound',
   });
@@ -1684,9 +1661,7 @@ it('rides a member message through the command channel (b3c)', async () => {
   });
   const parts = await running;
   expect(texts(parts)).toContain('Message sent to bob.');
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'consumed',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
 });
 
 it('refuses the self-addressed, the leader and the empty addressee locally (b3c)', async () => {
@@ -1710,14 +1685,10 @@ it('refuses the self-addressed, the leader and the empty addressee locally (b3c)
   );
   // Nothing committed anything: no command outbox, no message outbox.
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_command')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_command'),
   ).toHaveLength(0);
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_message')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_message'),
   ).toHaveLength(0);
 });
 
@@ -1732,7 +1703,7 @@ it('refuses a member message sharing its batch with Workspace work (b3c)', async
   expect(texts(parts)).toContain(
     'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls',
   );
-  expect(await commands.command(commandIdOf('call-msg-sb'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-msg-sb'))).toBeUndefined();
 });
 
 it('bounds a member message with the member-message wrapper budget (b3c)', async () => {
@@ -1747,7 +1718,7 @@ it('bounds a member message with the member-message wrapper budget (b3c)', async
     ),
   ]);
   expect(texts(parts)).toContain('too long for a member message');
-  expect(await commands.command(commandIdOf('call-big'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-big'))).toBeUndefined();
 });
 
 it.each([
@@ -1785,11 +1756,9 @@ it.each([
       }),
     ]);
     for (const domain of ['session_command', 'session_message'] as const)
-      expect(
-        await session.authority
-          .extensionRecordsInDomain(domain)
-          .collect(1_000_000),
-      ).toHaveLength(0);
+      expect(session.authority.extensionRecordsInDomain(domain)).toHaveLength(
+        0,
+      );
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     const history = await session.sink.project();
@@ -1820,9 +1789,7 @@ it.each([
     ]);
     expect(texts(responses)).toContain(reason);
     expect(
-      await session.authority
-        .extensionRecordsInDomain('session_message')
-        .collect(1_000_000),
+      session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
   },
 );
@@ -1858,9 +1825,7 @@ it('refuses an initial command batch before opening any commands (#14062)', asyn
   ]);
   expect(texts(responses)).toContain('another call in the batch');
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_command')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_command'),
   ).toHaveLength(0);
 });
 
@@ -1874,7 +1839,7 @@ it('refuses member messages in plan mode while the leader stays open (b3c)', asy
   expect(texts(parts)).toContain(
     'in plan mode until the leader approves its plan',
   );
-  expect(await commands.command(commandIdOf('call-plan-msg'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-plan-msg'))).toBeUndefined();
 });
 
 it('keeps to "parent" on the plain message lane (b3c)', async () => {
@@ -1889,14 +1854,11 @@ it('keeps to "parent" on the plain message lane (b3c)', async () => {
     ),
   ]);
   expect(texts(parts)).toContain('queued for delivery to the parent agent');
-  const messages = await session.authority
-    .extensionRecordsInDomain('session_message')
-    .collect(1_000_000);
+  const messages =
+    session.authority.extensionRecordsInDomain('session_message');
   expect(messages).toHaveLength(1);
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_command')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_command'),
   ).toHaveLength(0);
 });
 
@@ -1913,14 +1875,10 @@ it('routes a capitalized "Parent" to the plain message lane (R1-2)', async () =>
   ]);
   expect(texts(parts)).toContain('queued for delivery to the parent agent');
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_message')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_message'),
   ).toHaveLength(1);
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_command')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_command'),
   ).toHaveLength(0);
 });
 
@@ -1939,14 +1897,10 @@ it('answers an unsupported key on the member send_message with its member form (
   expect(text).toContain('A member send_message takes only a member');
   expect(text).not.toContain('messages only its parent');
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_command')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_command'),
   ).toHaveLength(0);
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_message')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_message'),
   ).toHaveLength(0);
 });
 
@@ -1961,8 +1915,8 @@ it('shares a batch of board commands with a member send_message (R1-4)', async (
   const createId = commandIdOf('call-c1');
   const messageId = commandIdOf('call-m1');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(createId)).toBeDefined();
+    () => {
+      expect(commands.command(createId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
@@ -1980,12 +1934,12 @@ it('shares a batch of board commands with a member send_message (R1-4)', async (
     text: 'Task #1 created: "x".',
   });
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(messageId)).toBeDefined();
+    () => {
+      expect(commands.command(messageId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
-  expect((await commands.command(messageId))?.kind).toBe('member_message');
+  expect(commands.command(messageId)?.kind).toBe('member_message');
   await commands.handover(messageId, PARENT);
   await commands.answered(messageId, {
     outcome: 'answered',
@@ -2010,14 +1964,10 @@ it('keeps to "parent" on the plain lane in plan mode (R1-5)', async () => {
   ]);
   expect(texts(parts)).toContain('queued for delivery to the parent agent');
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_message')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_message'),
   ).toHaveLength(1);
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_command')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_command'),
   ).toHaveLength(0);
 });
 
@@ -2030,16 +1980,14 @@ it('rides a broadcast address through the command channel (R1-5)', async () => {
   ]);
   const commandId = commandIdOf('call-star');
   await vi.waitFor(
-    async () => {
-      expect(await commands.command(commandId)).toBeDefined();
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
     },
     { timeout: 10_000 },
   );
-  expect((await commands.command(commandId))?.kind).toBe('member_message');
+  expect(commands.command(commandId)?.kind).toBe('member_message');
   expect(
-    await session.authority
-      .extensionRecordsInDomain('session_message')
-      .collect(1_000_000),
+    session.authority.extensionRecordsInDomain('session_message'),
   ).toHaveLength(0);
   await commands.handover(commandId, PARENT);
   await commands.answered(commandId, {
@@ -2047,9 +1995,7 @@ it('rides a broadcast address through the command channel (R1-5)', async () => {
     text: 'Message sent to every other member of team "review".\n- bob: sent.',
   });
   await running;
-  expect((await commands.command(commandId))?.run.delivery?.state).toBe(
-    'consumed',
-  );
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
 });
 
 it('refuses a member message with an empty text locally (R1-5)', async () => {
@@ -2062,5 +2008,5 @@ it('refuses a member message with an empty text locally (R1-5)', async () => {
   expect(texts(parts)).toContain(
     'Hosted send_message requires a nonempty message.',
   );
-  expect(await commands.command(commandIdOf('call-empty'))).toBeUndefined();
+  expect(commands.command(commandIdOf('call-empty'))).toBeUndefined();
 });

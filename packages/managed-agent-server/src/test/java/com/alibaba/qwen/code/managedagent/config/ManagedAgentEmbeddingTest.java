@@ -2,8 +2,6 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionHistoryStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -15,7 +13,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
@@ -86,13 +83,6 @@ class ManagedAgentEmbeddingTest {
             assertThat(host.mapper()).isNotSameAs(context.getBean("managedAgentObjectMapper"));
             assertThat(host.clock()).isSameAs(context.getBean("businessClock"));
             var managed = context.getBean("managedJdbcTemplate", JdbcTemplate.class);
-            var sessions = context.getBean(ManagedSessionStore.class);
-            var history = context.getBean(ManagedSessionHistoryStore.class);
-            assertThat(ReflectionTestUtils.getField(sessions, "jdbc")).isSameAs(managed);
-            assertThat(ReflectionTestUtils.getField(sessions, "history")).isSameAs(history);
-            assertThat(ReflectionTestUtils.getField(history, "jdbc")).isSameAs(managed);
-            assertThat(ReflectionTestUtils.getField(history, "json"))
-                    .isSameAs(context.getBean("managedAgentObjectMapper"));
             assertThat(managed.queryForObject("SELECT COUNT(*) FROM ma_agent_definition", Integer.class)).isZero();
             assertThat(context.getBeansWithAnnotation(org.springframework.web.bind.annotation.RestController.class)).isEmpty();
             assertThat(context.getBean("businessJdbc", JdbcTemplate.class).queryForObject("SELECT COUNT(*) FROM business_record", Integer.class)).isZero();

@@ -205,7 +205,7 @@ export async function readHostedCsiRecoveryBatch(
       Array.isArray(body['members']) &&
       body['members'].length === items.length,
   );
-  const events = session.authority.iterateEvents(
+  const events = session.authority.eventsInSequenceRange(
     1,
     session.authority.committedSequence,
   );
@@ -315,23 +315,19 @@ export async function readHostedCsiRecoveryBatch(
         event.kind === 'tool.intent' &&
         event.payload['executionCallId'] === item.executionCallId,
     );
-    const checkpoint = await events.find(
+    const checkpoint = events.find(
       (event) =>
         event.sequence === grant['authorizationSequence'] &&
         event.kind === 'checkpoint.committed',
     );
     ensure(
-      (await intents.count()) === 1 &&
-        (await intents.at(0))!.sequence ===
-          object(grant['intent'])['sequence'] &&
-        (await intents.at(0))!.payload['batchId'] === batchId &&
-        (await intents.at(0))!.payload['ordinal'] === item.ordinal &&
+      intents.length === 1 &&
+        intents[0].sequence === object(grant['intent'])['sequence'] &&
+        intents[0].payload['batchId'] === batchId &&
+        intents[0].payload['ordinal'] === item.ordinal &&
+        isDeepStrictEqual(intents[0].payload['argsRef'], ref['inputRef']) &&
         isDeepStrictEqual(
-          (await intents.at(0))!.payload['argsRef'],
-          ref['inputRef'],
-        ) &&
-        isDeepStrictEqual(
-          (await intents.at(0))!.payload['toolDefinitionRef'],
+          intents[0].payload['toolDefinitionRef'],
           ref['toolDefinitionRef'],
         ) &&
         checkpoint !== undefined &&
@@ -360,7 +356,7 @@ export async function readHostedCsiRecoveryBatch(
         'original CSI prepared history',
       );
       ensure(
-        await events.some(
+        events.some(
           (event) =>
             event.kind === 'domain.committed' &&
             event.payload['domain'] === 'file_history' &&

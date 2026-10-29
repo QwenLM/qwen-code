@@ -224,60 +224,6 @@ export function resolveCompletedTurnBranchCandidateFromRecords(input: {
   });
 }
 
-export async function resolveCompletedTurnBranchCandidateFromHistory(input: {
-  records: AsyncIterable<BranchPointRecord>;
-  startExclusiveRecordUuid: string | null;
-  pendingCallsAtStart: readonly BranchToolCallIdentity[];
-}): Promise<BranchCandidate | undefined> {
-  const pending: PendingToolCall[] = input.pendingCallsAtStart.map((call) => ({
-    ...call,
-    carriedFromPrefix: true,
-  }));
-  let endInclusiveRecordUuid: string | undefined;
-  let assistantRecordUuid: string | undefined;
-  let assistants = 0;
-  let invalid = false;
-  for await (const record of input.records) {
-    endInclusiveRecordUuid = record.uuid;
-    if (invalid) continue;
-    const calls = functionCalls(record);
-    pending.push(...calls);
-    const responses = functionResponses(record);
-    const result =
-      (record.type === 'tool_result' &&
-        !isInternalCodeModeToolResult(record)) ||
-      responses.length > 0;
-    if (result) {
-      assistants = 0;
-      assistantRecordUuid = undefined;
-    }
-    for (const response of responses)
-      if (!closeToolCall(pending, response)) invalid = true;
-    if (
-      record.type === 'assistant' &&
-      !result &&
-      calls.length === 0 &&
-      hasVisibleText(record)
-    ) {
-      assistants++;
-      assistantRecordUuid = record.uuid;
-    }
-  }
-  if (
-    invalid ||
-    assistants !== 1 ||
-    assistantRecordUuid === undefined ||
-    endInclusiveRecordUuid === undefined ||
-    pending.some((call) => !call.carriedFromPrefix)
-  )
-    return undefined;
-  return {
-    startExclusiveRecordUuid: input.startExclusiveRecordUuid,
-    endInclusiveRecordUuid,
-    assistantRecordUuid,
-  };
-}
-
 export function parseBranchCheckpointPayload(
   value: ChatRecord['systemPayload'],
 ): BranchCheckpointRecordPayloadV1 | undefined {

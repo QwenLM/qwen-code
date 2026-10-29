@@ -116,9 +116,7 @@ async function history() {
     },
   };
   let lease: SessionWriterLease | undefined;
-  let authority: LocalManagedSessionAuthority;
   const release = async () => {
-    await authority?.disposeHistory();
     await lease?.release();
     lease = undefined;
   };
@@ -136,7 +134,6 @@ async function history() {
           sessionKey,
         ),
         sessionKey,
-        historyDirectory: path.join(runtimeBaseDir, 'query-cache'),
         cwd: '/workspace',
         version: 'test',
         resources,
@@ -159,7 +156,7 @@ async function history() {
       throw error;
     }
   };
-  authority = await open(true);
+  let authority = await open(true);
   let commands = 0;
   const commit = (domain: string, record: unknown) =>
     authority.commitExtensionRecord(
@@ -266,44 +263,34 @@ it('admits a Hook execution without validating the history it accumulated', asyn
     session.io.peak = 0;
     parsed.executions = 0;
     const reopened = await session.reopen();
-    expect(session.reads.length).toBe(new Set(session.reads).size);
-    const sourceReads = session.reads.length;
-    const sourceParses = parsed.executions;
-    // Three revisions, with one extra parse to persist the opening indexes.
-    expect(sourceParses).toBeLessThanOrEqual(executions * (3 * 4 + 1));
-    expect(sourceReads).toBe(executions * 5 + Math.ceil(executions / 4) + 4);
-    const records = await reopened
-      .extensionRecordsInDomain('hook_execution')
-      .collect(1_000_000);
-    expect(records).toHaveLength(executions);
-    const latestBodies = new Set(
-      records.map((record) => record.recordRef.resourceId),
+    expect(reopened.extensionRecordsInDomain('hook_execution')).toHaveLength(
+      executions,
     );
-    expect(
-      session.reads.slice(sourceReads).every((id) => latestBodies.has(id)),
-    ).toBe(true);
-    expect(session.reads.length - sourceReads).toBeLessThanOrEqual(executions);
+    expect(session.reads.length).toBe(new Set(session.reads).size);
+    // Each execution has 3 revisions, 1 input and 1 result; each occurrence
+    // has a plan, plus the catalog and 3 registration revisions.
+    expect(session.reads.length).toBe(
+      executions * 5 + Math.ceil(executions / 4) + 4,
+    );
     // A window of 32 revisions, each reading its record and then at most
     // three resources at once; an unbounded one reads hundreds here.
     expect(session.io.peak).toBeLessThanOrEqual(32 * 3);
     // A bounded number per revision; reading the history at each admission
     // takes several thousand here.
-    expect(parsed.executions - sourceParses).toBeLessThanOrEqual(
-      executions * 2,
-    );
+    expect(parsed.executions).toBeLessThanOrEqual(executions * 3 * 4);
   } finally {
     await session.release();
   }
-}, 60_000);
+});
 
-it('refuses old once keys, ordinals and moved occurrences outside the resident window and after reopen', async () => {
+it('refuses consumed once keys, taken ordinals and a moved occurrence from an indexed history', async () => {
   const session = await history();
   try {
-    for (let index = 0; index < 4; index++) await session.settle(index);
-    const { planRef } = (await session.authority.extensionRecord(
+    for (let index = 0; index < 40; index++) await session.settle(index);
+    const { planRef } = session.authority.extensionRecord(
       'hook_execution',
       'execution-0',
-    ))!.record as HookExecution;
+    )!.record as HookExecution;
     // A replacement catalog, which new occurrences bind to.
     const replaced = {
       ...templates.hook_registration.run.definition!,
@@ -322,33 +309,6 @@ it('refuses old once keys, ordinals and moved occurrences outside the resident w
           definition: replaced,
         },
       });
-    for (let batch = 0; batch < 4; batch++) {
-      await session.authority.appendExecutionEvents(
-        {
-          operation: 'padCompletedHistory',
-          commandId: `pad-${batch}`,
-          sessionKey,
-          contentDigest: 'a'.repeat(64),
-        },
-        (first) =>
-          Array.from({ length: 256 }, (_, index) => ({
-            v: 1,
-            sequence: first + index,
-            eventId: `noise-${first + index}`,
-            sessionKey,
-            kind: 'cancel.requested',
-            occurredAt: 1,
-            payload: {
-              requestId: `noise-${first + index}`,
-              reason: 'test',
-              requestedBy: 'user',
-              target: { turnId: 'noise' },
-            },
-          })),
-        actor,
-      );
-    }
-    expect(session.authority.residency.events).toBe(1024);
     for (const live of [true, false]) {
       if (!live) await session.reopen();
       // The oldest once key, not only a recent one, stays consumed.
@@ -417,28 +377,23 @@ it('refuses old once keys, ordinals and moved occurrences outside the resident w
     ).rejects.toThrow('command command-3 already opened hook_execution record');
     await session.settle(1000);
     expect(
-      (
-        await session.authority.extensionRecord(
-          'hook_execution',
-          'execution-1000',
-        )
-      )?.revision,
+      session.authority.extensionRecord('hook_execution', 'execution-1000')
+        ?.revision,
     ).toBe(3);
   } finally {
     await session.release();
   }
-}, 120_000);
+});
 
 it('still refuses a reopen when a shared or late resource is missing or corrupt', async () => {
   const session = await history();
   try {
     for (let index = 0; index < 12; index++) await session.settle(index);
-    const record = async (id: string) =>
-      (await session.authority.extensionRecord('hook_execution', id))!
+    const record = (id: string) =>
+      session.authority.extensionRecord('hook_execution', id)!
         .record as HookExecution;
-    const plan = (await record('execution-5')).planRef;
-    const result = (await record('execution-11')).resultRef!;
-    const slowInput = (await record('execution-4')).inputRef;
+    const plan = record('execution-5').planRef;
+    const result = record('execution-11').resultRef!;
     await session.release();
     // A plan that every revision of four executions names, and a result
     // that only the last revision of the last execution names.
@@ -456,7 +411,7 @@ it('still refuses a reopen when a shared or late resource is missing or corrupt'
     session.io.delayMs = 0;
     // Only the failing revision's other reference is slow.
     session.failing.add(plan.resourceId);
-    session.io.slow.set(slowInput.resourceId, 100);
+    session.io.slow.set(record('execution-4').inputRef.resourceId, 100);
     await expect(session.reopen()).rejects.toThrow('is unavailable');
     expect(session.io.inFlight).toBe(0);
     session.failing.delete(plan.resourceId);
@@ -476,7 +431,7 @@ it('still refuses a reopen when a shared or late resource is missing or corrupt'
   } finally {
     await session.release();
   }
-}, 60_000);
+});
 
 it('keeps what opening verified only until a caller takes it', async () => {
   const session = await history();
@@ -487,12 +442,9 @@ it('keeps what opening verified only until a caller takes it', async () => {
     session.reads.length = 0;
     const retained = await session.reopen(true);
     // Everything opening read, and nothing else.
-    const verified: string[] = [];
-    for await (const key of (
-      await retained.takeVerifiedExtensionResources()
-    ).keys())
-      verified.push(key);
-    expect(verified.sort()).toEqual([...new Set(session.reads)].sort());
+    expect(
+      [...(await retained.takeVerifiedExtensionResources()).keys()].sort(),
+    ).toEqual([...new Set(session.reads)].sort());
     expect(session.reads).toHaveLength(8 * 5 + 2 + 4);
     expect((await retained.takeVerifiedExtensionResources()).size).toBe(0);
   } finally {
@@ -546,11 +498,7 @@ it('lets the store judge a reopened reference that describes a verified ID diffe
     });
     session.reads.length = 0;
     const reopened = await session.reopen();
-    expect(
-      await reopened
-        .extensionRecordsInDomain('hook_execution')
-        .collect(1_000_000),
-    ).toHaveLength(3);
+    expect(reopened.extensionRecordsInDomain('hook_execution')).toHaveLength(3);
     expect(session.reads.filter((id) => id === input.resourceId)).toHaveLength(
       2,
     );

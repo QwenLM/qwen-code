@@ -3,8 +3,6 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { hostedMessageRecords } from './hosted-session-records.js';
-import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -75,19 +73,17 @@ import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/manage
 export interface HostedChannelStore {
   readonly authority: {
     readonly committedSequence: number;
-    iterateEvents(
+    eventsInSequenceRange(
       from: number,
       to: number,
-    ): ManagedHistoryQuery<ManagedSessionEvent>;
+    ): readonly ManagedSessionEvent[];
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
-    ): Promise<
-      { readonly record: unknown; readonly revision: number } | undefined
-    >;
+    ): { readonly record: unknown; readonly revision: number } | undefined;
     extensionRecordsInDomain(
       domain: ManagedSessionDomain,
-    ): ManagedHistoryQuery<{ readonly record: unknown }>;
+    ): ReadonlyArray<{ readonly record: unknown }>;
     commitExtensionRecord(
       command: ManagedSessionCommand,
       request: {
@@ -107,7 +103,7 @@ export interface HostedChannelStore {
     read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
   readonly sink: {
-    iterateMessageRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
+    project(): Promise<ChatRecord[]>;
     write(record: ChatRecord): Promise<unknown>;
   };
 }
@@ -183,16 +179,16 @@ export class HostedChannelSession {
     private readonly key: ManagedSessionKey,
   ) {}
 
-  async route(routeId: string): Promise<ChannelRoute | undefined> {
-    const existing = await this.store.authority.extensionRecord(
+  route(routeId: string): ChannelRoute | undefined {
+    const existing = this.store.authority.extensionRecord(
       'channel_route',
       routeId,
     );
     return existing ? parseChannelRoute(existing.record) : undefined;
   }
 
-  async delivery(deliveryId: string): Promise<ChannelDelivery | undefined> {
-    const existing = await this.store.authority.extensionRecord(
+  delivery(deliveryId: string): ChannelDelivery | undefined {
+    const existing = this.store.authority.extensionRecord(
       'channel_delivery',
       deliveryId,
     );
@@ -200,12 +196,10 @@ export class HostedChannelSession {
   }
 
   /** The committed admission of one input, or undefined. */
-  async acceptedInput(
-    inputId: string,
-  ): Promise<ManagedSessionEvent | undefined> {
+  acceptedInput(inputId: string): ManagedSessionEvent | undefined {
     const authority = this.store.authority;
-    return await authority
-      .iterateEvents(1, authority.committedSequence)
+    return authority
+      .eventsInSequenceRange(1, authority.committedSequence)
       .find(
         (event) =>
           event.kind === 'input.accepted' &&
@@ -215,7 +209,7 @@ export class HostedChannelSession {
   }
 
   async envelopeOf(inputId: string): Promise<ChannelInputEnvelope | undefined> {
-    const accepted = await this.acceptedInput(inputId);
+    const accepted = this.acceptedInput(inputId);
     if (accepted === undefined) return undefined;
     const ref = assertManagedSessionDurableRef(
       accepted.payload['contentRef'],
@@ -251,7 +245,7 @@ export class HostedChannelSession {
         accountId: params.accountId,
         scope: params.scope,
       });
-      const existing = await this.route(routeId);
+      const existing = this.route(routeId);
       if (
         existing !== undefined &&
         existing.accountGeneration > params.accountGeneration
@@ -416,8 +410,8 @@ export class HostedChannelSession {
   settleInterruptedWake(turnId: string): Promise<boolean> {
     return this.serial(async () => {
       const authority = this.store.authority;
-      const alreadySettled = await authority
-        .iterateEvents(1, authority.committedSequence)
+      const alreadySettled = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
         .some(
           (event) =>
             event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
@@ -460,15 +454,15 @@ export class HostedChannelSession {
     turnId: string,
   ): Promise<ChannelDelivery | undefined> {
     const deliveryId = channelDeliveryId(turnId);
-    const existing = await this.delivery(deliveryId);
+    const existing = this.delivery(deliveryId);
     if (existing !== undefined) return existing;
     const envelope = await this.envelopeOf(turnId);
     if (envelope === undefined) return undefined;
     // The settle gate reads the journal, not the record projection: the
     // production sink commits turn results as `turn.settled` events and
     // never projects them, so only the journal knows the turn ended.
-    const settled = await this.store.authority
-      .iterateEvents(1, this.store.authority.committedSequence)
+    const settled = this.store.authority
+      .eventsInSequenceRange(1, this.store.authority.committedSequence)
       .findLast(
         (event) =>
           event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
@@ -478,27 +472,21 @@ export class HostedChannelSession {
     // plan whose route re-keyed since its input was admitted would be
     // refused at commitDelivery, and every refused attempt would orphan a
     // fresh reply+segment resource pair behind it (R10 P2).
-    const route = await this.route(envelope.routeId);
+    const route = this.route(envelope.routeId);
     if (route === undefined || route.routeRevision !== envelope.routeRevision)
       return undefined;
-    let prefix = '';
-    let characters = 0;
-    let meaningfulEnd = 0;
-    const capacity = MANAGED_CHANNEL_LIMITS.maxSegmentBytes + 1;
-    for await (const entry of hostedMessageRecords(this.store).filter(
-      (entry) => entry.type === 'assistant' && entry.daemonPromptId === turnId,
-    )) {
-      for (const part of entry.message?.parts ?? []) {
-        if (part.thought || typeof part.text !== 'string') continue;
-        const text = characters === 0 ? part.text.trimStart() : part.text;
-        const meaningful = text.trimEnd().length;
-        if (meaningful) meaningfulEnd = characters + meaningful;
-        characters += text.length;
-        if (prefix.length < capacity)
-          prefix += text.slice(0, capacity - prefix.length);
-      }
-    }
-    const text = prefix.slice(0, meaningfulEnd);
+    const text = (await this.store.sink.project())
+      .filter(
+        (entry) =>
+          entry.type === 'assistant' && entry.daemonPromptId === turnId,
+      )
+      .flatMap((entry) =>
+        (entry.message?.parts ?? [])
+          .filter((part) => !part.thought)
+          .map((part) => (typeof part.text === 'string' ? part.text : '')),
+      )
+      .join('')
+      .trim();
     if (text.length === 0) return undefined;
     // Publish the planned segment text, not the raw turn output: the reply
     // resource must satisfy the inline bound itself, or a long answer
@@ -570,7 +558,7 @@ export class HostedChannelSession {
   async reconcileReplies(): Promise<string[]> {
     const authority = this.store.authority;
     const planned: string[] = [];
-    for await (const event of authority.iterateEvents(
+    for (const event of authority.eventsInSequenceRange(
       1,
       authority.committedSequence,
     )) {
@@ -581,8 +569,7 @@ export class HostedChannelSession {
         continue;
       const turnId = event.payload['turnId'];
       if (typeof turnId !== 'string') continue;
-      if ((await this.delivery(channelDeliveryId(turnId))) !== undefined)
-        continue;
+      if (this.delivery(channelDeliveryId(turnId)) !== undefined) continue;
       try {
         if ((await this.planReply(turnId)) !== undefined) planned.push(turnId);
       } catch {
@@ -594,7 +581,7 @@ export class HostedChannelSession {
   }
 
   /** The deliveries still owed to a dispatcher: planned, or partial. */
-  pendingDeliveries(): ManagedHistoryQuery<ChannelDelivery> {
+  pendingDeliveries(): ChannelDelivery[] {
     return this.store.authority
       .extensionRecordsInDomain('channel_delivery')
       .map((entry) => parseChannelDelivery(entry.record))
@@ -610,7 +597,7 @@ export class HostedChannelSession {
    */
   claim(deliveryId: string): Promise<ChannelClaimResult> {
     return this.serial(async () => {
-      let delivery = await this.mustDelivery(deliveryId);
+      let delivery = this.mustDelivery(deliveryId);
       const state = delivery.run.delivery?.state;
       if (state === 'planned' || state === 'partial') {
         delivery = await this.revise(
@@ -658,7 +645,7 @@ export class HostedChannelSession {
     receipt: ChannelDeliveryReceipt,
   ): Promise<ChannelDelivery> {
     return this.serial(async () => {
-      let delivery = await this.mustDelivery(deliveryId);
+      let delivery = this.mustDelivery(deliveryId);
       const segment = delivery.segments[ordinal];
       if (segment === undefined) {
         // Refuse before any revision: a partial line commits `sending`
@@ -696,7 +683,7 @@ export class HostedChannelSession {
     reconciliationId?: string,
   ): Promise<ChannelDelivery> {
     return this.serial(async () => {
-      const delivery = await this.mustDelivery(deliveryId);
+      const delivery = this.mustDelivery(deliveryId);
       const state = delivery.run.delivery?.state;
       if (state === outcome) return delivery;
       if (isTerminalRunState(delivery.run.state)) {
@@ -719,7 +706,7 @@ export class HostedChannelSession {
   /** `cancelChannelDelivery`: a planned one settles; a sending one records the request. */
   cancel(deliveryId: string): Promise<ChannelDelivery> {
     return this.serial(async () => {
-      const delivery = await this.mustDelivery(deliveryId);
+      const delivery = this.mustDelivery(deliveryId);
       const state = delivery.run.delivery?.state;
       if (state === 'cancelled') return delivery;
       // A delivered, failed or cancelled chain admits no further revision,
@@ -748,7 +735,7 @@ export class HostedChannelSession {
    */
   resend(deliveryId: string): Promise<ChannelDelivery> {
     return this.serial(async () => {
-      const original = await this.mustDelivery(deliveryId);
+      const original = this.mustDelivery(deliveryId);
       if (!channelDeliveryResendable(original)) {
         throw new Error(
           `Channel delivery ${deliveryId} is ${original.run.delivery?.state} and cannot be resent.`,
@@ -756,7 +743,7 @@ export class HostedChannelSession {
       }
       let attempt = 1;
       while (
-        (await this.delivery(channelResendDeliveryId(deliveryId, attempt))) !==
+        this.delivery(channelResendDeliveryId(deliveryId, attempt)) !==
         undefined
       ) {
         attempt += 1;
@@ -804,8 +791,8 @@ export class HostedChannelSession {
     return staged;
   }
 
-  private async mustDelivery(deliveryId: string): Promise<ChannelDelivery> {
-    const delivery = await this.delivery(deliveryId);
+  private mustDelivery(deliveryId: string): ChannelDelivery {
+    const delivery = this.delivery(deliveryId);
     if (delivery === undefined) {
       throw new Error(`Channel delivery ${deliveryId} has no record.`);
     }
@@ -818,7 +805,7 @@ export class HostedChannelSession {
     operation: string,
     commandId?: string,
   ): Promise<ChannelDelivery> {
-    const existing = await this.store.authority.extensionRecord(
+    const existing = this.store.authority.extensionRecord(
       'channel_delivery',
       previous.deliveryId,
     );

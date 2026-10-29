@@ -243,7 +243,7 @@ it('uses the real compression engine and restores its journal snapshot in the ne
     promptTokens = 12_000;
     await compression.admit({ operationId, expectedCompactionRevision: 0 });
     await compression.wait();
-    expect(await compression.status(operationId)).toMatchObject({
+    expect(compression.status(operationId)).toMatchObject({
       outcome: 'compressed',
     });
     expect(requests).toHaveLength(1);

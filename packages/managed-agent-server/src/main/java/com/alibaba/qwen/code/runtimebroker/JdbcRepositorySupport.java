@@ -131,7 +131,7 @@ final class JdbcRepositorySupport {
     }
 
     static <T> T transaction(DataSource dataSource, SqlWork<T> work) {
-        try (var proofScope = CsiProofHistory.scope(); Connection connection = dataSource.getConnection()) {
+        try (Connection connection = dataSource.getConnection()) {
             boolean autoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             try {

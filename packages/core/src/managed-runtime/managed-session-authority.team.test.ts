@@ -487,9 +487,7 @@ describe('managed session authority team records (H4e)', () => {
             ['team_plan', 'request-1', 2, approved],
           ];
         for (const [domain, recordId, revision, record] of expected) {
-          expect(
-            await authority.extensionRecord(domain, recordId),
-          ).toMatchObject({
+          expect(authority.extensionRecord(domain, recordId)).toMatchObject({
             revision,
             record,
             task: null,
@@ -857,7 +855,7 @@ describe('managed session authority team records (H4e)', () => {
       );
       await expect(readdressed).rejects.toThrow(routing);
       expect(
-        await authority.extensionRecord('team_message', 'message-1'),
+        authority.extensionRecord('team_message', 'message-1'),
       ).toMatchObject({ revision: 1, record: message(refs) });
       await expect(
         commit(

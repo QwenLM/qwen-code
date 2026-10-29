@@ -263,7 +263,7 @@ describe('managed session authority child_run records', () => {
       expect(
         JSON.parse((await harness.store.read(first.recordRef)).toString()),
       ).toEqual(chain[0]);
-      expect(await authority.taskViews()).toEqual([
+      expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -283,7 +283,7 @@ describe('managed session authority child_run records', () => {
         { domain: 'child_run', record: chain[1] },
         TRUSTED,
       );
-      expect(await authority.taskViews()).toEqual([
+      expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -303,7 +303,7 @@ describe('managed session authority child_run records', () => {
         { domain: 'child_run', record: chain[2] },
         TRUSTED,
       );
-      expect(await authority.taskViews()).toEqual([
+      expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -338,7 +338,7 @@ describe('managed session authority child_run records', () => {
         TRUSTED,
       );
       expect(last.revision).toBe(6);
-      expect(await authority.taskViews()).toEqual([
+      expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -371,7 +371,7 @@ describe('managed session authority child_run records', () => {
     await withAuthority(
       harness,
       async (authority) => {
-        expect(await authority.taskViews()).toEqual([
+        expect(authority.taskViews()).toEqual([
           {
             taskId: TASK_ID,
             sessionId,
@@ -384,13 +384,13 @@ describe('managed session authority child_run records', () => {
             settledAt: null,
           },
         ]);
-        expect(
-          await authority.extensionRecord('child_run', 'shell-1'),
-        ).toMatchObject({
-          revision: 4,
-          operationId: 'shell-1:1',
-          record: chain[3],
-        });
+        expect(authority.extensionRecord('child_run', 'shell-1')).toMatchObject(
+          {
+            revision: 4,
+            operationId: 'shell-1:1',
+            record: chain[3],
+          },
+        );
       },
       { create: false },
     );
@@ -426,7 +426,7 @@ describe('managed session authority child_run records', () => {
         },
         TRUSTED,
       );
-      expect(await authority.taskViews()).toEqual([
+      expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -524,7 +524,7 @@ describe('managed session authority child_run records', () => {
       expect(replay.revision).toBe(1);
       expect(replay.receipt.replayed).toBe(true);
       expect(await publishedBodies(harness)).toBe(1);
-      expect(await authority.taskViews()).toHaveLength(1);
+      expect(authority.taskViews()).toHaveLength(1);
     });
   });
 });
