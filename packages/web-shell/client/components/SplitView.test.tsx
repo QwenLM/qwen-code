@@ -779,6 +779,11 @@ describe('SplitView', () => {
     render({ sessionIds: sessionsState.map((s) => s.sessionId) });
     // Eight requested, but only six live panes mount.
     expect(panes()).toHaveLength(6);
+    // At the cap there is no room left, so the entry point is disabled.
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    expect(addButton.disabled).toBe(true);
   });
 
   it('isolates a crashing pane so the rest of the split survives', () => {
