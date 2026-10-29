@@ -62,6 +62,14 @@ const SKILL_MANIFEST_FILE = 'SKILL.md';
 // that would otherwise exhaust file descriptors (see #3289).
 export const WATCHER_MAX_DEPTH = 2;
 
+/** Skill levels in precedence order (earlier wins on a duplicate name). */
+const ALL_SKILL_LEVELS: readonly SkillLevel[] = [
+  'project',
+  'user',
+  'extension',
+  'bundled',
+];
+
 // Reject special file types (sockets, FIFOs, devices) that cannot be watched
 // and would error with EOPNOTSUPP, plus .git directories.
 export function watcherIgnored(
@@ -87,9 +95,14 @@ interface SharedSkillWatcher {
 
 const sharedSkillWatchers = new Map<string, SharedSkillWatcher>();
 
+// Native handles that are actually open. The registry above drops its entry as
+// soon as the last subscriber leaves, while `closeFileWatcher` settles later (or
+// fails), so counting the map would hide a close that never happened.
+let openSkillWatcherCount = 0;
+
 /** Number of native skill-directory watchers currently open. */
 export function getActiveSkillWatcherCount(): number {
-  return sharedSkillWatchers.size;
+  return openSkillWatcherCount;
 }
 
 function unsubscribeSkillWatcher(manager: SkillManager, watchPath: string) {
@@ -98,9 +111,18 @@ function unsubscribeSkillWatcher(manager: SkillManager, watchPath: string) {
   shared.managers.delete(manager);
   if (shared.managers.size > 0) return;
   sharedSkillWatchers.delete(watchPath);
-  void closeFileWatcher(shared.watcher).catch((error) => {
-    debugLogger.warn(`Failed to close skills watcher for ${watchPath}:`, error);
-  });
+  void closeFileWatcher(shared.watcher)
+    .then(() => {
+      openSkillWatcherCount--;
+    })
+    .catch((error) => {
+      // Leaving the count untouched keeps a handle that failed to close
+      // visible instead of reporting it as released.
+      debugLogger.warn(
+        `Failed to close skills watcher for ${watchPath}:`,
+        error,
+      );
+    });
 }
 
 /**
@@ -481,20 +503,30 @@ export class SkillManager {
 
   /**
    * Refreshes the skills cache by loading all skills from disk.
+   *
+   * `levels` limits the scan to the levels a caller can actually observe, so a
+   * watcher-driven revalidation does not re-read immutable bundled Skills;
+   * levels left out keep the arrays the previous scan committed.
    */
-  async refreshCache(options?: { throwOnError?: boolean }): Promise<void> {
+  async refreshCache(options?: {
+    throwOnError?: boolean;
+    levels?: readonly SkillLevel[];
+  }): Promise<void> {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
-    this.parseErrors.clear();
+    if (!options?.levels) {
+      this.parseErrors.clear();
+    }
     let discoveryHasErrors = false;
     const onDiscoveryError = () => {
       discoveryHasErrors = true;
     };
 
     // Safe mode: only load bundled (system) skills
-    const levels: SkillLevel[] = this.config.isSafeMode()
-      ? ['bundled']
-      : ['project', 'user', 'extension', 'bundled'];
+    const levels: readonly SkillLevel[] =
+      options?.levels ??
+      (this.config.isSafeMode() ? ['bundled'] : ALL_SKILL_LEVELS);
+    const previousCache = this.skillsCache;
 
     // Use allSettled so an unrecoverable error at one level (e.g. a hung
     // FS, a permission denial, an OS-level enoent on a removed config dir)
@@ -530,6 +562,16 @@ export class SkillManager {
       }
     }
 
+    // Levels this pass did not rescan keep what the previous scan committed:
+    // the caller asked for a partial refresh, not for those arrays to vanish.
+    if (previousCache) {
+      for (const level of ALL_SKILL_LEVELS) {
+        if (levels.includes(level)) continue;
+        const retained = previousCache.get(level);
+        if (retained) skillsCache.set(level, retained);
+      }
+    }
+
     // Publish completeness with the cache produced by this scan.
     this.discoveryHasErrors = discoveryHasErrors;
     this.skillsCache = skillsCache;
@@ -551,7 +593,7 @@ export class SkillManager {
     //    the model cannot then invoke.
     const seenForActivation = new Set<string>();
     const eligibleForActivation: SkillConfig[] = [];
-    for (const level of levels) {
+    for (const level of ALL_SKILL_LEVELS) {
       for (const skill of skillsCache.get(level) ?? []) {
         if (seenForActivation.has(skill.name)) continue;
         seenForActivation.add(skill.name);
@@ -693,6 +735,15 @@ export class SkillManager {
       this.refreshTimer = null;
     }
     debugLogger.info('Skill directory watchers stopped');
+  }
+
+  /**
+   * True when this manager is subscribed to at least one skill-directory
+   * watcher. A watcher that failed after `startWatching()` resolved clears its
+   * subscription, so callers re-check this instead of trusting the start.
+   */
+  hasActiveWatcher(): boolean {
+    return this.watchedPaths.size > 0;
   }
 
   /**
@@ -1366,8 +1417,19 @@ export class SkillManager {
           })
           .on('error', (error) => {
             debugLogger.warn(`Skills watcher error for ${watchPath}:`, error);
+            // chokidar reports attach and runtime failures here, after
+            // `startWatching()` has already resolved. Drop the subscription so
+            // the failure is visible instead of reading as a live watcher.
+            if (sharedSkillWatchers.get(watchPath)?.watcher !== watcher) return;
+            sharedSkillWatchers.delete(watchPath);
+            for (const manager of managers) {
+              manager.watchedPaths.delete(watchPath);
+            }
+            openSkillWatcherCount--;
+            void closeFileWatcher(watcher).catch(() => undefined);
           });
         sharedSkillWatchers.set(watchPath, { watcher, managers });
+        openSkillWatcherCount++;
         this.watchedPaths.add(watchPath);
       } catch (error) {
         debugLogger.warn(

@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fsp from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getActiveSkillWatcherCount, SkillManager } from './skill-manager.js';
@@ -41,10 +42,17 @@ describe('SkillManager watcher sharing', () => {
     const second = new SkillManager(config);
     try {
       await first.startWatching();
-      // The project directory plus the user Skills directory `startWatching`
-      // creates.
+      // The count depends on which user-level base directories exist on this
+      // machine, so assert against the directories the manager resolved rather
+      // than a fixed number.
+      const expectedCount = new Set(
+        (['project', 'user'] as const)
+          .flatMap((level) => first.getSkillsBaseDirs(level))
+          .filter((dir) => fsSync.existsSync(dir)),
+      ).size;
       const afterFirst = getActiveSkillWatcherCount();
-      expect(afterFirst).toBe(2);
+      expect(afterFirst).toBe(expectedCount);
+      expect(afterFirst).toBeGreaterThan(0);
 
       await second.startWatching();
       expect(getActiveSkillWatcherCount()).toBe(afterFirst);
@@ -53,7 +61,9 @@ describe('SkillManager watcher sharing', () => {
       expect(getActiveSkillWatcherCount()).toBe(afterFirst);
 
       second.stopWatching();
-      expect(getActiveSkillWatcherCount()).toBe(0);
+      // The handles close asynchronously, so the count settles rather than
+      // dropping in the same tick as `stopWatching()`.
+      await vi.waitFor(() => expect(getActiveSkillWatcherCount()).toBe(0));
     } finally {
       first.stopWatching();
       second.stopWatching();
