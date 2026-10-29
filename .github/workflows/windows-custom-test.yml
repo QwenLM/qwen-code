@@ -20,6 +20,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
       - name: Install dependencies
         shell: pwsh
         run: corepack pnpm install --frozen-lockfile
@@ -51,17 +54,24 @@ jobs:
           cd /d "%~dp0"
           "%~dp0node.exe" "%~dp0dist\\cli.js" %*
           '@ | Set-Content -Encoding ascii windows-portable/qwen.cmd
+      - name: Build Qwen.exe launcher
+        shell: pwsh
+        run: dotnet publish scripts/windows/QwenLauncher.csproj -c Release -r win-x64 -o windows-launcher
+      - name: Install executable launcher
+        shell: pwsh
+        run: Copy-Item windows-launcher/Qwen.exe windows-portable/Qwen.exe
       - name: Verify portable output
         shell: pwsh
         run: |
+          if (!(Test-Path windows-portable/Qwen.exe)) { throw "Qwen.exe missing" }
           if (!(Test-Path windows-portable/node.exe)) { throw "node.exe missing" }
           if (!(Test-Path windows-portable/dist/cli.js)) { throw "Bundled CLI missing" }
           if (!(Test-Path windows-portable/dist/system.md)) { throw "Custom system prompt missing" }
-          & windows-portable/node.exe windows-portable/dist/cli.js --version
+          & windows-portable/Qwen.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Portable CLI startup failed" }
       - name: Upload portable Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: qwen-custom-windows-portable
+          name: qwen-custom-windows-exe
           path: windows-portable/
           if-no-files-found: error
