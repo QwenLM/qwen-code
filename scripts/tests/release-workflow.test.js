@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
 import { RELEASE_WORKSPACES } from '../release-packages.mjs';
+import { isAlreadyPublishedDryRunFailure } from '../../packages/cua-driver/scripts/publish-dry-run-skip.mjs';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -35,6 +36,11 @@ const hasGnuRealpath =
     0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const audioPrebuildsWorkflow = readFileSync(
+  '.github/workflows/audio-capture-prebuilds.yml',
+  'utf8',
+);
+const audioPrebuildsYaml = parse(audioPrebuildsWorkflow);
 const releaseYaml = parse(workflow);
 const releaseStepScriptPath = '.github/scripts/run-release-step.sh';
 const releaseStepScriptAbsolutePath = join(
@@ -53,15 +59,25 @@ const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
 );
+const cuaReleaseJobs = parse(cuaReleaseWorkflow).jobs;
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
-const cuaSdkPackageLock = JSON.parse(
-  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
+const cuaSdkInstallScript = readFileSync(
+  'packages/cua-driver/typescript/scripts/install-native.mjs',
+  'utf8',
 );
+const testSignWorkerScript = readFileSync(
+  '.github/scripts/test-sign-cua-windows-worker.ps1',
+  'utf8',
+);
+const browserUsePackage = JSON.parse(
+  readFileSync('packages/browser-use/package.json', 'utf8'),
+);
+const workspaceLock = parse(readFileSync('pnpm-lock.yaml', 'utf8'));
 const cuaInstallScript = readFileSync(
   'packages/cua-driver/scripts/install.sh',
   'utf8',
@@ -92,17 +108,35 @@ const liveHostOssWorkflow = readFileSync(
 );
 
 describe('CUA release workflow', () => {
-  it('keeps the Node REPL package independently versioned', () => {
+  it('excludes the Computer Use distribution from the CLI release', () => {
+    for (const name of [
+      '@qwen-code/browser-use',
+      '@qwen-code/cua-sdk',
+      '@qwen-code/node-repl-mcp',
+    ]) {
+      expect(RELEASE_WORKSPACES).not.toContain(name);
+    }
+  });
+
+  it('keeps the Computer Use distribution on one version', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.7');
+    expect(nodeReplPackage.version).toBe(cuaSdkPackage.version);
+    expect(browserUsePackage.version).toBe(cuaSdkPackage.version);
+    expect(nodeReplPackage.dependencies['@qwen-code/cua-sdk']).toBe(
+      cuaSdkPackage.version,
+    );
+    expect(cuaSdkPackage.dependencies['@qwen-code/browser-use']).toBe(
+      cuaSdkPackage.version,
+    );
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
-    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
-    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
+    expect(
+      workspaceLock.importers['packages/cua-driver/typescript'],
+    ).toBeDefined();
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
@@ -112,9 +146,15 @@ describe('CUA release workflow', () => {
   });
 
   it('publishes the verified Node REPL tarball immutably with provenance', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs: \['validate-version', 'verify-node-repl-package', 'release'\][\s\S]*?npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"[\s\S]*?Verify npm registry integrity/,
+    const job = cuaReleaseJobs['publish-node-repl'];
+    expect(job.needs).toContain('publish-sdk');
+    const commands = job.steps.map((step) => step.run ?? '').join('\n');
+    expect(commands).toMatch(
+      /npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"/,
     );
+    expect(
+      job.steps.some((step) => step.name === 'Verify npm registry integrity'),
+    ).toBe(true);
   });
 
   it('keeps installer version changes in the feature PR', () => {
@@ -139,38 +179,113 @@ describe('CUA release workflow', () => {
     expect(cuaReleaseWorkflow).toMatch(
       /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
     );
-    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
+    expect(cuaReleaseWorkflow).not.toMatch(
+      /WINDOWS_CERTIFICATE|WIN_CSC_LINK|New-SelfSignedCertificate/,
+    );
     expect(cuaReleaseWorkflow).toContain(
       '- **Windows**: unsigned UIAccess worker + native SDK payload',
     );
   });
 
-  it('pins exact Computer Use package versions across the skill and user guide', () => {
+  it('test-signs the Windows worker only for branch dry runs', () => {
+    const job = cuaReleaseJobs['build-windows'];
+    const steps = job.steps;
+    const index = (name) => steps.findIndex((step) => step.name === name);
+    const verifyIndex = index('Verify unsigned UIAccess worker');
+    const signIndex = index('Test-sign UIAccess worker (dry run)');
+    const packageIndex = index('Package');
+    const installIndex = index(
+      'Clean-install Windows SDK from packaged payload',
+    );
+    const uploadIndex = steps.findIndex(
+      (step) => step.uses === 'actions/upload-artifact@v4',
+    );
+
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job.env.CUA_TEST_SIGNING).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}",
+    );
+    expect(cuaReleaseJobs.release.if).toContain(
+      "startsWith(github.ref, 'refs/tags/cua-driver-rs-v')",
+    );
+    expect(verifyIndex).toBeGreaterThan(-1);
+    expect(signIndex).toBeGreaterThan(verifyIndex);
+    expect(packageIndex).toBeGreaterThan(signIndex);
+    expect(installIndex).toBeGreaterThan(packageIndex);
+    expect(uploadIndex).toBeGreaterThan(installIndex);
+
+    const signStep = steps[signIndex];
+    expect(signStep.if).toBe("env.CUA_TEST_SIGNING == 'true'");
+    expect(signStep.env.SIGNPATH_API_TOKEN).toBe(
+      '${{ secrets.SIGNPATH_API_TOKEN }}',
+    );
+    expect(signStep.run).toContain(
+      '.github/scripts/test-sign-cua-windows-worker.ps1',
+    );
+    expect(cuaReleaseWorkflow).not.toContain(
+      'github-action-submit-signing-request',
+    );
+    expect(testSignWorkerScript).toContain(
+      '/SigningRequests/SubmitWithArtifact',
+    );
+    expect(testSignWorkerScript).toContain(
+      "signingPolicySlug         = 'test-signing'",
+    );
+    expect(testSignWorkerScript).toContain(
+      "-ne '0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0'",
+    );
+    expect(testSignWorkerScript).toMatch(
+      /Thumbprint -ne[\s\S]*?Cert:\\LocalMachine\\Root[\s\S]*?\.Status -ne 'Valid'[\s\S]*?Copy-Item/,
+    );
+
+    const install = steps[installIndex];
+    expect(install.env.CUA_DRIVER_USE_UIACCESS).toBe(
+      "${{ env.CUA_TEST_SIGNING == 'true' && '1' || '0' }}",
+    );
+    expect(install.run).toContain('npm install');
+    expect(install.run).toContain('--ignore-scripts=false');
+    expect(job.needs).toContain('verify-browser-package');
+    expect(install.run).toContain('qwen-code-browser-use-');
+    expect(install.run).toContain("throw 'Windows SDK postinstall failed'");
+    expect(install.run).toContain(
+      "if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {",
+    );
+    expect(install.run).toContain(
+      "throw 'Ordinary installation must not deploy the UIAccess worker'",
+    );
+    expect(cuaSdkInstallScript).toContain('await run("powershell", args');
+    expect(cuaSdkInstallScript).toMatch(
+      /CouldNotAutoloadMatchingModule[\s\S]*?run\("pwsh"/,
+    );
+    expect(cuaSdkInstallScript).toContain(
+      'if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {',
+    );
+  });
+
+  it('pins exact runtime registration and dependency versions', () => {
     expect(computerUseGuide).toContain(
       `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
     );
     expect(computerUseGuide).toContain(
-      `@qwen-code/cua-sdk@${cuaSdkPackage.version}`,
+      'installs the matching SDK and browser SDK as dependencies',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_NODE_REPL_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_NODE_REPL_VERSION=');
     expect(cuaReleaseWorkflow).toContain(
       'USER_GUIDE_NODE_REPL_VERSION=$(sed -nE',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_SDK_VERSION=$(sed -nE');
-    expect(cuaReleaseWorkflow).toContain('USER_GUIDE_SDK_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_SDK_VERSION=');
+    expect(cuaReleaseWorkflow).toContain('SDK_BROWSER_VERSION=');
+    expect(cuaReleaseWorkflow).not.toContain('USER_GUIDE_SDK_VERSION=');
     expect(cuaReleaseWorkflow).not.toContain(
       'grep -Fq "@qwen-code/node-repl-mcp@',
     );
     expect(cuaReleaseWorkflow).not.toContain('grep -Fq "@qwen-code/cua-sdk@');
   });
 
-  it('bootstraps only Node REPL without replacing an existing CUA release', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /node_repl_only:[\s\S]*?type: 'boolean'[\s\S]*?default: false/,
-    );
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs\.release\.result == 'success'[\s\S]*?inputs\.node_repl_only == true[\s\S]*?inputs\.dry_run == false/,
-    );
+  it('releases dependencies before the same-version runtime', () => {
+    expect(cuaReleaseWorkflow).not.toContain('node_repl_only');
+    expect(cuaReleaseJobs['publish-sdk'].needs).toContain('publish-browser');
+    expect(cuaReleaseJobs['publish-node-repl'].needs).toContain('publish-sdk');
     expect(cuaReleaseWorkflow).toContain(
       'A production dispatch must run from protected main',
     );
@@ -180,12 +295,12 @@ describe('CUA release workflow', () => {
 // The canonical workspace restoration script shared by all nine
 // 'Restore workspace ownership' copies in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
-// checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
-// repo state may survive into them. Pin the WHOLE body by equality, the way
-// review-worktree-cleanup-workflow.test.js pins its sweep copies: a
-// commented-out find, an inserted early exit, or a uniformly dropped
-// ownership ladder all ship green under substring pins, and each of those
-// mutants reopens the incident class this step exists for.
+// checkouts persist credentials and the publish job can mint the npm OIDC
+// id-token, so no pre-existing repo state may survive into them. Pin the
+// WHOLE body by equality, the way review-worktree-cleanup-workflow.test.js
+// pins its sweep copies: a commented-out find, an inserted early exit, or a
+// uniformly dropped ownership ladder all ship green under substring pins,
+// and each of those mutants reopens the incident class this step exists for.
 const canonicalWipe = `set -uo pipefail
 # Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
@@ -290,7 +405,7 @@ describe('release workflow', () => {
     // it cannot be swapped for the hosted label because every pool-routed
     // runs-on expression names 'ubuntu-latest' as its fallback branch.
     const isPoolRouted = (job) =>
-      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+      /ecs-qwen-(?:hk4-host|release-host)/.test(String(job['runs-on'] ?? ''));
     const wipesWorkspace = (job) =>
       (job.steps ?? []).some(
         (step) => step.name === 'Restore workspace ownership',
@@ -351,12 +466,21 @@ describe('release workflow', () => {
     // without until a saturated instance died on ENOSPC mid-step — no log,
     // no annotation — and took the release with it (runs 34998771277 and
     // 35024357480). The gate fails the job fast instead, and a re-run lands
-    // on an instance with headroom. publish is hosted-only and stays ungated.
+    // on an instance with headroom. Jobs without a checkout are exempt: the
+    // gate rides a checkout, and the only such pool-routed job (quality) is
+    // a workspace-free three-second aggregation with nothing heavy to lose.
     const isPoolRouted = (job) =>
-      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+      /ecs-qwen-(?:hk4-host|release-host)/.test(String(job['runs-on'] ?? ''));
     const gated = [];
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
       if (!isPoolRouted(job)) continue;
+      if (
+        !(job.steps ?? []).some((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
+        )
+      ) {
+        continue;
+      }
       gated.push(id);
       const steps = job.steps ?? [];
       const gateIndex = steps.findIndex(
@@ -388,6 +512,7 @@ describe('release workflow', () => {
       'integration_docker',
       'integration_none',
       'prepare',
+      'publish',
       'quality_build',
       'quality_scripts',
       'quality_static',
@@ -425,6 +550,7 @@ describe('release workflow', () => {
       'integration_docker',
       'publish',
       'notify_failure',
+      'reconcile_failure',
     ]) {
       const steps = releaseYaml.jobs[jobId].steps;
       const targetCheckoutIndex = steps.findIndex(
@@ -439,12 +565,17 @@ describe('release workflow', () => {
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
         'persist-credentials': false,
+        // The tarball gate rides this checkout too: run from the selected
+        // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
-      if (jobId !== 'notify_failure') {
+      // The two issue jobs are the only ones whose script checkout has no
+      // preceding target checkout: they must run when that checkout is what
+      // failed.
+      if (jobId !== 'notify_failure' && jobId !== 'reconcile_failure') {
         expect(scriptCheckoutIndex, jobId).toBeGreaterThan(targetCheckoutIndex);
       }
       for (const [index, step] of steps.entries()) {
@@ -533,7 +664,21 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    // 850, raised from 830 for the pool-wide disk-floor gate: one anchored
+    // 920, raised from 880 for reconcile_failure: the success-gated sibling of
+    // notify_failure, one job carrying a single script step, because the close
+    // path cannot live inside notify_failure — that job is skipped on a
+    // passing re-run, which is the whole defect (#15705). The reconciliation
+    // logic itself stays in .github/scripts/run-release-step.sh.
+    // 880, raised from 870 for quality_scripts' standalone runtime cache
+    // step: the same four-line export of a host-wide cache path as ci.yml's
+    // test job — orchestration; the cache logic lives in
+    // scripts/lib/runtime-archive-cache.js.
+    // 870, raised from 850 for moving publish/collect onto the opt-in
+    // ecs-qwen-release-host lane and quality onto the pool its checks already
+    // use: the added lines are two runs-on expressions, two anchored steps,
+    // and their comments — orchestration, not logic (2026-10-15 hosted-pool
+    // saturation queued publish for 64 minutes behind PR automation).
+    // 850 was raised from 830 for the pool-wide disk-floor gate: one anchored
     // step plus one alias per pool-routed job is still orchestration — the
     // gate's logic lives in .github/scripts/check-disk-floor.sh (#10035).
     // 830 was raised from 800 for the notify_failure fallback: that job may
@@ -541,7 +686,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(850);
+    expect(workflow.split('\n').length).toBeLessThan(930);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -602,9 +747,15 @@ describe('release workflow', () => {
         join(directory, 'dist/package.json'),
         JSON.stringify({ name: '@qwen-code/qwen-code' }),
       );
-      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit "$CLI_PUBLISHED"\n', {
-        mode: 0o755,
-      });
+      // `npm view` drives the already-published skip; `npm publish` is the
+      // generated CLI's own publish call, logged like the corepack one so the
+      // assertions below cover both. The CLI goes through npm because pnpm's
+      // packer drops the exec bit on `vendor/ripgrep/*/rg` (#12668).
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\nif [ "$1" = "view" ]; then exit "$CLI_PUBLISHED"; fi\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
+        { mode: 0o755 },
+      );
       writeFileSync(
         join(bin, 'corepack'),
         '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
@@ -658,6 +809,14 @@ describe('release workflow', () => {
           ),
         );
         expect(publishCalls[0][1]).toContain('pnpm -r publish');
+        if (publishesCli) {
+          // The generated CLI is the only package carrying vendored binaries
+          // and the only one published with npm: pnpm's packer writes 0644 for
+          // every entry outside `bin`, which shipped an unspawnable
+          // `vendor/ripgrep/*/rg` from 0.24.4 on (#12668).
+          expect(publishCalls[1][1]).toMatch(/^publish --provenance /);
+          expect(publishCalls[1][1]).not.toContain('pnpm');
+        }
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=preview');
@@ -916,6 +1075,166 @@ describe('release workflow', () => {
         expect(fallback.if).toBe(
           "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}",
         );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reconciles a stale failure issue only when the release succeeded', () => {
+    const job = releaseYaml.jobs.reconcile_failure;
+    // notify_failure is skipped the moment a re-run passes, so the close path
+    // has to be a sibling gated on success rather than a step inside it.
+    expect(job.if).toContain('always()');
+    expect(job.if).toContain("needs.publish.result == 'success'");
+    expect(job.if).toContain("github.event.inputs.dry_run != 'true'");
+    // force_skip_tests lets publish run past a failed validation job: closing
+    // there would race the issue notify_failure is filing for that failure.
+    for (const need of [
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(job.if, need).toContain(`needs.${need}.result != 'failure'`);
+    }
+    expect(job.needs).toEqual(releaseYaml.jobs.notify_failure.needs);
+    expect(job.permissions).toEqual({ contents: 'read', issues: 'write' });
+    const step = job.steps.find(
+      (entry) => entry.name === 'Close the issue an earlier attempt filed',
+    );
+    expect(step.run).toBe(
+      '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure',
+    );
+    // A reconciliation failure must never turn a shipped release red.
+    expect(step['continue-on-error']).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'closes the workflow-owned failure issue once a later attempt succeeds',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      const issues = join(directory, 'issues.json');
+      mkdirSync(bin);
+      writeFileSync(
+        issues,
+        JSON.stringify([
+          {
+            number: 15672,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15672',
+            labels: [{ name: 'type/bug' }, { name: 'status/ready-for-agent' }],
+            author: { login: 'github-actions[bot]' },
+            title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  cat "$GH_ISSUES"\n' +
+          '  exit 0\n' +
+          'fi\n' +
+          'if [ "$1" = issue ] && [ "$2" = edit ]; then\n' +
+          '  case "$*" in\n' +
+          '    *autofix/approved*) exit 1 ;;\n' +
+          '  esac\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_ISSUES: issues,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(ghLog, 'utf8');
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).toContain(
+          'issue close 15672 --repo QwenLM/qwen-code --reason not planned',
+        );
+        expect(calls).not.toContain('issue create');
+        // One absent label must not abort the remaining removals or the close.
+        expect(calls).toContain('--remove-label status/ready-for-agent');
+        expect(calls).toContain('--remove-label autofix/in-progress');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'never closes a human-authored release-failure issue',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-human-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      const issues = join(directory, 'issues.json');
+      mkdirSync(bin);
+      writeFileSync(
+        issues,
+        JSON.stringify([
+          {
+            number: 9001,
+            url: 'https://github.example/QwenLM/qwen-code/issues/9001',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'some-maintainer' },
+            title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  cat "$GH_ISSUES"\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_ISSUES: issues,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(ghLog, 'utf8');
+        expect(calls).toContain('issue list');
+        expect(calls).not.toContain('issue close');
+        expect(calls).not.toContain('issue comment');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -1520,13 +1839,16 @@ describe('release workflow', () => {
     expect(quality.if).toBe(
       "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}",
     );
-    expect(quality.steps[0].run).toContain(
-      'if [[ "${result}" != \'success\' ]]',
+    // The wipe anchor precedes the verify step once quality is pool-routed;
+    // locate the aggregation by name so the pool hygiene cannot shadow it.
+    const verify = quality.steps.find(
+      (step) => step.name === 'Verify quality results',
     );
+    expect(verify.run).toContain('if [[ "${result}" != \'success\' ]]');
     // Pin the full result mapping, not just the loop's shape: dropping one
     // loop entry or remapping an env var to another job's result must fail
     // here instead of letting a failed component publish.
-    expect(quality.steps[0].env).toEqual({
+    expect(verify.env).toEqual({
       STATIC_RESULT: '${{ needs.quality_static.result }}',
       BUILD_RESULT: '${{ needs.quality_build.result }}',
       TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}',
@@ -1540,7 +1862,7 @@ describe('release workflow', () => {
       'WORKSPACE_TEST_RESULT',
       'SCRIPT_TEST_RESULT',
     ]) {
-      expect(quality.steps[0].run, name).toContain('"${' + name + '}"');
+      expect(verify.run, name).toContain('"${' + name + '}"');
     }
     expect(releaseYaml.jobs.notify_failure.if).toContain(
       "needs.quality.result == 'failure'",
@@ -2909,6 +3231,7 @@ exit 0`,
           'integration_none',
           'integration_docker',
           'notify_failure',
+          'reconcile_failure',
         ].map((id) => [id, releaseYaml.jobs[id]['timeout-minutes']]),
       ),
     ).toEqual({
@@ -2927,6 +3250,7 @@ exit 0`,
       integration_none: 120,
       integration_docker: 120,
       notify_failure: 10,
+      reconcile_failure: 10,
     });
 
     for (const id of [
@@ -2966,6 +3290,121 @@ exit 0`,
     );
     expect(publishSetupNode?.with.cache).toBeUndefined();
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
+  });
+
+  it('keeps the standalone runtime spawn inside the quality_scripts budget', () => {
+    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
+    const worker = /^const WORKER_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const setup = /^const SETUP_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const derived =
+      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ SETUP_TIMEOUT_MS;$/m.exec(
+        source,
+      );
+    expect(
+      worker,
+      'WORKER_TIMEOUT_MS must stay a plain constant',
+    ).not.toBeNull();
+    expect(setup, 'SETUP_TIMEOUT_MS must stay a plain constant').not.toBeNull();
+    expect(
+      derived,
+      'CI_TIMEOUT_MS must derive from the worker and setup caps',
+    ).not.toBeNull();
+    // Pin the wiring, not just the declarations: these constants exist to
+    // bound exactly two spawnSync options, and every setup phase must spend
+    // the shared setup budget instead of inheriting the 300 s run() default.
+    expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
+    expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
+    // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
+    // must fail the next phase at 1 ms rather than disarm its cap.
+    expect(
+      source.match(/Math\.max\(1, deadline - Date\.now\(\)\)/g),
+    ).toHaveLength(1);
+    // Both entry points must take their setup I/O from the one factory, and
+    // that factory must close both wrappers over the shared deadline.
+    expect(
+      source.match(/^ {2}const setup = makeSetupBudget\(\);$/gm),
+    ).toHaveLength(2);
+    expect(source).toMatch(
+      /run: \(bin, args\) =>\s*run\(bin, args, \{ timeout: remaining\(\) \}\),/,
+    );
+    expect(source).toMatch(
+      /fetch: \(url, init\) =>\s*fetch\(url, \{ \.\.\.init, signal: AbortSignal\.timeout\(remaining\(\)\) \}\),/,
+    );
+    const setupSlices = [];
+    let from = 0;
+    while (true) {
+      const start = source.indexOf('const setup = makeSetupBudget();', from);
+      if (start < 0) break;
+      const end = source.indexOf('const result = spawnSync(', start);
+      expect(end, 'setup must be followed by its spawn').toBeGreaterThan(start);
+      setupSlices.push(source.slice(start, end));
+      from = end;
+    }
+    expect(setupSlices).toHaveLength(2);
+    for (const slice of setupSlices) {
+      // A phase that reaches past the budget factory inherits run()'s 300 s
+      // default or escapes the deadline entirely. Naming the escape hatches
+      // avoids enumerating call spellings: budgeted calls are setup.run() /
+      // setup.fetch(), which the leading-dot exclusion leaves alone.
+      expect(
+        slice,
+        'every setup phase must go through the budget wrapper',
+      ).not.toMatch(/(?<![\w.])(?:spawnSync|run|fetch)\s*\(/);
+    }
+    // The slice's fetch must be the implementation the archive fetch uses,
+    // not a helper left behind after the wiring was removed.
+    expect(setupSlices[0]).toMatch(
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+    );
+    const workerMs = Number(worker[1].replaceAll('_', ''));
+    const setupMs = Number(setup[1].replaceAll('_', ''));
+    const spawnMs = 2 * workerMs + setupMs;
+    // The child spends the same setup budget on its five pre-worker probes
+    // and keygen, so the outer cap must cover setup before either worker
+    // starts. A near-zero margin would let the outer cap fire first and lose
+    // the host-naming diagnostic.
+    expect(
+      spawnMs - 2 * workerMs,
+      'outer cap must leave room for pre-worker probes and keygen',
+    ).toBeGreaterThanOrEqual(60_000);
+    // That margin only matters while a worker killed at its cap still names
+    // the host, so the diagnostic must precede the bare asserts that throw
+    // first on the failure path.
+    const workerLoop = source.slice(
+      source.indexOf('for (const [host, bin] of ['),
+    );
+    const diagnosticAt = workerLoop.indexOf('actualExitCode');
+    expect(
+      diagnosticAt,
+      'worker loop must print the host diagnostic',
+    ).toBeGreaterThanOrEqual(0);
+    expect(workerLoop.indexOf('assert.equal(result.status, 0')).toBeGreaterThan(
+      diagnosticAt,
+    );
+    // package.json is the only link that places this spawn inside the
+    // quality_scripts job, and the budget counts vitest as running after it.
+    const rootScripts = JSON.parse(
+      readFileSync('package.json', 'utf8'),
+    ).scripts;
+    expect(rootScripts['test:scripts']).toMatch(
+      /^npm run test:standalone:runtimes:ci && npm run test:scripts:unit /,
+    );
+    expect(rootScripts['test:scripts:unit']).toMatch(/^vitest run /);
+    expect(rootScripts['test:standalone:runtimes:ci']).toBe(
+      'node scripts/test-standalone-runtimes.mjs --ci',
+    );
+    // Reserve the slow-pool measurements outside the spawn: ~295 s of job
+    // setup and the ~288 s scripts suite, rounded up to 600 s. Re-measure
+    // when scripts/tests/** gains a suite; 600 s is only valid for the suite
+    // as of this commit.
+    const aroundTheSpawnSeconds = 600;
+    // Parent setup and the child spawn are separate caps; both plus the
+    // reserve must fit the job's declared 30-minute budget.
+    expect(
+      setupMs / 1000 + spawnMs / 1000 + aroundTheSpawnSeconds,
+    ).toBeLessThanOrEqual(
+      releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,
+    );
   });
 
   it('stages every integration package manifest after versioning', () => {
@@ -3035,6 +3474,24 @@ exit 0`,
     expect(releaseStepScript).toMatch(
       /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
+  });
+
+  it('reads the release tree with the run-scoped token, not the bot PAT', () => {
+    // The publish checkout is read-only and the repository is public, so
+    // authenticating it with the long-lived bot PAT adds an auth dependency
+    // without adding access: a transient PAT rejection failed the release at
+    // Checkout (#15726). The PAT stays exported to the steps that write.
+    const steps = releaseYaml.jobs.publish.steps;
+    const checkout = steps.find((step) => step.name === 'Checkout');
+    expect(checkout.with.token).toBeUndefined();
+    expect(checkout.with['persist-credentials']).toBe(false);
+    expect(
+      steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(
+      steps.find((step) => step.name === 'Create GitHub Release and Tag').env
+        .GITHUB_TOKEN,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
   it('serializes publish jobs per release tag', () => {
@@ -3344,14 +3801,94 @@ describe('release lane runner routing', () => {
     }
   });
 
-  it('keeps publishing and failure notification on hosted runners', () => {
-    expect(releaseYaml.jobs.quality['runs-on']).toBe('ubuntu-latest');
-    expect(releaseYaml.jobs.quality['runs-on']).not.toContain('ecs-qwen');
-    expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
-    expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
+  it('keeps release credentials off PR-shared machines and failure reporting hosted', () => {
+    // quality aggregates five pool-routed checks, so it rides the same
+    // hk4-host pool they do; on 2026-10-15 it queued 53 minutes on the
+    // hosted pool while every machine it depended on sat idle.
+    expect(releaseYaml.jobs.quality['runs-on']).toContain('ecs-qwen-hk4-host');
+    expect(releaseYaml.jobs.quality['runs-on']).toContain('ubuntu-latest');
+    // publish carries CI_BOT_PAT and npm OIDC publishing. ecs-qwen-hk4-host
+    // machines are dual-labelled onto the ecs-qwen PR CI pool, so publish may
+    // only reach a release-only machine set — and only when explicitly
+    // opted in, which keeps the lane hosted until ops provisions it.
+    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+      'ecs-qwen-release-host',
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).not.toContain(
+      'ecs-qwen-hk4-host',
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).toContain('ubuntu-latest');
+    // Failure reporting must survive whatever broke the pool it reports on.
     expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
     );
+  });
+
+  it('keeps prebuild collection fail-closed on the release-only pool', () => {
+    // collect rides the same opt-in ecs-qwen-release-host lane as publish,
+    // so the runs-on expression must keep the repository condition and the
+    // hosted fallback that keep forks and the unset default on ubuntu-latest.
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      'ecs-qwen-release-host',
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      'ubuntu-latest',
+    );
+    // On the persistent release-host workspace, download-artifact's
+    // merge-multiple merges into existing paths, so a stale prebuilds/ tree
+    // from a previous release would leak into the merged artifact. The wipe
+    // must stay first and self-hosted-only; dropping it (or reordering it
+    // after the merge) re-opens that leak.
+    const [wipe, ...rest] = audioPrebuildsYaml.jobs.collect.steps;
+    expect(wipe.name).toBe('Clear stale prebuilds (self-hosted)');
+    expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(wipe.run).toBe('rm -rf prebuilds');
+    expect(rest[0].name).toBe('Merge per-platform prebuilds');
+  });
+});
+
+describe('SDK publish dry-run already-published tolerance', () => {
+  // After a release, the packaged version lives in the registry and the
+  // dry-run's collision probe is permanently red until the next bump; only
+  // that exact registry state may be treated as a skip.
+  it.each([
+    {
+      label: 'npm stderr line',
+      text: 'npm error You cannot publish over the previously published versions: 0.26.0.',
+    },
+    {
+      label: 'npm --json error summary',
+      text: '{"error":{"code":"E403","summary":"You cannot publish over the previously published versions: 0.26.0."}}',
+    },
+  ])('skips the registry-collision case: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'permission denied',
+      text: 'npm error code E403\nnpm error 403 403 Forbidden - PUT https://registry.npmjs.org/@qwen-code%2fcua-sdk - You do not have permission to publish "@qwen-code/cua-sdk".',
+    },
+    {
+      label: 'network failure',
+      text: 'npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/@qwen-code%2fcua-sdk failed',
+    },
+    {
+      label: 'bare exit without captured detail',
+      text: 'npm exited with status 1',
+    },
+    { label: 'empty', text: '' },
+  ])('keeps failing every other registry failure: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(false);
   });
 });

@@ -6,13 +6,19 @@
 
 import type { Config } from '../config/config.js';
 import type { ContentGeneratorConfig } from './contentGenerator.js';
+import { getRequestModel } from './request-model.js';
 import type {
   AvailableModel,
   ModelReasoningCapabilities,
 } from '../models/types.js';
 import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
+import {
+  getBuiltinDeepSeekReasoning,
+  normalizeDeepSeekReasoningEffort,
+} from './deepseek-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
+import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 import {
   parseClaudeModelVersion,
   anthropicSupportedEffortTiers,
@@ -142,6 +148,7 @@ export function validateReasoningCapabilities(
   route: Route,
   declaration: unknown,
 ): ResolvedReasoning | undefined {
+  if (declaration === undefined) return getBuiltinDeepSeekReasoning(route);
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
@@ -175,10 +182,18 @@ export function validateReasoningCapabilities(
   } catch {
     host = '';
   }
+  // Host-or-subdomain, anchored, so a forged `maas.qianwenaiapi.com.evil.com`
+  // cannot match while the `token-plan.` subscription subdomains still do. The
+  // QwenCloud hosts are dotted and matched literally rather than spliced into
+  // the alternation above, which keeps them out of regex-escaping duty; the
+  // list itself comes from the attribution leaf (#15107).
   const dashscope =
     auth === 'qwen-oauth' ||
     /(^|\.)(dashscope(?:-intl|-us)?\.aliyuncs\.com|alibaba-inc\.com|aliyun-inc\.com|alicloudapi\.com)$/.test(
       host,
+    ) ||
+    QWENCLOUD_MAAS_HOSTS.some(
+      (domain) => host === domain || host.endsWith(`.${domain}`),
     ) ||
     /^token-plan\..+\.maas\.aliyuncs\.com$/.test(host);
   const profile =
@@ -315,6 +330,7 @@ export function resolveReasoningForModel(
   model = generation.model,
   strict = false,
 ): ResolvedReasoning | undefined {
+  model = getRequestModel(generation, model);
   let declaration: unknown;
   if (generation.reasoningSnapshot) {
     const rows = generation.reasoningSnapshot.filter(
@@ -358,7 +374,13 @@ export function resolveReasoningForModel(
 }
 
 export function getEffectiveReasoning(
-  generation: Pick<ContentGeneratorConfig, 'reasoning'>,
+  generation: Pick<ContentGeneratorConfig, 'reasoning'> &
+    Partial<
+      Pick<
+        ContentGeneratorConfig,
+        'model' | 'baseUrl' | 'authType' | 'samplingParams' | 'extra_body'
+      >
+    >,
   resolved?: ResolvedReasoning,
 ): ContentGeneratorConfig['reasoning'] {
   if (!resolved) return generation.reasoning;
@@ -373,12 +395,24 @@ export function getEffectiveReasoning(
     return false;
   if (resolved.toggleOnly)
     return selected ?? (resolved.profile ? {} : undefined);
-  const effort = selected?.effort ?? resolved.defaultEffort;
+  const model = getRequestModel(generation);
+  const knownDeepSeek =
+    (resolved.profile === undefined ||
+      resolved.profile === 'deepseek-openai') &&
+    getBuiltinDeepSeekReasoning({ ...generation, model });
+  let effort = selected?.effort ?? resolved.defaultEffort;
+  if (effort && knownDeepSeek && !resolved.efforts.includes(effort))
+    effort = normalizeDeepSeekReasoningEffort(
+      effort,
+      model,
+      generation.baseUrl,
+    ) as ReasoningEffort;
   return effort
     ? {
         ...selected,
         effort:
-          resolved.profile && REASONING_EFFORT_TIERS.includes(effort)
+          (resolved.profile || knownDeepSeek) &&
+          REASONING_EFFORT_TIERS.includes(effort)
             ? clampReasoningEffort(effort, resolved.efforts)
             : effort,
       }

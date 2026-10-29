@@ -11,6 +11,7 @@ import type {
   AgentEventEmitter,
   Config,
   ToolRegistry,
+  AgentStartEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
@@ -157,7 +158,144 @@ describe('SubAgentTracker', () => {
     abortController = new AbortController();
   });
 
+  it('forwards lifecycle metadata after cancellation for an admitted tool without replacing output', async () => {
+    const cleanups = tracker.setup(eventEmitter, abortController.signal);
+    const call = createToolCallEvent({ name: 'shell', callId: 'same' });
+    eventEmitter.emit(AgentEventType.TOOL_CALL, call);
+    const lifecycle = {
+      v: 1 as const,
+      kind: 'tool' as const,
+      sessionId: 'original',
+      executionId: 'execution',
+      callId: 'same',
+      toolName: 'shell',
+      subagentId: call.subagentId,
+      phase: 'started' as const,
+      executionStatus: 'running' as const,
+      startedAt: 100,
+    };
+    eventEmitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+      subagentId: call.subagentId,
+      round: 1,
+      callId: 'same',
+      outputChunk: '',
+      timestamp: 100,
+      lifecycle,
+    });
+    abortController.abort();
+    cleanups[0]();
+    const ended = {
+      ...lifecycle,
+      phase: 'ended' as const,
+      executionStatus: 'cancelled' as const,
+      outcome: 'cancelled' as const,
+      endedAt: 120,
+      executionDurationMs: 20,
+    };
+    eventEmitter.emit(
+      AgentEventType.TOOL_RESULT,
+      createToolResultEvent({
+        name: 'shell',
+        callId: 'same',
+        success: false,
+        lifecycle: ended,
+      }),
+    );
+    await Promise.resolve();
+    const frames = sendUpdateSpy.mock.calls
+      .map(([update]) => update)
+      .filter((update) => update._meta?.toolLifecycle);
+    expect(frames.map((update) => update._meta.toolLifecycle)).toEqual([
+      lifecycle,
+      ended,
+    ]);
+    expect(
+      frames.every(
+        (update) => update.content === undefined && update.status === undefined,
+      ),
+    ).toBe(true);
+    cleanups[0]();
+    expect(
+      (eventEmitter as unknown as EventEmitter).listenerCount(
+        AgentEventType.TOOL_OUTPUT_UPDATE,
+      ),
+    ).toBe(0);
+  });
+
   describe('setup', () => {
+    it.each([
+      ['GENERAL-PURPOSE', 'general-purpose'],
+      ['mixed-casereviewer', 'Mixed-CaseReviewer'],
+    ])(
+      'uses START definition %s → %s for stream and tool frames',
+      async (raw, name) => {
+        tracker = new SubAgentTracker(
+          mockContext,
+          mockClient,
+          'parent-call-123',
+          raw,
+          undefined,
+          undefined,
+          undefined,
+          { agentName: '/root/reviewer', depth: 1, kind: 'teammate' },
+        );
+        const cleanups = tracker.setup(eventEmitter, abortController.signal);
+        const start = {
+          subagentId: 'test-subagent',
+          name,
+          tools: ['read_file'],
+          timestamp: Date.now(),
+        } satisfies AgentStartEvent;
+        eventEmitter.emit(AgentEventType.START, start);
+        eventEmitter.emit(
+          AgentEventType.STREAM_TEXT,
+          createStreamTextEvent({ text: 'Resolved definition output' }),
+        );
+        eventEmitter.emit(
+          AgentEventType.TOOL_CALL,
+          createToolCallEvent({ name: 'read_file', callId: 'canonical-call' }),
+        );
+        eventEmitter.emit(
+          AgentEventType.TOOL_RESULT,
+          createToolResultEvent({
+            name: 'read_file',
+            callId: 'canonical-call',
+            success: true,
+          }),
+        );
+
+        await vi.waitFor(() => expect(sendUpdateSpy).toHaveBeenCalledTimes(4));
+        const agent = {
+          agentName: `/root/reviewer/${name}`,
+          depth: 2,
+          kind: 'subagent',
+        };
+        expect(tracker.agentIdentity).toEqual(agent);
+        expect(
+          sendUpdateSpy.mock.calls.map(([update]) => update.sessionUpdate),
+        ).toEqual([
+          'agent_message_chunk',
+          'tool_call_update',
+          'tool_call',
+          'tool_call_update',
+        ]);
+        for (const [update] of sendUpdateSpy.mock.calls) {
+          expect(update._meta).toEqual(
+            expect.objectContaining({ subagentType: name, agent }),
+          );
+        }
+
+        cleanups[0]();
+        expect(
+          (eventEmitter as unknown as EventEmitter).listenerCount(
+            AgentEventType.START,
+          ),
+        ).toBe(0);
+        eventEmitter.emit(AgentEventType.START, { ...start, name: 'detached' });
+        expect(tracker.agentIdentity).toEqual(agent);
+      },
+    );
+
     it('should return cleanup function', () => {
       const cleanups = tracker.setup(eventEmitter, abortController.signal);
 

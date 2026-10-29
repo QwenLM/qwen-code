@@ -31,6 +31,7 @@ import {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -380,6 +381,296 @@ describe('HostedMonitorWakeScheduler', () => {
     expect(ran).toEqual(['m:1', 'm:2']);
     scheduler.close();
   });
+
+  it('holds the pump for exclusive work, then runs the kick that landed meanwhile', async () => {
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => queue[0],
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const exclusive = scheduler.exclusive(async () => {
+      queue.push({ turnId: 'm:1', text: 'x' });
+      scheduler.kick();
+      await held;
+    }, 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(ran).toEqual([]);
+    release();
+    await exclusive;
+    await poll(() => ran.length === 1);
+    expect(ran).toEqual(['m:1']);
+    scheduler.close();
+  });
+
+  it('hands a pass in flight over to an exclusive caller before a remembered kick', async () => {
+    let reads = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 1) await opened;
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    let readsAtWork: number | undefined;
+    const exclusive = scheduler.exclusive(async () => {
+      readsAtWork = reads;
+    }, 1_000);
+    // Remembered for after both the pass and the work.
+    scheduler.kick();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(readsAtWork).toBeUndefined();
+    open();
+    await exclusive;
+    expect(readsAtWork).toBe(1);
+    await poll(() => reads === 2);
+    scheduler.close();
+  });
+
+  it('leaves the pump to a pass that outlasts the wait, without running the work', async () => {
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    let reads = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 1) await opened;
+        return queue[0];
+      },
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    const work = vi.fn(async () => undefined);
+    await scheduler.exclusive(work, 20);
+    open();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // The expired waiter is gone: the pass idled the pump, so the next
+    // kick runs, and exclusive work starts at once.
+    queue.push({ turnId: 'm:1', text: 'x' });
+    scheduler.kick();
+    await poll(() => ran.length === 1);
+    expect(work).not.toHaveBeenCalled();
+    await scheduler.exclusive(work, 20);
+    expect(work).toHaveBeenCalledTimes(1);
+    scheduler.close();
+  });
+
+  it('releases the pump when exclusive work throws', async () => {
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => queue[0],
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    await expect(
+      scheduler.exclusive(async () => {
+        throw new Error('settle lost');
+      }, 1_000),
+    ).rejects.toThrow('settle lost');
+    queue.push({ turnId: 'm:1', text: 'x' });
+    scheduler.kick();
+    await poll(() => ran.length === 1);
+    scheduler.close();
+  });
+
+  it('hands the pump to one waiter at a time, first come first served, and holds it for each', async () => {
+    let reads = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 1) await opened;
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    let holders = 0;
+    let mostHolders = 0;
+    let readsDuringWork = 0;
+    const order: string[] = [];
+    const work = (name: string) => async () => {
+      order.push(name);
+      holders += 1;
+      mostHolders = Math.max(mostHolders, holders);
+      // A kick during the handed-over work starts no pass.
+      scheduler.kick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      readsDuringWork = Math.max(readsDuringWork, reads);
+      holders -= 1;
+    };
+    const both = Promise.all([
+      scheduler.exclusive(work('first'), 1_000),
+      scheduler.exclusive(work('second'), 1_000),
+    ]);
+    open();
+    await both;
+    expect(order).toEqual(['first', 'second']);
+    expect(mostHolders).toBe(1);
+    expect(readsDuringWork).toBe(1);
+    // The kicks the works remembered run once both are done.
+    await poll(() => reads === 2);
+    scheduler.close();
+  });
+
+  it('waits out a stalled hold once, not once per caller', async () => {
+    let reads = 0;
+    const gates: Array<() => void> = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    const work = vi.fn(async () => undefined);
+    await scheduler.exclusive(work, 20);
+    // The pass has outlasted one full wait: a later caller does not wait
+    // for it again.
+    expect(
+      await Promise.race([
+        scheduler.exclusive(work, 60_000).then(() => 'returned'),
+        new Promise((resolve) => setTimeout(() => resolve('waiting'), 500)),
+      ]),
+    ).toBe('returned');
+    expect(work).not.toHaveBeenCalled();
+    gates[0]();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // A new pass is a new hold, waited for again.
+    scheduler.kick();
+    await poll(() => reads === 2);
+    const handedOver = scheduler.exclusive(work, 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(work).not.toHaveBeenCalled();
+    gates[1]();
+    await handedOver;
+    expect(work).toHaveBeenCalledTimes(1);
+    scheduler.close();
+  });
+
+  it('lets its waiters go when closed, without their work', async () => {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        await opened;
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    const work = vi.fn(async () => undefined);
+    const waiting = scheduler.exclusive(work, 60_000);
+    scheduler.close();
+    // Let go at the close, long before its wait would expire.
+    await waiting;
+    // Nor does a later caller wait for the pass still in flight.
+    await scheduler.exclusive(work, 60_000);
+    expect(work).not.toHaveBeenCalled();
+    open();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // With that pass over, none can start: the work runs, so a Session
+    // whose close failed after its pump closed keeps its repair.
+    await scheduler.exclusive(work, 60_000);
+    expect(work).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-arms a pass that ends blocked when its settle-verify read finds nothing', async () => {
+    // A stopped Session's message turn: the settle-verify read filters the
+    // input the pass just blocked on.
+    let blocked = false;
+    let visible = true;
+    let recoveries = 0;
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () =>
+          visible ? { turnId: 'msg:1', text: 'x' } : undefined,
+        state: () => (blocked ? 'blocked' : 'idle'),
+        runTurn: async () => {
+          blocked = true;
+          visible = false;
+          return 'recovery';
+        },
+        recoverBlocked: async () => {
+          recoveries += 1;
+          blocked = false;
+        },
+        failed: () => {
+          throw new Error('pump must not fail here');
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await poll(() => recoveries === 1);
+    expect(blocked).toBe(false);
+    scheduler.close();
+  });
 });
 
 describe('wakeHasPriorAttempt', () => {
@@ -533,6 +824,7 @@ describe('createMonitorWakeRunTurn', () => {
     ['tool', () => new HostedToolRecoveryRequiredError(new Error('parked'))],
     ['mcp', () => new HostedMcpRecoveryRequiredError()],
     ['hook', () => new HostedHookRecoveryRequiredError()],
+    ['model preparation', () => new LlmRequestPreparationError('store lost')],
   ])(
     'leaves a %s recovery-required input unsettled rather than consuming it',
     async (_kind, makeCause) => {
@@ -1353,6 +1645,63 @@ describe('settlePendingMonitorInputs', () => {
           authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['run-1:accept:notify']);
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  // #13803 (K2): a workflow child's acceptance notification reads as a
+  // monitor-family source through the default sources list — the close drain
+  // never has to name it.
+  it('pins the fallback: a workflow child notification also settles through the default sources list (production never takes it, the close drain names its own capability list)', async () => {
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'workflow',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
       const settled = await settlePendingMonitorInputs({
         authority,
         sink: session.sink,

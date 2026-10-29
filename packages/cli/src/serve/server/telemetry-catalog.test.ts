@@ -88,6 +88,7 @@ describe('legacy session telemetry route drift guard', () => {
         typeof registerSseEventsRoutes
       >[1]['workspaceRegistry'],
       sendBridgeError: vi.fn(),
+      resolveSubagentSessionRuntime: vi.fn(),
     });
     registerA2uiActionRoutes(app, {
       boundWorkspace: '/workspace/primary',
@@ -103,7 +104,7 @@ describe('legacy session telemetry route drift guard', () => {
       .map(({ method, path }) => `${method} ${path}`)
       .sort();
 
-    expect(registered).toHaveLength(79);
+    expect(registered).toHaveLength(85);
     expect(registered).toEqual(catalog);
   });
 });

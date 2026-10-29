@@ -171,6 +171,7 @@ export {
   type DaemonPendingPromptsResult,
   type DaemonRemovePendingPromptResult,
   type DaemonRemoveMidTurnMessageResult,
+  type DaemonSendMidTurnMessagesNowResult,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,
@@ -274,8 +275,10 @@ export {
   type DaemonSessionSubscribeOptions,
   type DaemonSessionState,
   type DaemonSessionSummary,
+  type DaemonSessionShellTaskRuntime,
   type DaemonSessionSupportedCommandsStatus,
   type DaemonSessionTaskLifecycleStatus,
+  type DaemonSessionTaskRuntimeStatus,
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
   type DaemonSessionTasksStatus,
@@ -503,6 +506,7 @@ export type { QueryOptions } from './query/createQuery.js';
 export type {
   EffortOverride,
   EffortStatus,
+  WorkflowModeState,
   EffortTier,
 } from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';

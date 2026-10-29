@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,6 +26,14 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
 import { readManagedSessionRecords } from './managed-session-message-projection.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import {
+  parseHistoryMaintenance,
+  type HistoryMaintenance,
+} from './managed-history-maintenance-record.js';
+import {
+  publishManagedMessageBody,
+  readManagedMessageBody,
+} from './managed-message-chunks.js';
 
 const DIGEST = 'f'.repeat(64);
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
@@ -94,7 +103,7 @@ async function createHarness(): Promise<Harness> {
     transcriptPath,
   });
   const authority = await LocalManagedSessionAuthority.open({
-    lease,
+    journal: LocalJsonlManagedSessionJournalStore.fromLease(lease, sessionKey),
     sessionKey,
     cwd: projectRoot,
     version: 'test',
@@ -192,6 +201,291 @@ async function transcriptSubtypes(
 }
 
 describe('managed session record sink', () => {
+  it('atomically applies a chunked compression and its outcome while preserving queued wake inputs', async () => {
+    const harness = await createHarness();
+    const user = record({
+      uuid: 'raw-user',
+      message: { role: 'user', parts: [{ text: 'Original request' }] },
+    });
+    const answer = record({
+      uuid: 'raw-answer',
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: 'Original response' }] },
+    });
+    await harness.sink.write(user);
+    await harness.sink.write(answer);
+    const cut = harness.authority.committedSequence;
+    const requestRef = await harness.store.publish(
+      'managed-compaction-request',
+      Buffer.from('{}'),
+    );
+    const actor = {
+      class: 'harness' as const,
+      activation: { activationId: 'act-1', epoch: 1 },
+    };
+    const command = (phase: string) => ({
+      operation: 'historyMaintenance',
+      commandId: `manual:${phase}`,
+      sessionKey,
+      contentDigest: requestRef.digest,
+    });
+    let maintenance: HistoryMaintenance = {
+      schemaVersion: 1,
+      kind: 'context_compression',
+      operationId: 'manual',
+      expectedCompactionRevision: 0,
+      historyCutSequence: cut,
+      requestRef,
+      phase: 'admitted',
+      attempt: 0,
+      candidateRef: null,
+      outcome: null,
+      failureCode: null,
+      compactionRevision: null,
+      run: {
+        state: 'admitted',
+        reason: null,
+        definition: null,
+        executionCallId: null,
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: null,
+        runtime: null,
+        delivery: null,
+      },
+    };
+    await expect(
+      harness.authority.commitHistoryMaintenance(
+        command('stale-revision'),
+        { record: { ...maintenance, expectedCompactionRevision: 1 } },
+        actor,
+      ),
+    ).rejects.toThrow('compaction revision changed');
+    await expect(
+      harness.authority.commitHistoryMaintenance(
+        command('stale-cut'),
+        { record: { ...maintenance, historyCutSequence: cut - 1 } },
+        actor,
+      ),
+    ).rejects.toThrow('history changed or has pending input');
+    await expect(
+      harness.authority.commitHistoryMaintenance(
+        command('fenced-writer'),
+        { record: maintenance },
+        { ...actor, activation: { ...actor.activation, epoch: 2 } },
+      ),
+    ).rejects.toThrow('current Harness activation');
+    await harness.authority.commitHistoryMaintenance(
+      command('admitted'),
+      { record: maintenance },
+      actor,
+    );
+    await expect(
+      harness.sink.write(record({ uuid: 'racing-message' })),
+    ).rejects.toThrow('history maintenance is active');
+    const inputRef = await harness.store.publish(
+      'managed-input',
+      Buffer.from('{"text":"Wake later"}'),
+    );
+    await expect(
+      harness.authority.submitInput(command('racing-user'), {
+        inputId: 'racing-user',
+        turnId: 'racing-user',
+        source: 'user',
+        contentRef: inputRef,
+        deadline: null,
+        admissionRef: inputRef,
+        wakeReason: 'input',
+      }),
+    ).rejects.toThrow('history maintenance is active');
+    await harness.authority.submitInput(command('wake'), {
+      inputId: 'wake-input',
+      turnId: 'wake-input',
+      source: 'automation',
+      contentRef: inputRef,
+      deadline: null,
+      admissionRef: inputRef,
+      wakeReason: 'input',
+    });
+    maintenance = {
+      ...maintenance,
+      phase: 'generating',
+      attempt: 1,
+      run: { ...maintenance.run, state: 'running' },
+    };
+    await harness.authority.commitHistoryMaintenance(
+      command('generating'),
+      { record: maintenance },
+      actor,
+    );
+    const compressedHistory = [
+      { role: 'user', parts: [{ text: '压缩'.repeat(20_000) }] },
+      { role: 'model', parts: [{ text: 'Acknowledged' }] },
+    ];
+    const snapshot = record({
+      uuid: 'manual',
+      type: 'system',
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 40_000,
+          compressionStatus: 1,
+        },
+        compressedHistory,
+      } as ChatRecord['systemPayload'],
+    });
+    const summaryRef = await publishManagedMessageBody(
+      harness.store,
+      Buffer.from(JSON.stringify(snapshot)),
+    );
+    expect(summaryRef.kind).toBe('managed-message-chunks');
+    maintenance = {
+      ...maintenance,
+      phase: 'candidate',
+      candidateRef: summaryRef,
+    };
+    await harness.authority.commitHistoryMaintenance(
+      command('candidate'),
+      { record: maintenance },
+      actor,
+    );
+    const final = {
+      ...maintenance,
+      phase: 'settled' as const,
+      outcome: 'compressed' as const,
+      run: { ...maintenance.run, state: 'settled' as const },
+    };
+    const compaction = {
+      summaryRef,
+      compactionId: 'manual',
+      fromSequence: 1,
+      toSequence: cut,
+      replacedMessageIds: [user.uuid, answer.uuid],
+    };
+    const result = await harness.authority.commitHistoryMaintenance(
+      command('settled'),
+      { record: final, compaction },
+      actor,
+    );
+    expect(result.receipt.lastSequence).toBe(result.receipt.firstSequence + 1);
+    const saved = parseHistoryMaintenance(
+      harness.authority.extensionRecord('history_maintenance', 'manual')!
+        .record,
+    );
+    expect(saved.compactionRevision).toBe(result.receipt.firstSequence);
+    expect(harness.authority.activeHistoryMaintenance).toBeUndefined();
+    expect(await harness.sink.project()).toEqual([user, answer]);
+    expect((await harness.sink.projectModelHistory()).apiHistory).toEqual(
+      compressedHistory,
+    );
+    expect(
+      JSON.parse(
+        (
+          await readManagedMessageBody(
+            (ref) => harness.store.read(ref),
+            summaryRef,
+          )
+        ).toString(),
+      ),
+    ).toEqual(snapshot);
+    const replay = await harness.authority.commitHistoryMaintenance(
+      command('settled'),
+      { record: final, compaction },
+      actor,
+    );
+    expect(replay.receipt.replayed).toBe(true);
+    expect(
+      harness.authority
+        .eventsInSequenceRange(1, harness.authority.committedSequence)
+        .filter((event) => event.kind === 'context.compacted'),
+    ).toHaveLength(1);
+    expect(
+      harness.authority
+        .eventsInSequenceRange(1, harness.authority.committedSequence)
+        .find((event) => event.kind === 'input.accepted')?.payload['inputId'],
+    ).toBe('wake-input');
+    await harness.close();
+  });
+
+  it('stores large automatic compression snapshots in chunks and restores later model history', async () => {
+    const harness = await createHarness();
+    const original = record({
+      uuid: 'original',
+      message: { role: 'user', parts: [{ text: 'Old raw history' }] },
+    });
+    await harness.sink.write(original);
+    const compressedHistory = [
+      { role: 'user', parts: [{ text: 'summary'.repeat(15_000) }] },
+      { role: 'model', parts: [{ text: 'Acknowledged' }] },
+    ];
+    await harness.sink.write(
+      record({
+        uuid: 'auto-summary',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 40_000,
+            newTokenCount: 25_000,
+            compressionStatus: 1,
+          },
+          compressedHistory,
+        } as ChatRecord['systemPayload'],
+      }),
+    );
+    const later = record({
+      uuid: 'later-input',
+      message: { role: 'user', parts: [{ text: 'Continue' }] },
+    });
+    await harness.sink.write(later);
+    // toMatchObject: restored records also carry their record-derived rewind id.
+    expect((await harness.sink.projectModelHistory()).apiHistory).toMatchObject(
+      [...compressedHistory, later.message],
+    );
+    expect(await harness.sink.project()).toEqual([original, later]);
+    const cold = await readManagedSessionRecords({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
+      sessionKey,
+    });
+    expect(cold.some((item) => item.subtype === 'chat_compression')).toBe(true);
+    await harness.close();
+  });
+  it('round-trips resumed attempt identities through the managed projection', async () => {
+    const harness = await createHarness();
+    const attempt = record({
+      type: 'system',
+      subtype: 'turn_attempt',
+      promptId: 'client-1',
+      daemonPromptId: 'daemon-2',
+    });
+    await harness.sink.write(attempt);
+    expect(await harness.sink.project()).toEqual([attempt]);
+    await harness.close();
+  });
+
+  it('round-trips marked memory snapshots through the managed projection', async () => {
+    const harness = await createHarness();
+    const snapshot = record({
+      type: 'system',
+      subtype: 'memory_catalog_snapshot',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            text: 'full catalog',
+            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+          },
+        ],
+      },
+    });
+    await harness.sink.write(snapshot);
+    expect(await harness.sink.project()).toEqual([snapshot]);
+    await harness.close();
+  });
+
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();
     expect(harness.sink.canCarry(record({ type: 'user' }))).toBe(true);
@@ -592,6 +886,35 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('refuses to settle a turn whose result record is not reader-facing', async () => {
+    const harness = await createHarness();
+    const before = harness.authority.committedSequence;
+    // The session is still initial, so this settle takes the direct
+    // appendExecutionEvent path rather than commitTurnComplete.
+    await expect(
+      harness.sink.write(
+        record({
+          uuid: 'rec-turn-foreign',
+          sessionId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: 'turn-foreign',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        } as Partial<ChatRecord>),
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    expect(
+      harness.authority
+        .readEvents()
+        .some((event) => event.kind === 'turn.settled'),
+    ).toBe(false);
+    await harness.close();
+  });
+
   it('refuses a turn result with no prompt id or state', async () => {
     const harness = await createHarness();
     await expect(
@@ -832,7 +1155,7 @@ describe('managed session record sink', () => {
         type: 'system',
         subtype,
         systemPayload,
-      } as Partial<ChatRecord>);
+      } as unknown as Partial<ChatRecord>);
       await harness.sink.write(carried);
       // The name names the channel: a carried subtype lands as one
       // message.committed event and no domain record, or the live

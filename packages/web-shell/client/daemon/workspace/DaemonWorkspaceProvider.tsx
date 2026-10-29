@@ -13,8 +13,19 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { DaemonBrand, DaemonCapabilities } from '@qwen-code/sdk/daemon';
-import { DaemonClient, DaemonHttpError } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonBrand,
+  DaemonCapabilities,
+  DaemonClient,
+} from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonAvailability,
+  createDaemonClient,
+  registerDaemonAvailability,
+} from '../availability.js';
+import { DaemonAvailabilityContext } from '../availability-context.js';
+import { getSessionCatalogStore } from '../../session-catalog/session-catalog-store.js';
 import { createDaemonWorkspaceActions } from './actions.js';
 import { setBoundedMapEntry } from '../../utils/bounded-map.js';
 import type {
@@ -73,10 +84,6 @@ function recordProviderCopy(id: string, provided: boolean): void {
   setBoundedMapEntry(registry, id, next, MAX_TRACKED_PROVIDER_COPIES);
 }
 
-// Module-level sentinel for deferred-disposal StrictMode guard.
-// See the useEffect cleanup in DaemonWorkspaceProvider for details.
-let pendingDisposeClient: DaemonClient | undefined;
-
 /**
  * Delay before the one bounded retry after a retryable brand-fetch failure.
  * Exported so the provider's own tests can drive it on fake timers instead
@@ -101,11 +108,21 @@ export function DaemonWorkspaceProvider({
   // Render-phase so the breadcrumb exists before any child can throw, and
   // recorded even when no client is built (autoConnect={false}).
   recordProviderCopy(moduleInstanceId, false);
+  const availability = useMemo(
+    () =>
+      autoConnect
+        ? new DaemonAvailability(baseUrl, token, transport?.restFetch)
+        : undefined,
+    [baseUrl, token, transport, autoConnect],
+  );
   const client = useMemo(
     () =>
-      autoConnect ? new DaemonClient({ baseUrl, token, transport }) : undefined,
-    [autoConnect, baseUrl, token, transport],
+      autoConnect && availability
+        ? createDaemonClient({ baseUrl, token, transport }, availability)
+        : undefined,
+    [autoConnect, baseUrl, token, transport, availability],
   );
+  const pendingDisposeRef = useRef(new Set<DaemonClient>());
   const clientRef = useRef<DaemonClient | undefined>(client);
   clientRef.current = client;
   const capabilitiesClientRef = useRef<DaemonClient | undefined>(undefined);
@@ -123,6 +140,8 @@ export function DaemonWorkspaceProvider({
   const [status, setStatus] = useState<DaemonWorkspaceStatus>(
     autoConnect ? 'connecting' : 'idle',
   );
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const [error, setError] = useState<Error | undefined>(undefined);
 
   // Reset the brand in the RENDER that observes a new client, not in the
@@ -228,9 +247,8 @@ export function DaemonWorkspaceProvider({
     // Cancel any pending deferred disposal from a previous cleanup (handles
     // React StrictMode double-invocation: the first cleanup schedules a
     // disposal microtask, but the synchronous second mount cancels it).
-    if (pendingDisposeClient === client) {
-      pendingDisposeClient = undefined;
-    }
+    const pending = pendingDisposeRef.current;
+    pending.delete(client);
 
     let disposed = false;
     const initialPromise = getCapabilities();
@@ -266,15 +284,15 @@ export function DaemonWorkspaceProvider({
       // re-mount cancels disposal before the microtask fires, preserving
       // the memoized client. On real unmount or client replacement no
       // cancellation occurs and disposal proceeds.
-      pendingDisposeClient = client;
+      pending.add(client);
       queueMicrotask(() => {
-        if (pendingDisposeClient === client) {
-          pendingDisposeClient = undefined;
+        if (pending.delete(client)) {
           client.dispose();
+          availability?.dispose();
         }
       });
     };
-  }, [client, getCapabilities]);
+  }, [client, getCapabilities, availability]);
 
   // Brand is fetched beside capabilities but deliberately stays out of the
   // connection status machine. An older daemon without `GET /brand`, a logo the
@@ -390,6 +408,52 @@ export function DaemonWorkspaceProvider({
     fetchBrand(clientRef.current);
   }, [brand, brandSettled, fetchBrand]);
 
+  const refreshBrandRef = useRef(refreshBrand);
+  refreshBrandRef.current = refreshBrand;
+  useEffect(() => {
+    if (!client || !availability) return;
+    const unregister = registerDaemonAvailability(baseUrl, token, availability);
+    let wasAvailable = availability.getSnapshot() === 'available';
+    const update = () => {
+      const ready = availability.getSnapshot() === 'available';
+      const recovered = ready && !wasAvailable;
+      wasAvailable = ready;
+      getSessionCatalogStore(client).setPaused(!ready);
+      if (!ready) return;
+      const caps = availability.recoveredCapabilities;
+      // A diagnostic probe on a healthy connection republishes `available`
+      // with whatever payload it read; adopting it would let that older
+      // snapshot overwrite a newer refreshCapabilities result. Only a probe
+      // that repairs the connection may replace the cached capabilities.
+      if (caps && (recovered || statusRef.current !== 'connected')) {
+        capabilitiesClientRef.current = client;
+        capabilitiesGenerationRef.current++;
+        capabilitiesPromiseRef.current = Promise.resolve(caps);
+        setCapabilities(caps);
+        setStatus('connected');
+        setError(undefined);
+        if (recovered) refreshBrandRef.current();
+      }
+    };
+    const unsubscribe = availability.subscribe(update);
+    update();
+    const foreground = () => {
+      const snapshot = availability.getSnapshot();
+      if (
+        document.visibilityState === 'visible' &&
+        (snapshot === 'unavailable' || snapshot === 'auth-required')
+      ) {
+        void availability.check(true);
+      }
+    };
+    document.addEventListener('visibilitychange', foreground);
+    return () => {
+      unsubscribe();
+      queueMicrotask(unregister);
+      document.removeEventListener('visibilitychange', foreground);
+    };
+  }, [client, baseUrl, token, availability]);
+
   resolvedCwdRef.current = capabilities?.workspaceCwd ?? workspaceCwd;
 
   const workspaceActions = useMemo<DaemonWorkspaceActions>(
@@ -438,9 +502,13 @@ export function DaemonWorkspaceProvider({
   ]);
 
   return (
-    <DaemonWorkspaceContext.Provider value={contextValue}>
-      {children}
-    </DaemonWorkspaceContext.Provider>
+    <DaemonAvailabilityContext.Provider
+      value={client ? availability : undefined}
+    >
+      <DaemonWorkspaceContext.Provider value={contextValue}>
+        {children}
+      </DaemonWorkspaceContext.Provider>
+    </DaemonAvailabilityContext.Provider>
   );
 }
 

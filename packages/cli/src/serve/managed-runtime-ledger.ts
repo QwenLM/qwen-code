@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   type Dirent,
+  chmodSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -18,6 +19,7 @@ import { readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { UnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 
 const debugLogger = createDebugLogger('MANAGED_RUNTIME_LEDGER');
 
@@ -57,6 +59,7 @@ const POSIX_PS = '/bin/ps';
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
 export interface ManagedRuntimeLedgerWorkerRecord {
+  readonly groupOwned?: boolean;
   readonly pid: number;
   /** The worker's own process group; its pid on Windows, which has none. */
   readonly pgid: number;
@@ -162,9 +165,12 @@ export interface ProcessTableRow {
    * procps's negative wraparound): the row still COUNTS as a member — a
    * group whose only row is undatable is not gone — but no age judgement
    * may ever be made from it, so the group can only judge 'unknown' (held
-   * unproven), never 'gone' and never 'recycled'.
+   * unproven), never 'gone' and never 'recycled'. A zombie row is the one
+   * exception: it runs nothing, so the identity judges drop it first.
    */
   readonly runningMs: number | undefined;
+  /** ps's STAT column; a leading `Z` is a zombie awaiting reap, not live. */
+  readonly state?: string;
   readonly args: string;
 }
 
@@ -191,11 +197,14 @@ function parseProcessTable(
 ): ReadonlyMap<number, ProcessTableRow> {
   const rows = new Map<number, ProcessTableRow>();
   for (const line of stdout.split('\n')) {
-    const match = /^(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/u.exec(line.trim());
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/u.exec(
+      line.trim(),
+    );
     if (!match) continue;
     const pid = Number.parseInt(match[1]!, 10);
     const pgid = Number.parseInt(match[2]!, 10);
     const runningMs = parsePsElapsed(match[3]!);
+    const state = match[4]!;
     if (
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
@@ -207,7 +216,7 @@ function parseProcessTable(
     // A row whose elapsed column cannot be dated stays in the table:
     // dropping it would read the group's only member as absent — 'gone',
     // resolved silently, ledger deleted with the live group running.
-    rows.set(pid, { pid, pgid, runningMs, args: match[4] ?? '' });
+    rows.set(pid, { pid, pgid, runningMs, state, args: match[5] ?? '' });
   }
   return rows;
 }
@@ -225,7 +234,7 @@ export function queryProcessTable(): ReadonlyMap<number, ProcessTableRow> {
     // -ww: procps truncates every row to the terminal width even into a
     // pipe, and the identity markers are matched at the END of the args
     // column — a narrow inherited COLUMNS would cut them off a live row.
-    ['-A', '-ww', '-o', 'pid=,pgid=,etime=,args='],
+    ['-A', '-ww', '-o', 'pid=,pgid=,etime=,stat=,args='],
     {
       encoding: 'utf8',
       maxBuffer: PROCESS_QUERY_MAX_BUFFER,
@@ -301,6 +310,7 @@ function judgeWorkerIdentity(
   now: number,
   platform: NodeJS.Platform = process.platform,
 ): WorkerIdentity {
+  if (isZombieRow(row)) return 'recycled';
   if (!row.args.includes('managed-runtime-worker')) return 'recycled';
   // The pid answers but its age cannot be read: nothing here dates the
   // process AS the record's, and nothing proves it a recycler either.
@@ -343,12 +353,21 @@ function groupMatchesRecord(
   );
 }
 
+/** A zombie has exited and only awaits its parent's reap; it runs nothing.
+ * A multithreaded leader in EXIT_ZOMBIE can still have live sibling threads;
+ * procps marks that row with `l` (e.g. `Zl`, `Zsl`), so only a zombie without
+ * that marker has nothing left to run. */
+function isZombieRow(row: ProcessTableRow): boolean {
+  return row.state?.startsWith('Z') === true && !row.state.includes('l');
+}
+
 /** What the live table can prove about the group a record holds. */
 type GroupIdentity = 'gone' | 'ours' | 'recycled' | 'unknown';
 
 /**
- * Judges the group `record` holds against a live table. `gone`: no member
- * left. `ours`: some member old enough to have been there at the record's
+ * Judges the group `record` holds against a live table. `gone`: no live
+ * member left (zombies are not live members). `ours`: some member old enough
+ * to have been there at the record's
  * write still runs — judged first, so a SIGTERM-ignoring survivor keeps
  * the group accountable even where its dead leader's pid has been recycled
  * to a younger leader. `recycled`: with no old-enough member, a live young
@@ -368,10 +387,18 @@ function judgeGroupIdentity(
   platform: NodeJS.Platform = process.platform,
 ): GroupIdentity | undefined {
   if (table === undefined) return undefined;
-  const members = [...table.values()].filter((row) => row.pgid === record.pgid);
+  const rows = [...table.values()].filter((row) => row.pgid === record.pgid);
+  const members = rows.filter((row) => !isZombieRow(row));
   if (members.length === 0) return 'gone';
-  if (groupMatchesRecord(members, record, now, platform)) return 'ours';
-  const leader = members.find((member) => member.pid === record.pgid);
+  // The age/ownership check reads every row, including a zombie leader: its
+  // start time is still evidence that this is the recorded group, and a live
+  // child created later than the record must not erase that evidence.
+  if (groupMatchesRecord(rows, record, now, platform)) return 'ours';
+  // The leader lookup must also see a zombie leader: a young zombie on a
+  // reused pgid proves the recorded group is gone ('recycled'), while
+  // filtering it out leaves an unrelated live child to be signalled in
+  // witnessed mode or the stale ledger held in unwitnessed mode.
+  const leader = rows.find((member) => member.pid === record.pgid);
   if (
     leader !== undefined &&
     leader.runningMs !== undefined &&
@@ -459,9 +486,37 @@ function writeLedgerDocument(
   writeFileSync(
     temporary,
     JSON.stringify({ version: LEDGER_FILE_VERSION, worker, groups }),
-    'utf8',
+    // Worker pids, group ids and call ids are read-side hygiene: another
+    // local user who can traverse $HOME/.qwen should not read them, so the
+    // file (and, via rename, its finished shape) lands owner-only.
+    { encoding: 'utf8', mode: 0o600 },
   );
   renameSync(temporary, workFile);
+}
+
+/**
+ * The ledger directory, owner-only: it guards the same secrets as the files
+ * inside it. A recursive mkdirSync's mode would land on every ancestor it
+ * creates — the shared tmp tree above the ledger dir is not ours to tighten
+ * — and on none it finds existing, so the leaf alone is chmod'd, which also
+ * heals a loose directory an earlier build left behind.
+ */
+export function ensureLedgerDirectory(ledgerDir: string): void {
+  mkdirSync(ledgerDir, { recursive: true });
+  if (process.platform === 'win32') return;
+  try {
+    chmodSync(ledgerDir, 0o700);
+  } catch (error) {
+    // Best-effort: a truly unwritable dir fails the ledger write itself. But
+    // a chmod the owner or the mount refuses while the dir stays writable —
+    // a root-created leaf, sshfs/CIFS — leaves the ledger readable, and that
+    // degradation must not be silent.
+    debugLogger.warn(
+      `Managed Runtime ledger directory ${ledgerDir} could not be made owner-only: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
@@ -473,6 +528,11 @@ function writeLedgerDocument(
 export class ManagedRuntimeLedger {
   private readonly groups = new Map<number, ManagedRuntimeLedgerGroupRecord>();
   private watchdog?: NodeJS.Timeout;
+  private writeFailed = false;
+
+  get hasIntegrityFailure(): boolean {
+    return this.writeFailed;
+  }
 
   private constructor(
     readonly workFile: string,
@@ -488,7 +548,7 @@ export class ManagedRuntimeLedger {
     readonly worker: ManagedRuntimeLedgerWorkerRecord;
   }): ManagedRuntimeLedger {
     const ledger = new ManagedRuntimeLedger(options.workFile, options.worker);
-    mkdirSync(path.dirname(options.workFile), { recursive: true });
+    ensureLedgerDirectory(path.dirname(options.workFile));
     ledger.rewrite();
     return ledger;
   }
@@ -514,11 +574,16 @@ export class ManagedRuntimeLedger {
       (group) => group.pgid !== record.pgid,
     );
     updated.push(stamped);
-    writeLedgerDocument(
-      this.workFile,
-      this.worker,
-      updated.map((group) => ({ ...group })),
-    );
+    try {
+      writeLedgerDocument(
+        this.workFile,
+        this.worker,
+        updated.map((group) => ({ ...group })),
+      );
+    } catch (error) {
+      this.writeFailed = true;
+      throw error;
+    }
     this.groups.set(record.pgid, stamped);
   }
 
@@ -537,6 +602,7 @@ export class ManagedRuntimeLedger {
     try {
       this.rewrite();
     } catch (error) {
+      this.writeFailed = true;
       debugLogger.warn(
         `Managed Runtime ledger ${this.workFile} could not be rewritten: ${
           error instanceof Error ? error.message : String(error)
@@ -630,6 +696,42 @@ export class ManagedRuntimeLedger {
       this.safeRewrite();
     }
     return state;
+  }
+
+  async stopWitnessedGroup(
+    pgid: number,
+    budgetMs: number,
+  ): Promise<ProcessLiveness> {
+    const record = this.groups.get(pgid);
+    if (record === undefined) return 'gone';
+    const identity = judgeGroupIdentity(
+      record,
+      queryTableQuietly(),
+      Date.now(),
+    );
+    if (identity === 'gone' || identity === 'recycled')
+      return this.waitForGroupExit(pgid, 0);
+    if (identity !== 'ours') return 'denied';
+    signalProcessGroup(pgid, 'SIGTERM');
+    if ((await this.waitForGroupExit(pgid, 1000)) === 'gone') return 'gone';
+    const remainingIdentity = judgeGroupIdentity(
+      record,
+      queryTableQuietly(),
+      Date.now(),
+    );
+    if (remainingIdentity === 'gone' || remainingIdentity === 'recycled')
+      return this.waitForGroupExit(pgid, 0);
+    if (remainingIdentity !== 'ours') return 'denied';
+    return this.stopGroup(pgid, budgetMs);
+  }
+
+  async stopGroup(pgid: number, budgetMs: number): Promise<ProcessLiveness> {
+    const record = this.groups.get(pgid);
+    if (record === undefined) return 'gone';
+    if ((await this.waitForGroupExit(pgid, 0)) === 'gone') return 'gone';
+    if (this.groups.get(pgid) !== record) return 'denied';
+    signalProcessGroup(pgid, 'SIGKILL');
+    return this.waitForGroupExit(pgid, budgetMs);
   }
 
   /** Starts pruning dead groups in the background; nothing to await. */
@@ -739,7 +841,10 @@ export type LedgerSweepVerdict =
   | 'held';
 
 /** A stop a sweep could not prove; the ledger stays on disk. */
-export class LedgerSweepUnprovenError extends Error {
+export class LedgerSweepUnprovenError
+  extends Error
+  implements UnprovenSweepReport
+{
   constructor(
     readonly workFile: string,
     readonly remaining: readonly number[],
@@ -833,6 +938,13 @@ export async function sweepWorkerLedger(
     );
   }
   const document = parseLedgerDocument(raw);
+  if (document?.worker.groupOwned === false) {
+    throw new LedgerSweepUnprovenError(
+      workFile,
+      [document.worker.pgid],
+      'Worker process group belongs to its host; only explicit extension-owner reconciliation may stop its registered groups.',
+    );
+  }
   if (!document) {
     // A ledger nobody can read is an operator's evidence, not a retryable
     // stop: a reaper would re-read the same immutable bytes forever and
@@ -881,7 +993,10 @@ export async function sweepWorkerLedger(
   const prove = async (pgid: number): Promise<boolean> => {
     // Only ESRCH (or the caller's idea of 'gone') proves an exit; a transient
     // EPERM during teardown must not end the wait, and a permanent one ends
-    // it unproven at the deadline.
+    // it unproven at the deadline. This stays on the bare liveness probe: a
+    // group killed by this very sweep can turn zombie-only after the judge,
+    // so one proof may time out; the ledger reaper retries on backoff and the
+    // next pass judges the zombie-only group 'gone'.
     const deadline = performance.now() + proofTimeoutMs;
     for (;;) {
       if (liveness(pgid) === 'gone') return true;
@@ -1132,7 +1247,7 @@ function holdsForLiveHost(
   if (!alive(worker.hostPid)) return false;
   if (table === undefined) return worker.hostPid !== 1;
   const host = table.get(worker.hostPid);
-  if (host === undefined) return false;
+  if (host === undefined || isZombieRow(host)) return false;
   if (
     !host.args.includes('--acp') &&
     !host.args.includes('--experimental-acp')

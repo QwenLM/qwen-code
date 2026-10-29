@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // Tests for Config's module-level `sessionEnvClaimed` / `modelEnvClaimed`
 // guards: only the first Config in a process sets QWEN_CODE_SESSION_ID /
@@ -105,7 +106,8 @@ const baseParams: ConfigParameters = {
 // flag resets). That cold transform+evaluate runs several seconds and, under
 // a contended CI runner, crosses the 5s default — a flaky timeout, not a hang.
 // The reset is load-bearing for what these tests check, so give them headroom.
-vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 const ENV_KEYS = [
   'QWEN_CODE_SESSION_ID',
@@ -214,6 +216,45 @@ describe('Config sessionEnvClaimed guard', () => {
 
     expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
     expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
+  });
+
+  it('startNewSession forgets the autofix-pr watches the sessions confirmed, so a resumed one asks again', async () => {
+    const { Config } = await import('./config.js');
+    const grants = await import('../tools/autofix-pr-grants.js');
+    const config = new Config({ ...baseParams });
+    const first = config.getSessionId();
+    const watch = {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/repo',
+      preparedAt: null,
+      worktree: '/w',
+      authorCanPush: true,
+    };
+    grants.recordConfirmedWatch(first, watch);
+    // `/resume` of a session left earlier comes back under its old id.
+    grants.recordConfirmedWatch('resumed-session', watch);
+    config.startNewSession('resumed-session');
+    expect(grants.confirmedWatch(first, 7)).toBeUndefined();
+    expect(grants.confirmedWatch('resumed-session', 7)).toBeUndefined();
+  });
+
+  it('shutdown forgets them too, so a daemon that loads the session again asks again', async () => {
+    const { Config } = await import('./config.js');
+    const grants = await import('../tools/autofix-pr-grants.js');
+    const config = new Config({ ...baseParams, sessionId: 'daemon-session' });
+    grants.recordConfirmedWatch('daemon-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/repo',
+      preparedAt: null,
+      worktree: '/w',
+      authorCanPush: true,
+    });
+    await config.shutdown({ shutdownTelemetry: false });
+    expect(grants.confirmedWatch('daemon-session', 7)).toBeUndefined();
   });
 });
 

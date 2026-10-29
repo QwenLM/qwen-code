@@ -47,6 +47,7 @@ import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
 } from '../../packages/cli/src/serve/local-path-open.js';
+import { isGitAvailable } from '../../packages/cli/src/serve/git-availability.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -86,6 +87,8 @@ let nativeDirectoryPickerAtBoot = false;
 let localPathOpenAtBoot = false;
 // Same boot-time probe pinning as above, for the workspace_local_terminal tag.
 let localTerminalOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the git_workspace_clone tag.
+let gitAvailableAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -165,6 +168,7 @@ beforeAll(async () => {
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
   localPathOpenAtBoot = isLocalPathOpenAvailable();
   localTerminalOpenAtBoot = isLocalTerminalAvailable();
+  gitAvailableAtBoot = isGitAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -353,6 +357,8 @@ describe('qwen serve — capabilities envelope', () => {
     // environment, not a spawn flag) and is spliced at its registry
     // position below, using the boot-time probe captured when the daemon
     // was spawned rather than a fresh probe at assertion time.
+    // `git_workspace_clone` is host-conditional too (the daemon host's
+    // `git` binary) and is spliced the same way.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -394,10 +400,14 @@ describe('qwen serve — capabilities envelope', () => {
       'session_attachment_list',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
+      'session_mid_turn_send_now',
       'session_cancel',
       'session_events',
       'session_artifacts',
       'session_artifacts_persistence',
+      'session_artifact_library',
+      'workspace_artifact_library',
+      'workspace_artifact_library_stream',
       'session_sources',
       'slow_client_warning',
       'typed_event_schema',
@@ -414,6 +424,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_acp_status',
       'auth_provider_install',
       'workspace_memory',
+      'memory_import_v1',
       'workspace_memory_remember',
       'workspace_memory_remember_project_scope',
       'workspace_memory_remember_user_scope',
@@ -430,6 +441,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_tasks',
       'session_agents',
       'session_agent_trace',
+      'scheduled_task_gate',
+      'autofix_pr_watches',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
@@ -437,6 +450,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_status',
       'session_close',
       'session_archive',
+      'session_archive_idle_guard',
       'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',
@@ -455,10 +469,14 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_read_cursor',
       'workspace_file_write',
       'workspace_file_upload',
+      'workspace_file_delete',
+      'workspace_directory_create',
+      'workspace_directory_delete',
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
@@ -478,6 +496,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_generation',
       'workspace_generation',
       'session_btw',
+      'session_btw_stream',
       'mcp_workspace_pool',
       'mcp_pool_restart',
       'auth_device_flow',
@@ -485,6 +504,7 @@ describe('qwen serve — capabilities envelope', () => {
       'non_blocking_prompt',
       'session_language',
       'user_language_sync',
+      'session_message_deletion',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
@@ -492,6 +512,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_branch',
       'session_branch_worktree',
       'workspace_reload',
+      'workspace_model_reload',
       'channel_delivery',
       'channel_control',
       'channel_management',
@@ -501,9 +522,11 @@ describe('qwen serve — capabilities envelope', () => {
       'persistent_workspace_registration',
       'workspace_display_name',
       'scratch_workspace_registration',
+      ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
+      'workspace_directories',
       ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',

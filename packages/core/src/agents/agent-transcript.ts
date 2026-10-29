@@ -20,6 +20,10 @@
  *                            closes
  */
 
+import {
+  TOOL_LIFECYCLE_DRAIN_MS,
+  type ToolLifecycleEvent,
+} from '../telemetry/tool-lifecycle.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -134,6 +138,8 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
+  /** Workflow children have no background registry entry to attest liveness. */
+  workflowOwner?: { pid: number; hostname: string };
   /** Container launches use this legacy field so older readers refuse resume. */
   isolation?: 'worktree' | 'container';
   executionBackend?: 'container';
@@ -142,6 +148,9 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /** Set at launch for a run that is never continued: a restart restores
+   * it as a task that cannot be resumed, for this reason. */
+  resumeBlockedReason?: string;
   /**
    * Immutable launch-time execution policy for a restricted fork.
    * Legacy absence allows every tool except the mandatory interaction-tool
@@ -802,7 +811,46 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
+  const recordedLifecycle = new Set<string>();
+  const pendingLifecycle = new Set<string>();
+  let cleanedUp = false;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  const closeLifecycle = () => {
+    if (drainTimer) clearTimeout(drainTimer);
+    drainTimer = undefined;
+    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+      fd = null;
+    }
+  };
+  const recordLifecycle = (event: ToolLifecycleEvent | undefined) => {
+    if (!event || (cleanedUp && !pendingLifecycle.has(event.executionId)))
+      return;
+    const key = `${event.executionId}:${event.phase}`;
+    if (recordedLifecycle.has(key)) return;
+    recordedLifecycle.add(key);
+    if (event.phase === 'started') pendingLifecycle.add(event.executionId);
+    else pendingLifecycle.delete(event.executionId);
+    if (recordedLifecycle.size > 512)
+      recordedLifecycle.delete(recordedLifecycle.values().next().value!);
+    append({
+      ...baseFields('system'),
+      subtype: 'ui_telemetry',
+      systemPayload: { uiEvent: { ...event, 'event.name': 'tool_lifecycle' } },
+    });
+    if (cleanedUp && pendingLifecycle.size === 0) closeLifecycle();
+  };
+  const onToolResult = (event: { lifecycle?: ToolLifecycleEvent }) =>
+    recordLifecycle(event.lifecycle);
   const onToolOutputUpdate = (event: AgentToolOutputUpdateEvent) => {
+    recordLifecycle(event.lifecycle);
+    if (cleanedUp) return;
     const output = event.outputChunk;
     if (
       typeof output === 'object' &&
@@ -910,15 +958,17 @@ export function attachJsonlTranscriptWriter(
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
   emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
   const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
     emitter.off(
       AgentEventType.TOOL_RESPONSES_FINALIZED,
       onToolResponsesFinalized,
@@ -929,13 +979,10 @@ export function attachJsonlTranscriptWriter(
       streamFlushTimer = null;
     }
     flushStreamText();
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // best effort
-      }
-      fd = null;
+    if (pendingLifecycle.size === 0) closeLifecycle();
+    else {
+      drainTimer = setTimeout(closeLifecycle, TOOL_LIFECYCLE_DRAIN_MS);
+      drainTimer.unref();
     }
     if (streamFd !== null) {
       try {

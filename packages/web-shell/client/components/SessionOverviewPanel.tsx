@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useDaemonAvailability } from '../daemon/availability-context.js';
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -50,6 +52,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { useI18n } from '../i18n';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
@@ -60,6 +63,7 @@ import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-sessi
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { getDaemonToken } from '../config/daemon';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_ORGANIZATION_FEATURE,
@@ -289,6 +293,7 @@ function SessionOverviewPanelInner({
   manageLiveState: boolean;
 }) {
   const { t } = useI18n();
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const connection = useConnection();
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
@@ -412,9 +417,10 @@ function SessionOverviewPanelInner({
   const statusReload = status.reload;
   const statusReport = status.report;
 
+  const available = useDaemonAvailability() === 'available';
   const statusInFlight = useRef(false);
   useEffect(() => {
-    if (liveStateActive) return;
+    if (!available || liveStateActive) return;
     const timer = window.setInterval(() => {
       if (document.hidden || statusInFlight.current) return;
       statusInFlight.current = true;
@@ -423,7 +429,7 @@ function SessionOverviewPanelInner({
       });
     }, STATUS_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [liveStateActive, statusReload]);
+  }, [available, liveStateActive, statusReload]);
 
   const cards = useMemo(
     () =>
@@ -723,20 +729,31 @@ function SessionOverviewPanelInner({
             group.map((card) => [card.sessionId, card]),
           );
           if (mutation === 'archive') {
-            const result = await client.archiveSessionsData(ids);
-            for (const id of [
-              ...result.archived,
-              ...result.alreadyArchived,
-              ...result.notFound,
-            ]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const result = await client.archiveSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              for (const id of [
+                ...result.archived,
+                ...result.alreadyArchived,
+                ...result.notFound,
+              ]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              firstError ??= result.errors[0]
+                ? new Error(result.errors[0].error)
+                : undefined;
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           } else {
+            const invalidateDeleted =
+              generatedUiOwner?.captureSessionDeletion(ownerCwd);
             const result = await client.deleteSessionsData(ids);
+            invalidateDeleted?.([...result.removed, ...result.notFound]);
             for (const id of [...result.removed, ...result.notFound]) {
               const card = cardsById.get(id);
               if (card) succeededIdentities.add(getSessionIdentity(card));
@@ -759,6 +776,7 @@ function SessionOverviewPanelInner({
     [
       canArchiveCard,
       canDeleteCard,
+      generatedUiOwner,
       primaryCwd,
       sessionCatalogController,
       t,

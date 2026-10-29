@@ -1,3 +1,4 @@
+import { pierreResources } from './pierre-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -77,10 +78,11 @@ function developmentCsp(requestUrl: string): string {
   const queryStart = requestUrl.indexOf('?');
   const raw = new URLSearchParams(
     queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
-  ).get('daemon');
-  const origin = getAllowedDaemonOrigin(raw || '');
+  );
   const connectOrigins: string[] = [];
-  if (origin) {
+  for (const value of [raw.get('daemon'), ...raw.getAll('fanout')]) {
+    const origin = getAllowedDaemonOrigin(value || '');
+    if (!origin || connectOrigins.includes(origin)) continue;
     const websocket = new URL(origin);
     websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
     connectOrigins.push(origin, websocket.origin);
@@ -126,7 +128,19 @@ function configureDevelopmentMiddleware(
 
 export default defineConfig(({ command }) => ({
   root: 'client',
+  // Worker-only imports otherwise trigger a dev-page reload on first preview.
+  optimizeDeps: {
+    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    include: [
+      'exceljs',
+      'ssf',
+      'shiki-files/core',
+      'shiki-files/engine/javascript',
+      'shiki-files/engine/oniguruma',
+    ],
+  },
   plugins: [
+    pierreResources(),
     react(),
     tailwindcss(),
     {

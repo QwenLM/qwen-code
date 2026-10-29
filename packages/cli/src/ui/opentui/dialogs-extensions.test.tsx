@@ -29,6 +29,7 @@ import { render, screen } from '@testing-library/react';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    width: 100,
   };
   // Shared fake jsx runtime (box→div, text→span); built inside hoisted so
   // neither mock factory needs an internal-module import.
@@ -67,6 +68,9 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react', async () => {
   const React = await import('react');
   return {
+    useAppContext: (
+      await import('../../test-utils/opentui-catalog.js')
+    ).catalogAppContext(mocks.state.keyboardHandlers),
     // Mount-stable registration: the wrapper is registered once per consumer
     // and always invokes the latest handler closure — the real renderer's
     // semantics — so a key event can be broadcast to every mounted consumer.
@@ -86,6 +90,7 @@ vi.mock('@opentui/react', async () => {
       addInputHandler: () => {},
       removeInputHandler: () => {},
     }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
 });
 
@@ -208,6 +213,8 @@ function renderDialog(overrides?: {
   rows?: ExtensionRow[];
   busy?: boolean;
   onDetailAction?: ReturnType<typeof vi.fn>;
+  status?: { type: 'error' | 'warning' | 'success' | 'info'; text: string };
+  availableTerminalHeight?: number;
 }) {
   const onClose = vi.fn();
   const onRowAction = vi.fn();
@@ -219,14 +226,89 @@ function renderDialog(overrides?: {
       onRowAction={onRowAction}
       onDetailAction={onDetailAction}
       busy={overrides?.busy}
+      status={overrides?.status}
+      availableTerminalHeight={overrides?.availableTerminalHeight}
     />,
   );
   return { onClose, onRowAction, onDetailAction };
 }
 
+const SIX_ROWS: ExtensionRow[] = [
+  'ext-a',
+  'ext-b',
+  'ext-c',
+  'ext-d',
+  'ext-e',
+  'ext-f',
+].map((key) => ({ key, label: key, enabled: true, scope: 'user' }));
+
+describe('OpenTuiExtensionsDialog region budget', () => {
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('charges the footer hint the rows it wraps into at a narrow width', () => {
+    // At a forty-column terminal the 75-column installed footer hint wraps
+    // to three rows, so the measured chrome is eight, not the flat six: a
+    // twelve-row region pays the scroll arrows and two rows, where the flat
+    // count paid four — and the unshrinkable frame grew two rows past the
+    // region.
+    mocks.state.width = 40;
+    renderDialog({ rows: SIX_ROWS, availableTerminalHeight: 12 });
+    expect(screen.getByText('ext-b')).toBeTruthy();
+    expect(screen.queryByText('ext-c')).toBeNull();
+  });
+
+  it('charges the status line the rows it wraps into at a narrow width', () => {
+    // The status run paints unclipped below the list; at a forty-column
+    // terminal this one wraps to two rows, so the measured chrome pays it
+    // and the list loses the row, where the flat status ? 8 : 6 charge let
+    // the frame grow one row past the region.
+    mocks.state.width = 40;
+    renderDialog({
+      rows: SIX_ROWS,
+      availableTerminalHeight: 12,
+      status: {
+        type: 'success',
+        text: 'Extension ext-a updated successfully, reload to apply',
+      },
+    });
+    // chrome: 5 fixed + 1 status margin + 2 status rows + 3 hint rows = 11,
+    // leaving the list one row.
+    expect(screen.getByText('ext-a')).toBeTruthy();
+    expect(screen.queryByText('ext-b')).toBeNull();
+  });
+
+  it('clips an installed row label to the columns its one-row charge owns', () => {
+    // The row is charged one physical row, but the label painted whole
+    // beside the trailing status run. At a forty-column terminal the frame's
+    // content is 32 columns, the row owns 30 of them past DialogSelect's
+    // indicator box, and ` (active)` takes 9 — so a 28-column npm-style name
+    // wrapped the row into two, the unshrinkable frame grew past the region,
+    // and the region's tail clip ate the footer and the highlighted row.
+    mocks.state.width = 40;
+    renderDialog({
+      rows: [
+        {
+          key: 'long',
+          label: 'qwen-code-context-mcp-server',
+          enabled: true,
+          scope: 'user',
+        },
+        { key: 'ext-b', label: 'ext-b', enabled: true, scope: 'user' },
+      ],
+      availableTerminalHeight: 24,
+    });
+    expect(screen.getByText('qwen-code-context-mc…')).toBeTruthy();
+    expect(screen.getByText('ext-b')).toBeTruthy();
+  });
+});
+
 describe('OpenTuiExtensionsDialog management keys (#44)', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
   });
 
   it('renders the installed rows with their status', () => {
@@ -338,6 +420,29 @@ describe('OpenTuiExtensionsDialog management keys (#44)', () => {
     });
     expect(screen.getByText('Update Now')).toBeTruthy();
   });
+
+  it.each(['up-to-date', undefined] as const)(
+    'adopts a settled update state: %s',
+    async (state) => {
+      const onDetailAction = vi
+        .fn()
+        .mockResolvedValueOnce('update-available')
+        .mockResolvedValueOnce(state);
+      renderDialog({ onDetailAction });
+      await press('return');
+      await press('down');
+      await press('down');
+      await press('down');
+      await press('return');
+      expect(screen.getByText('Update Now')).toBeTruthy();
+      await press('down');
+      await press('return');
+      expect(onDetailAction).toHaveBeenLastCalledWith(ROWS[0], 'update');
+      expect(screen.queryByText('Update Now') !== null).toBe(
+        state === undefined,
+      );
+    },
+  );
 
   it('falls back to the list when the open row disappears after a reload', async () => {
     const { rerender } = render(<div />);

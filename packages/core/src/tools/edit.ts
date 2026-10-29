@@ -27,13 +27,21 @@ import {
 } from '../sandbox/runtime-file.js';
 import type { SandboxFileVersion } from '../sandbox/file-version.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
-import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
+import {
+  checkTeamMemorySecrets,
+  checkWorkspaceTeamMemorySecrets,
+} from '../memory/team-memory-secret-guard.js';
 import {
   FileEncoding,
   needsUtf8Bom,
   detectLineEnding,
 } from '../services/fileSystemService.js';
-import type { LineEnding } from '../services/fileSystemService.js';
+import type {
+  LineEnding,
+  TextFileObservation,
+  TextFileMutation,
+} from '../services/fileSystemService.js';
+import type { Stats } from 'node:fs';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
@@ -56,9 +64,16 @@ import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
   extractEditSnippet,
+  findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+import {
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
@@ -67,6 +82,7 @@ export function applyReplacement(
   oldString: string,
   newString: string,
   isNewFile: boolean,
+  matchOffsets?: readonly number[],
 ): string {
   if (isNewFile) {
     return newString;
@@ -78,6 +94,17 @@ export function applyReplacement(
   // If oldString is empty and it's not a new file, do not modify the content.
   if (oldString === '' && !isNewFile) {
     return currentContent;
+  }
+
+  if (matchOffsets !== undefined) {
+    const pieces: string[] = [];
+    let cursor = 0;
+    for (const offset of matchOffsets) {
+      pieces.push(currentContent.slice(cursor, offset), newString);
+      cursor = offset + oldString.length;
+    }
+    pieces.push(currentContent.slice(cursor));
+    return pieces.join('');
   }
 
   // Use intelligent replacement that handles $ sequences safely
@@ -117,6 +144,12 @@ export interface EditToolParams {
    * Initially proposed content.
    */
   ai_proposed_content?: string;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface CalculatedEdit {
@@ -150,14 +183,25 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns An object describing the potential edit outcome
    * @throws File system errors if reading the file fails unexpectedly (e.g., permissions)
    */
-  private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
+  private async calculateEdit(
+    params: EditToolParams,
+    original?: TextFileObservation,
+    signal?: AbortSignal,
+  ): Promise<CalculatedEdit> {
+    const observation =
+      original ??
+      (await this.config
+        .getFileSystemService()
+        .textFileIo?.inspect(params.file_path, signal));
     const sandboxFileVersion = captureRuntimeFileVersion(
       this.config,
       params.file_path,
     );
     const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
-    let fileExists = await isFilefileExists(params.file_path);
+    let fileExists = observation
+      ? observation.kind === 'file'
+      : await isFilefileExists(params.file_path);
     let isNewFile = false;
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
@@ -205,9 +249,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
     if (fileExists) {
       try {
-        const fileInfo = await this.config
-          .getFileSystemService()
-          .readTextFile({ path: params.file_path });
+        const fileInfo =
+          observation?.kind === 'file'
+            ? observation.response
+            : await this.config
+                .getFileSystemService()
+                .readTextFile({ path: params.file_path });
         if (fileInfo._meta?.bom !== undefined) {
           useBOM = fileInfo._meta.bom;
         } else {
@@ -280,6 +327,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     );
     finalOldString = normalizedStrings.oldString;
     finalNewString = normalizedStrings.newString;
+    let matchOffsets: number[] | undefined;
 
     if (finalOldString === '' && !fileExists) {
       // Creating a new file
@@ -296,9 +344,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         currentContent,
         finalOldString,
         finalNewString,
+        normalizedStrings.lineBasedMatch,
       );
 
-      occurrences = countOccurrences(currentContent, finalOldString);
+      if (normalizedStrings.lineBasedMatch) {
+        matchOffsets = findLineBasedMatchOffsets(
+          currentContent,
+          finalOldString,
+        );
+      }
+      occurrences =
+        matchOffsets?.length ??
+        countOccurrences(currentContent, finalOldString);
       if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
@@ -340,6 +397,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           finalOldString,
           finalNewString,
           isNewFile,
+          matchOffsets,
         )
       : (currentContent ?? '');
 
@@ -355,17 +413,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // Scan the full resulting content, not just new_string, so a secret split
     // across multiple edits (each fragment alone undetectable) is still caught.
     if (!error) {
-      const teamMemoryError = checkTeamMemorySecrets(
-        params.file_path,
-        newContent,
-        this.config.getProjectRoot(),
-      );
+      const teamMemoryError = (
+        this.config.getFileSystemService().textFileIo
+          ? checkWorkspaceTeamMemorySecrets
+          : checkTeamMemorySecrets
+      )(params.file_path, newContent, this.config.getProjectRoot());
       if (teamMemoryError) {
         // If the secret is already in the on-disk file, this edit can't clear it
         // — tell the user to remove the committed secret, not just retry.
         const preExisting =
           currentContent !== null &&
-          checkTeamMemorySecrets(
+          (this.config.getFileSystemService().textFileIo
+            ? checkWorkspaceTeamMemorySecrets
+            : checkTeamMemorySecrets)(
             params.file_path,
             currentContent,
             this.config.getProjectRoot(),
@@ -395,6 +455,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
+    );
+  }
+
+  /**
    * Edit operations always need user confirmation, except for the private
    * managed auto-memory files (user/project) which are written autonomously.
    * Team memory is shared and committed to the repo, so it is NOT auto-allowed
@@ -403,6 +476,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * diff for review before commit.)
    */
   async getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getFileSystemService().textFileIo) return 'ask';
     const projectRoot = this.config.getProjectRoot();
     const filePath = path.resolve(this.params.file_path);
     if (isTeamAutoMemPath(filePath, projectRoot)) {
@@ -422,7 +496,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   ): Promise<ToolCallConfirmationDetails> {
     let editData: CalculatedEdit;
     try {
-      editData = await this.calculateEdit(this.params);
+      editData = await this.calculateEdit(this.params, undefined, abortSignal);
     } catch (error) {
       if (abortSignal.aborted) {
         throw error;
@@ -490,9 +564,30 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns Result of the edit operation
    */
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    try {
+      const io = this.config.getFileSystemService().textFileIo;
+      return io
+        ? await io.withMutation(this.params.file_path, signal, (mutation) =>
+            this.executeObserved(signal, mutation),
+          )
+        : await this.executeObserved(signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return this.writeFailure(error);
+    }
+  }
+
+  private async executeObserved(
+    signal: AbortSignal,
+    mutation?: TextFileMutation,
+  ): Promise<ToolResult> {
     let editData: CalculatedEdit;
     try {
-      editData = await this.calculateEdit(this.params);
+      editData = await this.calculateEdit(
+        this.params,
+        mutation?.original,
+        signal,
+      );
     } catch (error) {
       if (signal.aborted) {
         throw error;
@@ -605,12 +700,23 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // directories on the failure path — a real (if minor) FS
       // litter that the previous order created on every rejected
       // edit.
-      if (!this.config.getShellExecutionSandbox?.()) {
+      if (!mutation && !this.config.getShellExecutionSandbox?.()) {
         this.ensureParentDirectoriesExist(this.params.file_path);
       }
 
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
+      let committedStats: Stats | undefined;
+      const write = async (params: Parameters<typeof writeRuntimeFile>[1]) => {
+        if (mutation) committedStats = await mutation.write(params);
+        else
+          await writeRuntimeFile(
+            this.config,
+            params,
+            editData.sandboxFileVersion,
+            signal,
+          );
+      };
       if (editData.isNewFile) {
         const userEncoding = this.config.getDefaultFileEncoding();
         let useBOM = false;
@@ -620,39 +726,29 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           // No explicit setting: auto-detect (e.g. .ps1 on non-UTF-8 Windows)
           useBOM = needsUtf8Bom(this.params.file_path);
         }
-        await writeRuntimeFile(
-          this.config,
-          {
-            path: this.params.file_path,
-            content: editData.newContent,
-            toolWriteOrigin: 'edit',
-            _meta: {
-              bom: useBOM,
-            },
+        await write({
+          path: this.params.file_path,
+          content: editData.newContent,
+          toolWriteOrigin: 'edit',
+          _meta: {
+            bom: useBOM,
           },
-          editData.sandboxFileVersion,
-          signal,
-        );
+        });
       } else {
-        await writeRuntimeFile(
-          this.config,
-          {
-            path: this.params.file_path,
-            content: editData.newContent,
-            toolWriteOrigin: 'edit',
-            _meta: {
-              bom: editData.bom,
-              encoding: editData.encoding,
-              lineEnding: editData.lineEnding,
-            },
+        await write({
+          path: this.params.file_path,
+          content: editData.newContent,
+          toolWriteOrigin: 'edit',
+          _meta: {
+            bom: editData.bom,
+            encoding: editData.encoding,
+            lineEnding: editData.lineEnding,
           },
-          editData.sandboxFileVersion,
-          signal,
-        );
+        });
       }
 
       // Track AI contribution for commit attribution
-      if (!this.params.modified_by_user) {
+      if (!mutation && !this.params.modified_by_user) {
         CommitAttributionService.getInstance().recordEdit(
           this.params.file_path,
           editData.currentContent,
@@ -666,12 +762,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // pre-edit placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will simply
       // re-stat and treat the cache entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
-        const postWriteStats = fs.statSync(this.params.file_path);
+        if (mutation && !committedStats)
+          throw new Error('Scoped file write returned no committed stats.');
+        const postWriteStats = mutation
+          ? committedStats!
+          : fs.statSync(this.params.file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config
           .getFileReadCache()
           .recordWrite(this.params.file_path, postWriteStats);
-      } catch {
+      } catch (error) {
+        if (mutation) throw error;
         // Non-fatal: leaving a stale entry is preferable to failing
         // the user-visible Edit on a transient stat failure. The
         // entry's mtime/size still does not match the on-disk bytes
@@ -733,6 +836,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           : `The file: ${this.params.file_path} has been updated.`,
       ];
 
+      const artifact = buildWorkspaceArtifactCandidate(
+        this.config,
+        this.params.file_path,
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
+      );
+      if (artifact && !artifact.updateOnly) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
+      }
+
       const snippetResult = extractEditSnippet(
         editData.currentContent,
         editData.newContent,
@@ -745,25 +862,30 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
-      const errorMsg = getErrorMessage(error);
-      return {
-        llmContent: `Error executing edit: ${errorMsg}`,
-        returnDisplay: `Error writing file: ${errorMsg}`,
-        error: {
-          message: errorMsg,
-          type:
-            isNodeError(error) &&
-            error.code === 'ESTALE' &&
-            this.config.getShellExecutionSandbox?.()
-              ? ToolErrorType.FILE_CHANGED_SINCE_READ
-              : isNodeError(error) && error.code === 'EISDIR'
-                ? ToolErrorType.TARGET_IS_DIRECTORY
-                : ToolErrorType.FILE_WRITE_FAILURE,
-        },
-      };
+      return this.writeFailure(error);
     }
+  }
+
+  private writeFailure(error: unknown): ToolResult {
+    const errorMsg = getErrorMessage(error);
+    return {
+      llmContent: `Error executing edit: ${errorMsg}`,
+      returnDisplay: `Error writing file: ${errorMsg}`,
+      error: {
+        message: errorMsg,
+        type:
+          isNodeError(error) &&
+          error.code === 'ESTALE' &&
+          this.config.getShellExecutionSandbox?.()
+            ? ToolErrorType.FILE_CHANGED_SINCE_READ
+            : isNodeError(error) && error.code === 'EISDIR'
+              ? ToolErrorType.TARGET_IS_DIRECTORY
+              : ToolErrorType.FILE_WRITE_FAILURE,
+      },
+    };
   }
 
   /**
@@ -822,6 +944,10 @@ Expectation for required parameters:
             description:
               'Replace all occurrences of old_string (default false).',
           },
+          record_as_artifact: {
+            type: 'boolean',
+            description: 'Refresh existing only.',
+          },
         },
         required: ['file_path', 'old_string', 'new_string'],
         type: 'object',
@@ -849,11 +975,11 @@ Expectation for required parameters:
       return `File path must be absolute: ${params.file_path}`;
     }
 
-    const teamMemoryError = checkTeamMemorySecrets(
-      params.file_path,
-      params.new_string ?? '',
-      this.config.getProjectRoot(),
-    );
+    const teamMemoryError = (
+      this.config.getFileSystemService().textFileIo
+        ? checkWorkspaceTeamMemorySecrets
+        : checkTeamMemorySecrets
+    )(params.file_path, params.new_string ?? '', this.config.getProjectRoot());
     if (teamMemoryError) {
       return teamMemoryError;
     }
@@ -890,10 +1016,17 @@ Expectation for required parameters:
     };
   }
 
-  getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
+  getModifyContext(signal: AbortSignal): ModifyContext<EditToolParams> {
     return {
       getFilePath: (params: EditToolParams) => params.file_path,
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
+        const observation = await this.config
+          .getFileSystemService()
+          .textFileIo?.inspect(params.file_path, signal);
+        if (observation)
+          return observation.kind === 'file'
+            ? observation.response.content
+            : '';
         const fileExists = await isFilefileExists(params.file_path);
         if (fileExists) {
           try {
@@ -910,6 +1043,19 @@ Expectation for required parameters:
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
+        const observation = await this.config
+          .getFileSystemService()
+          .textFileIo?.inspect(params.file_path, signal);
+        if (observation) {
+          if (observation.kind === 'missing') return '';
+          const content = observation.response.content;
+          return applyReplacement(
+            content,
+            params.old_string,
+            params.new_string,
+            params.old_string === '' && content === '',
+          );
+        }
         if (fs.existsSync(params.file_path)) {
           try {
             const { content: currentContent } = await this.config

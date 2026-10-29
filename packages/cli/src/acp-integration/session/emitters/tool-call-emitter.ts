@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolLifecycleEvent } from '@qwen-code/qwen-code-core';
+
 import { BaseEmitter } from './base-emitter.js';
 import { PlanEmitter } from './PlanEmitter.js';
 import type {
@@ -12,6 +14,7 @@ import type {
   ToolCallResultParams,
   ResolvedToolMetadata,
   SubagentMeta,
+  AgentIdentity,
 } from '../types.js';
 import { hasFullSessionContext } from '../types.js';
 import type {
@@ -25,13 +28,18 @@ import {
   toolResultBoundaryArtifact,
   ToolNames,
   Kind,
+  createToolLifecycle,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
+  createTranscriptToolLifecycleUpdate,
   createTranscriptToolCallResultUpdate,
   createTranscriptToolCallStartUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
 import { associateAcpToolResultArtifact } from '../../../nonInteractive/tool-result-boundary-diagnostics.js';
+
+const debugLogger = createDebugLogger('TOOL_CALL_EMITTER');
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -97,6 +105,10 @@ function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
 export class ToolCallEmitter extends BaseEmitter {
   private readonly planEmitter: PlanEmitter;
   private readonly preparedCallIds = new Set<string>();
+  private readonly preparedLifecycles = new Map<
+    string,
+    ReturnType<typeof createToolLifecycle>
+  >();
 
   constructor(ctx: SessionEmitterContext) {
     super(ctx);
@@ -109,6 +121,15 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param params - Tool call start parameters
    * @returns true if event was emitted, false if skipped (e.g., TodoWriteTool)
    */
+  async emitLifecycle(event: ToolLifecycleEvent): Promise<void> {
+    if (
+      this.isTodoWriteTool(event.toolName) ||
+      (hasFullSessionContext(this.ctx) && this.ctx.isDisposed?.())
+    )
+      return;
+    await this.sendUpdate(createTranscriptToolLifecycleUpdate(event));
+  }
+
   async emitStart(params: ToolCallStartParams): Promise<boolean> {
     // Skip tool_call for TodoWriteTool - plan updates sent on result
     if (this.isTodoWriteTool(params.toolName)) {
@@ -121,6 +142,14 @@ export class ToolCallEmitter extends BaseEmitter {
       return false;
     }
 
+    if (params.phase === 'preparing' && hasFullSessionContext(this.ctx)) {
+      this.preparedLifecycles.set(
+        params.callId,
+        createToolLifecycle(this.ctx.config, params.callId, params.toolName),
+      );
+    } else if (params.phase !== 'preparing') {
+      this.preparedLifecycles.delete(params.callId);
+    }
     const { title, locations, kind } = this.resolveToolMetadata(
       params.toolName,
       params.args,
@@ -177,6 +206,15 @@ export class ToolCallEmitter extends BaseEmitter {
     if (this.isTodoWriteTool(toolName)) return;
 
     this.preparedCallIds.delete(callId);
+    const lifecycle = this.preparedLifecycles
+      .get(callId)
+      ?.finish('cancelled', 'not_started');
+    this.preparedLifecycles.delete(callId);
+    if (lifecycle) {
+      await this.emitLifecycle(lifecycle).catch((error) =>
+        debugLogger.debug('Failed to emit discarded tool lifecycle', error),
+      );
+    }
     const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
@@ -221,6 +259,7 @@ export class ToolCallEmitter extends BaseEmitter {
     }
 
     this.preparedCallIds.delete(params.callId);
+    this.preparedLifecycles.delete(params.callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       params.toolName,
       params.subagentMeta,
@@ -275,6 +314,7 @@ export class ToolCallEmitter extends BaseEmitter {
     timing?: { startedAt: number; durationMs: number },
   ): Promise<void> {
     this.preparedCallIds.delete(callId);
+    this.preparedLifecycles.delete(callId);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       toolName,
       subagentMeta,
@@ -309,6 +349,7 @@ export class ToolCallEmitter extends BaseEmitter {
     subagentType: string,
     message: string,
     toolName?: string,
+    agent?: AgentIdentity,
   ): Promise<void> {
     if (toolName && this.isTodoWriteTool(toolName)) return;
 
@@ -329,6 +370,7 @@ export class ToolCallEmitter extends BaseEmitter {
         subagentType,
         provenance: 'subagent',
         subagentProgress: true,
+        ...(agent ? { agent } : {}),
       },
     });
   }

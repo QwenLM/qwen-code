@@ -1,0 +1,16 @@
+{
+  "namespace": "qwen-harness-qualification",
+  "runId": "qualification-replace-me",
+  "sourceSha": "REPLACE_WITH_FULL_COMMIT_SHA",
+  "harnessImage": "REPLACE_WITH_PUBLISHED_HARNESS_DIGEST",
+  "envoyImage": "REPLACE_WITH_VERIFIED_ENVOY_DIGEST",
+  "nodeInventoryFile": "nodes.json",
+  "nodeNames": ["existing-business-node-1", "existing-business-node-2"],
+  "javaNamespace": "qwen-harness-control",
+  "javaServiceAccount": "managed-agent-server",
+  "capabilityDigest": "REPLACE_WITH_VERIFIED_CAPABILITY_DIGEST",
+  "brokerUrl": "https://managed-gateway.example.internal",
+  "modelBaseUrl": "https://model-gateway.example.internal/v1",
+  "modelId": "qualification-model",
+  "httpsPorts": [443, 8443]
+}

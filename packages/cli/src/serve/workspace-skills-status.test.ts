@@ -25,6 +25,7 @@ import {
   getUserSettingsPath,
 } from '../config/settings.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
   let qwenHome: string;
@@ -37,6 +38,81 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await fsp.rm(qwenHome, { recursive: true, force: true });
     vi.restoreAllMocks();
     mockWriteStderrLine.mockClear();
+  });
+
+  it('exports only enabled instructions with invocation policy and fresh configuration', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-export-'),
+    );
+    try {
+      for (const [name, flags] of [
+        ['enabled', 'disable-model-invocation: true'],
+        ['disabled', ''],
+        ['hidden', 'user-invocable: false'],
+      ]) {
+        const directory = path.join(workspace, '.qwen', 'skills', name!);
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: Test ${name}\n${flags}\n---\nBODY_${name}`,
+        );
+      }
+      const settings = path.join(workspace, '.qwen', 'settings.json');
+      await fsp.writeFile(
+        settings,
+        JSON.stringify({
+          skills: {
+            disabledLevels: ['user', 'bundled'],
+            disabled: ['disabled'],
+          },
+        }),
+      );
+      const provider = createWorkspaceSkillsStatusProvider();
+      const snapshot = await provider.snapshot(workspace);
+      expect(snapshot).toEqual({
+        workspaceCwd: workspace,
+        skills: [
+          {
+            name: 'enabled',
+            description: 'Test enabled',
+            body: 'BODY_enabled',
+            model_invocable: false,
+          },
+          {
+            name: 'hidden',
+            description: 'Test hidden',
+            body: 'BODY_hidden',
+            user_invocable: false,
+          },
+        ],
+      });
+      expect(JSON.stringify(await provider(workspace))).not.toContain('BODY_');
+      await fsp.writeFile(
+        settings,
+        JSON.stringify({
+          skills: {
+            disabledLevels: ['user', 'bundled'],
+            disabled: ['enabled'],
+          },
+        }),
+      );
+      expect(
+        (await provider.snapshot(workspace)).skills.map((skill) => skill.name),
+      ).toEqual(['disabled', 'hidden']);
+      vi.spyOn(SkillManager.prototype, 'hasDiscoveryErrors').mockReturnValue(
+        true,
+      );
+      await expect(provider.snapshot(workspace)).rejects.toThrow(
+        'completely discovered',
+      );
+      await expect(
+        createWorkspaceSkillsStatusProvider({
+          workspaceTrusted: false,
+        }).snapshot(workspace),
+      ).rejects.toThrow('trusted');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it('enumerates bundled skills (including /review) without an ACP child', async () => {
@@ -921,7 +997,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'fails closed for a searchable but unlistable extensions root',
     async () => {
       const extensionsRoot = path.join(qwenHome, 'extensions');
@@ -1040,5 +1116,106 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       },
       { name: 'second:second-skill', status: 'ok' },
     ]);
+  });
+
+  it('shares one enumeration between concurrent reads', async () => {
+    const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    await Promise.all([provider('/ws'), provider('/ws')]);
+
+    expect(listSpy).toHaveBeenCalledOnce();
+  });
+
+  it('rebuilds after an invalidation that lands during an in-flight enumeration', async () => {
+    const workspace = path.join(qwenHome, 'workspace');
+    const skillDir = path.join(workspace, '.qwen', 'skills', 'alpha');
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha\n---\nInstructions',
+    );
+    await fsp.mkdir(path.join(qwenHome, 'extensions'), { recursive: true });
+
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = ExtensionManager.prototype.refreshCacheWithSnapshot;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    ).mockImplementation(async function (this: ExtensionManager, options) {
+      enter();
+      await gate;
+      return original.call(this, options);
+    });
+
+    const provider = createWorkspaceSkillsStatusProvider();
+    const first = provider(workspace);
+    await entered;
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['project'] } }),
+    );
+    provider.invalidate?.(workspace);
+    release();
+    await first;
+
+    const status = await provider(workspace);
+    expect(status.skills.some((skill) => skill.name === 'alpha')).toBe(false);
+  });
+
+  it('starts a post-invalidation read instead of joining the pre-invalidation enumeration', async () => {
+    const workspace = path.join(qwenHome, 'workspace');
+    const alphaDir = path.join(workspace, '.qwen', 'skills', 'alpha');
+    await fsp.mkdir(alphaDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(alphaDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha\n---\nInstructions',
+    );
+
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = SkillManager.prototype.listSkills;
+    const listSpy = vi
+      .spyOn(SkillManager.prototype, 'listSkills')
+      .mockImplementation(async function (this: SkillManager) {
+        const skills = await original.call(this);
+        if (listSpy.mock.calls.length === 1) {
+          enter();
+          await gate;
+        }
+        return skills;
+      });
+
+    const provider = createWorkspaceSkillsStatusProvider();
+    const first = provider(workspace);
+    await entered;
+    const betaDir = path.join(workspace, '.qwen', 'skills', 'beta');
+    await fsp.mkdir(betaDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(betaDir, 'SKILL.md'),
+      '---\nname: beta\ndescription: Beta\n---\nInstructions',
+    );
+    provider.invalidate?.(workspace);
+    const second = provider(workspace);
+    expect(second).not.toBe(first);
+    release();
+
+    const [firstStatus, secondStatus] = await Promise.all([first, second]);
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(secondStatus.skills.map((skill) => skill.name)).toContain('beta');
+    expect(firstStatus.skills.map((skill) => skill.name)).not.toContain('beta');
   });
 });
