@@ -121,6 +121,7 @@ class ManagedAgentServerIntegrationTest {
     private SessionEventHub eventHub;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @AfterEach
@@ -3167,7 +3168,7 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+        FixtureHarness fixtureHarness(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
             return new FixtureHarness(jdbc);
         }
     }

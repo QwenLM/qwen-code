@@ -45,12 +45,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class ManagedSessionCreationSkillsTest {
     @Autowired private MockMvc mvc;
-    @Autowired @Qualifier("managedJdbcTemplate") private JdbcTemplate jdbc;
+    @Qualifier("managedJdbcTemplate")
+    @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedAgentStore store;
     @Autowired private ManagedSessionSkills snapshots;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
     @TempDir private Path archiveDirectory;
     @TestBean(methodName = "createHarness") private HarnessConnector harness;

@@ -26,6 +26,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -108,7 +109,7 @@ class ManagedSessionLifecycleTest {
     private ObjectMapper objectMapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedAgentStore store;
@@ -120,6 +121,7 @@ class ManagedSessionLifecycleTest {
     private RecordingRuntimeWarmer runtime;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Autowired

@@ -129,7 +129,7 @@ async function gotoSourceShell(page: Page): Promise<string> {
 }
 
 function addWorkspaceDialog(page: Page) {
-  return page.locator('[data-web-shell-dialog-title="Add Workspace"]');
+  return page.locator('[data-web-shell-dialog-title="Add workspace"]');
 }
 
 async function openFolderBrowser(page: Page): Promise<void> {

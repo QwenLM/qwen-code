@@ -234,7 +234,7 @@ class HostedShellLifecycleRecoveryIT {
             assertThat(released.getDrainReceipt().matches(originalBinding)).isTrue();
             assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                     String.class, originalBinding.getBindingId())).isEqualTo("RELEASED");
-            assertThat(running(worker)).isFalse();
+            assertThat(HostedProcessLiveness.running(worker)).isFalse();
             // The completion transaction of a DELETE retires the Session and nulls the
             // head's writer identity with it, so only the writer generation column still
             // witnesses the writer count: the pre-delete writer alone, plus the reload
@@ -377,7 +377,7 @@ class HostedShellLifecycleRecoveryIT {
                 first.destroyForcibly();
                 assertThat(first.waitFor(10, TimeUnit.SECONDS)).isTrue();
                 assertThat(first.exitValue()).isEqualTo(137);
-                assertThat(running(worker)).as("original worker survives Spring SIGKILL").isTrue();
+                assertThat(HostedProcessLiveness.running(worker)).as("original worker survives Spring SIGKILL").isTrue();
                 assertThat(harness.isAlive()).isTrue();
                 releaseFirst.countDown();
                 await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(jdbc.queryForObject(
@@ -693,18 +693,6 @@ class HostedShellLifecycleRecoveryIT {
     private static int freePort() throws IOException {
         try (var socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
             return socket.getLocalPort();
-        }
-    }
-
-    private static boolean running(ProcessHandle process) throws IOException {
-        if (!process.isAlive()) {
-            return false;
-        }
-        try {
-            String stat = Files.readString(Path.of("/proc", Long.toString(process.pid()), "stat"));
-            return stat.charAt(stat.lastIndexOf(')') + 2) != 'Z';
-        } catch (java.nio.file.NoSuchFileException exited) {
-            return false;
         }
     }
 

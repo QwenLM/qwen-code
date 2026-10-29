@@ -103,6 +103,14 @@ export function BaseSelectionList<
       setScrollOffset(activeIndex);
     } else if (activeIndex >= scrollOffset + maxItemsToShow) {
       setScrollOffset(newScrollOffset);
+    } else {
+      // The window grew or the list shrank: keep the offset inside the range
+      // that can actually be painted, so items that now fit are not left
+      // off-screen by a stale slice.
+      const maxOffset = Math.max(0, items.length - maxItemsToShow);
+      if (scrollOffset > maxOffset) {
+        setScrollOffset(maxOffset);
+      }
     }
   }, [activeIndex, items.length, scrollOffset, maxItemsToShow]);
 

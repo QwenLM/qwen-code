@@ -15,6 +15,7 @@ import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
   ManagedAgentSessionTranscript,
+  ManagedAgentSessionSummary,
 } from './managed-agent-provider';
 import { failureRetryDelayMs, useManagedSession } from './use-managed-session';
 
@@ -269,6 +270,111 @@ describe('useManagedSession', () => {
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
     return () => random.mockRestore();
   }
+
+  it('keeps the newest worktree identity without regranting execution capabilities from an older read', async () => {
+    const bound = (
+      revision: number,
+      state: 'preparing' | 'ready' | 'blocked',
+    ): ManagedAgentSessionSummary => ({
+      sessionId: 'session-1',
+      title: 'Worktree session',
+      createdAt: 1,
+      updatedAt: 1,
+      admittedAt: 1,
+      phase: 'created',
+      runtimeReady: state === 'ready',
+      runtimeState: 'unknown',
+      worktree: {
+        id: 'worktree-a',
+        sessionId: 'session-1',
+        workspaceId: 'ws-a',
+        state,
+        branch: 'worktree-managed-a',
+        baseCommit: 'a'.repeat(40),
+        cwdRelative: '.qwen-managed-session-worktrees/a',
+        operationId: 'op-a',
+        revision,
+      },
+      workspace: {
+        workspaceId: 'ws-a',
+        cwdRelative: '.qwen-managed-session-worktrees/a',
+        contextRevision: 1,
+        state:
+          state === 'ready'
+            ? 'ready'
+            : state === 'preparing'
+              ? 'changing'
+              : 'recovery_blocked',
+      },
+      planModeSupported: state === 'ready',
+      capabilities: {
+        canSend: state === 'ready',
+        canCancel: false,
+        canRename: state === 'ready',
+        workspaceTurns: state === 'ready',
+        inputAttachments: state === 'ready',
+        childAgents: state === 'ready',
+        modelChange: state === 'ready',
+        contextCompression: state === 'ready',
+        approvalModeChange: state === 'ready',
+      },
+    });
+    let stale!: (value: ManagedAgentSessionSummary) => void;
+    const getSession = vi
+      .fn()
+      .mockResolvedValueOnce(bound(1, 'preparing'))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            stale = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(bound(2, 'ready'))
+      .mockResolvedValueOnce(bound(3, 'blocked'))
+      .mockResolvedValue(bound(2, 'ready'));
+    const provider = {
+      getSession,
+      getTranscript: vi.fn().mockResolvedValue(transcript(0)),
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        await new Promise((resolve) =>
+          opts.signal.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe provider={provider} />);
+    });
+    let earlier!: Promise<unknown>;
+    act(() => {
+      earlier = latest!.refreshSummary();
+    });
+    await act(async () => {
+      await latest!.refreshSummary();
+    });
+    await act(async () => {
+      stale({ ...bound(1, 'preparing'), lifecycleStatus: 'closed' });
+      await earlier;
+    });
+    expect(latest!.summary).toMatchObject({
+      worktree: { revision: 2, state: 'ready' },
+      workspace: { state: 'ready' },
+      lifecycleStatus: 'closed',
+      capabilities: bound(1, 'preparing').capabilities,
+      planModeSupported: false,
+    });
+    await act(async () => {
+      await latest!.refreshSummary();
+      await latest!.refreshSummary();
+    });
+    expect(latest!.summary).toMatchObject({
+      worktree: { revision: 3, state: 'blocked' },
+      workspace: { state: 'recovery_blocked' },
+      capabilities: bound(3, 'blocked').capabilities,
+      planModeSupported: false,
+    });
+  });
 
   it('refreshes only the summary on context events and preserves a higher revision', async () => {
     const bound = (revision: number) => ({

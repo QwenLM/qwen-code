@@ -1927,6 +1927,52 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `theme-dialog-${theme}`);
     });
 
+    test('archived conversations settings', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: ['session_events', 'workspace_settings', 'session_archive'],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(
+        /\/workspaces?\/[^/]+\/sessions(?:\?|$)/,
+        async (route) => {
+          const url = new URL(route.request().url());
+          const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
+          await route.fulfill({
+            json: {
+              sessions:
+                url.searchParams.get('archiveState') === 'archived'
+                  ? [
+                      {
+                        sessionId: 'visual-archive',
+                        workspaceCwd: cwd,
+                        displayName: 'Archived project discussion',
+                        isArchived: true,
+                        updatedAt: '2026-10-25T00:00:00Z',
+                      },
+                    ]
+                  : [],
+            },
+          });
+        },
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await submitLocalCommand(page, '/settings');
+      await page
+        .getByRole('navigation', { name: 'Settings' })
+        .getByRole('button', { name: 'Archived conversations', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-archived-sessions]'),
+      ).toContainText('Archived project discussion');
+      await captureScreenshot(page, `archived-settings-${theme}`);
+    });
+
     test(`settings panel`, async ({ page }, testInfo) => {
       const scenario = createSettingsPanelScenario(theme);
       const daemon = await installScenario(

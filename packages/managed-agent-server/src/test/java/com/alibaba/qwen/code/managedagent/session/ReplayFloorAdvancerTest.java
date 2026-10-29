@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.time.Duration;
@@ -48,6 +49,7 @@ class ReplayFloorAdvancerTest {
     private ManagedAgentStore store;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @Test

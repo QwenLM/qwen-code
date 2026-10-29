@@ -36,6 +36,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+@org.springframework.beans.factory.annotation.Qualifier("managedAgentTransactionManager")
 @RestController
 @ConditionalOnProperty(prefix = "qwen.managed-agent.session-store",
         name = "enabled", havingValue = "true")
@@ -207,6 +208,29 @@ public class ManagedSessionStoreController {
             @RequestParam(defaultValue = "100") int limit) {
         return store.transactions(tenant.tenantId(), workspaceId,
                 sessionId, writerToken, afterRevision, limit);
+    }
+
+    @GetMapping("/transactions:recent")
+    public ManagedSessionStoreModels.RecentTransactionPage recentTransactions(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId,
+            @RequestParam(required = false) Long throughRevision,
+            @RequestParam(required = false) Long beforeRevision,
+            @RequestParam(defaultValue = "100") int limit) {
+        return store.recentTransactions(tenant.tenantId(), workspaceId, sessionId, writerToken,
+                throughRevision, beforeRevision, limit);
+    }
+
+    @GetMapping("/transactions:lookup")
+    public ManagedSessionStoreModels.CommandTransaction commandTransaction(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId,
+            @RequestParam String operation, @RequestParam String commandId,
+            @RequestParam(required = false) Long throughRevision) {
+        return store.commandTransaction(tenant.tenantId(), workspaceId, sessionId, writerToken,
+                throughRevision, operation, commandId);
     }
 
     @PostMapping("/journal-snapshots:publish")

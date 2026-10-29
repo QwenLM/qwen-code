@@ -286,6 +286,68 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
     expect(artifacts).toMatch(/pr42-verify-\d{8}-\d{6}$/);
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
+    expect(
+      JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
+    ).toEqual({ headRefOid: head });
+  });
+
+  it('keeps an earlier report bound to its prepared head', async () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(dir, snapshotFor({ base, head }));
+    const first = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(first.status).toBe(0);
+    const artifacts = first.stdout.match(/artifacts {2}(\S+)/)?.[1];
+    writeFileSync(join(artifacts, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(artifacts, 'assertions.json'),
+      JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+    );
+    const writeReport = (oid) =>
+      writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
+    const check = () =>
+      spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
+          ),
+          artifacts,
+        ],
+        { encoding: 'utf8' },
+      );
+    writeReport(head);
+    const initial = check();
+    expect(initial.status).toBe(0);
+    expect(initial.stdout).not.toContain('does not name the verified head');
+
+    execFileSync('git', ['commit', '--allow-empty', '-qm', 'next head'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const nextHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      env.FAKE_GH_SNAPSHOT,
+      JSON.stringify(snapshotFor({ base, head: nextHead })),
+    );
+    // Artifact directory names have one-second resolution.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const second = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(second.status).toBe(0);
+    expect(second.stdout.match(/artifacts {2}(\S+)/)?.[1]).not.toBe(artifacts);
+
+    const unchanged = check();
+    expect(unchanged.status).toBe(0);
+    expect(unchanged.stdout).not.toContain('does not name the verified head');
+    writeReport(nextHead);
+    const wrongHead = check();
+    expect(wrongHead.status).toBe(0);
+    expect(wrongHead.stdout).toContain(
+      `does not name the verified head ${head}`,
+    );
   });
 
   // The coordinate path always runs on the host, because resolving metadata

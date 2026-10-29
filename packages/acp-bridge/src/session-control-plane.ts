@@ -7790,6 +7790,7 @@ export function createSessionControlPlane(
     const reason = 'reason' in value ? value.reason : undefined;
     if (
       reason === 'setting-disabled' ||
+      reason === 'unsupported-client' ||
       reason === 'unsupported-runtime' ||
       reason === 'workspace-untrusted' ||
       reason === 'provider-conflict' ||
