@@ -4020,6 +4020,9 @@ export function createServeApp(
           ? startReviewVerifyAutomation({
               boundWorkspace: runtime.workspaceCwd,
               launch: runtime.subSessionLauncher.launch,
+              // A review performed outside qwen-code names no session; the
+              // bridge is the parentless spawn path for those events.
+              getBridge: () => runtime.bridge,
             })
           : undefined;
       } catch (err) {

@@ -80,6 +80,7 @@ describe('reviewCommand', () => {
       'publish-assets',
       'compose-review',
       'save-artifact',
+      'verify-event',
       'submit',
       'cleanup',
       'watch-repo',

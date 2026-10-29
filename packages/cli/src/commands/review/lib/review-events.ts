@@ -54,9 +54,15 @@ export interface ReviewCleanEventV1 {
   eventId: string;
   createdAt: string;
   /** The session that ran the review, when the CLI exported one. The consumer
-   *  needs it as the sub-session's caller: the launcher's concurrency bucket
-   *  and depth-1 gate are keyed on it. */
+   *  uses it as the sub-session's caller: the launcher's concurrency bucket
+   *  and depth-1 gate are keyed on it. Absent for a review performed outside
+   *  qwen-code (another agent, a human, a CI job) — the consumer then spawns a
+   *  top-level automation session rather than a sub-session. */
   sessionId?: string;
+  /** Who asserted this head was reviewed clean. Attribution for an action
+   *  that publishes a public comment: `qwen-code/save-artifact` for the
+   *  built-in producer, whatever an external caller names itself otherwise. */
+  reviewedBy?: string;
   target: ReviewEventTarget;
   round: number;
   verdict: {
@@ -64,8 +70,9 @@ export interface ReviewCleanEventV1 {
     critical: number;
     suggestion: number;
   };
-  /** Workspace-relative path of the saved review artifact. */
-  artifactPath: string;
+  /** Workspace-relative path of the saved review artifact, when the producer
+   *  is qwen-code's own pipeline. An external producer has none. */
+  artifactPath?: string;
 }
 
 /**
@@ -124,13 +131,15 @@ export function cleanRoundHeadSha(input: {
 }
 
 export interface EmitReviewCleanEventInput {
-  /** The main project directory the artifact was saved against. */
+  /** The main project directory the event keys on — the same root the daemon
+   *  resolves for this workspace. */
   workspaceRoot: string;
   target: ReviewEventTarget;
   round: number;
   verdict: ReviewCleanEventV1['verdict'];
-  artifactPath: string;
+  artifactPath?: string;
   sessionId?: string;
+  reviewedBy?: string;
   /** Injectable for tests. */
   now?: () => Date;
 }
@@ -156,10 +165,11 @@ export function emitReviewCleanEvent(
     eventId,
     createdAt: (input.now?.() ?? new Date()).toISOString(),
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.reviewedBy ? { reviewedBy: input.reviewedBy } : {}),
     target: input.target,
     round: input.round,
     verdict: input.verdict,
-    artifactPath: input.artifactPath,
+    ...(input.artifactPath ? { artifactPath: input.artifactPath } : {}),
   };
   const dir = pendingEventsDir(input.workspaceRoot);
   const path = join(dir, `${eventId}.json`);
@@ -225,6 +235,8 @@ export function readPendingReviewEvents(repositoryRoot: string): {
  */
 const EVENT_OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const EVENT_HOST_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
+/** Same shape `lib/ledger.ts` accepts for an anchor (abbreviated or full). */
+const EVENT_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/;
 
 function validateEvent(value: unknown): ReviewCleanEventV1 | null {
   if (typeof value !== 'object' || value === null) return null;
@@ -232,8 +244,13 @@ function validateEvent(value: unknown): ReviewCleanEventV1 | null {
   if (e.schemaVersion !== REVIEW_EVENT_SCHEMA_VERSION) return null;
   if (typeof e.eventId !== 'string' || e.eventId === '') return null;
   if (typeof e.createdAt !== 'string' || e.createdAt === '') return null;
-  if (typeof e.artifactPath !== 'string') return null;
+  if (e.artifactPath !== undefined && typeof e.artifactPath !== 'string') {
+    return null;
+  }
   if (e.sessionId !== undefined && typeof e.sessionId !== 'string') return null;
+  if (e.reviewedBy !== undefined && typeof e.reviewedBy !== 'string') {
+    return null;
+  }
   if (!Number.isInteger(e.round) || (e.round as number) < 1) return null;
   const t = e.target;
   if (
@@ -248,7 +265,7 @@ function validateEvent(value: unknown): ReviewCleanEventV1 | null {
     !Number.isInteger(t.number) ||
     (t.number as number) < 1 ||
     typeof t.headSha !== 'string' ||
-    t.headSha === ''
+    !EVENT_HEAD_SHA_RE.test(t.headSha)
   ) {
     return null;
   }
@@ -256,8 +273,11 @@ function validateEvent(value: unknown): ReviewCleanEventV1 | null {
   if (
     typeof v !== 'object' ||
     v === null ||
-    typeof v.event !== 'string' ||
-    !Number.isInteger(v.critical) ||
+    (v.event !== 'APPROVE' && v.event !== 'COMMENT') ||
+    // The record IS the clean-round assertion. A producer that counted a
+    // Critical, or posted a Request changes, wrote a contradiction: refuse it
+    // here so the consumer never has to re-derive the predicate.
+    v.critical !== 0 ||
     !Number.isInteger(v.suggestion)
   ) {
     return null;

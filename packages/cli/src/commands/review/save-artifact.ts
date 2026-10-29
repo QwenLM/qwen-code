@@ -719,6 +719,7 @@ function emitVerifyEvent(input: {
       },
       artifactPath: input.artifactPath,
       sessionId: process.env['QWEN_CODE_SESSION_ID']?.trim() || undefined,
+      reviewedBy: 'qwen-code/save-artifact',
     });
     return `save-artifact: verify event written (${emitted.path}).`;
   } catch (error) {

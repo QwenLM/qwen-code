@@ -30,6 +30,7 @@ import {
   reviewVerifyDecision,
   startReviewVerifyAutomation,
   type ReviewVerifyAutomation,
+  type ReviewVerifyBridge,
 } from './review-verify-automation.js';
 
 let home: string;
@@ -72,12 +73,46 @@ function emit(
   return result.path;
 }
 
-function start(opts: { enabled?: boolean } = {}): ReviewVerifyAutomation {
+/** A bridge stub for the parentless path: records every call, resolves the
+ *  spawn, and lets a test decide whether the prompt dispatch settles. */
+function stubBridge(opts: { dispatch?: Promise<unknown> } = {}) {
+  const calls = {
+    spawn: [] as Array<Record<string, unknown>>,
+    named: [] as Array<{ sessionId: string; displayName?: string }>,
+    prompts: [] as Array<{ sessionId: string; text: string }>,
+  };
+  const bridge: ReviewVerifyBridge = {
+    spawnOrAttach: async (req) => {
+      calls.spawn.push({ ...req });
+      return { sessionId: 'top-1' } as unknown as Awaited<
+        ReturnType<ReviewVerifyBridge['spawnOrAttach']>
+      >;
+    },
+    updateSessionMetadata: (sessionId, meta) => {
+      calls.named.push({ sessionId, displayName: meta.displayName });
+      return meta;
+    },
+    sendPrompt: (sessionId, req) => {
+      const first = req.prompt[0] as { text?: string } | undefined;
+      calls.prompts.push({ sessionId, text: first?.text ?? '' });
+      return (opts.dispatch ??
+        Promise.resolve({ stopReason: 'end_turn' })) as unknown as ReturnType<
+        ReviewVerifyBridge['sendPrompt']
+      >;
+    },
+  };
+  return { bridge, calls };
+}
+
+function start(
+  opts: { enabled?: boolean; bridge?: ReviewVerifyBridge } = {},
+): ReviewVerifyAutomation {
   launch = vi.fn(async () => ({ sessionId: 'child-1' }));
   notices = [];
   automation = startReviewVerifyAutomation({
     boundWorkspace: root,
     launch,
+    ...(opts.bridge ? { getBridge: () => opts.bridge } : {}),
     // Long enough that only the explicit tick() runs during a test; the watch
     // is exercised by writing before start, so it has nothing to deliver.
     intervalMs: 600_000,
@@ -117,6 +152,7 @@ describe('reviewVerifyDecision', () => {
     enabled: true,
     skillAvailable: true,
     spawnedKeys: new Set<string>(),
+    canSpawnTopLevel: true,
   };
 
   it('builds the maintainer-round prompt for an accepted event', () => {
@@ -142,7 +178,11 @@ describe('reviewVerifyDecision', () => {
         { ...event, target: { ...target, host: 'ghe.example.com' } },
       ],
       ['skill-unavailable', { skillAvailable: false }, event],
-      ['no-session', {}, { ...event, sessionId: undefined }],
+      [
+        'no-session',
+        { canSpawnTopLevel: false },
+        { ...event, sessionId: undefined },
+      ],
       [
         'already-verified',
         { spawnedKeys: new Set([reviewEventDedupeKey(target)]) },
@@ -154,6 +194,15 @@ describe('reviewVerifyDecision', () => {
         reviewVerifyDecision(subject, { ...facts, ...override }),
       ).toMatchObject({ action: 'decline', reason });
     }
+  });
+
+  it('accepts a sessionless event when a parentless spawn path exists', () => {
+    const decision = reviewVerifyDecision(
+      { ...event, sessionId: undefined },
+      facts,
+    );
+    expect(decision.action).toBe('spawn');
+    expect(decision).not.toHaveProperty('callerSessionId');
   });
 });
 
@@ -258,19 +307,88 @@ describe('startReviewVerifyAutomation', () => {
     expect(notices.join('\n')).toContain('skill-unavailable');
   });
 
-  it('declines an event with no originating session', async () => {
+  it('declines a sessionless event when no parentless path is wired', async () => {
     installSkill();
     const { path } = emitReviewCleanEvent({
       workspaceRoot: root,
       target,
       round: 1,
       verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
-      artifactPath: '.qwen/reviews/report.json',
     });
     await start().tick();
     expect(launch).not.toHaveBeenCalled();
     expect(existsSync(path)).toBe(false);
     expect(notices.join('\n')).toContain('no-session');
+  });
+
+  it('spawns a TOP-LEVEL session for a review another agent performed', async () => {
+    installSkill();
+    const { path } = emitReviewCleanEvent({
+      workspaceRoot: root,
+      target,
+      round: 1,
+      verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+      reviewedBy: 'codex',
+    });
+    const { bridge, calls } = stubBridge();
+    await start({ bridge }).tick();
+    // Not a sub-session: there is no qwen-code session to be the parent.
+    expect(launch).not.toHaveBeenCalled();
+    expect(calls.spawn).toEqual([
+      { workspaceCwd: root, sessionScope: 'thread' },
+    ]);
+    expect(calls.prompts).toEqual([
+      {
+        sessionId: 'top-1',
+        text: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      },
+    ]);
+    expect(calls.named).toEqual([
+      { sessionId: 'top-1', displayName: 'verify PR #15846' },
+    ]);
+    expect(existsSync(path)).toBe(false);
+    expect(readSpawnedKeys(root).has(reviewEventDedupeKey(target))).toBe(true);
+    expect(notices.join('\n')).toContain('spawned top-1');
+    expect(notices.join('\n')).toContain('reviewed by codex');
+  });
+
+  it('verifies a sessionless head once, like any other', async () => {
+    installSkill();
+    const { bridge, calls } = stubBridge();
+    const emitExternal = () =>
+      emitReviewCleanEvent({
+        workspaceRoot: root,
+        target,
+        round: 1,
+        verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+        reviewedBy: 'codex',
+      });
+    emitExternal();
+    await start({ bridge }).tick();
+    emitExternal();
+    await automation?.tick();
+    expect(calls.spawn).toHaveLength(1);
+    expect(notices.join('\n')).toContain('already-verified');
+  });
+
+  it('surfaces a prompt dispatch failure without losing the spawned session', async () => {
+    installSkill();
+    emitReviewCleanEvent({
+      workspaceRoot: root,
+      target,
+      round: 1,
+      verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+      reviewedBy: 'codex',
+    });
+    const { bridge, calls } = stubBridge({
+      dispatch: Promise.reject(new Error('admission refused')),
+    });
+    await start({ bridge }).tick();
+    expect(calls.spawn).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(notices.join('\n')).toContain('prompt dispatch failed'),
+    );
+    expect(notices.join('\n')).toContain('admission refused');
   });
 
   it('leaves events pending when the spawned ledger cannot be read', async () => {

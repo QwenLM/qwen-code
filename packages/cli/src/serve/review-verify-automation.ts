@@ -8,10 +8,19 @@
  * Consumes the clean-review handoff and spawns the deep-verification round.
  *
  * A review round that ended clean writes one durable event
- * (commands/review/lib/review-events.ts). This automation reads it and asks the
- * workspace's own sub-session launcher to run `/verify-pr <n> --publish` in a
- * fresh session, so the maintainer does not have to notice the verdict and
- * start the evidence round by hand.
+ * (commands/review/lib/review-events.ts). This automation reads it and runs
+ * `/verify-pr <n> --publish` in a fresh session, so the maintainer does not have
+ * to notice the verdict and start the evidence round by hand.
+ *
+ * The producer is not assumed to be qwen-code. Two spawn paths follow from who
+ * did the review:
+ *  - Event names a session (qwen-code's own `save-artifact` wrote it) → the
+ *    workspace's sub-session launcher, with that session as the parent, so the
+ *    per-caller caps and the depth-1 gate apply.
+ *  - Event names none (another agent, a human, or CI recorded it through
+ *    `qwen review verify-event`) → a top-level automation session via the
+ *    bridge. There is no parent to charge a bucket to, so the bridge's own
+ *    session admission is the bound.
  *
  * Shape and lifecycle mirror `scheduled-task-keepalive.ts`: an interval tick as
  * the backstop, an `fs.watch` + debounce on the durable directory for
@@ -30,11 +39,13 @@
 
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import type { AcpSessionBridge } from './acp-session-bridge.js';
 import {
   pendingEventsDir,
   readPendingReviewEvents,
@@ -48,6 +59,71 @@ import { operatorReviewSettings } from '../commands/review/lib/review-settings.j
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 const log = createDebugLogger('REVIEW_VERIFY');
+
+/** The slice of the bridge the parentless path needs. Narrow so the automation
+ *  stays testable without a bridge, and so it cannot reach for lifecycle
+ *  operations it has no business calling. */
+export type ReviewVerifyBridge = Pick<
+  AcpSessionBridge,
+  'spawnOrAttach' | 'updateSessionMetadata' | 'sendPrompt'
+>;
+
+/**
+ * Spawn a TOP-LEVEL verification session for an event with no originating
+ * qwen-code session — a review performed by another agent, a human, or CI.
+ *
+ * The sub-session launcher cannot serve this case: its `callerSessionId` is
+ * required, and it keys both the per-caller concurrency bucket and the depth-1
+ * gate on it. So this goes straight to the bridge, exactly as the launcher's
+ * own non-standalone path does (`spawnOrAttach` thread scope → name →
+ * `sendPrompt`), minus the parent lineage and the completion await.
+ *
+ * Fire-and-forget: the turn runs independently and the session is idle-reaped
+ * like any other. Concurrency is bounded by the bridge's own `maxSessions`
+ * admission, and by the per-head dedupe ledger upstream of this call.
+ */
+export async function spawnReviewVerifySession(
+  bridge: ReviewVerifyBridge,
+  info: {
+    prompt: string;
+    /** Built by `reviewVerifyDecision` from a PR number, so inert by
+     *  construction — no model or platform text reaches the session title. */
+    name: string;
+    workspaceCwd: string;
+  },
+  onDispatchError?: (error: unknown) => void,
+): Promise<{ sessionId: string }> {
+  const session = await bridge.spawnOrAttach({
+    workspaceCwd: info.workspaceCwd,
+    sessionScope: 'thread', // a fresh top-level session, never attach
+  });
+  const sessionId = session.sessionId;
+  try {
+    bridge.updateSessionMetadata(sessionId, {
+      displayName: info.name,
+      titleSource: 'auto',
+    });
+  } catch (error) {
+    // Presentation only: a failed rename must not lose the round.
+    log.debug('review-verify: session rename failed', sessionId, error);
+  }
+  const turn = bridge.sendPrompt(
+    sessionId,
+    {
+      sessionId,
+      prompt: [{ type: 'text', text: info.prompt }],
+    } as Parameters<AcpSessionBridge['sendPrompt']>[1],
+    undefined,
+    { promptId: randomUUID() },
+  );
+  // The session exists either way; a dispatch rejection (admission, auth, API)
+  // is reported rather than left as an unhandled rejection or a silent loss.
+  void turn.catch((error: unknown) => {
+    log.debug('review-verify: sendPrompt rejected', sessionId, String(error));
+    onDispatchError?.(error);
+  });
+  return { sessionId };
+}
 
 /** Backstop interval. The watch delivers a new event within its debounce; this
  *  only covers a missed watch event (a platform that drops them, a directory
@@ -70,7 +146,9 @@ export type ReviewVerifyDecision =
   | {
       action: 'spawn';
       prompt: string;
-      callerSessionId: string;
+      /** Absent when the review happened outside qwen-code: the pass then
+       *  spawns a top-level automation session instead of a sub-session. */
+      callerSessionId?: string;
       name: string;
       key: string;
     }
@@ -83,6 +161,10 @@ export type ReviewVerifyDecision =
  * `--host` flag, so a GitHub Enterprise or Aone target cannot be expressed in
  * the prompt. The event still carries the platform and host — lifting this gate
  * is a change here, not a schema change.
+ *
+ * The producer is irrelevant to every gate below: an event written by another
+ * agent through `review verify-event` is judged exactly like one written by
+ * qwen-code's own pipeline.
  */
 export function reviewVerifyDecision(
   event: ReviewCleanEventV1,
@@ -90,6 +172,9 @@ export function reviewVerifyDecision(
     enabled: boolean;
     skillAvailable: boolean;
     spawnedKeys: ReadonlySet<string>;
+    /** Whether a parentless spawn path exists (a bridge is wired). Without one
+     *  an event that names no session cannot be acted on at all. */
+    canSpawnTopLevel: boolean;
   },
 ): ReviewVerifyDecision {
   const key = reviewEventDedupeKey(event.target);
@@ -103,7 +188,7 @@ export function reviewVerifyDecision(
   if (!facts.skillAvailable) {
     return { action: 'decline', reason: 'skill-unavailable', key };
   }
-  if (!event.sessionId) {
+  if (!event.sessionId && !facts.canSpawnTopLevel) {
     return { action: 'decline', reason: 'no-session', key };
   }
   if (facts.spawnedKeys.has(key)) {
@@ -112,7 +197,7 @@ export function reviewVerifyDecision(
   return {
     action: 'spawn',
     prompt: `/verify-pr ${event.target.number} --publish --repo ${event.target.ownerRepo}`,
-    callerSessionId: event.sessionId,
+    ...(event.sessionId ? { callerSessionId: event.sessionId } : {}),
     name: `verify PR #${event.target.number}`,
     key,
   };
@@ -122,6 +207,10 @@ export interface ReviewVerifyAutomationOptions {
   boundWorkspace: string;
   /** The workspace's own sub-session launcher (`SubSessionLauncher.launch`). */
   launch: (info: CreateSubSessionInfo) => Promise<CreateSubSessionResult>;
+  /** This runtime's bridge, for events with no originating session. Optional:
+   *  without it such an event is declined with `no-session` rather than
+   *  silently dropped. */
+  getBridge?: () => ReviewVerifyBridge | undefined;
   intervalMs?: number;
   /** Re-read each pass that has work, so flipping the setting needs no
    *  restart. Defaults to the operator-scoped `review.autoVerify`. */
@@ -182,12 +271,14 @@ export function startReviewVerifyAutomation(
 
     const enabled = isEnabled();
     const skillAvailable = fsSync.existsSync(skillPath);
+    const bridge = opts.getBridge?.();
 
     for (const { event, path: eventPath } of events) {
       const decision = reviewVerifyDecision(event, {
         enabled,
         skillAvailable,
         spawnedKeys,
+        canSpawnTopLevel: bridge !== undefined,
       });
       if (decision.action === 'decline') {
         removePendingEvent(eventPath);
@@ -213,22 +304,50 @@ export function startReviewVerifyAutomation(
         continue;
       }
       spawnedKeys.add(decision.key);
+      const label = `${event.target.ownerRepo}#${event.target.number}`;
+      const attribution = event.reviewedBy
+        ? ` (reviewed by ${event.reviewedBy})`
+        : '';
       try {
-        const result = await opts.launch({
-          prompt: decision.prompt,
-          completion: 'sent',
-          callerSessionId: decision.callerSessionId,
-          name: decision.name,
-        });
+        let result: { sessionId: string };
+        if (decision.callerSessionId) {
+          result = await opts.launch({
+            prompt: decision.prompt,
+            completion: 'sent',
+            callerSessionId: decision.callerSessionId,
+            name: decision.name,
+          });
+        } else {
+          // The decision only reaches here without a caller when a bridge was
+          // wired; assert it rather than cast, so a future gate change surfaces
+          // as a logged failure instead of a crash on undefined.
+          if (!bridge) {
+            throw new Error('no bridge available for a parentless event');
+          }
+          result = await spawnReviewVerifySession(
+            bridge,
+            {
+              prompt: decision.prompt,
+              name: decision.name,
+              workspaceCwd: boundWorkspace,
+            },
+            (error) =>
+              notice(
+                `review-verify: prompt dispatch failed for ${label} (${
+                  error instanceof Error ? error.message : String(error)
+                })`,
+              ),
+          );
+        }
         notice(
-          `review-verify: spawned ${result.sessionId} for ${event.target.ownerRepo}#${event.target.number} at ${event.target.headSha}`,
+          `review-verify: spawned ${result.sessionId} for ${label} at ${event.target.headSha}${attribution}`,
         );
-        log.debug('spawned verification sub-session', result.sessionId);
+        log.debug('spawned verification session', result.sessionId);
       } catch (error) {
         // The key is already recorded: this head is not retried. A missing
         // round is recoverable by hand; a duplicate published report is not.
         notice(
-          `review-verify: spawn failed for ${event.target.ownerRepo}#${event.target.number} (${
+          `review-verify: spawn failed for ${label} (${
             error instanceof Error ? error.message : String(error)
           }); not retried — run /verify-pr ${event.target.number} --publish manually`,
         );

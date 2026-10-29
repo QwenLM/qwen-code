@@ -288,6 +288,56 @@ After the review, context-aware tips appear as ghost text. Press Tab to accept:
 
 Note: `fix these issues` is only available for local reviews, for the same reason `--fix` is — for PR reviews the worktree is cleaned up after the review, so post-review interactive fixing is not possible; use `--comment` or `post comments` to publish findings instead. When `--fix` was passed, the findings already carry outcomes and no fix tip is offered.
 
+## Automatic Deep Verification
+
+A clean PR review can hand itself to a deep-verification round. When a round
+ends with zero Criticals **and** certified its scope (the review's own
+fail-closed caps — an undecided blocker, unproven coverage, an unavailable PR
+context — withhold that certification), the running `qwen serve` daemon starts a
+session in the same workspace executing:
+
+```
+/verify-pr <number> --publish --repo <owner>/<repo>
+```
+
+That round produces behavioural evidence for the change and posts its report as
+a PR comment. It runs untrusted PR code under the same isolation posture as a
+manually invoked `/verify-pr`, so treat it as you would that command.
+
+- **One verification per reviewed head.** Two clean rounds at the same commit
+  start one round. A failed start is logged and not retried, so a report is
+  never published twice by accident; run `/verify-pr` by hand if you want it
+  again.
+- **Only `github.com` targets start today.** The handoff records the platform,
+  but `/verify-pr` has no Aone or GitLab backend and no `--host` flag yet, and
+  the workspace must carry the project skill (`.qwen/skills/verify-pr`).
+  Other targets are recorded and declined with a reason in the daemon log.
+- **Turn it off** with `review.autoVerify: false` in your user settings. Events
+  are still recorded; nothing is spawned. A repository's own
+  `.qwen/settings.json` cannot change this either way.
+
+### Handing off a review performed elsewhere
+
+The reviewer does not have to be qwen-code. Another agent, a script, or a person
+can record the same handoff:
+
+```bash
+qwen review verify-event --pr 15846 --repo QwenLM/qwen-code \
+  --head <the commit the review actually read> --reviewed-by codex
+```
+
+The command is offline — it reads no platform and needs no credentials — and the
+daemon does not have to be running yet: the record is durable and is picked up
+whenever the daemon next reads that workspace. Pass `--workspace-root` when you
+are not invoking it from that checkout, and `--host` for any non-GitHub target
+(there is no default host off GitHub).
+
+Because such a review has no qwen-code session, the daemon starts a **top-level**
+session rather than a sub-session. The caller asserts the two facts it is
+responsible for — which head was read, and that the round found no Critical —
+and `--reviewed-by` records who asserted them, which the daemon log names when
+it starts the round.
+
 ## Project Review Rules
 
 You can customize review criteria per project. `/review` reads rules from these files (in order):
