@@ -141,8 +141,9 @@ class ChildResultRelayTest {
         }
 
         static HarnessHttpFailure refusal(String code) {
-            return new HarnessHttpFailure("runChildOperation", null, 409,
-                    "{\"code\":\"" + code + "\"}", Map.of("code", code));
+            String body = "{\"code\":\"" + code + "\"}";
+            return new HarnessHttpFailure("runChildOperation failed with HTTP 409: " + body, null, 409,
+                    body, Map.of("code", code));
         }
     }
 

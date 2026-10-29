@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
+import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.SourceEvent;
@@ -326,7 +327,7 @@ final class HostedGateTestSupport {
                                     + invocation.getMethod().getName());
                 });
         context.addBeanFactoryPostProcessor(beanFactory -> beanFactory
-                .registerSingleton("toolPublicationOss", oss));
+                .registerSingleton("toolPublicationOss", new AliyunObjectStoreClient(oss)));
     }
 
     // The extension-record JDBC read, led by the Session's scope key: the

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
@@ -115,6 +116,7 @@ class ToolPublicationStorageConfigurationTest {
     @Test
     void theDefaultAdapterOwnsAndClosesItsOssClient() {
         var client = mock(OSS.class);
+        var managedClient = new AliyunObjectStoreClient(client);
         var acl = new AccessControlList();
         acl.setCannedACL(CannedAccessControlList.Private);
         when(client.getBucketAcl("private-test-bucket")).thenReturn(acl);
@@ -122,11 +124,12 @@ class ToolPublicationStorageConfigurationTest {
                 .withBean("unrelatedOss", OSS.class, () -> mock(OSS.class))
                 .withBean(BeanFactoryPostProcessor.class, () -> beanFactory ->
                         ((AbstractBeanDefinition) beanFactory.getBeanDefinition("toolPublicationOss"))
-                                .setInstanceSupplier(() -> client))
+                                .setInstanceSupplier(() -> managedClient))
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(ToolPublicationObjectStore.class);
-                    assertThat(context.getBeansOfType(OSS.class)).hasSize(2);
-                    assertThat(context.getBean("toolPublicationOss", OSS.class)).isSameAs(client);
+                    assertThat(context.getBeansOfType(OSS.class)).containsOnlyKeys("unrelatedOss");
+                    assertThat(context.getBean("toolPublicationOss", AliyunObjectStoreClient.class))
+                            .isSameAs(managedClient);
                     assertThat(context.getBean(ToolPublicationObjectStore.class))
                             .isInstanceOf(AliyunToolPublicationObjectStore.class);
                 });

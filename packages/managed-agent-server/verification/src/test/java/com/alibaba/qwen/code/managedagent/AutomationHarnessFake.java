@@ -446,8 +446,8 @@ public final class AutomationHarnessFake {
 
     /** The daemon client's HTTP refusal, as the hosted route answers it. */
     public static HarnessHttpFailure refusal(int status, String code) {
-        return new HarnessHttpFailure("POST /session/:id/automations/operations", null, status,
-                "{\"error\":\"" + code + "\",\"code\":\"" + code + "\"}",
-                Map.of("error", code, "code", code));
+        String body = "{\"error\":\"" + code + "\",\"code\":\"" + code + "\"}";
+        return new HarnessHttpFailure("POST /session/:id/automations/operations failed with HTTP " + status
+                + ": " + body, null, status, body, Map.of("error", code, "code", code));
     }
 }

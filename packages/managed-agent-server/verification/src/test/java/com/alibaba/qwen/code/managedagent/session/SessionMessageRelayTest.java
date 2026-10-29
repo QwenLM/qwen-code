@@ -113,8 +113,9 @@ class SessionMessageRelayTest {
         }
 
         static HarnessHttpFailure refusal(String code) {
-            return new HarnessHttpFailure("runMessageOperation", null, 409,
-                    "{\"code\":\"" + code + "\"}", Map.of("code", code));
+            String body = "{\"code\":\"" + code + "\"}";
+            return new HarnessHttpFailure("runMessageOperation failed with HTTP 409: " + body, null, 409,
+                    body, Map.of("code", code));
         }
     }
 

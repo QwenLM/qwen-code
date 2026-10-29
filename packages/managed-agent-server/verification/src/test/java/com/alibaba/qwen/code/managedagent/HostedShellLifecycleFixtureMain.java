@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.Filter;
@@ -81,7 +82,7 @@ public final class HostedShellLifecycleFixtureMain {
                         case "toString" -> "l4-publication-fixture";
                         default -> throw new AssertionError("Unexpected object I/O: " + invocation.getMethod().getName());
                     });
-                    context.addBeanFactoryPostProcessor(factory -> factory.registerSingleton("toolPublicationOss", oss));
+                    context.addBeanFactoryPostProcessor(factory -> factory.registerSingleton("toolPublicationOss", new AliyunObjectStoreClient(oss)));
                 }).run(arguments.toArray(String[]::new));
         Path ready = Path.of(config.path("ready").asText());
         Path writing = ready.resolveSibling(ready.getFileName() + ".tmp");
