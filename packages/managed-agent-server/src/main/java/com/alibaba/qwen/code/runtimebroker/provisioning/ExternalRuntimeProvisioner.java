@@ -38,10 +38,17 @@ import java.util.concurrent.Executors;
  * identity decision: the handle is bound to a digest of the token-free boot
  * document, and every endpoint is attested before use. Like the Kubernetes
  * scratch provider, {@link #release} is never treated as authority to stop a
- * worker another Broker may own, and managed-context (registered Workspace)
- * requests are refused.
+ * worker another Broker may own.
+ *
+ * <p>This class also owns the transport, identity and recovery mechanics shared
+ * by the external kind family ({@link ExternalRuntimeKinds}). The default
+ * profile is {@code external-scratch}: it refuses managed-context (registered
+ * Workspace) requests. {@link ExternalWorkspaceProvisioner} overrides only the
+ * profile hooks — the boot document, the profile admission rules and the
+ * storage evidence — so the two kinds cannot drift apart in placement,
+ * recovery, idempotency or release semantics.
  */
-public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
+public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     public static final String KIND = "external-scratch";
     static final int MAX_PLACEMENTS = 1024;
     private static final int HANDLE_VERSION = 1;
@@ -97,7 +104,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             Placement retained = admitPlacement(request, seed, knownHandle, true);
             RuntimeResourceHandle original = knownHandle != null ? knownHandle : retained.handle();
             RuntimeResourceHandle handle = original != null ? original
-                    : new RuntimeResourceHandle(KIND, HANDLE_VERSION, Map.of(
+                    : new RuntimeResourceHandle(kind(), HANDLE_VERSION, Map.of(
                             "providerId", providerId,
                             "provisionRequestId", seed.getProvisionRequestId(),
                             "identity", identity(request, seed),
@@ -109,7 +116,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
-        return handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == HANDLE_VERSION;
+        return handle != null && kind().equals(handle.getKind()) && handle.getVersion() == HANDLE_VERSION;
     }
 
     @Override
@@ -125,7 +132,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             body.put("provisionRequestId", seed.getProvisionRequestId());
             body.put("identity", identity(request, seed));
             body.put("scope", scope(request));
-            body.put("boot", boot(request, seed));
+            body.put("boot", bootDocument(request, seed));
             body.put("handle", saved.handle().getValue().get("provider"));
             Map<String, Object> response;
             try {
@@ -264,6 +271,15 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         body.put("identity", identity(request, seed));
         body.put("handle", handle.getValue().get("provider"));
         Map<String, Object> response = call(client.observe(Map.copyOf(body)));
+        return observation(request, seed, handle, response);
+    }
+
+    /**
+     * Maps one provider observe response onto a Broker observation. Profiles that
+     * carry extra evidence override this and delegate the state mapping here.
+     */
+    protected RuntimeObservation observation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, Map<String, Object> response) {
         Object state = response.get("state");
         if ("RUNNING".equals(state)) {
             return RuntimeObservation.ready(handle, endpoint(response.get("endpoint")),
@@ -276,8 +292,26 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             return RuntimeObservation.unknown(handle);
         }
         // GONE, or anything the contract does not name, blocks adoption: a vanished
-        // scratch worker is never silently replaced under the original identity.
+        // external worker is never silently replaced under the original identity.
         throw conflict();
+    }
+
+    /**
+     * Builds the boot document sent to the provider. The default is the shipped
+     * boot-v1 scratch document; profiles add their own closed members.
+     */
+    protected Map<String, Object> bootDocument(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return boot(request, seed);
+    }
+
+    /**
+     * Profile-specific admission rules, evaluated inside {@link #validate} before
+     * the boot size bound. The default refuses managed-context requests.
+     */
+    protected void validateProfile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        if (request.isManagedContext()) {
+            throw conflict();
+        }
     }
 
     private Placement admitPlacement(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -351,7 +385,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        if (request == null || seed == null || request.isManagedContext() || !KIND.equals(request.getProvisionerKind())
+        if (request == null || seed == null || !kind().equals(request.getProvisionerKind())
                 || !"session".equals(request.getScope().getIsolationClass())) {
             throw conflict();
         }
@@ -362,7 +396,8 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 || seed.getEpoch() > 9_007_199_254_740_991L) {
             throw conflict();
         }
-        if (JsonCodec.encode(boot(request, seed)).length > BOOT_LIMIT) {
+        validateProfile(request, seed);
+        if (JsonCodec.encode(bootDocument(request, seed)).length > BOOT_LIMIT) {
             throw conflict();
         }
     }
@@ -381,7 +416,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private String identity(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        Map<String, Object> boot = new LinkedHashMap<>(boot(request, seed));
+        Map<String, Object> boot = new LinkedHashMap<>(bootDocument(request, seed));
         boot.remove("token");
         return digest(Map.of("version", 1, "providerId", providerId,
                 "isolationKey", request.getIsolationKey(), "boot", boot));
@@ -438,6 +473,11 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             }
             throw unavailable();
         }
+    }
+
+    /** Canonical-JSON SHA-256, the digest discipline every external identity uses. */
+    protected static String canonicalDigest(Object value) {
+        return digest(value);
     }
 
     private static String digest(Object value) {

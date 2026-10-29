@@ -57,6 +57,7 @@ vi.mock('@modelcontextprotocol/ext-apps', () => ({
     }
   },
   applyDocumentTheme: vi.fn(),
+  applyHostStyleVariables: vi.fn(),
 }));
 
 const input = {
@@ -126,6 +127,71 @@ function deferred() {
   });
   return { promise, resolve, reject };
 }
+
+describe('ask the session to fix a failed view', () => {
+  const error =
+    "Script error: ReferenceError: 'total' is not defined (line 3, column 7).";
+
+  it('offers the error for review and sends it only on explicit activation', async () => {
+    const pending = deferred();
+    bridge.sendMessage.mockReturnValue(pending.promise);
+    ready();
+    present({ phase: 'error', viewAvailable: false, error });
+    expect(continuation().disabled).toBe(false);
+    expect(continuation().textContent).toBe(
+      'Ask the assistant to fix this view',
+    );
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    continuation().click();
+    continuation().click();
+    expect(presentation.capture).not.toHaveBeenCalled();
+    expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
+    const [message] = bridge.sendMessage.mock.calls[0];
+    expect(message.content[0].text).toContain('"Verified capacity"');
+    expect(message.content[0].text).toContain(error);
+    expect(message.content[0].text).toContain('generated_ui_show');
+    expect(continuation().disabled).toBe(true);
+    pending.resolve({});
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain('session accepted'),
+    );
+    expect(continuation().disabled).toBe(true);
+  });
+
+  it('lets the user review again after an unconfirmed request', async () => {
+    bridge.sendMessage.mockResolvedValue({ isError: true });
+    ready();
+    present({ phase: 'error', viewAvailable: false, error });
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(continuation().textContent).toBe(
+        'Review again after checking the session',
+      ),
+    );
+    expect(continuation().disabled).toBe(false);
+  });
+
+  it.each([
+    'The interactive host is unavailable. Use the summary.',
+    'This browser cannot run the view. Use the summary.',
+  ])('does not offer host failures: %s', (hostError) => {
+    ready();
+    present({ phase: 'error', viewAvailable: false, error: hostError });
+    expect(continuation().disabled).toBe(true);
+    continuation().click();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not offer a fix without message review', async () => {
+    await bridge.onteardown!();
+    vi.resetModules();
+    bridge.getHostVersion.mockReturnValue({ name: 'other' });
+    await import('./main.js');
+    ready();
+    present({ phase: 'error', viewAvailable: false, error });
+    expect(continuation().disabled).toBe(true);
+  });
+});
 
 describe('continue analysis from the trusted App', () => {
   it('captures only on explicit activation, freezes text and locks repeated activation', async () => {

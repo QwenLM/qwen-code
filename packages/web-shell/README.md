@@ -626,6 +626,7 @@ daemon 参数的完整含义和配置方式见
 | `onSessionArtifactsChange`     | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                                                |
 | `onAssistantTurnSettled`       | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                                                   |
 | `settings`                     | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                                                    |
+| `composerVariant`              | `'default' \| 'simple'`                                                                                                               | 输入框展示模式；默认 `default`，`simple` 使用胶囊形简洁输入框，适用于主聊天、分屏和侧任务。                                                                                  |
 | `showToolCalls`                | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                                                      |
 | `modelManagement`              | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                                                      |
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`                                                                                                 | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                                               |
@@ -701,6 +702,40 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+### 简洁输入框
+
+通过 `composerVariant="simple"` 启用胶囊形输入框，适用于 `WebShell` 和
+`WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders composerVariant="simple" />
+<WebShell composerVariant="simple" />
+```
+
+`WebShell` 仍需放在现有 daemon providers 中。省略该属性或传入 `"default"`
+时使用原有输入框；该选项不增加 daemon 配置或持久化设置。
+
+简洁模式在左侧保留 ＋ 菜单，中间为编辑区，右侧显示当前主要操作：有内容时发送，
+语音可用且输入为空时显示已有语音入口，运行中保留停止操作。语音不受支持或不可用
+时，简洁布局右侧显示发送按钮，空内容的闲置状态下禁用，不提供麦克风占位入口。
+长文本和附件可展开，继续使用已有文本编辑、输入法、附件和提交行为；简洁加号使用
+中性灰。简洁录音／转写时，语音控件占据胶囊整行以容纳波形、计时和停止操作，暂时
+隐藏编辑区、加号、模式和提交控件但不卸载编辑器，结束后恢复。高级／默认录音展示
+保持原样。
+触屏设备可通过语音／发送左侧的设置图标直接“切换至高级模式”，原地使用现有完整
+移动端输入框，再通过原语音控件前的返回图标“切换至简洁模式”，顺序为返回 →
+麦克风 → 发送，让麦克风紧挨发送。高级模式除返回
+按钮外保持原有布局、工具栏、语音／发送行为和图标尺寸，不应用简洁模式的麦克风
+放大或语音／发送互斥。切换保留文字、附件和编辑器节点，不打开菜单或全屏对话框，
+也不修改 iOS 原生编辑菜单；默认模式及桌面端不新增此切换按钮。
+
+简洁 ＋ 菜单仅提供照片、拍照、添加文件附件、上传至工作区、引用文件、扩展、MCP、
+技能八类入口，并遵守平台及能力检查。命令、历史、shell 模式、Plan、实时语音及次要
+工具栏控件不放入简洁菜单，工作区、权限模式、模型、上下文和宿主控件在高级模式按
+原方式展示。桌面菜单使用下拉形式，触屏使用抽屉。已有 `composerToolbarActions`
+等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
+生效。
 
 ### 品牌（白标）
 
@@ -798,7 +833,7 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 单栏默认 300px。已有保存宽度优先，保存值仍表示侧栏总宽度，展开时至少为单栏 220px、双栏 276px；不对已有值直接增加 56px。分屏入口和分屏自动折叠使用容器宽度 1024px，分屏侧栏空间阈值为容器 1200px。
 环境面板的停靠断点不计入图标栏的 56px（由消息区让出这部分宽度），因此面板停靠的窗口宽度阈值与仅首页侧栏一致——例如 1440px 窗口仍可停靠。
 
-双栏的「频道」入口同时展示按工作区文件夹分组的频道会话、归档和右侧设置页。
+双栏的「频道」入口同时展示按工作区文件夹分组的频道会话和右侧设置页；频道归档在「设置 → 归档会话」内切换到「频道」查看。
 文件夹保留展开收起、搜索与会话操作；工作区管理、添加及文件夹行操作仅在首页展示。
 点击会话后右侧切为详情，再点击一级「频道」图标可重新打开管理页；左栏标题下显示分隔线，
 不再提供齿轮入口，右侧标题为「设置」，双栏频道设置页不显示返回按钮。
@@ -839,7 +874,9 @@ Live 和频道右侧标题都为「设置」，左栏标题与首页品牌名共
 
 `WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件（界面语言），`setting:output-language` 对应模型输出语言（用户作用域，仅用户标签页显示），`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections`、`builtin:archived-sessions` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+
+归档会话管理位于 **设置 → 归档会话**，直接展示现有归档列表及工作区分组；侧边栏不再常驻“已归档”区块。只有进入该分类时才加载归档，离开后停止相关订阅。该分类沿用原有侧边栏归档功能的能力限制，禁用侧边栏的嵌入宿主不展示此分类；可通过 `builtin:archived-sessions` 控制其设置入口。嵌入宿主需在 `sidebar.footer.items` 中提供 `settings`，使用设置白名单时需加入 `builtin:archived-sessions`；既有白名单升级后不会自动加入该入口，隐藏设置入口或排除此分类会隐藏归档管理界面，底层归档 API 不受影响。支持来源元数据时，归档页内可独立切换任务／频道，不改变侧边栏活跃会话的筛选。
 
 - 未传 `includeItems` 时保持现有展示逻辑，仅应用 `excludeItems`；新增的上游设置默认仍然可见。
 - `includeItems: []` 隐藏全部原生设置条目；它与未传入白名单不同。

@@ -2,17 +2,27 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppBridge,
   PostMessageTransport,
+  type McpUiStyles,
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import {
   McpAppHostContext,
   useMcpAppAdmission,
+  isBuiltInGeneratedUi,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
+  McpAppGeneratedUiOwnerContext,
+  McpAppVisibilityContext,
 } from '../../mcpAppHostContext';
 import { useI18n } from '../../i18n';
 import { useTheme } from '../../themeContext';
 import styles from './McpApp.module.css';
+import {
+  GeneratedUiSlot,
+  useGeneratedUiRetention,
+} from '../../generated-ui/GeneratedUiRuntimeProvider';
+import { Button } from '../ui/button';
+import type { GeneratedUiInstance } from '../../generated-ui/instance-store';
 
 type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
 type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
@@ -120,9 +130,53 @@ export function applySandboxCspQuery(
     : sandboxUrl;
 }
 
-function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
+// Standard MCP App style variables resolved from the Web Shell tokens the
+// card itself sees, so Apps can match the current theme instead of the
+// operating system's color scheme. Secondary text uses the token that keeps
+// readable contrast in each theme.
+function hostStyleVariables(
+  element: Element | null,
+  theme: ReturnType<typeof useTheme>,
+): Record<string, string> | undefined {
+  if (!element || typeof getComputedStyle !== 'function') return undefined;
+  const computed = getComputedStyle(element);
+  const tokens: Record<string, string> = {
+    '--color-background-primary': '--background',
+    '--color-background-secondary': '--muted',
+    '--color-background-inverse': '--primary',
+    '--color-text-primary': '--foreground',
+    '--color-text-secondary':
+      theme === 'light' ? '--secondary-foreground' : '--muted-foreground',
+    '--color-text-inverse': '--primary-foreground',
+    '--color-text-danger': '--destructive',
+    '--color-border-primary': '--border',
+    '--color-border-secondary': '--input',
+    '--color-ring-primary': '--ring',
+    '--font-sans': '--font-sans',
+    '--border-radius-md': '--radius',
+  };
+  const variables: Record<string, string> = {};
+  for (const [name, token] of Object.entries(tokens)) {
+    const value = computed.getPropertyValue(token).trim();
+    if (value) variables[name] = value;
+  }
+  return Object.keys(variables).length ? variables : undefined;
+}
+
+function mcpAppHostContext(
+  theme: ReturnType<typeof useTheme>,
+  variables?: Record<string, string>,
+) {
   return {
     theme,
+    // Hosts may send any subset of the standard variables.
+    ...(variables
+      ? {
+          styles: {
+            variables: variables as Partial<McpUiStyles> as McpUiStyles,
+          },
+        }
+      : {}),
     platform: 'web' as const,
     displayMode: 'inline' as const,
     availableDisplayModes: ['inline' as const],
@@ -172,8 +226,34 @@ export function GeneratedUiFallback({ display }: { display: McpAppDisplay }) {
   );
 }
 
-export function McpApp({ display }: { display: McpAppDisplay }) {
+export function McpApp({
+  display,
+  toolId,
+  visible = true,
+}: {
+  display: McpAppDisplay;
+  toolId?: string;
+  visible?: boolean;
+}) {
   const allowed = useMcpAppAdmission(display);
+  const retention = useGeneratedUiRetention();
+  const owner = useContext(McpAppGeneratedUiOwnerContext)?.source;
+  const sessionId = useContext(McpAppSessionContext);
+  const surfaceVisible = useContext(McpAppVisibilityContext);
+  if (
+    import.meta.env.MODE !== 'transcript' &&
+    allowed &&
+    retention &&
+    toolId &&
+    isBuiltInGeneratedUi(display) &&
+    owner?.eventEpoch &&
+    owner.sessionId === sessionId
+  )
+    return surfaceVisible ? (
+      <GeneratedUiSlot display={display} toolId={toolId} visible={visible} />
+    ) : (
+      <GeneratedUiFallback display={display} />
+    );
   return allowed ? (
     <McpAppRuntime display={display} />
   ) : (
@@ -181,7 +261,14 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   );
 }
 
-function McpAppRuntime({ display }: { display: McpAppDisplay }) {
+export function McpAppRuntime({
+  display,
+  retained,
+}: {
+  display: McpAppDisplay;
+  retained?: GeneratedUiInstance['runtime'];
+}) {
+  const { t } = useI18n();
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);
@@ -196,6 +283,7 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
   const mountGenerationRef = useRef(0);
   const displayRef = useRef(display);
@@ -238,14 +326,23 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
           ...(current.csp ? { csp: current.csp } : {}),
         },
       },
-      { hostContext: mcpAppHostContext(themeRef.current) },
+      {
+        hostContext: mcpAppHostContext(
+          themeRef.current,
+          hostStyleVariables(cardRef.current, themeRef.current),
+        ),
+      },
     );
     bridgeRef.current = bridge;
     const appAbort = new AbortController();
     let messagePending = false;
     if (requestMessage) {
       bridge.onmessage = async (params, extra) => {
-        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        const signal = AbortSignal.any([
+          extra.signal,
+          appAbort.signal,
+          ...(retained ? [retained.getSignal()] : []),
+        ]);
         const content = params.content;
         if (
           signal.aborted ||
@@ -276,7 +373,11 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     }
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
-        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        const signal = AbortSignal.any([
+          extra.signal,
+          appAbort.signal,
+          ...(retained ? [retained.getSignal()] : []),
+        ]);
         let progress = 0;
         const progressToken = params._meta?.progressToken;
         // ext-apps omits the base MCP progress notification from its union.
@@ -368,7 +469,8 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (
         typeof requestedHeight === 'number' &&
-        Number.isFinite(requestedHeight)
+        Number.isFinite(requestedHeight) &&
+        (!retained || (retained.isVisible() && requestedHeight > 0))
       ) {
         setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
       }
@@ -423,10 +525,13 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     cspKey,
     toolArgumentsKey,
     toolResultKey,
+    retained,
   ]);
 
   useEffect(() => {
-    bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
+    bridgeRef.current?.setHostContext(
+      mcpAppHostContext(theme, hostStyleVariables(cardRef.current, theme)),
+    );
   }, [theme]);
 
   if (!display.html || !sandboxUrl) {
@@ -434,11 +539,26 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
   }
 
   return (
-    <div className={styles.card} data-testid="mcp-app">
+    <div ref={cardRef} className={styles.card} data-testid="mcp-app">
       <div className={styles.header}>
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>
+        {retained && (
+          <Button
+            variant="ghost"
+            size="sm"
+            title={t('mcpApp.generatedUi.reopenNotice')}
+            onClick={retained.reset}
+          >
+            {t('mcpApp.generatedUi.reset')}
+          </Button>
+        )}
       </div>
+      {retained?.reopened && (
+        <div className={styles.fallback}>
+          {t('mcpApp.generatedUi.reopenNotice')}
+        </div>
+      )}
       {error ? (
         <div className={styles.fallback}>
           {display.fallbackText || 'MCP App could not initialize.'}
