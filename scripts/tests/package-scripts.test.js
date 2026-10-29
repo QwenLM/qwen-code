@@ -23,8 +23,11 @@ import { describe, expect, it } from 'vitest';
 import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
+import { checkReleaseTarballExecBits } from '../check-release-tarball-exec-bits.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -43,6 +46,43 @@ function readPackageJson() {
 
 function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
+}
+
+const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
+
+/**
+ * Writes a throwaway package shaped like the generated CLI for the
+ * vendored-binary packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given modes, the manifest entry that makes
+ * a packer pick the tree up, and optionally
+ * `vendor/landlock-run/<platform>/qwen-landlock-run` binaries.
+ */
+function writeVendoredBinaryFixture(directory, platforms, landlock = {}) {
+  writeFileSync(
+    path.join(directory, 'package.json'),
+    JSON.stringify({
+      name: 'vendored-binary-fixture',
+      version: '1.0.0',
+      files: ['vendor'],
+    }),
+  );
+  const binaries = [];
+  for (const [platform, mode] of Object.entries(platforms)) {
+    binaries.push([
+      `vendor/ripgrep/${platform}/${platform.endsWith('-win32') ? 'rg.exe' : 'rg'}`,
+      mode,
+    ]);
+  }
+  for (const [platform, mode] of Object.entries(landlock)) {
+    binaries.push([`vendor/landlock-run/${platform}/qwen-landlock-run`, mode]);
+  }
+  for (const [relative, mode] of binaries) {
+    const binary = path.join(directory, relative);
+    mkdirSync(path.dirname(binary), { recursive: true });
+    writeFileSync(binary, '#!/bin/sh\n');
+    chmodSync(binary, mode);
+  }
+  return directory;
 }
 
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
@@ -1073,6 +1113,33 @@ describe('package scripts', () => {
     expect(created).toContain('new file mode');
   });
 
+  it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
+    const { build } = readPackageJson().scripts;
+    const cap = heapCap(build);
+    expect(cap).toBeDefined();
+    // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
+    // shared pool and failed the Java daemon E2E leg before any test ran
+    // (#14835). Keep the build-time cap at or above the 6144 MB that fixed it.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
+  it('keeps the pnpm prepare build above the heap ceiling and the root build cap', () => {
+    const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
+    const pnpmCap = heapCap(nodeOptions);
+    const buildCap = heapCap(readPackageJson().scripts.build);
+    expect(pnpmCap).toBeDefined();
+    expect(buildCap).toBeDefined();
+    // The pnpm prepare path compiles the same CLI project that crossed the
+    // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
+    // root build script instead of leaving one half of the fix unguarded.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(6144);
+    // pnpm replaces NODE_OPTIONS for every package script, so this cap — not
+    // the root build script's — governs `tsc --build` on both the explicit
+    // and install-time paths. A raise on the root entry point intended for
+    // that compile must be mirrored here.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
@@ -1141,6 +1208,14 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:ci']).toBe(
       'npm run test:ci:workspaces && npm run test:scripts',
     );
+    // test:scripts passes its args on to the scripts/tests Vitest run, which
+    // CI's side lane runs as its own script.
+    expect(packageJson.scripts['test:scripts']).toBe(
+      'npm run test:standalone:runtimes:ci && npm run test:scripts:unit --',
+    );
+    expect(packageJson.scripts['test:scripts:unit']).toBe(
+      'vitest run --config ./scripts/tests/vitest.config.ts',
+    );
 
     const step = getWorkflowStep(
       getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
@@ -1153,14 +1228,54 @@ describe('package scripts', () => {
     // outrank a workspace's own config-level retry (sdk-typescript).
     expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
     expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
-    expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
-    expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+    // The step hands the flag to the lane script, which passes it to all
+    // three of its Vitest runs: the CLI and core suites in the main lane, and
+    // the other workspaces and scripts/tests in the side lane.
+    expect(step).toContain(
+      '.github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
+    );
+    const lanes = readWorkflow('.github/scripts/ci/run-unit-test-lanes.sh');
+    expect(lanes).toContain(
+      'npm run test:ci "${main_workspaces[@]/#/--workspace=}" -- "$@"',
+    );
+    expect(lanes).toContain('npm run test:ci "${side_workspaces[@]}" -- "$@"');
+    expect(lanes).toContain('npm run test:scripts:unit -- "$@"');
   });
 
-  it('drops DAC capabilities for root unit tests on both CI commands', () => {
-    // The permission-bit gates in packages/cli, packages/core,
-    // packages/channels/wecom and scripts/tests ask the kernel, so on a root
-    // lane that keeps these capabilities they all skip, without failing.
+  it('prints the side lane of a test step killed before its replay', () => {
+    // The lane script replays the side lane only after the main lane ends,
+    // so a timeout or a cancel would lose every suite but the CLI and core
+    // ones. The step names the log outside the TMPDIR it removes, and the
+    // next step prints whatever is left of it.
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
+    );
+    const log = '${{ runner.temp }}/side-lane-tests.log';
+    expect(getWorkflowStep(job, 'Run tests and generate reports')).toContain(
+      `SIDE_LANE_LOG: '${log}'`,
+    );
+    const print = getWorkflowStep(
+      job,
+      'Print the side lane of a killed test step',
+    );
+    expect(print).toContain("if: '${{ failure() || cancelled() }}'");
+    expect(print).toContain('side_log="${RUNNER_TEMP}/side-lane-tests.log"');
+    expect(print).toContain('cat "${side_log}"');
+    // The script removes the log after every replay it reaches, so on an
+    // ordinary red test job the guard is what keeps this step quiet.
+    expect(print).toContain('if [ -f "${side_log}" ]; then');
+    expect(
+      job.indexOf("- name: 'Run tests and generate reports'"),
+    ).toBeLessThan(
+      job.indexOf("- name: 'Print the side lane of a killed test step'"),
+    );
+  });
+
+  it('drops DAC capabilities for root unit tests on every CI command', () => {
+    // The permission-bit probes in the workspaces and scripts/tests ask the
+    // kernel, so on a root lane that keeps these capabilities every case
+    // they gate skips, without failing.
     const step = getWorkflowStep(
       getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
       'Run tests and generate reports',
@@ -1183,19 +1298,444 @@ describe('package scripts', () => {
       setpriv,
       'fi',
     ]);
-    // Nothing else touches it (no unset, read or reset), and both test
-    // commands run under it, with no unwrapped copy beside them.
+    // Nothing else touches it (no unset, read or reset), and the lane script
+    // runs under it, so every test command it starts inherits the dropped
+    // capabilities; no test command runs beside it unwrapped.
     expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
       'test_runner=()',
       setpriv,
-      '"${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"',
-      '"${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"',
+      '"${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
     ]);
-    expect(
-      code.filter((line) =>
-        /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
-      ),
-    ).toHaveLength(2);
+    expect(code.filter((line) => /\bnpm run test:/.test(line))).toEqual([]);
+  });
+
+  // `tail --pid` is GNU; the script runs only in the Linux test job.
+  it.runIf(process.platform === 'linux')(
+    'runs every other suite beside the CLI and core suites',
+    () => {
+      // The CLI and core suites keep their workers busy for most of the
+      // step, while the other suites are small or wait on a few files and the
+      // standalone regression starts one runtime at a time, so the lane
+      // script runs all of those beside the CLI and core suites. Run it
+      // against a stub npm: each lane runs what it should, beside the other,
+      // every failure reaches the exit code, and the side lane's log comes
+      // out whole after the main lane's.
+      const lanes = path.join(
+        root,
+        '.github/scripts/ci/run-unit-test-lanes.sh',
+      );
+      const heap = heapCap(readPackageJson().scripts['test:ci:workspaces']);
+      expect(heap).toBe('3072');
+
+      const realNpm = spawnSync('sh', ['-c', 'command -v npm'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      expect(realNpm).not.toBe('');
+
+      const dir = mkdtempSync(path.join(tmpdir(), 'ci-side-lane-'));
+      try {
+        const bin = path.join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          path.join(bin, 'npm'),
+          [
+            '#!/bin/sh',
+            'if [ "$1 $2" = "pkg get" ]; then',
+            '  if [ -n "$STUB_REAL_NPM" ]; then exec "$STUB_REAL_NPM" "$@"; fi',
+            '  printf "%s" "$STUB_WORKSPACES"; exit "$STUB_PKG_GET_RC"',
+            'fi',
+            'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
+            // The main lane's suites and the side lane's workspaces each wait
+            // for the other to start, so a side lane run before or after the
+            // main lane, rather than beside it, fails here.
+            'meet() {',
+            '  touch "$STUB_CALLS.$1"; i=0',
+            '  while [ ! -e "$STUB_CALLS.$2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done',
+            '  [ -e "$STUB_CALLS.$2" ] || { echo "$1 lane ran alone"; exit 9; }',
+            '}',
+            'case "$*" in',
+            '  *--workspace=@qwen-code/qwen-code-core*) meet main side ;;',
+            '  *--workspace=@qwen-code/web-shell*) meet side main ;;',
+            'esac',
+            'echo "output of npm $*"',
+            'if [ -n "$STUB_FAIL" ] && echo "$*" | grep -qF -- "$STUB_FAIL"; then exit 7; fi',
+            'if [ -n "$STUB_HANG" ] && echo "$*" | grep -qF -- "$STUB_HANG"; then sleep 30; fi',
+            // scripts/tests runs `npm run test:scripts:unit`, the lane script
+            // again, one level deep. Its args mark its output, so a test can
+            // tell the nested lane's lines from the outer one's.
+            'if [ -n "$STUB_NESTED" ] && [ -z "${STUB_NESTED_DONE:-}" ] && echo "$*" | grep -qF "test:scripts:unit"; then',
+            '  printf "%s" "${SIDE_LANE_LOG-<unset>}" > "$STUB_NESTED_SAW"',
+            '  STUB_NESTED_DONE=1 bash "$LANES" --nested',
+            'fi',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(path.join(bin, 'npm'), 0o755);
+        const allWorkspaces = {
+          '@qwen-code/acp-bridge': 'vitest run',
+          '@qwen-code/qwen-code': 'vitest run',
+          '@qwen-code/qwen-code-core': 'vitest run',
+          '@qwen-code/web-shell': 'vitest run --config vitest.config.ts',
+          '@qwen-code/web-templates': {},
+          '@qwen-code/sdk': 'vitest run',
+        };
+        // Kills the script's process group once the side lane has run its
+        // last suite, while the main lane still hangs: a step timeout or
+        // cancel that lands before the replay.
+        const killBeforeReplay = [
+          'setsid bash "$LANES" --retry=2 &',
+          'pid=$!',
+          'i=0',
+          'until grep -q "output of npm run test:scripts:unit" "$SIDE_LANE_LOG" 2>/dev/null || [ "$i" -ge 100 ]; do sleep 0.1; i=$((i + 1)); done',
+          'kill -KILL -- "-$pid"',
+          'wait "$pid"',
+        ].join('\n');
+        const run = (
+          name,
+          {
+            workspaces = allWorkspaces,
+            pkgGet = JSON.stringify(workspaces),
+            pkgGetRc = 0,
+            realListing = false,
+            fail = '',
+            tmp = dir,
+            // ci.yml sets both to the same cap; apart, they show which is which.
+            forks = '4',
+            threads = '6',
+            sideLog = '',
+            killed = false,
+            nested = false,
+          } = {},
+        ) => {
+          const calls = path.join(dir, `${name}.calls`);
+          const args = killed ? ['-c', killBeforeReplay] : [lanes, '--retry=2'];
+          const result = spawnSync('bash', args, {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+              TMPDIR: tmp,
+              // The script sets the heap cap itself where it wants one; the
+              // other commands run with no NODE_OPTIONS, not the caller's.
+              NODE_OPTIONS: '',
+              VITEST_MAX_FORKS: forks,
+              VITEST_MAX_THREADS: threads,
+              // In CI this suite runs inside the side lane, whose own log
+              // ci.yml names here: never write to it.
+              SIDE_LANE_LOG: sideLog,
+              LANES: lanes,
+              STUB_CALLS: calls,
+              STUB_WORKSPACES: pkgGet,
+              STUB_PKG_GET_RC: String(pkgGetRc),
+              STUB_REAL_NPM: realListing ? realNpm : '',
+              STUB_FAIL: fail,
+              STUB_HANG: killed ? '--workspace=@qwen-code/qwen-code-core' : '',
+              STUB_NESTED: nested ? '1' : '',
+              STUB_NESTED_SAW: path.join(dir, `${name}.nested-saw`),
+            },
+          });
+          // The replayed side log is removed once printed.
+          expect(
+            readdirSync(dir).filter((f) => f.startsWith('side-lane-tests.')),
+          ).toEqual([]);
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            rc: String(result.status),
+            calls: existsSync(calls)
+              ? readFileSync(calls, 'utf8').trim().split('\n')
+              : [],
+          };
+        };
+        const mainSuites = `npm run test:ci --workspace=@qwen-code/qwen-code --workspace=@qwen-code/qwen-code-core -- --retry=2 heap=--max-old-space-size=${heap} workers=4/6`;
+        const sideWorkspaces = `npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2 heap=--max-old-space-size=${heap} workers=2/3`;
+        const standalone =
+          'npm run test:standalone:runtimes:ci heap= workers=4/6';
+        const scriptsUnit =
+          'npm run test:scripts:unit -- --retry=2 heap= workers=2/3';
+
+        // The two lanes run at once, so only the side lane's order is fixed.
+        const passing = run('passing');
+        expect(passing.rc).toBe('0');
+        expect([...passing.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, standalone, scriptsUnit].sort(),
+        );
+        const order = (calls, line) => calls.indexOf(line);
+        expect(order(passing.calls, sideWorkspaces)).toBeLessThan(
+          order(passing.calls, standalone),
+        );
+        expect(order(passing.calls, standalone)).toBeLessThan(
+          order(passing.calls, scriptsUnit),
+        );
+        const replay = passing.stdout.indexOf('Side lane output');
+        const mainOutput = passing.stdout.indexOf(
+          'output of npm run test:ci --workspace=@qwen-code/qwen-code ',
+        );
+        expect(mainOutput).toBeGreaterThanOrEqual(0);
+        expect(mainOutput).toBeLessThan(replay);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(replay).toBeLessThan(passing.stdout.indexOf(side));
+        }
+
+        // Each Vitest run applies the worker cap on its own, so the side
+        // lane's runs take half of it, at least 1, beside the main lane's
+        // full cap. With no cap set, as on the hosted runners, they take 2
+        // rather than Vitest's default of all CPUs but one.
+        for (const [cap, side] of [
+          ['', '2'],
+          ['1', '1'],
+        ]) {
+          const capped = run(`cap-${cap || 'unset'}`, {
+            forks: cap,
+            threads: cap,
+          });
+          expect(capped.rc).toBe('0');
+          expect([...capped.calls].sort()).toEqual(
+            [
+              mainSuites.replace('workers=4/6', `workers=${cap}/${cap}`),
+              sideWorkspaces.replace('workers=2/3', `workers=${side}/${side}`),
+              standalone.replace('workers=4/6', `workers=${cap}/${cap}`),
+              scriptsUnit.replace('workers=2/3', `workers=${side}/${side}`),
+            ].sort(),
+          );
+        }
+
+        // Against npm's real listing, the two lanes split every workspace the
+        // release pins select (scripts/workspaces.js) between them, each one
+        // in one lane.
+        const real = run('real-listing', { realListing: true });
+        expect(real.rc, real.stdout).toBe('0');
+        const names = (call) =>
+          call
+            .split(' ')
+            .filter((arg) => arg.startsWith('--workspace='))
+            .map((arg) => arg.slice('--workspace='.length));
+        const realWorkspaces = real.calls.filter((call) =>
+          call.startsWith('npm run test:ci --workspace='),
+        );
+        expect(realWorkspaces).toContain(mainSuites);
+        expect(realWorkspaces).toHaveLength(2);
+        expect(realWorkspaces.flatMap(names).sort()).toEqual(
+          getTestCiWorkspacePackageJsonPaths(root)
+            .map(
+              (packageJsonPath) =>
+                JSON.parse(
+                  readFileSync(path.join(root, packageJsonPath), 'utf8'),
+                ).name,
+            )
+            .sort(),
+        );
+
+        // A failure in one side-lane suite still lets the others run, and a
+        // main-lane failure still waits for the side lane and prints it.
+        for (const [failing, fail] of [
+          ['side-workspace', '--workspace=@qwen-code/web-shell'],
+          ['standalone', 'test:standalone'],
+          ['scripts', 'test:scripts:unit'],
+          ['main', '--workspace=@qwen-code/qwen-code-core'],
+        ]) {
+          const failed = run(`${failing}-fails`, { fail });
+          expect(failed.rc, failing).toBe('7');
+          expect([...failed.calls].sort(), failing).toEqual(
+            [...passing.calls].sort(),
+          );
+          expect(failed.stdout, failing).toContain('Side lane exited with');
+          expect(failed.stdout, failing).toContain(
+            'output of npm run test:scripts:unit',
+          );
+        }
+
+        // With nothing left beside the CLI and core suites, the step fails
+        // rather than fall back to the root's test:ci, which reruns every
+        // suite.
+        const nothingElse = run('nothing-else', {
+          workspaces: {
+            '@qwen-code/qwen-code': 'vitest run',
+            '@qwen-code/qwen-code-core': 'vitest run',
+            '@qwen-code/web-templates': {},
+          },
+        });
+        expect(nothingElse.rc).toBe('1');
+        expect(nothingElse.stdout).toContain(
+          '::error::Found no workspaces to test beside the CLI and core suites.',
+        );
+        expect(nothingElse.calls).toEqual([]);
+
+        // A failed listing says so instead of claiming there is nothing to
+        // test, and runs no suites. A failing `npm pkg get --json` prints an
+        // error object, which parses as a listing with no workspaces in it.
+        const unlisted =
+          '::error::Could not list the workspaces that define test:ci; the error is above.';
+        for (const [name, options] of [
+          [
+            'pkg-get-fails',
+            {
+              pkgGet: JSON.stringify({ error: { code: 'EJSONPARSE' } }),
+              pkgGetRc: 1,
+            },
+          ],
+          ['pkg-get-garbled', { pkgGet: 'not json' }],
+        ]) {
+          const listingFails = run(name, options);
+          expect(listingFails.rc).toBe('1');
+          expect(listingFails.stdout).toContain(unlisted);
+          expect(listingFails.stdout).not.toContain('Found no workspaces');
+          expect(listingFails.calls).toEqual([]);
+        }
+
+        // The side lane's arguments are read one per line, so a workspace
+        // name with a line break in it would split into other arguments,
+        // flags among them.
+        const splitName = run('name-with-newline', {
+          workspaces: {
+            ...allWorkspaces,
+            '@qwen-code/evil\n--workspaces': 'vitest run',
+          },
+        });
+        expect(splitName.rc).toBe('1');
+        expect(splitName.stdout).toContain(unlisted);
+        expect(splitName.stderr).toContain(
+          'A workspace name holds whitespace: "@qwen-code/evil\\n--workspaces"',
+        );
+        expect(splitName.calls).toEqual([]);
+
+        // A log the caller names is removed once replayed, like a temp one.
+        const namedLog = path.join(dir, 'named.log');
+        const named = run('named-log', { sideLog: namedLog });
+        expect(named.rc).toBe('0');
+        expect([...named.calls].sort()).toEqual([...passing.calls].sort());
+        expect(named.stdout).toContain(
+          'output of npm run test:scripts:unit -- --retry=2',
+        );
+        expect(existsSync(namedLog)).toBe(false);
+
+        // scripts/tests runs `npm run test:scripts:unit`, which runs this
+        // script again. A nested run must not inherit the caller's log: it
+        // would truncate the outer side lane's log, replay it and remove it,
+        // leaving the outer replay nothing to print.
+        const nestedLog = path.join(dir, 'nested.log');
+        const nested = run('nested-log', { sideLog: nestedLog, nested: true });
+        expect(nested.rc).toBe('0');
+        expect(
+          nested.calls.filter((call) =>
+            call.startsWith('npm run test:scripts:unit'),
+          ),
+        ).toHaveLength(2);
+        // The nested run does not see the caller's log, so it cannot truncate,
+        // replay or remove it.
+        expect(
+          readFileSync(path.join(dir, 'nested-log.nested-saw'), 'utf8'),
+        ).toBe('<unset>');
+        // The outer side lane's own lines still reached its replay. The
+        // nested run's carry `--nested`, so its identical-looking output
+        // cannot satisfy these.
+        const nestedReplay = nested.stdout.indexOf('Side lane output');
+        expect(nestedReplay).toBeGreaterThanOrEqual(0);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2',
+          'output of npm run test:scripts:unit -- --retry=2',
+        ]) {
+          expect(nestedReplay).toBeLessThan(nested.stdout.indexOf(side));
+        }
+        expect(existsSync(nestedLog)).toBe(false);
+
+        // A step killed before the replay leaves the named log behind with
+        // everything the side lane ran, for ci.yml's next step to print.
+        const killedLog = path.join(dir, 'killed.log');
+        const killed = run('killed', { sideLog: killedLog, killed: true });
+        expect(killed.stdout).not.toContain('Side lane output');
+        expect(killed.calls).toContain(mainSuites);
+        const leftover = readFileSync(killedLog, 'utf8');
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(leftover).toContain(side);
+        }
+
+        // Without a log file for the side lane, nothing runs.
+        const noLog = run('named-log-missing', {
+          sideLog: path.join(dir, 'missing', 'named.log'),
+        });
+        expect(noLog.rc).toBe('1');
+        expect(noLog.stdout).toContain(
+          `::error::Could not create the side lane's log file ${path.join(dir, 'missing', 'named.log')}; running no suites.`,
+        );
+        expect(noLog.calls).toEqual([]);
+        const noTmp = run('no-tmpdir', { tmp: path.join(dir, 'missing') });
+        expect(noTmp.rc).toBe('1');
+        expect(noTmp.stdout).toContain(
+          `::error::Could not create the side lane's log file under ${path.join(dir, 'missing')}; running no suites.`,
+        );
+        expect(noTmp.calls).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps every copy of the permission-bit probe identical', () => {
+    // The probe is copied, not shared: each package that uses it keeps its
+    // own copy, and cli, core and browser-use also keep its tests (wecom
+    // inlines a smaller probe for its one case). A fix to one copy has to
+    // reach the others, or the packages measure differently.
+    const copies = {
+      'permission-bits.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+        'packages/sdk-typescript/test/test-utils',
+        'integrations/test-failure-explorer/src/test-utils',
+      ],
+      'permission-bits.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+    };
+    for (const [file, dirs] of Object.entries(copies)) {
+      const [reference, ...others] = dirs.map((dir) =>
+        readFileSync(path.join(root, dir, file), 'utf8'),
+      );
+      others.forEach((text, i) => {
+        expect(text, `${file}: ${dirs[i + 1]} vs ${dirs[0]}`).toBe(reference);
+      });
+    }
+  });
+
+  it('keeps both copies of the slow-test-host predicate identical', () => {
+    // The predicate is copied, not shared, and each copy's header says to keep
+    // them in sync. The files are not byte-identical (only the cli copy also
+    // exports slowHostBudgetMs), so compare the shared function itself. A
+    // threshold tweak that reaches one copy and not the other silently splits
+    // the suites the two packages put on the raised budgets.
+    const copies = [
+      'packages/cli/src/test-utils/slow-test-host.ts',
+      'packages/core/src/test-utils/slow-test-host.ts',
+    ];
+    const bodies = copies.map((file) => {
+      const text = readFileSync(path.join(root, file), 'utf8');
+      const body = text.match(
+        /export function isSlowTestHost\(\): boolean \{[\s\S]*?\n\}\n/,
+      );
+      expect(body, `${file}: isSlowTestHost not found`).not.toBeNull();
+      return body[0];
+    });
+    const [reference, ...others] = bodies;
+    others.forEach((body, i) => {
+      expect(body, `${copies[i + 1]} vs ${copies[0]}`).toBe(reference);
+    });
   });
 
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
@@ -1725,12 +2265,123 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
+      'npm publish --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
       'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
+
+  it('publishes the generated CLI with a packer that keeps the ripgrep exec bit', () => {
+    // #12668: pnpm's packer writes 0644 for every entry outside `bin`, so a CLI
+    // published with it ships a vendored ripgrep that nobody can spawn. The
+    // generated CLI is the only package carrying vendored binaries and the only
+    // one `publish_package` is called for, so it alone goes back to npm.
+    expect(releaseStepScript).toContain("publish_package 'dist'");
+    expect(releaseStepScript).not.toContain('corepack pnpm publish');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+
+    // The gate runs in the arm that produces `dist`, before the publish step
+    // consumes it, so no release can publish a tarball it never checked. It
+    // runs from the workflow-pinned scripts: a release ref that predates it
+    // would have no `scripts/check-release-tarball-exec-bits.mjs` of its own.
+    const buildPackageArm = releaseStepScript.slice(
+      releaseStepScript.indexOf('build-package)'),
+      releaseStepScript.indexOf('build-archives)'),
+    );
+    expect(buildPackageArm).toContain(
+      'node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist',
+    );
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'npm pack keeps the exec bit on every spawned vendored binary in the CLI tarball',
+    () => {
+      // The archive is where the bit is lost (#12668), so assert on its
+      // recorded modes rather than on the staged tree. A `-win32` directory
+      // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
+      try {
+        writeVendoredBinaryFixture(
+          fixture,
+          {
+            'x64-linux': 0o755,
+            'arm64-darwin': 0o755,
+            'x64-win32': 0o644,
+          },
+          { 'x64-linux': 0o755 },
+        );
+        const { entries } = checkReleaseTarballExecBits(fixture);
+        expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/landlock-run/x64-linux/qwen-landlock-run',
+          'package/vendor/ripgrep/arm64-darwin/rg',
+          'package/vendor/ripgrep/x64-linux/rg',
+        ]);
+        for (const [name, mode] of entries) {
+          expect(mode & 0o111, name).toBe(0o111);
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'release tarball gate rejects a spawned vendored binary without an exec bit',
+    () => {
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
+      try {
+        writeVendoredBinaryFixture(
+          fixture,
+          { 'x64-linux': 0o755 },
+          { 'x64-linux': 0o644 },
+        );
+        expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
+          /package\/vendor\/landlock-run\/x64-linux\/qwen-landlock-run: 0644 lacks an exec bit/,
+        );
+
+        // A platform directory whose binary was dropped during staging must
+        // fail, not silently shrink the expected set.
+        const shrunk = mkdtempSync(path.join(tmpdir(), 'cli-rg-missing-'));
+        try {
+          writeVendoredBinaryFixture(
+            shrunk,
+            { 'arm64-linux': 0o755 },
+            { 'x64-linux': 0o755 },
+          );
+          mkdirSync(path.join(shrunk, 'vendor', 'ripgrep', 'x64-linux'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(shrunk)).toThrow(
+            /package\/vendor\/ripgrep\/x64-linux\/rg: missing from the packed tarball/,
+          );
+        } finally {
+          rmSync(shrunk, { force: true, recursive: true });
+        }
+
+        // A package whose vendor trees ship no spawned binary must not pass
+        // vacuously: the gate refuses before it ever packs.
+        const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
+        try {
+          mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
+            recursive: true,
+          });
+          mkdirSync(path.join(empty, 'vendor', 'landlock-run'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(empty)).toThrow(
+            /no spawned vendored executables under/,
+          );
+        } finally {
+          rmSync(empty, { force: true, recursive: true });
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
 
   it('meets npm trusted publishing requirements', () => {
     for (const [workflowPath, jobName, publishStepName] of [
@@ -1739,6 +2390,11 @@ describe('package scripts', () => {
         '.github/workflows/release-sdk.yml',
         'release-sdk',
         'Publish @qwen-code/sdk',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-browser',
+        'Publish immutable Browser SDK tarball',
       ],
       [
         '.github/workflows/cd-cua-driver.yml',

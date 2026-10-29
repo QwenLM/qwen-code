@@ -206,6 +206,238 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'projects DeepSeek controls for the final %s.model in cold workspace status',
+    async (source) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'deepseek-v4.1-flash-1017', reasoningEffort: 'low' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-v4.1-flash-1017',
+              baseUrl,
+              generationConfig: { [source]: { model: 'deepseek-v4-pro' } },
+            },
+          ],
+        },
+      });
+      const result = await provider(workspace, false);
+      expect(result.initialized).toBe(true);
+      expect(
+        result.providers
+          .flatMap((entry) => entry.models)
+          .find((model) => model.baseModelId === 'deepseek-v4.1-flash-1017'),
+      ).toMatchObject({
+        baseModelId: 'deepseek-v4.1-flash-1017',
+        configOptions: [
+          {
+            currentValue: 'high',
+            options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+          },
+        ],
+      });
+    },
+  );
+
+  it('uses the final DeepSeek route declaration in cold workspace status', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'deepseek-v4.1-flash-1017' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'deepseek-v4.1-flash-1017',
+            baseUrl,
+            generationConfig: { extra_body: { model: 'deepseek-v4-pro' } },
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['low'],
+                defaultEffort: 'low',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            fastOnly: true,
+            baseUrl,
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['max'],
+                defaultEffort: 'max',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            baseUrl: 'https://api.deepseek.com/v1',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['low'],
+                defaultEffort: 'low',
+              },
+            },
+          },
+        ],
+      },
+    });
+    const result = await provider(workspace, false);
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'deepseek-v4.1-flash-1017'),
+    ).toMatchObject({
+      baseModelId: 'deepseek-v4.1-flash-1017',
+      configOptions: [
+        { currentValue: 'max', options: [{ value: 'none' }, { value: 'max' }] },
+      ],
+    });
+  });
+
+  it('projects endpoint-specific DeepSeek controls for duplicate model routes', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        reasoningEffort: 'low',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'Official',
+            baseUrl: 'https://api.deepseek.com/v1',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                efforts: ['low', 'high', 'max'],
+                defaultEffort: 'high',
+                disableField: 'thinking',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            name: 'MaaS',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+          {
+            id: 'deepseek-v4-pro',
+            name: 'Custom',
+            baseUrl: 'https://custom.example/v1',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'Anthropic',
+            baseUrl: 'https://api.deepseek.com/anthropic',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const official = models.find((model) => model.name === 'Official');
+    const maas = models.find((model) => model.name === 'MaaS');
+    expect(official?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(maas?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(official?.configOptions).toMatchObject([
+      {
+        currentValue: 'low',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'high' },
+          { value: 'max' },
+        ],
+      },
+    ]);
+    expect(maas?.configOptions).toMatchObject([
+      {
+        currentValue: 'high',
+        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+      },
+    ]);
+    expect(
+      models.find((model) => model.name === 'Custom')?.configOptions,
+    ).toBeUndefined();
+    expect(
+      models.find((model) => model.name === 'Anthropic')?.configOptions,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'https://api.deepseek.com/v1',
+      { reasoning: { effort: 'low' } },
+      undefined,
+      'low',
+    ],
+    [
+      'https://api.deepseek.com/v1',
+      { reasoning: { effort: 'low' }, extra_body: { reasoning_effort: 'max' } },
+      undefined,
+      'max',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      { samplingParams: { reasoning: { effort: 'max' } } },
+      undefined,
+      'max',
+    ],
+    [
+      'https://api.deepseek.com/v1',
+      { extra_body: { thinking: { type: 'disabled' } } },
+      undefined,
+      'none',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      { extra_body: { enable_thinking: false } },
+      undefined,
+      'none',
+    ],
+    [
+      'https://api.deepseek.com/v1',
+      {
+        extra_body: { thinking: { type: 'disabled' }, reasoning_effort: 'low' },
+      },
+      'max',
+      'max',
+    ],
+  ] as const)(
+    'projects DeepSeek provider defaults from %s with %j and persisted %s',
+    async (baseUrl, generationConfig, reasoningEffort, currentValue) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'deepseek-flash', reasoningEffort },
+        modelProviders: {
+          openai: [{ id: 'deepseek-flash', baseUrl, generationConfig }],
+        },
+      });
+      const result = await provider(workspace, false);
+      const model = result.providers
+        .flatMap((entry) => entry.models)
+        .find((entry) => entry.baseModelId === 'deepseek-flash');
+      expect(model?.configOptions).toMatchObject([{ currentValue }]);
+    },
+  );
+
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

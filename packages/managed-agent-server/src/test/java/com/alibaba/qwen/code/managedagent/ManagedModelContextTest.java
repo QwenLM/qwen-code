@@ -1,19 +1,19 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitResource;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -225,7 +225,7 @@ class ManagedModelContextTest {
                     }
                 });
         assertThatThrownBy(() -> transactions.execute(status -> journal.commit(request)))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(1);
@@ -282,10 +282,144 @@ class ManagedModelContextTest {
         assertThat(service.listWebShellSessions(TENANT, "reader", null, 100).data())
                 .singleElement().satisfies(session -> assertThat(session.modelContext()).isEqualTo(context("summary")));
         assertThatThrownBy(() -> service.getWebShellSession(TENANT, "stranger", "summary"))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         assertThat(service.listWebShellSessions(TENANT, "stranger", null, 100).data()).isEmpty();
         assertThat(json.valueToTree(service.getWebShellSession(TENANT, "reader", "summary"))
                 .path("modelContext").path("modelId").textValue()).isEqualTo("actual-model");
+    }
+
+    @Test
+    void compactionCommitsItsIndependentRevisionAndInvalidatesUsageExactlyOnce() {
+        var journal = open(TENANT, "compaction", true);
+        var state = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        assertThat(state.contextCompressionState(TENANT, "compaction").compactionRevision()).isZero();
+        commit(journal, request(journal, "before", usage("before", 80, 100), USAGE_KIND,
+                "output_committed", 1_000));
+        byte[] summary = "{\"history\":[]}".getBytes(StandardCharsets.UTF_8);
+        var compaction = request(journal, "compact", summary, "managed-message", "unused", 2_000, event -> {
+            event.put("kind", "context.compacted").put("eventId", "compaction:compact");
+            ObjectNode payload = event.putObject("payload").put("compactionId", "compact")
+                    .put("fromSequence", 1).put("toSequence", 1);
+            payload.set("summaryRef", ManagedExtensionRecordStoreTest.hookRef(
+                    ManagedExtensionRecordStoreTest.hookResource(ExtensionRecordJournal.resourceId(summary),
+                            "managed-message", summary)));
+            payload.putArray("replacedMessageIds");
+            payload.putNull("tokenCountsRef");
+        });
+        commit(journal, compaction);
+        assertThat(context("compaction")).isNull();
+        assertThat(state.contextCompressionState(TENANT, "compaction").compactionRevision())
+                .isEqualTo(compaction.firstSequence());
+        assertThat(jdbc.queryForObject("SELECT context_revision FROM ma_session WHERE session_id = ?",
+                Long.class, "compaction")).isEqualTo(1);
+        commit(journal, request(journal, "after", usage("after", 20, 100), USAGE_KIND,
+                "output_committed", 3_000));
+        transactions.executeWithoutResult(status -> journal.commit(compaction));
+        assertThat(context("compaction").modelId()).isEqualTo("after");
+        assertThat(state.contextCompressionState(TENANT, "compaction").compactionRevision())
+                .isEqualTo(compaction.firstSequence());
+    }
+
+    @Test
+    void upgradesRecoverTheCompactionRevisionWithoutClearingANewerUsageObservation() {
+        var journal = open(TENANT, "old-compaction", true);
+        byte[] summary = "{}".getBytes(StandardCharsets.UTF_8);
+        var compaction = request(journal, "old-compact", summary, "managed-compaction-summary", "unused", 1_000, event -> {
+            event.put("kind", "context.compacted").put("eventId", "compaction:old");
+            ObjectNode payload = event.putObject("payload").put("compactionId", "old")
+                    .put("fromSequence", 1).put("toSequence", 0);
+            payload.set("summaryRef", ManagedExtensionRecordStoreTest.hookRef(
+                    ManagedExtensionRecordStoreTest.hookResource(ExtensionRecordJournal.resourceId(summary),
+                            "managed-compaction-summary", summary)));
+            payload.putArray("replacedMessageIds");
+            payload.putNull("tokenCountsRef");
+        });
+        commit(journal, compaction);
+        commit(journal, request(journal, "newer-usage", usage("newer", 12, 100), USAGE_KIND,
+                "output_committed", 2_000));
+        jdbc.update("DELETE FROM ma_session_record WHERE domain = 'hosted_context_compaction'");
+        var state = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        assertThat(state.contextCompressionState(TENANT, "old-compaction").compactionRevision())
+                .isEqualTo(compaction.firstSequence());
+        assertThat(context("old-compaction").modelId()).isEqualTo("newer");
+        jdbc.update("DELETE FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "old-compaction");
+        assertThat(state.contextCompressionState(TENANT, "old-compaction").compactionRevision())
+                .isEqualTo(compaction.firstSequence());
+    }
+
+    @Test
+    void aRefusedNativeCommitKeepsItsDurableCandidateAndCanContinueAfterAuthorityReturns() {
+        var allowed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var guard = mock(com.alibaba.qwen.code.managedagent.session.AgentStateStore.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            if (!allowed.get()) {
+                throw new ManagedAgentException(org.springframework.http.HttpStatus.CONFLICT,
+                        "context_compression_authorization_revoked", "Actor grant was revoked");
+            }
+            return null;
+        }).when(guard).requireContextCompressionCommit(TENANT, "manual", "op_manual");
+        records = new ManagedExtensionRecordStore(jdbc, guard);
+        sessions = new ManagedSessionStore(jdbc, records);
+        var journal = open(TENANT, "manual", true);
+        byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
+        var pinned = ManagedExtensionRecordStoreTest.hookResource("pinned", "managed-message", bytes);
+        var candidate = ManagedExtensionRecordStoreTest.hookResource("candidate", "managed-message", bytes);
+        ObjectNode body = json.createObjectNode().put("schemaVersion", 1).put("kind", "context_compression")
+                .put("operationId", "op_manual").put("expectedCompactionRevision", 0).put("historyCutSequence", 0)
+                .put("phase", "admitted").put("attempt", 0);
+        body.set("requestRef", ManagedExtensionRecordStoreTest.hookRef(pinned));
+        for (String key : List.of("candidateRef", "outcome", "failureCode", "compactionRevision")) {
+            body.putNull(key);
+        }
+        ObjectNode run = body.putObject("run").put("state", "admitted");
+        for (String key : List.of("reason", "definition", "executionCallId", "effectId", "dispatchId",
+                "deliveryId", "execution", "runtime", "delivery")) {
+            run.putNull(key);
+        }
+        commit(journal, journal.requestDomain("manual-admit", "history_maintenance", body, List.of(pinned), 1_000));
+        body.put("phase", "generating").put("attempt", 1);
+        run.put("state", "running");
+        commit(journal, journal.requestDomain("manual-generate", "history_maintenance", body, List.of(pinned), 2_000));
+        body.put("phase", "candidate").set("candidateRef", ManagedExtensionRecordStoreTest.hookRef(candidate));
+        commit(journal, journal.requestDomain("manual-candidate", "history_maintenance", body,
+                List.of(pinned, candidate), 3_000));
+        long compactionRevision = journal.committedSequence() + 1;
+        body.put("phase", "settled").put("outcome", "compressed").put("compactionRevision", compactionRevision);
+        run.put("state", "settled");
+        var compaction = json.createObjectNode();
+        var compactionId = new java.util.concurrent.atomic.AtomicReference<>("op_manual");
+        java.util.function.Supplier<CommitTransactionRequest> terminalRequest = () -> journal.requestOrdinary(
+                "manual-commit", "history_maintenance", body, event -> {
+                    compaction.setAll(event.deepCopy());
+                    compaction.put("kind", "context.compacted").put("eventId", "compaction:manual");
+                    ObjectNode payload = compaction.putObject("payload").put("compactionId", compactionId.get())
+                            .put("fromSequence", 1).put("toSequence", 0);
+                    payload.set("summaryRef", ManagedExtensionRecordStoreTest.hookRef(candidate));
+                    payload.putArray("replacedMessageIds");
+                    payload.putNull("tokenCountsRef");
+                    event.put("sequence", compactionRevision + 1);
+                }, lines -> ExtensionRecordJournal.line("manual", "managed_session_event_v1", compaction) + lines, 1);
+        var terminal = terminalRequest.get();
+        assertThatThrownBy(() -> commit(journal, terminal)).isInstanceOf(ManagedAgentException.class);
+        assertThat(records.findRecord(TENANT, "manual", "history_maintenance", "op_manual").orElseThrow()
+                .path("phase").asText()).isEqualTo("candidate");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE domain ="
+                + " 'hosted_context_compaction'", Integer.class)).isZero();
+        allowed.set(true);
+        compactionId.set("op_other");
+        assertThatThrownBy(() -> commit(journal, terminalRequest.get()))
+                .isInstanceOf(ManagedAgentException.class).hasMessageContaining("atomically");
+        assertThat(records.findRecord(TENANT, "manual", "history_maintenance", "op_manual").orElseThrow()
+                .path("phase").asText()).isEqualTo("candidate");
+        compactionId.set("op_manual");
+        commit(journal, terminal);
+        assertThat(records.findRecord(TENANT, "manual", "history_maintenance", "op_manual").orElseThrow()
+                .path("outcome").asText()).isEqualTo("compressed");
+        assertThat(jdbc.queryForObject("SELECT revision FROM ma_session_record WHERE domain ="
+                + " 'hosted_context_compaction'", Long.class)).isEqualTo(terminal.firstSequence());
     }
 
     private ExtensionRecordJournal open(String tenant, String session, boolean bound) {

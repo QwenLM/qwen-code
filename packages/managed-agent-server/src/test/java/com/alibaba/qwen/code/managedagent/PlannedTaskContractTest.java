@@ -97,6 +97,29 @@ class PlannedTaskContractTest {
         assertThat(failures).isEmpty();
     }
 
+    // #13746 F2: only a child Session kind names its child Session, and the
+    // name is a Session id.
+    @Test
+    void onlyAChildTaskNamesItsChildSession() {
+        for (String kind : List.of("child_agent", "workflow")) {
+            ObjectNode linked = task("running", 2L, null, "cancel")
+                    .put("kind", kind).put("child_session_id",
+                            "0d7f3c2e-5b6a-4e1f-8a9b-abcdef012345");
+            accept(kind + " names its child Session", linked);
+            accept(kind + " before its child is known", task("running", 2L,
+                    null, "cancel").put("kind", kind));
+            reject(kind + " with a malformed child Session", linked.deepCopy()
+                    .put("child_session_id", "not-a-session"));
+        }
+        for (String kind : List.of("background_shell", "monitor",
+                "automation_run")) {
+            reject(kind + " names a child Session", task("running", 2L, null)
+                    .put("kind", kind).put("child_session_id",
+                            "0d7f3c2e-5b6a-4e1f-8a9b-abcdef012345"));
+        }
+        assertThat(failures).isEmpty();
+    }
+
     @Test
     void taskEventsKeepOneShapePerType() {
         check("PublicTaskEvent", "state_changed",

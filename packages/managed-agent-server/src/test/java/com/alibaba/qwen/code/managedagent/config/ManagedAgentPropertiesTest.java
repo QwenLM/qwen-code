@@ -1,11 +1,13 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HostedCleanupRetryCoordinator;
+import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
+import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -27,6 +29,21 @@ class ManagedAgentPropertiesTest {
     private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";
     private static final String TRUSTED_KEY =
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
+
+    @Test
+    void verifiedFileRuntimeCanResolvePersistedImportsWithNewImportsDisabled() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        assertThat(properties.getRuntimeBroker().isLocalDirectoryImportEnabled()).isFalse();
+        assertThat(properties.getRuntimeBroker().getWorkspaceMounts()).isEmpty();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
+        assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
 
     @Test
     void applicationYmlBindsTheDurableAndTrustedDefaults() throws java.io.IOException {
@@ -77,6 +94,43 @@ class ManagedAgentPropertiesTest {
                             .getRuntimeBroker();
                     assertThat(broker.isDurableLocalProcess()).isFalse();
                     assertThat(broker.isTrustedLocalRebootRecovery()).isFalse();
+                });
+    }
+
+    private static final String PROVIDER_ID_KEY =
+            "qwen.managed-agent.runtime-broker.external-provider-id";
+    private static final String REQUEST_TIMEOUT_KEY =
+            "qwen.managed-agent.runtime-broker.external-request-timeout";
+    private static final String STARTUP_TIMEOUT_KEY =
+            "qwen.managed-agent.runtime-broker.external-startup-timeout";
+
+    @Test
+    void applicationYmlBindsTheExternalRuntimeDefaults() throws java.io.IOException {
+        var values = applicationYmlValues();
+        // The named contract itself: renaming or typoing a variable shows up
+        // here, and dropping the '2m' unit flips the startup bind to PT2S
+        // instead of PT2M while every duration floor keeps passing.
+        assertThat(values).containsEntry(PROVIDER_ID_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID:external}");
+        assertThat(values).containsEntry(REQUEST_TIMEOUT_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT:30s}");
+        assertThat(values).containsEntry(STARTUP_TIMEOUT_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT:2m}");
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        PROVIDER_ID_KEY + "=" + values.get(PROVIDER_ID_KEY),
+                        REQUEST_TIMEOUT_KEY + "=" + values.get(REQUEST_TIMEOUT_KEY),
+                        STARTUP_TIMEOUT_KEY + "=" + values.get(STARTUP_TIMEOUT_KEY))
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var broker = started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker();
+                    assertThat(broker.getExternalProviderId()).isEqualTo("external");
+                    assertThat(broker.getExternalRequestTimeout())
+                            .isEqualTo(java.time.Duration.ofSeconds(30));
+                    assertThat(broker.getExternalStartupTimeout())
+                            .isEqualTo(java.time.Duration.ofMinutes(2));
                 });
     }
 
@@ -152,10 +206,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 34 is the current field
+        // exceptions would go unchecked. 36 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(34);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(36);
     }
 
     @Test
@@ -405,8 +459,19 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void theThreeScanDelaySchedulesShareOneFallback() throws java.io.IOException {
-        // The Dispatch comment claims the three sites read the identical
+    void theWakeRecoveryScanUsesItsDedicatedSchedulerAndMillisecondCadence() {
+        assertThat(schedulesOn(WakeRecovery.class, "wake-recovery.scan-delay"))
+                .hasSize(1).allSatisfy(scheduled -> {
+                    assertThat(scheduled.fixedDelayString()).isEqualTo(
+                            "${qwen.managed-agent.wake-recovery.scan-delay:2s}");
+                    assertThat(scheduled.scheduler()).isEqualTo("wakeRecoveryScheduler");
+                    assertThat(scheduled.timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+                });
+    }
+
+    @Test
+    void theFourScanDelaySchedulesShareOneFallback() throws java.io.IOException {
+        // The Dispatch comment claims the four sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
         // true when one fallback is retuned without the others. The unit
         // is half of the claim: @Scheduled reads a bare number as
@@ -423,7 +488,8 @@ class ManagedAgentPropertiesTest {
         assertThat(applicationYmlValues()).containsEntry(
                 "qwen.managed-agent.dispatch.scan-delay", "1s");
         for (Class<?> coordinator : List.of(ActionResponseCoordinator.class,
-                HarnessCoordinator.class, SessionLifecycleCoordinator.class)) {
+                HarnessCoordinator.class, SessionLifecycleCoordinator.class,
+                HostedCleanupRetryCoordinator.class)) {
             assertThat(schedulesOn(coordinator, "dispatch.scan-delay"))
                     .as(coordinator.getSimpleName())
                     .hasSize(1)
@@ -480,7 +546,9 @@ class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
-                "runtime-broker.retention.scan-delay");
+                "runtime-broker.retention.scan-delay",
+                "session-worktree.scan-delay",
+                "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
             if (!hasTypedField(key)) {
@@ -714,6 +782,53 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void sshCatalogBindsAndRetainsExistingRuntimeConfigurationWhenNewAdmissionIsDisabled() {
+        var remote = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues("qwen.managed-agent.harness.enabled=true",
+                        "qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "qwen.managed-agent.session-store.enabled=true",
+                        "qwen.managed-agent.runtime-broker.enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-id=mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].display-name=Build Mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].ssh-host=build-mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-executable=/node",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].qwen-entry=/cli.js",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].state-directory=/state",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].allowed-roots[0]=/work",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].publication-port=41270",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].qwen-version=0.25.1",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].access[0].tenant-id=tenant",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].access[0].actor-id=actor");
+        remote.run(started -> {
+            assertThat(started).hasNotFailed();
+            var ssh = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getSsh();
+            assertThat(ssh.isEnabled()).isTrue();
+            assertThat(ssh.getNodes().getFirst().admits("tenant", "actor")).isTrue();
+            assertThat(ssh.getNodes().getFirst().admits("tenant", "other")).isFalse();
+        });
+        remote.withPropertyValues("qwen.managed-agent.runtime-broker.ssh.enabled=false")
+                .run(started -> assertThat(started).hasNotFailed());
+        if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+            var mixed = remote.withPropertyValues("qwen.managed-agent.runtime-broker.child-workspaces-enabled=true",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=local-storage",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
+            mixed.run(started -> {
+                assertThat(started).hasNotFailed();
+                var broker = started.getBean(ManagedAgentProperties.class).getRuntimeBroker();
+                assertThat(broker.getSsh().isEnabled()).isTrue();
+                assertThat(broker.isChildWorkspacesEnabled()).isTrue();
+            });
+            mixed.withPropertyValues(DURABLE_KEY + "=false").run(started -> assertThat(started).hasFailed());
+        }
+        for (String invalid : List.of("runtime-broker.child-workspaces-enabled=true", "harness.workspace-files-enabled=false")) {
+            remote.withPropertyValues("qwen.managed-agent." + invalid).run(started -> assertThat(started).hasFailed());
+        }
+    }
+
+    @Test
     void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
         ApplicationContextRunner context = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class);
@@ -784,6 +899,66 @@ class ManagedAgentPropertiesTest {
                 .run(started -> assertThat(started).hasFailed());
         context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
                 .run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues(prefix + "ssh.nodes[0].node-id=remote",
+                        prefix + "ssh.nodes[0].display-name=Remote",
+                        prefix + "ssh.nodes[0].ssh-host=remote",
+                        prefix + "ssh.nodes[0].node-executable=/node",
+                        prefix + "ssh.nodes[0].qwen-entry=/cli.js",
+                        prefix + "ssh.nodes[0].state-directory=/state",
+                        prefix + "ssh.nodes[0].allowed-roots[0]=/work",
+                        prefix + "ssh.nodes[0].publication-port=41270",
+                        prefix + "ssh.nodes[0].qwen-version=0.25.1")
+                .run(started -> assertThat(started).hasFailed().getFailure()
+                        .hasRootCauseMessage("Resident Workspaces require exclusive CSI/files configuration"));
+    }
+
+    @Test
+    void publicChildrenDefaultOnWithoutEnablingUnsupportedRuntimeProfiles() {
+        var properties = new ManagedAgentProperties();
+        assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getHarness().setWorkspaceChildAgentsEnabled(false);
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getHarness().setWorkspaceChildAgentsEnabled(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setDurableLocalProcess(true);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
+    void publicChildEnvironmentOverrideDisablesTheShippedDefault() throws Exception {
+        String key = "qwen.managed-agent.harness.workspace-child-agents-enabled";
+        String variable = "QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED";
+        var values = applicationYmlValues();
+        assertThat(values).containsEntry(key, "${" + variable + ":true}");
+        for (boolean disabled : List.of(false, true)) {
+            new ApplicationContextRunner()
+                    .withPropertyValues(key + "=" + values.get(key))
+                    .withInitializer(ctx -> {
+                        var ambient = new java.util.LinkedHashMap<String, Object>(System.getenv());
+                        ambient.remove(variable);
+                        if (disabled) {
+                            ambient.put(variable, "false");
+                        }
+                        ctx.getEnvironment().getPropertySources().replace("systemEnvironment",
+                                new org.springframework.core.env.MapPropertySource("systemEnvironment", ambient));
+                    })
+                    .withUserConfiguration(PropertiesConfiguration.class)
+                    .run(started -> {
+                        assertThat(started).hasNotFailed();
+                        var bound = started.getBean(ManagedAgentProperties.class);
+                        assertThat(bound.getHarness().isWorkspaceChildAgentsEnabled()).isEqualTo(!disabled);
+                        assertThat(bound.admitsPublicChildAgents()).isFalse();
+                    });
+        }
     }
 
     @Test
@@ -825,6 +1000,64 @@ class ManagedAgentPropertiesTest {
         assertThatThrownBy(missing::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
     }
 
+    @Test
+    void boundSessionIsolationDefaultsToSessionAndWorkspaceRequiresADurableLocalBrokerWithoutChildren() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().getBoundSessionIsolationClass()).isEqualTo("session");
+        plain.validateWorkspaceFiles();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties unknown = new ManagedAgentProperties();
+        unknown.getRuntimeBroker().setBoundSessionIsolationClass("tenant");
+        assertThatThrownBy(unknown::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("session or workspace");
+
+        ManagedAgentProperties notDurable = new ManagedAgentProperties();
+        notDurable.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        notDurable.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThatThrownBy(notDurable::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durable");
+
+        ManagedAgentProperties withChildren = new ManagedAgentProperties();
+        withChildren.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        withChildren.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        assertThatThrownBy(withChildren::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("child Workspaces");
+
+        ManagedAgentProperties nonLocal = new ManagedAgentProperties();
+        nonLocal.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        nonLocal.getRuntimeBroker().setProvisioner("static");
+        assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("local-process");
+    }
+
+    @Test
+    void sessionCreateWarmDefaultsOffAndRequiresWorkspaceIsolationWithoutSshNodes() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().isSessionCreateWarm()).isFalse();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.getRuntimeBroker().setSessionCreateWarm(true);
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties session = new ManagedAgentProperties();
+        session.getRuntimeBroker().setSessionCreateWarm(true);
+        assertThatThrownBy(session::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
+
+        ManagedAgentProperties ssh = new ManagedAgentProperties();
+        ssh.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        ssh.getRuntimeBroker().setSessionCreateWarm(true);
+        ssh.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac", "test-host",
+                "/node", "/cli.js", "/state", List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThatThrownBy(ssh::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
+    }
+
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(ManagedAgentProperties.class)
     static class PropertiesConfiguration {
@@ -837,8 +1070,6 @@ class ManagedAgentPropertiesTest {
                 .isEqualTo(java.time.Duration.ofSeconds(5));
         assertThat(properties.getArtifacts().getReadRevalidationInterval())
                 .isEqualTo(java.time.Duration.ofSeconds(5));
-        assertThat(properties.getToolPublication()
-                .isJournalHeadAuthorization()).isFalse();
         // ... and the shipped application.yml mirrors the same values.
         var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
                 .load("application.yml",
@@ -852,9 +1083,6 @@ class ManagedAgentPropertiesTest {
                     + ".read-grant-recheck-interval")).isTrue();
             assertThat(source.containsProperty("qwen.managed-agent.artifacts"
                     + ".read-revalidation-interval")).isTrue();
-            assertThat(source.containsProperty("qwen.managed-agent"
-                    + ".tool-publication.journal-head-authorization"))
-                    .isTrue();
         });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -881,8 +1109,6 @@ class ManagedAgentPropertiesTest {
                     assertThat(bound.getArtifacts()
                             .getReadRevalidationInterval())
                             .isEqualTo(java.time.Duration.ofSeconds(5));
-                    assertThat(bound.getToolPublication()
-                            .isJournalHeadAuthorization()).isFalse();
                 });
     }
 
@@ -940,6 +1166,8 @@ class ManagedAgentPropertiesTest {
                     + ".max-slots-per-tick")).isTrue();
             assertThat(source.containsProperty("qwen.managed-agent.automation"
                     + ".concurrency")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".scanner-threads")).isTrue();
         });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -971,6 +1199,7 @@ class ManagedAgentPropertiesTest {
                             .isEqualTo(java.time.Duration.ofHours(24));
                     assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
                     assertThat(automation.getConcurrency()).isEqualTo(4);
+                    assertThat(automation.getScannerThreads()).isEqualTo(4);
                 });
     }
 
@@ -979,6 +1208,7 @@ class ManagedAgentPropertiesTest {
         List<Consumer<ManagedAgentProperties>> invalid = List.of(
                 p -> p.getAutomation().setMaxSlotsPerTick(0),
                 p -> p.getAutomation().setConcurrency(0),
+                p -> p.getAutomation().setScannerThreads(0),
                 p -> p.getAutomation().setScanDelay(
                         java.time.Duration.ZERO),
                 p -> p.getAutomation().setLease(java.time.Duration.ZERO),

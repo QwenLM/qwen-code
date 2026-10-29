@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
+
 /** Checks performed while the parent generation admission lock is held. */
 final class RuntimeAdmission {
     private RuntimeAdmission() {
@@ -44,8 +47,10 @@ final class RuntimeAdmission {
         requireRelease(binding, session);
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
                 || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
-                || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
-                || !binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId())
+                        && !SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                        || WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
+                                && binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId()))
                 || session.getState() != RuntimeSessionRecord.State.RELEASING
                 || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)

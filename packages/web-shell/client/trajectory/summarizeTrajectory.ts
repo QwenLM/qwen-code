@@ -19,6 +19,8 @@ export interface TrajectorySummary {
   plottedCount: number;
   missingStartCount: number;
   missingTimingCount: number;
+  /** Main-session requests that reported usage; absent when none did. */
+  tokens?: { input: number; output: number };
 }
 
 export function summarizeTrajectory(trajectory: Trajectory): TrajectorySummary {
@@ -36,9 +38,15 @@ export function summarizeTrajectory(trajectory: Trajectory): TrajectorySummary {
     if (row.kind === 'request') {
       summary.requestCount++;
       if (row.status === 'error') summary.requestFailures++;
-      if (row.depth === 0)
+      if (row.depth === 0) {
         summary.mainRequestMs =
           (summary.mainRequestMs ?? 0) + row.timing.durationMs;
+        if (row.usage) {
+          summary.tokens ??= { input: 0, output: 0 };
+          summary.tokens.input += row.usage.inputTokens;
+          summary.tokens.output += row.usage.outputTokens;
+        }
+      }
     } else if (row.kind === 'tool') {
       summary.toolCount++;
       const status = row.toolStatus ?? row.block.status;

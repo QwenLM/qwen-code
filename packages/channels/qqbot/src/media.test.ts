@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  QQ_FILE_MAX_BYTES,
   QQ_IMAGE_MAX_BYTES,
   QQ_VIDEO_MAX_BYTES,
   classifyQQAttachment,
@@ -29,13 +30,18 @@ describe('classifyQQAttachment', () => {
     ['image/png', 'image'],
     ['image/gif', 'image'],
     ['video/mp4', 'video'],
+    ['file', 'file'],
+    ['voice', 'voice'],
   ])('classifies %s as %s', (contentType, expected) => {
     expect(classifyQQAttachment(contentType)).toBe(expected);
   });
 
-  it.each(['voice', 'file', undefined])('ignores %s', (contentType) => {
-    expect(classifyQQAttachment(contentType)).toBeUndefined();
-  });
+  it.each(['application/octet-stream', undefined])(
+    'ignores %s',
+    (contentType) => {
+      expect(classifyQQAttachment(contentType)).toBeUndefined();
+    },
+  );
 });
 
 describe('downloadQQAttachment', () => {
@@ -174,6 +180,22 @@ describe('downloadQQAttachment', () => {
 
     const result = await downloadQQAttachment(ALLOWED_URL, QQ_VIDEO_MAX_BYTES);
 
+    expect(result.mimeType).toBe('application/octet-stream');
+  });
+
+  it('keeps a declared file type as opaque bytes under the file cap', async () => {
+    const bytes = Buffer.from('PK\u0003\u0004docx-ish bytes');
+    stubFetch(
+      () => new Response(bytes, { headers: { 'content-type': 'file' } }),
+    );
+
+    const result = await downloadQQAttachment(
+      ALLOWED_URL,
+      QQ_FILE_MAX_BYTES,
+      'file',
+    );
+
+    expect(result.buffer.equals(bytes)).toBe(true);
     expect(result.mimeType).toBe('application/octet-stream');
   });
 });

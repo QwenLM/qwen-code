@@ -1,4 +1,19 @@
+import type {
+  ManagedExtensionManifest,
+  ManagedExtensionPin,
+  ManagedExtensionCatalog,
+  ManagedExtensionPackageOperation,
+  ManagedExtensionSettings,
+  ManagedExtensionSnapshot,
+  ManagedExtensionSelection,
+} from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
+import type {
+  ManagedWorkspaceFileQueryRequest,
+  ManagedWorkspaceFileReadRequest,
+  ManagedWorkspaceFileUploadRequest,
+} from './managed-agent-provider';
 import type {
   ManagedArtifact,
   ManagedArtifactPage,
@@ -7,8 +22,6 @@ import type {
 } from './managed-tool-result-types';
 
 type Schemas = components['schemas'];
-
-export type JavaAgentDate = number | string;
 
 export type JavaAgentTurn = Schemas['WebShellTurn'];
 
@@ -72,6 +85,7 @@ export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 export type JavaAgentItem = Schemas['WebShellItem'];
 
 export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
+export type JavaAgentTurnAdmission = Schemas['WebShellTurnAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
 export type JavaAgentAction = Schemas['WebShellAction'];
@@ -127,6 +141,42 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  getRecovery(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  recheckRecovery(sessionId: string, turnId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/recheck',
+      { sessionId, turnId },
+      signal,
+    );
+  }
+
+  async renameSession(
+    request: Schemas['WebShellRenameRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellRenameResult']> {
+    const response = await this.request(
+      '/sessions/rename',
+      request,
+      signal,
+      false,
+    );
+    if (response.status !== 200) {
+      throw new JavaManagedAgentHttpError(
+        response.status,
+        'session_rename_unconfirmed',
+        'Managed Agent rename was not confirmed',
+      );
+    }
+    return (await response.json()) as Schemas['WebShellRenameResult'];
+  }
+
   listWorkspaces(
     request: Schemas['WebShellWorkspaceQueryRequest'],
     signal?: AbortSignal,
@@ -142,11 +192,96 @@ export class JavaManagedAgentClient {
     );
   }
 
+  listRuntimeNodes(signal?: AbortSignal) {
+    return this.post<Schemas['WebShellRuntimeNodePage']>(
+      '/runtime-nodes/query',
+      {},
+      signal,
+    );
+  }
+
+  checkWorkspaceDirectory(
+    request: Schemas['WebShellWorkspaceDirectoryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceDirectory']>(
+      '/workspaces/check-directory',
+      request,
+      signal,
+    );
+  }
+
+  registerWorkspace(
+    request: Schemas['WebShellWorkspaceRegisterRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/register',
+      request,
+      signal,
+    );
+  }
+
+  getWorkspaceOperation(operationId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/operations/get',
+      { operationId },
+      signal,
+    );
+  }
+
   createWorkspace(
     request: Schemas['WebShellWorkspaceCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentWorkspace> {
     return this.post('/workspaces/create', request, signal);
+  }
+
+  queryWorkspaceFiles(
+    request: ManagedWorkspaceFileQueryRequest,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFilePage']> {
+    return this.post('/workspaces/files/query', request, signal);
+  }
+
+  readWorkspaceFile(
+    request: ManagedWorkspaceFileReadRequest,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
+    return this.post('/workspaces/files/read', request, signal);
+  }
+
+  async uploadWorkspaceFile(
+    request: ManagedWorkspaceFileUploadRequest,
+    data: Blob,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileUploadResult']> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(request)) {
+      if (value !== undefined) query.set(key, value);
+    }
+    const response = await this.fetchRequest(
+      `/workspaces/files/upload?${query}`,
+      data,
+      signal,
+      false,
+      'application/octet-stream',
+    );
+    return (await response.json()) as Schemas['WebShellWorkspaceFileUploadResult'];
+  }
+
+  queryWorkspaceFileUpload(
+    uploadId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileUploadStatus']> {
+    return this.post('/workspaces/files/uploads/query', { uploadId }, signal);
+  }
+
+  workspaceDirectories(
+    request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceDirectoryPage']> {
+    return this.post('/workspaces/directories/query', request, signal);
   }
 
   getSessionApproval(
@@ -170,11 +305,48 @@ export class JavaManagedAgentClient {
     return this.post('/session-options/query', { agentId }, signal);
   }
 
+  lifecycleCommand(
+    kind: 'close' | 'archive' | 'delete',
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      `/sessions/${kind}`,
+      request,
+      signal,
+    );
+  }
+
+  unarchiveSession(
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+  }
+
+  exportSnapshot(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellExportPage']>(
+      '/sessions/export/query',
+      request,
+      signal,
+    );
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentTranscript> {
     return this.post('/transcript/query', request, signal);
+  }
+
+  getRecentTranscriptItems(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellExportPage']> {
+    return this.post('/transcript/items/query', request, signal);
   }
 
   createSession(
@@ -184,17 +356,50 @@ export class JavaManagedAgentClient {
     return this.post('/sessions/create', request, signal);
   }
 
+  worktreeOptions(
+    request: Schemas['WebShellSessionWorktreeOptionsRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreeOptions']> {
+    return this.post('/workspaces/worktrees/options', request, signal);
+  }
+
+  listSessionWorktrees(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreePage']> {
+    return this.post('/workspaces/worktrees/query', { workspaceId }, signal);
+  }
+
+  inspectSessionWorktree(
+    workspaceId: string,
+    worktreeId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreeInspection']> {
+    return this.post(
+      '/workspaces/worktrees/inspect',
+      { workspaceId, worktreeId },
+      signal,
+    );
+  }
+
+  cleanupSessionWorktree(
+    request: Schemas['WebShellSessionWorktreeCleanupRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktree']> {
+    return this.post('/workspaces/worktrees/cleanup', request, signal);
+  }
+
   submitTurn(
     request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCommandAdmission> {
+  ): Promise<JavaAgentTurnAdmission> {
     return this.post('/turns/submit', request, signal);
   }
 
   cancelTurn(
     request: Schemas['WebShellCancelRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCommandAdmission> {
+  ): Promise<JavaAgentTurnAdmission> {
     return this.post('/turns/cancel', request, signal);
   }
 
@@ -257,17 +462,193 @@ export class JavaManagedAgentClient {
     return this.post('/operations/query', request, signal);
   }
 
-  changeCwd(
-    request: Schemas['WebShellChangeCwdRequest'],
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellCwdOperation']> {
-    return this.post('/sessions/cwd/change', request, signal);
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
   }
 
   getSessionModels(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['WebShellSessionModels']>(
       '/session-models/query',
       { sessionId },
+      signal,
+    );
+  }
+
+  getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionSkills']>(
+      '/session-skills/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionMcp(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['PublicMcpCatalog']>(
+      '/session-mcp/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listExtensionPackages(workspaceId: string, signal?: AbortSignal) {
+    return this.post<ManagedExtensionCatalog>(
+      '/workspace-extensions/query',
+      { workspaceId },
+      signal,
+    );
+  }
+
+  async publishExtensionPackage(
+    workspaceId: string,
+    extensionId: string | undefined,
+    packageDigest: string,
+    manifest: ManagedExtensionManifest,
+    archive: Blob,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<ManagedExtensionPackageOperation> {
+    if (archive.size > 100 * 1024 * 1024)
+      throw new Error('Managed package exceeds 100 MiB');
+    const encoded = btoa(
+      String.fromCharCode(
+        ...new TextEncoder().encode(JSON.stringify(manifest)),
+      ),
+    )
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replace(/=+$/, '');
+    const query = new URLSearchParams({
+      workspaceId,
+      packageDigest,
+      manifest: encoded,
+    });
+    if (extensionId) query.set('extensionId', extensionId);
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('Content-Type', 'application/octet-stream');
+    headers.set('Idempotency-Key', idempotencyKey);
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${API_PREFIX}/workspace-extensions/publish?${query}`,
+      {
+        method: 'POST',
+        headers,
+        body: archive,
+        credentials: this.credentials,
+        signal,
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    return response.json();
+  }
+
+  getExtensionSettings(
+    workspaceId: string,
+    extensionId: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSettings>(
+      '/workspace-extensions/settings/query',
+      { workspaceId, extensionId },
+      signal,
+    );
+  }
+
+  saveExtensionSettings(
+    workspaceId: string,
+    extensionId: string,
+    expectedRevision: number,
+    values: Record<string, string>,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionPackageOperation>(
+      '/workspace-extensions/settings/submit',
+      { workspaceId, extensionId, expectedRevision, values, idempotencyKey },
+      signal,
+    );
+  }
+
+  queryExtensionConfiguration(
+    sessionId: string,
+    operationId?: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      '/session-extensions/query',
+      { sessionId, ...(operationId ? { operationId } : {}) },
+      signal,
+    );
+  }
+
+  applyExtensionConfiguration(
+    sessionId: string,
+    command: ManagedExtensionSelection,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      '/session-extensions/submit',
+      { sessionId, command, idempotencyKey },
+      signal,
+    );
+  }
+
+  resumeExtensionConfiguration(
+    sessionId: string,
+    operationId: string,
+    recoverPrevious: boolean,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      `/session-extensions/${recoverPrevious ? 'recover-previous' : 'continue'}`,
+      { sessionId, operationId },
+      signal,
+    );
+  }
+
+  getExtensionPackage(
+    workspaceId: string,
+    pin: ManagedExtensionPin,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionCatalog['extensions'][number]>(
+      '/workspace-extensions/packages/query',
+      { workspaceId, pin },
+      signal,
+    );
+  }
+
+  queryMcpManagement(
+    request: Schemas['WebShellMcpManagementQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/query',
+      request,
+      signal,
+    );
+  }
+
+  submitMcpManagement(
+    request: Schemas['WebShellMcpManagementSubmit'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/submit',
+      request,
+      signal,
+    );
+  }
+
+  getMcpManagementOperation(
+    request: Schemas['WebShellMcpManagementOperationQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/operations/query',
+      request,
       signal,
     );
   }
@@ -279,6 +660,14 @@ export class JavaManagedAgentClient {
     return this.post<Schemas['WebShellModelChangeResult']>(
       '/session-models/change',
       request,
+      signal,
+    );
+  }
+
+  getToolDetails(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellToolDetails']>(
+      '/tool-details/get',
+      { sessionId, itemId },
       signal,
     );
   }
@@ -603,6 +992,23 @@ export class JavaManagedAgentClient {
     }
   }
 
+  queryUserMessages(sessionId: string, signal?: AbortSignal) {
+    return this.post<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >('/user-messages/query', { sessionId }, signal);
+  }
+
+  commandUserMessages(
+    sessionId: string,
+    command: import('./use-managed-user-messages').ManagedUserMessageCommand,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >('/user-messages/command', { sessionId, command, idempotencyKey }, signal);
+  }
+
   private async post<T>(
     path: string,
     body: unknown,
@@ -618,10 +1024,29 @@ export class JavaManagedAgentClient {
     signal: AbortSignal | undefined,
     stream: boolean,
   ): Promise<Response> {
+    return this.fetchRequest(
+      path,
+      JSON.stringify(body),
+      signal,
+      stream,
+      'application/json',
+    );
+  }
+
+  private async fetchRequest(
+    path: string,
+    body: BodyInit,
+    signal: AbortSignal | undefined,
+    stream: boolean,
+    contentType: string,
+  ): Promise<Response> {
     const supplied = await this.options.getHeaders?.();
     const headers = new Headers(supplied);
-    if (!headers.has('content-type')) {
-      headers.set('content-type', 'application/json');
+    if (
+      contentType === 'application/octet-stream' ||
+      !headers.has('content-type')
+    ) {
+      headers.set('content-type', contentType);
     }
     headers.set('accept', stream ? 'text/event-stream' : 'application/json');
     const response = await this.fetchImpl(
@@ -630,7 +1055,7 @@ export class JavaManagedAgentClient {
         method: 'POST',
         headers,
         credentials: this.credentials,
-        body: JSON.stringify(body),
+        body,
         signal,
       },
     );

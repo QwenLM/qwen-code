@@ -1,10 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
-import com.fasterxml.jackson.databind.JsonNode;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -91,22 +88,5 @@ class ManagedCwdOperationContractShapeTest {
                 null, false);
         assertThat(CONTRACT.validate("/components/schemas/PublicCwdOperation",
                 MAPPER.valueToTree(outsideEnum))).isNotEmpty();
-    }
-
-    @Test
-    void requestRecordsMatchTheirPublishedSchemas() {
-        assertThat(CONTRACT.validate("/components/schemas/ChangeCwdRequest",
-                MAPPER.valueToTree(new ChangeCwdRequest("services/api", 1L))))
-                .isEmpty();
-        assertThat(CONTRACT.validate(
-                "/components/schemas/WebShellChangeCwdRequest",
-                MAPPER.valueToTree(new WebShellChangeCwdRequest(
-                        "request-1", SESSION_ID, "key", "services/api",
-                        1L)))).isEmpty();
-
-        JsonNode nullCwd = MAPPER.createObjectNode()
-                .put("expected_context_revision", 1);
-        assertThat(CONTRACT.validate("/components/schemas/ChangeCwdRequest",
-                nullCwd)).isNotEmpty();
     }
 }

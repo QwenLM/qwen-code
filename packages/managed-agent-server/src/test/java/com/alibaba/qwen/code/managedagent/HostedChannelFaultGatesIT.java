@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.channel.ManagedChannelService;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -119,7 +119,8 @@ class HostedChannelFaultGatesIT {
     @Timeout(600)
     void fg7dChannelCancellationsSettlePhysicallyOnMySql() throws Exception {
         runLetter("fg7d", List.of("cancel-planned", "cancel-sending",
-                "cancel-replay", "cancel-unsettled"), null);
+                "cancel-replay", "cancel-unsettled", "task-cancel-planned",
+                "task-cancel-claimed"), null);
     }
 
     @Test
@@ -254,6 +255,7 @@ class HostedChannelFaultGatesIT {
                     "receipt-reply", "route-admit", "delivery-commit",
                     "commit-reply-restart", "cancel-planned",
                     "cancel-sending", "cancel-replay", "cancel-unsettled",
+                    "task-cancel-planned", "task-cancel-claimed",
                     "delivery-page-resume", "delivery-state-progress",
                     "provider-ambiguous", "out-of-plan-ordinal",
                     "receipt-never-arrived")) {
@@ -377,9 +379,9 @@ class HostedChannelFaultGatesIT {
                 if (!match.find()) {
                     return null;
                 }
-                // qwen serve falls back attemptPort+1 on EADDRINUSE; a
-                // harness on a fallback port invalidates the pre-baked
-                // harness.base-url, so the bound port must be the reserved one.
+                // --profile hosted-harness exits on EADDRINUSE instead of
+                // moving, so a collision surfaces as a harness exit; this check
+                // keeps the pre-baked harness.base-url honest should it move.
                 if (Integer.parseInt(match.group(1)) != harnessPort) {
                     return new IllegalStateException("harness bound port "
                             + match.group(1) + " instead of the reserved "
@@ -507,7 +509,7 @@ class HostedChannelFaultGatesIT {
         registration.setAsyncSupported(true);
         registration.setDispatcherTypes(DispatcherType.REQUEST,
                 DispatcherType.ASYNC);
-        registration.addUrlPatterns("/v1/agent-channels/*");
+        registration.addUrlPatterns("/v1/agent-channels/*", "/v1/agents/*");
         return registration;
     }
 
@@ -583,6 +585,40 @@ class HostedChannelFaultGatesIT {
                         .runChannelOperation(tenant, sessionId, body)
                         .get("delivery");
         return answer;
+    }
+
+    /** The route Session's one delivery task, read publicly. */
+    private JsonNode deliveryTask(String tenant, String sessionId)
+            throws Exception {
+        HttpResponse<String> response = publicCall(tenant,
+                "/v1/agents/sessions/" + sessionId + "/tasks", null);
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+        List<JsonNode> tasks = new java.util.ArrayList<>();
+        json.readTree(response.body()).path("data").forEach(task -> {
+            if ("channel_delivery".equals(task.path("kind").asText())) {
+                tasks.add(task);
+            }
+        });
+        assertThat(tasks).as("delivery tasks").hasSize(1);
+        return tasks.getFirst();
+    }
+
+    /** A public GET, or a POST under {@code key} when one is given. */
+    private HttpResponse<String> publicCall(String tenant, String route,
+            String key) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(
+                "http://127.0.0.1:" + spring.getWebServer().getPort()
+                        + route)).timeout(Duration.ofSeconds(20))
+                .header("X-Qwen-Tenant-Id", tenant)
+                .header("Accept", "application/json");
+        if (key != null) {
+            request.header("Idempotency-Key", key)
+                    .POST(HttpRequest.BodyPublishers.noBody());
+        } else {
+            request.GET();
+        }
+        return HttpClient.newHttpClient().send(request.build(),
+                HttpResponse.BodyHandlers.ofString());
     }
 
     /** Park one pull mid-send; resume it by creating {@code release}. */
@@ -810,6 +846,100 @@ class HostedChannelFaultGatesIT {
                 assertThat(support.claimRows(tenant, channelId)).isZero();
                 assertThat(support.ledgerRows(tenant, channelId))
                         .as("nothing ever reaches the ledger").isZero();
+            }
+            // #13746 F3: the public task cancel of a delivery. A planned
+            // one is a pending task that advertises cancel, and the cancel
+            // settles it before any send; once an adapter claims it, the
+            // task runs and refuses a new cancel.
+            case "task-cancel-planned" -> {
+                JsonNode admitted = support.drive(caseDir, "admit", base);
+                String sessionId = support.channelSession(tenant, channelId);
+                String deliveryId = admitted.path("admissionInputIds").get(0)
+                        .asText() + ":reply";
+                awaitPlanned(tenant, sessionId, deliveryId);
+                JsonNode task = deliveryTask(tenant, sessionId);
+                assertThat(task.path("state").asText()).isEqualTo("pending");
+                assertThat(task.path("action_capabilities").toString())
+                        .isEqualTo("[\"cancel\"]");
+                String route = "/v1/agents/sessions/" + sessionId + "/tasks/"
+                        + task.path("id").asText() + "/cancel";
+                HttpResponse<String> cancel = publicCall(tenant, route,
+                        "fg7-task-cancel");
+                assertThat(cancel.statusCode()).as(cancel.body())
+                        .isEqualTo(202);
+                String operationId = json.readTree(cancel.body()).path("id")
+                        .asText();
+                await("task cancel completed", 90, () -> {
+                    try {
+                        return "completed".equals(json.readTree(publicCall(
+                                tenant, "/v1/agents/sessions/" + sessionId
+                                        + "/operations/" + operationId,
+                                null).body()).path("status").asText())
+                                ? true : null;
+                    } catch (Exception failure) {
+                        throw new IllegalStateException(failure);
+                    }
+                });
+                JsonNode replay = json.readTree(publicCall(tenant, route,
+                        "fg7-task-cancel").body());
+                assertThat(replay.path("id").asText()).isEqualTo(operationId);
+                assertThat(replay.path("replayed").asBoolean()).isTrue();
+                JsonNode settled = deliveryTask(tenant, sessionId);
+                assertThat(settled.path("state").asText())
+                        .isEqualTo("cancelled");
+                assertThat(settled.path("action_capabilities")).isEmpty();
+                assertThat(support.deliveryRecord(tenant, sessionId,
+                        deliveryId).path("cancelRequested").asBoolean())
+                        .isTrue();
+                JsonNode pull = support.drive(caseDir, "pull", base,
+                        Map.of("expectDelivery", false));
+                assertThat(HostedChannelGateSupport.relayCountOk(pull,
+                        "claim"))
+                        .as("the outbox pull reached the control plane")
+                        .isGreaterThanOrEqualTo(1);
+                HostedChannelGateSupport.assertSendsEmpty(pull,
+                        "a cancelled delivery task never sends");
+                assertThat(support.ledgerRows(tenant, channelId))
+                        .as("nothing ever reaches the ledger").isZero();
+            }
+            case "task-cancel-claimed" -> {
+                JsonNode admitted = support.drive(caseDir, "admit", base);
+                String sessionId = support.channelSession(tenant, channelId);
+                String deliveryId = admitted.path("admissionInputIds").get(0)
+                        .asText() + ":reply";
+                awaitPlanned(tenant, sessionId, deliveryId);
+                Path release = caseDir.resolve("smtp-release");
+                HostedChannelGateSupport.DriverLaunch launch = startParkedPull(
+                        caseDir, base, release);
+                Process driver = launch.process();
+                try {
+                    awaitSending(tenant, sessionId, deliveryId, channelId);
+                    JsonNode task = deliveryTask(tenant, sessionId);
+                    assertThat(task.path("state").asText())
+                            .isEqualTo("running");
+                    assertThat(task.path("action_capabilities")).isEmpty();
+                    HttpResponse<String> cancel = publicCall(tenant,
+                            "/v1/agents/sessions/" + sessionId + "/tasks/"
+                                    + task.path("id").asText() + "/cancel",
+                            "fg7-task-cancel-claimed");
+                    assertThat(cancel.statusCode()).as(cancel.body())
+                            .isEqualTo(409);
+                    assertThat(json.readTree(cancel.body()).path("error")
+                            .path("code").asText())
+                            .isEqualTo("task_action_unavailable");
+                    Files.writeString(release, "go");
+                    assertThat(driver.waitFor(120, TimeUnit.SECONDS))
+                            .isTrue();
+                    assertThat(driver.exitValue()).isZero();
+                    assertThat(support.resultsOf(caseDir, launch.tag())
+                            .path("sends")).hasSize(1);
+                    assertThat(deliveryTask(tenant, sessionId).path("state")
+                            .asText()).isEqualTo("completed");
+                } finally {
+                    if (driver.isAlive()) {
+                        driver.destroyForcibly();
+                    }
+                }
             }
             case "cancel-sending" -> {
                 JsonNode admitted = support.drive(caseDir, "admit", base);

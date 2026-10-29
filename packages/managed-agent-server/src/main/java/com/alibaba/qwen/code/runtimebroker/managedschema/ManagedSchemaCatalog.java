@@ -104,7 +104,8 @@ final class ManagedSchemaCatalog {
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {
             throw new SQLException(
-                    "Managed schema must contain exactly the 32 target tables: " + actual.keySet());
+                    "Managed schema must contain exactly the " + ManagedSchemaContract.TABLES.size()
+                            + " target tables: " + actual.keySet());
         }
         if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())
                 || isMariaDb(connection)) {
@@ -493,9 +494,10 @@ final class ManagedSchemaCatalog {
         List<String> tokens = new ArrayList<>();
         while (matcher.find()) {
             String token = matcher.group();
-            tokens.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            tokens.add("octet_length".equals(normalized) ? "length" : normalized);
         }
-        return booleanShape(tokens);
+        return booleanShape(numericBooleans(tokens));
     }
 
     private static List<String> booleanShape(List<String> tokens) {
@@ -587,8 +589,9 @@ final class ManagedSchemaCatalog {
         return result;
     }
 
-    // MariaDB stores a bare FALSE/TRUE in a generation expression as 0/1,
-    // while MySQL keeps the keyword, so boolean literals compare numerically.
+    // MariaDB stores a bare FALSE/TRUE in a generation expression or check
+    // clause as 0/1, while MySQL keeps the keyword, so boolean literals
+    // compare numerically.
     private static List<String> numericBooleans(List<String> tokens) {
         return tokens.stream().map(token -> switch (token) {
             case "false" -> "0";

@@ -14,10 +14,15 @@ import { parse } from 'yaml';
 import { expect, it } from 'vitest';
 
 const jobs = [
+  ['desktop-release', 'prepare'],
   ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
-  ...['test', 'lint_and_static', 'integration_no_ak', 'integration_cli'].map(
-    (name) => ['ci', name],
-  ),
+  ...[
+    'test',
+    'lint_and_static',
+    'integration_no_ak',
+    'integration_cli',
+    'web_shell_e2e_smoke',
+  ].map((name) => ['ci', name]),
   ...['test', 'flyway-migrations', 'mysql-integration', 'daemon-e2e'].map(
     (name) => ['sdk-java', name],
   ),

@@ -167,6 +167,30 @@ await client
 
 `DaemonSkillBatchToggleResult` contains ordered `results`, a compatibility `errors` array, and batch-level activation/session-refresh counts. Current daemons process every structurally valid name in request order, persist all resulting declaration changes together in at most one locked settings write, refresh active sessions once when anything changed, and return an empty `errors` array without consulting the loaded Skill catalog. Enabling records an explicit workspace `skills.enabled` opt-in even for names not yet installed, so it can override Extension-internal disablement; an identical repeated declaration remains a no-op. The error item types remain available so the SDK can still decode responses from older daemons. The method throws on a non-200 response.
 
+Explicit Skill and Extension refreshes accept optional `sessionIds`:
+
+```ts
+await client.refreshWorkspaceSkills(
+  { sessionIds: ['session-1'] },
+  'dashboard-1',
+);
+await client.refreshExtensions('dashboard-1', { sessionIds: ['session-1'] });
+
+const workspace = client.workspaceByCwd('/work/secondary');
+await workspace.refreshSkillRuntime(
+  { sessionIds: ['session-2'] },
+  'dashboard-1',
+);
+const refresh = await workspace.refreshExtensionRuntime('dashboard-1', {
+  sessionIds: ['session-2'],
+});
+await client.waitForExtensionOperation(refresh);
+```
+
+Omitting `sessionIds` refreshes every live session in the selected runtime; `[]` selects none. Duplicate IDs refresh once. Unknown IDs and IDs owned by another workspace return HTTP 404 before refresh begins. Selection controls immediate session refresh and command notifications; shared runtime caches can change, and automatic reconciliation can still refresh other sessions later. Existing Skill toggles, Extension activation calls and automatic refresh callers retain their behavior.
+
+The new Skill methods always require `workspace_session_refresh` and return `DaemonSkillRefreshResult` with `sessionsRefreshed`, `sessionsFailed`, `configsRefreshed`, `configsFailed` and `reason: 'all'`. Extension methods check that capability only when `sessionIds` is supplied, including `[]`, so an older daemon cannot ignore a selection and refresh everything. Existing `refreshExtensions(clientId?)` and `refreshExtensionRuntime(clientId?)` calls keep their argument order and send `{}` without an additional capability request. Primary Extension refresh returns synchronous counts; qualified Extension refresh still returns an asynchronous operation handle. A selected Extension refresh never advances the workspace-wide applied generation.
+
 V2 Extension batch activation retains the asynchronous Extension operation model. Pre-flight `extension_batch_activation_v2`, submit a global default batch or a selected-workspace override batch, then poll it with the existing operation helper:
 
 ```ts

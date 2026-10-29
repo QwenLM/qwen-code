@@ -1,26 +1,28 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
@@ -32,6 +34,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -43,6 +46,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -54,7 +58,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -78,7 +84,7 @@ class ManagedWorkspaceAdmissionTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedAgentStore store;
@@ -90,7 +96,62 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedWorkspaceRegistry registry;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
+
+    @Test
+    void publicChildrenKeepLaunchPolicyAndModelAfterParentChangesAndDeploymentDisable() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-public-child", "storage-public-child", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-public-child", "actor-a", true);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
+        properties.getHarness().setApprovalMode("default");
+        var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var tx = new TransactionTemplate(transactionManager);
+        var selection = new WorkspaceSelection("ws-public-child", ".");
+        var old = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "old", "old-digest",
+                "qwen-code", null, null, List.of(), null, selection));
+        assertThat(enabled.requireSession(tenant, old.sessionId()).publicChildAgentsVersion()).isZero();
+        var parent = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "public", "public-digest",
+                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        assertThat(enabled.requireSession(tenant, parent.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+        var snapshot = mapper.readTree("""
+                {"version":1,"sourcePromptId":"source-1","approvalMode":"auto-edit","approvalRevision":2,
+                 "modelId":"launch-model","modelRevision":4,"skillsRef":null,
+                 "modelRoute":{"authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "providerPin":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                 "origin":{"modelId":"source-model","authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "providerPin":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+                """);
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = 'auto', approval_revision = 3 WHERE tenant_id = ? AND session_id = ?",
+                tenant, parent.sessionId());
+        properties.getHarness().setWorkspaceChildAgentsEnabled(false);
+        var disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(parent.sessionId(), parent.sessionId(), "run-public", 1);
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "write a file"));
+        var autoSnapshot = ((com.fasterxml.jackson.databind.node.ObjectNode) snapshot.deepCopy()).put("approvalMode", "auto");
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "auto-launch", "auto-digest",
+                "child", input, "payload", lineage, autoSnapshot))).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_launch_snapshot_invalid"));
+        var child = tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
+                "child", input, "payload", lineage, snapshot));
+        assertThat(disabled.requireSession(tenant, child.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+        assertThat(disabled.requireSession(tenant, child.sessionId()).approvalMode()).isEqualTo("auto-edit");
+        var model = disabled.findTurnModelSelection(tenant, child.sessionId(), disabled.findTurn(tenant, child.sessionId(), child.turnId()).orElseThrow().promptId());
+        assertThat(model.modelId()).isEqualTo("launch-model");
+        assertThat(model.revision()).isEqualTo(1);
+        assertThat(tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
+                "child", input, "payload", lineage, snapshot)).sessionId()).isEqualTo(child.sessionId());
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertTurnCommand(tenant, "actor-a", "new-child-turn", "digest",
+                child.sessionId(), input, "payload"))).isInstanceOf(ManagedAgentException.class);
+        var fresh = tx.execute(status -> disabled.insertWorkspaceSessionCommand(tenant, "actor-a", "disabled", "disabled-digest",
+                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        assertThat(disabled.requireSession(tenant, fresh.sessionId()).publicChildAgentsVersion()).isZero();
+    }
 
     @ParameterizedTest
     @CsvSource({"false, yolo", "false, default", "false, auto-edit", "true, default", "true, auto-edit"})
@@ -157,7 +218,7 @@ class ManagedWorkspaceAdmissionTest {
         var projection = new ManagedAgentService(admitted, new RequestDigests(), mock(HarnessCoordinator.class),
                 new UnavailableHarnessConnector(), registry);
         assertThat(projection.getPublicSession(tenant, "actor-a", first.sessionId()).capabilities().foregroundShell()).isNull();
-        var lineage = new com.alibaba.qwen.code.managedagent.store.StoreModels.SessionLineage(
+        var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(
                 first.sessionId(), first.sessionId(), "member-run", 1);
         var child = transaction.execute(status -> admitted.insertChildSessionCommand(tenant, first.sessionId(),
                 "member-create", "member-digest", "member", List.of(), null, lineage));
@@ -168,7 +229,7 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("UPDATE ma_turn SET status = 'COMPLETED' WHERE tenant_id = ? AND session_id = ?",
                 tenant, first.sessionId());
         var close = transaction.execute(status -> admitted.beginWorkspaceLifecycle(tenant, first.sessionId(),
-                com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.CLOSE,
+                com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.CLOSE,
                 "actor-a", "actor-digest", "close-lead", "close-digest", true, 0));
         assertThat(close.operation().lifecycleProtocolVersion()).isZero();
     }
@@ -197,7 +258,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThatThrownBy(() -> new TransactionTemplate(transactionManager).execute(status ->
                 defensive.insertInternalTeamLeadSessionCommand(tenant, "actor-a", "internal", "digest", null,
                         new WorkspaceSelection("ws-lead", "."))))
-                .isInstanceOfAny(ApiException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+                .isInstanceOfAny(ManagedAgentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ?",
@@ -304,7 +365,7 @@ class ManagedWorkspaceAdmissionTest {
             @Override
             public boolean isWorkspaceFilesAvailable() { return true; }
         };
-        var coordinator = mock(com.alibaba.qwen.code.managedagent.service.HarnessCoordinator.class);
+        var coordinator = mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class);
         ManagedAgentService admitted = new ManagedAgentService(enabled, new RequestDigests(), coordinator, harness, registry);
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
         var original = transaction.execute(status -> admitted.submitTurn(tenant, "actor-a", "original", session, input));
@@ -318,9 +379,9 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "original", session, input)).turnId())
                 .isEqualTo(original.turnId());
         assertThatThrownBy(() -> transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "fresh", session, input)))
-                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> stopped.submitTurn(tenant, "reader", "original", session, input))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         var capabilities = stopped.getWebShellSession(tenant, "actor-a", session).capabilities();
         assertThat(capabilities.workspaceTurns()).isTrue();
         assertThat(capabilities.foregroundShell()).isFalse();
@@ -335,20 +396,22 @@ class ManagedWorkspaceAdmissionTest {
                 Integer.class, tenant, session)).isEqualTo(1);
         for (String state : List.of("ACTIVE", "CLOSED", "ARCHIVED")) {
             jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, session);
-            for (var kind : List.of(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.CLOSE,
-                    com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.ARCHIVE,
-                    com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.DELETE)) {
+            for (var kind : List.of(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.CLOSE,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.ARCHIVE,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.DELETE)) {
                 assertThatThrownBy(() -> transaction.execute(status -> disabled.beginWorkspaceLifecycle(tenant, session,
-                        kind, "actor-a", digest, state + kind, digest, true, 1))).isInstanceOf(ApiException.class);
+                        kind, "actor-a", digest, state + kind, digest, true, 1))).isInstanceOf(ManagedAgentException.class);
             }
             assertThatThrownBy(() -> transaction.execute(status -> disabled.unarchiveWorkspaceSession(tenant, session,
-                    "actor-a", "unarchive-" + state, digest))).isInstanceOf(ApiException.class);
+                    "actor-a", "unarchive-" + state, digest))).isInstanceOf(ManagedAgentException.class);
             var read = stopped.getPublicSession(tenant, "actor-a", session).capabilities();
             assertThat(read.sessionArchive()).isFalse();
             assertThat(read.sessionUnarchive()).isFalse();
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
-                Integer.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind NOT IN ('SUBMIT_INPUT', 'CANCEL')", Integer.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind IN ('SUBMIT_INPUT', 'CANCEL')", Integer.class, tenant, session)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session)).isEqualTo(2);
         String files = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
@@ -766,7 +829,7 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(status().isNotFound());
         assertThatThrownBy(() -> service.renameSession(tenant, "actor-a",
                 "invalid-rename", sessionId, ""))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("session_not_found"));
     }
 
@@ -821,20 +884,20 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.submitTurn(tenant, "actor-b",
                         "submit", sessionId, input))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("workspace_unavailable")));
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.submitTurn(tenant, "actor-b",
                         "submit", sessionId, List.of(new InputBlock("text",
                                 "other"))))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("workspace_unavailable")));
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.submitTurn(tenant, "actor-c",
                         "submit", sessionId, input))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("session_not_found")));
     }
@@ -915,13 +978,13 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionId, "new title"))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("session_not_found")));
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-c", "rename", sessionId, "new title"))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("session_not_found")));
     }
@@ -1001,7 +1064,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status -> assertThatThrownBy(
                 () -> service.renameSession(tenant, "actor-z", key, sessionId,
                         title))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
                             .isEqualTo(HttpStatus.NOT_FOUND);
                     assertThat(error.getCode())
@@ -1048,7 +1111,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionY, "new title"))
-                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getCode())
                                     .isEqualTo("idempotency_conflict");
                             assertThat(error.getStatus())
@@ -1102,7 +1165,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionId, "new title"))
-                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getStatus())
                                     .isEqualTo(HttpStatus.CONFLICT);
                             assertThat(error.getCode())
@@ -1160,7 +1223,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionId, "other title"))
-                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getStatus())
                                     .isEqualTo(HttpStatus.CONFLICT);
                             assertThat(error.getCode())
@@ -1192,7 +1255,7 @@ class ManagedWorkspaceAdmissionTest {
                 .workspace().getWorkspaceId()).isEqualTo("ws-b");
         assertThatThrownBy(() -> store.replayWorkspaceSessionCommand(tenant,
                 "actor-a", "key", "sha256:" + "b".repeat(64)))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
     }
@@ -1218,7 +1281,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThatThrownBy(() -> upgraded.insertWorkspaceSessionCommand(
                 tenant, "actor-a", "new-key", digest, "qwen-code", "1", null,
                 List.of(), null, selection))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
     }
@@ -1234,7 +1297,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
                 tenant, "actor-a", "nonempty", "digest", "qwen-code", null,
                 null, input, "payload", selection))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         var created = store.insertWorkspaceSessionCommand(tenant, "actor-a",
@@ -1243,24 +1306,24 @@ class ManagedWorkspaceAdmissionTest {
         String sessionId = created.sessionId();
         assertThatThrownBy(() -> store.insertTurnCommand(tenant, "SUBMIT",
                 "turn", "digest", sessionId, input, "payload"))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> store.insertCancelCommand(tenant, "CANCEL",
                 "cancel", "digest", sessionId, "turn-id"))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> store.beginSessionMutation(tenant,
                 "RENAME", "rename", "digest", sessionId,
                 SessionMutationKind.RENAME))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> store.completeSessionMutation(tenant,
                 "RENAME", "rename", sessionId, SessionMutationKind.RENAME,
                 "new title", "boot"))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_turn WHERE tenant_id = ?",
@@ -1380,7 +1443,7 @@ class ManagedWorkspaceAdmissionTest {
                 gated.beginSessionMutation(tenant, "UNARCHIVE_SESSION",
                         "unarchive-1", digest, sessionId,
                         SessionMutationKind.UNARCHIVE)))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         // Rename is the one lifecycle-adjacent mutation the enabled store
@@ -1452,7 +1515,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThatThrownBy(() -> enabled.submitTurn(tenant, "actor-a",
                 "later", driftedId,
                 List.of(new InputBlock("text", "go"))))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         // The same shape on the frozen profile with the qwen-code agent
@@ -1526,7 +1589,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-a", "rename-1", sessionId, "first"))
-                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getStatus())
                                     .isEqualTo(HttpStatus.CONFLICT);
                             assertThat(error.getCode())
@@ -1540,7 +1603,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> gated.beginWorkspaceClose(tenant, sessionId, "actor-a",
                         "actor-digest", "close-while-rename-pending", digest, true))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode()).isEqualTo("session_operation_active")));
         assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
                         + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
@@ -1561,7 +1624,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-a", "rename-2", sessionId, "second"))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode()).isEqualTo("workspace_unavailable")));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
                         + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
@@ -1641,7 +1704,7 @@ class ManagedWorkspaceAdmissionTest {
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-a", "rename-1", sessionId, "first"))
-                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getStatus())
                                     .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
                             assertThat(error.getCode())
@@ -1705,7 +1768,7 @@ class ManagedWorkspaceAdmissionTest {
                             workspace, digest, "qwen-code", null, null, input,
                             digest, new WorkspaceSelection(workspace, "."))));
             assertThat(thrown).as(workspace)
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         // The store's message, not the registry's "Workspace is
                         // unavailable.", ties the refusal to the store guard.
                         assertThat(error.getMessage()).isEqualTo(
@@ -1838,7 +1901,7 @@ class ManagedWorkspaceAdmissionTest {
                                 "legacy-digest", "qwen-code", null, null, List.of(), null);
                     }
                     return "created";
-                } catch (ApiException error) {
+                } catch (ManagedAgentException error) {
                     return error.getCode();
                 }
             })).toList();
@@ -1963,6 +2026,75 @@ class ManagedWorkspaceAdmissionTest {
         // the Turn lookup for the operator even after the creator falls.
         assertRefused(() -> service.cancelTurn(tenant, "operator2",
                 "cancel-1", sessionId, "turn_missing"), "turn_not_found");
+    }
+
+    @Test
+    void compressionCapabilityAllowsResidentWorkspacesAndRequiresTheOperatorAndFrozenFacts() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsContextCompression()).thenReturn(true);
+        var enabled = boundServiceWith(harness);
+        org.springframework.test.util.ReflectionTestUtils.setField(enabled, "runtimeWarmer",
+                mock(com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer.class));
+        var summary = enabled.getWebShellSession(tenant, "operator2", session);
+        assertThat(summary.capabilities().cwdChange()).isFalse();
+        assertThat(summary.capabilities().contextCompression()).isTrue();
+        assertThat(summary.compactionRevision()).isZero();
+        assertThat(enabled.getWebShellSession(tenant, "reader", session).capabilities().contextCompression()).isFalse();
+        jdbc.update("UPDATE ma_workspace_access SET role='READER' WHERE tenant_id=? AND actor_id=?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().contextCompression()).isFalse();
+    }
+
+    @Test
+    void renameCapabilityUsesTheRoleAndFrozenFactsIndependentlyOfTurnApprovalSupport() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isTrue();
+        assertThat(enabled.getWebShellSession(tenant, "reader", session).capabilities().rename()).isFalse();
+
+        jdbc.update("UPDATE ma_session SET selected_approval_mode='default', approval_revision=1"
+                + " WHERE tenant_id=? AND session_id=?", tenant, session);
+        var summary = enabled.getWebShellSession(tenant, "operator2", session);
+        assertThat(summary.capabilities().workspaceTurns()).isFalse();
+        assertThat(summary.capabilities().rename()).isTrue();
+
+        jdbc.update("UPDATE ma_workspace_access SET role='READER' WHERE tenant_id=? AND actor_id=?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"workspace_generation=workspace_generation+1", "storage_id='replacement'", "state='DRAINING'"})
+    void renameCapabilityRefusesAChangedWorkspaceBinding(String changedFact) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename()).isTrue();
+        jdbc.update("UPDATE ma_workspace SET " + changedFact + " WHERE tenant_id=?", tenant);
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename()).isFalse();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true,true", "true,false,true", "true,true,false", "true,true,true"})
+    void renameCapabilityRequiresAvailableFencedTitlesAndWorkspaceFiles(boolean available,
+            boolean fencedTitles, boolean workspaceFiles) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(available);
+        when(harness.supportsFencedTitles()).thenReturn(fencedTitles);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(workspaceFiles);
+        var enabled = boundServiceWith(harness);
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename())
+                .isEqualTo(available && fencedTitles && workspaceFiles);
     }
 
     @Test
@@ -2192,8 +2324,195 @@ class ManagedWorkspaceAdmissionTest {
                 "workspace_unavailable");
     }
 
+    @Test
+    void onlyAWorkspaceCreateWithoutInputRequestsTheSessionCreateWarm() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        var selection = new WorkspaceSelection("ws-a", ".");
+        HarnessCoordinator coordinator = mock(HarnessCoordinator.class);
+        ManagedAgentService warming = workspaceFilesService(tenant, true,
+                coordinator);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        CommandAdmission empty = transaction.execute(status ->
+                warming.createWorkspaceSession(tenant, "actor-a",
+                        "create-empty", "qwen-code", null, "empty", null,
+                        List.of(), selection));
+        CommandAdmission prompted = transaction.execute(status ->
+                warming.createWorkspaceSession(tenant, "actor-a",
+                        "create-prompted", "qwen-code", null, "prompted",
+                        null, List.of(new InputBlock("text", "go")),
+                        selection));
+        assertThat(empty.turnId()).isNull();
+        assertThat(prompted.turnId()).isNotNull();
+        verify(coordinator).warmSession(tenant, empty.sessionId());
+        verify(coordinator, never()).warmSession(tenant,
+                prompted.sessionId());
+    }
+
     private ManagedAgentService workspaceFilesService(String tenant,
             boolean workspaceFiles) {
+        return workspaceFilesService(tenant, workspaceFiles, null);
+    }
+
+    @Test
+    void preparingWorktreesProjectTheirTargetWithoutAdmittingMoreInput() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        persistWorktree(tenant, session, "PREPARING");
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        var summary = enabled.getWebShellSession(tenant, "actor-a", session);
+        assertThat(summary.workspace().state()).isEqualTo("changing");
+        assertThat(summary.workspace().cwdRelative()).startsWith(".qwen-managed-worktrees/");
+        assertThat(summary.worktree().state()).isEqualTo("preparing");
+        assertThat(summary.capabilities().workspaceTurns()).isFalse();
+        assertRefused(() -> enabled.submitTurn(tenant, "actor-a", "next", session,
+                List.of(new InputBlock("text", "go"))), "worktree_preparing");
+        mvc.perform(get("/v1/agents/sessions/{sessionId}", session).header(TenantContextFilter.HEADER, tenant).principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.worktree.session_id").value(session))
+                .andExpect(jsonPath("$.worktree.base_commit").value("a".repeat(40)))
+                .andExpect(jsonPath("$.worktree.state").value("preparing"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PREPARING", "FAILED", "BLOCKED", "REMOVING", "REMOVED"})
+    void unreadyWorktreesAllowQueueManagementButKeepRuntimeActionsGated(String state) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsFencedTitles()).thenReturn(true);
+        when(harness.supportsUserMessageQueue()).thenReturn(true);
+        var enabled = boundServiceWith(harness);
+        var messages = new ManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled);
+        var transaction = new TransactionTemplate(transactionManager);
+        var input = List.of(new InputBlock("text", "queued"));
+        var first = transaction.execute(status -> messages.command(tenant, "actor-a", session, "seed",
+                new ManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
+        persistWorktree(tenant, session, state);
+
+        assertThat(transaction.execute(status -> messages.queryMessages(tenant, "operator2", session)).messages()).hasSize(1);
+        var edited = transaction.execute(status -> messages.command(tenant, "operator2", session, "edit",
+                new ManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
+        assertThat(edited.messages().getFirst().revision()).isEqualTo(2);
+        assertThat(edited.messages().getFirst().input().getFirst().get("text")).isEqualTo("edited");
+        assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "new",
+                new ManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "resume",
+                new ManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertThat(transaction.execute(status -> messages.command(tenant, "operator2", session, "withdraw",
+                new ManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
+        assertRefused(() -> enabled.submitTurn(tenant, "operator2", "submit", session, input),
+                "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertRefused(() -> enabled.renameSession(tenant, "operator2", "rename", session, "renamed"),
+                "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, session)).isZero();
+        verify(harness, never()).createOrLoad(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean());
+        assertRefused(() -> enabled.authorizeUserMessages(tenant, "reader", session), "session_operation_forbidden");
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                tenant, "ws-a", ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
+        assertRefused(() -> enabled.authorizeUserMessages(tenant, "operator2", session), "workspace_unavailable");
+    }
+
+    @Test
+    void sessionPagesPreserveWorktreeGatingAndBlockInvalidReadyIdentities() throws Exception {
+        for (String state : List.of("PREPARING", "FAILED", "READY")) {
+            String tenant = "tenant-" + UUID.randomUUID();
+            String session = boundSession(tenant);
+            persistWorktree(tenant, session, state);
+            var enabled = boundServiceWithWorkingHarness();
+            var publicPage = enabled.listPublicSessions(tenant, "actor-a", null, 1).data();
+            assertThat(publicPage).hasSize(1);
+            String expected = "READY".equals(state) ? "blocked" : state.toLowerCase(java.util.Locale.ROOT);
+            assertThat(publicPage.getFirst().worktree().sessionId()).isEqualTo(session);
+            assertThat(publicPage.getFirst().worktree().state()).isEqualTo(expected);
+            var page = enabled.listWebShellSessions(tenant, "actor-a", null, 1).data();
+            assertThat(page).hasSize(1);
+            assertThat(page.getFirst().worktree().state()).isEqualTo(expected);
+            assertThat(page.getFirst().capabilities().workspaceTurns()).isFalse();
+            if ("READY".equals(state)) {
+                assertThat(jdbc.queryForObject("SELECT state FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?",
+                        String.class, tenant, session)).isEqualTo("BLOCKED");
+            }
+        }
+    }
+
+    @Test
+    void worktreePreparationGatesDispatchButPreservesCancellation() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        var enabled = boundServiceWithWorkingHarness();
+        var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
+        persistWorktree(tenant, session, "PREPARING");
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
+                .noneMatch(target -> target.sessionId().equals(session));
+        assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isEmpty();
+
+        enabled.cancelTurn(tenant, "actor-a", "cancel-initial", session, admission.turnId());
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
+                .anyMatch(target -> target.sessionId().equals(session));
+        assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isPresent();
+        store.cancelBeforeAdmission(tenant, session, admission.turnId(), "owner");
+        assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void failedAndBlockedWorktreesStillAllowCancellation() throws Exception {
+        for (String state : List.of("FAILED", "BLOCKED")) {
+            String tenant = "tenant-" + UUID.randomUUID();
+            String session = boundSession(tenant);
+            var enabled = boundServiceWithWorkingHarness();
+            var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
+            persistWorktree(tenant, session, state);
+            enabled.cancelTurn(tenant, "actor-a", "cancel-initial", session, admission.turnId());
+            assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLING");
+        }
+    }
+
+    @Test
+    void failedWorktreePreparationSettlesInitialInputOnce() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        var admission = boundServiceWithWorkingHarness().submitTurn(tenant, "actor-a", "initial", session,
+                List.of(new InputBlock("text", "go")));
+        persistWorktree(tenant, session, "FAILED");
+        store.failWorktreeInitialTurns(tenant, session, "worktree_prepare_failed");
+        store.failWorktreeInitialTurns(tenant, session, "worktree_prepare_failed");
+        assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                + " AND event_type = 'turn.failed'", Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    private void persistWorktree(String tenant, String session, String state) throws Exception {
+        String id = UUID.randomUUID().toString().replace("-", "");
+        String cwd = ".qwen-managed-worktrees/" + id;
+        var binding = store.requireSession(tenant, session).workspace();
+        var plan = new SessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
+                binding.getContextConfigRef(), 1, "/workspace", "root-identity", ".", ".",
+                "/workspace/.git", "common-identity", "main", "a".repeat(40), id, cwd, cwd, "qwen/" + id);
+        jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE tenant_id = ? AND session_id = ?", cwd, tenant, session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id,"
+                + " session_id, target_kind, target_key, request_digest, request_json, state, phase, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'SESSION_WORKTREE', ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, 1, 1)",
+                ManagedSchemaKeys.key(tenant, id), ManagedSchemaKeys.key(tenant), id, tenant, session,
+                ManagedSchemaKeys.key(session), state, state);
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'ws-a', 'storage-a', ?, ?, ?, ?, 1, ?, ?, 1, 1)", tenant, session,
+                "a".repeat(64), id, ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
+    }
+
+    private ManagedAgentService workspaceFilesService(String tenant,
+            boolean workspaceFiles, HarnessCoordinator coordinator) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -2201,7 +2520,7 @@ class ManagedWorkspaceAdmissionTest {
                         "storage-a", "/workspace")));
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
                 Clock.systemUTC(), ignored -> {}, registry, properties);
-        return new ManagedAgentService(gated, new RequestDigests(), null,
+        return new ManagedAgentService(gated, new RequestDigests(), coordinator,
                 new UnavailableHarnessConnector() {
                     @Override
                     public boolean isWorkspaceFilesAvailable() {
@@ -2252,6 +2571,11 @@ class ManagedWorkspaceAdmissionTest {
             public void dispatch(String tenantId, String sessionId,
                     String turnId) {
             }
+
+            @Override
+            public void cancel(String tenantId, String sessionId,
+                    String turnId) {
+            }
         };
         return new ManagedAgentService(gated, new RequestDigests(),
                 noopCoordinator, harness, registry);
@@ -2283,7 +2607,7 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     private static void assertRefused(ThrowingCallable call, String code) {
-        assertThatThrownBy(call).isInstanceOfSatisfying(ApiException.class,
+        assertThatThrownBy(call).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertThat(error.getCode()).isEqualTo(code));
     }
 
@@ -2291,7 +2615,7 @@ class ManagedWorkspaceAdmissionTest {
             String expected) {
         assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(tenant,
                 "actor-a", "key", "digest", "qwen-code", null, null, List.of(), null,
-                selection)).isInstanceOfSatisfying(ApiException.class, error ->
+                selection)).isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(expected));
     }
 

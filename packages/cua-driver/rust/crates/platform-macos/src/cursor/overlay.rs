@@ -31,6 +31,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -70,10 +71,19 @@ fn arrival_fire(key: &CursorKey) {
 
 // ── Global overlay state ──────────────────────────────────────────────────
 
-static CMD_TX: OnceLock<std::sync::mpsc::SyncSender<OverlayMsg>> = OnceLock::new();
+type FlushSender = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+enum OverlayEnvelope {
+    Command(OverlayMsg),
+    Flush(FlushSender),
+}
+
+static CMD_TX: OnceLock<std::sync::mpsc::SyncSender<OverlayEnvelope>> = OnceLock::new();
 // Single-consumer slot; receiver is moved into run_on_main_thread().
-static CMD_RX_CELL: Mutex<Option<std::sync::mpsc::Receiver<OverlayMsg>>> = Mutex::new(None);
+static CMD_RX_CELL: Mutex<Option<std::sync::mpsc::Receiver<OverlayEnvelope>>> = Mutex::new(None);
 static RENDER: Mutex<Option<RenderMap>> = Mutex::new(None);
+static STARTED: AtomicBool = AtomicBool::new(false);
+static APPKIT_READY: AtomicBool = AtomicBool::new(false);
 
 /// The keyed, insertion-ordered collection of owned cursors that the render
 /// loop composites every frame. Insertion order = stable z-order (later keys
@@ -159,6 +169,20 @@ fn apply_msg(map: &mut RenderMap, msg: OverlayMsg) -> Option<CursorKey> {
     }
 }
 
+fn apply_envelope(
+    map: &mut RenderMap,
+    message: OverlayEnvelope,
+    flushes: &mut Vec<FlushSender>,
+) -> Option<CursorKey> {
+    match message {
+        OverlayEnvelope::Command(message) => apply_msg(map, message),
+        OverlayEnvelope::Flush(sender) => {
+            flushes.push(sender);
+            None
+        }
+    }
+}
+
 /// Initialise global overlay state (call once, before run_on_main_thread).
 pub fn init(cfg: CursorConfig) {
     static INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -226,7 +250,9 @@ pub fn send_command(key: CursorKey, cmd: OverlayCommand) {
         return;
     }
     if let Some(tx) = CMD_TX.get() {
-        let _ = tx.try_send(OverlayMsg::Cmd(KeyedOverlayCommand { key, cmd }));
+        let _ = tx.try_send(OverlayEnvelope::Command(OverlayMsg::Cmd(
+            KeyedOverlayCommand { key, cmd },
+        )));
     }
 }
 
@@ -252,6 +278,17 @@ pub fn is_visible_for_session(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Snapshot the exact session's rendered state without advancing its animation.
+pub fn preview_cursor(key: &str) -> Option<RenderStateCore> {
+    RENDER
+        .lock()
+        .ok()?
+        .as_ref()?
+        .cursors
+        .get(key)
+        .map(|state| state.core.clone())
+}
+
 /// Remove a session's owned cursor from the render collection (fired from the
 /// `session_end` hook). The `"default"` key is guarded against removal on the
 /// render side, so this is a no-op for it; removing an absent key (anonymous
@@ -260,8 +297,12 @@ pub fn remove_cursor(key: CursorKey) {
     if key.is_empty() {
         return;
     }
+    // Teardown must survive a full best-effort animation queue.
+    if let Some(map) = RENDER.lock().unwrap().as_mut() {
+        apply_msg(map, OverlayMsg::Remove(key.clone()));
+    }
     if let Some(tx) = CMD_TX.get() {
-        let _ = tx.try_send(OverlayMsg::Remove(key));
+        let _ = tx.try_send(OverlayEnvelope::Command(OverlayMsg::Remove(key)));
     }
 }
 
@@ -272,7 +313,7 @@ pub fn revive_cursor(key: CursorKey) {
         return;
     }
     if let Some(tx) = CMD_TX.get() {
-        let _ = tx.try_send(OverlayMsg::Revive(key));
+        let _ = tx.try_send(OverlayEnvelope::Command(OverlayMsg::Revive(key)));
     }
 }
 
@@ -431,57 +472,135 @@ pub async fn animate_cursor_to(key: CursorKey, x: f64, y: f64) {
     let _ = rx.await;
 }
 
-/// Block the calling thread (must be the OS main thread) running the AppKit
-/// event loop and the overlay window.  Never returns normally.
-///
-/// Call this from `main()` after spawning the tokio background thread.
-pub fn run_on_main_thread() {
-    // Take the receiver.
-    let rx = match CMD_RX_CELL.lock().unwrap().take() {
-        Some(r) => r,
-        None => {
-            // init() was never called — no overlay, just spin.
-            loop {
-                std::thread::park();
-            }
-        }
-    };
+pub fn is_started() -> bool {
+    STARTED.load(Ordering::Acquire)
+}
 
-    let cfg = {
-        let guard = RENDER.lock().unwrap();
-        match guard.as_ref() {
-            Some(m) => m.template.clone(),
-            None => return,
-        }
-    };
-
-    if !cfg.enabled {
-        loop {
-            std::thread::park();
-        }
+/// Complete only after queued cursor removals and earlier main-queue UI updates.
+pub async fn flush_on_main_thread() -> Result<(), String> {
+    if !APPKIT_READY.load(Ordering::Acquire) {
+        return Ok(());
     }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    if is_started() {
+        let queue = CMD_TX
+            .get()
+            .ok_or("cursor overlay sender is unavailable")?
+            .clone();
+        tokio::task::spawn_blocking(move || queue.send(OverlayEnvelope::Flush(sender)))
+            .await
+            .map_err(|error| format!("cursor flush enqueue failed: {error}"))?
+            .map_err(|_| "cursor overlay render thread has stopped")?;
+    } else {
+        dispatch_flush(sender);
+    }
+    receiver
+        .await
+        .map_err(|_| "native UI flush was interrupted")?
+}
 
-    // AppKit's `+[NSApplication sharedApplication]` registers the process with
-    // the Window Server and ABORTS the whole process (SIGABRT in
-    // `_RegisterApplication`) when there's no graphic-session access — e.g.
-    // `mcp` run as a stdio child from SSH, a LaunchDaemon, or headless CI.
-    // Detect that without touching AppKit and run headless: the MCP server
-    // keeps serving on its background thread while this thread just parks,
-    // exactly as it does when the overlay is disabled. See issue #1724.
+pub fn initialize_appkit_on_main_thread() -> Result<(), String> {
+    let _main =
+        objc2_foundation::MainThreadMarker::new().ok_or("native UI requires the OS main thread")?;
     if !crate::session::has_graphic_access() {
-        tracing::warn!(
-            "no Window Server / graphic-session access — skipping cursor \
-             overlay and running headless (issue #1724)"
-        );
+        return Err("native UI requires a Window Server graphic session".into());
+    }
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        #[link(name = "AppKit", kind = "framework")]
+        extern "C" {
+            static NSApp: *mut AnyObject;
+        }
+        if NSApp.is_null() {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let _: bool = msg_send![app, setActivationPolicy: 2i64];
+            let _: () = msg_send![app, finishLaunching];
+            // Consume launch activation while prohibited, preserving AX registration.
+            pump_appkit_events(app, 0.0);
+            let _: bool = msg_send![app, setActivationPolicy: 1i64];
+        }
+    }
+    APPKIT_READY.store(true, Ordering::Release);
+    Ok(())
+}
+
+unsafe fn pump_appkit_events(app: *mut objc2::runtime::AnyObject, wait_seconds: f64) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopDefaultMode: *mut AnyObject;
+        fn CFRunLoopRunInMode(mode: *mut AnyObject, seconds: f64, return_after_source: u8) -> i32;
+    }
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, wait_seconds, 1);
+    let until: *mut AnyObject = msg_send![class!(NSDate), distantPast];
+    let started = Instant::now();
+    for _ in 0..32 {
+        let event: *mut AnyObject = msg_send![app,
+            nextEventMatchingMask: u64::MAX
+            untilDate: until
+            inMode: kCFRunLoopDefaultMode
+            dequeue: objc2::runtime::Bool::YES
+        ];
+        if event.is_null() {
+            break;
+        }
+        let _: () = msg_send![app, sendEvent: event];
+        if started.elapsed() >= Duration::from_millis(2) {
+            break;
+        }
+    }
+    let _: () = msg_send![app, updateWindows];
+}
+
+pub(crate) fn run_appkit_main_loop() {
+    if initialize_appkit_on_main_thread().is_err() {
+        return;
+    }
+    // NSApplication.run reactivates a standalone host after launch completion.
+    loop {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let app: *mut objc2::runtime::AnyObject =
+                objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+            pump_appkit_events(app, 0.1);
+        });
+    }
+}
+
+/// Create the process-owned overlay without taking over the host's event loop.
+pub fn start_on_main_thread() -> Result<(), String> {
+    let _main = objc2_foundation::MainThreadMarker::new()
+        .ok_or("cursor overlay requires the OS main thread")?;
+    if is_started() {
+        return Ok(());
+    }
+    // sharedApplication aborts in a process without Window Server access.
+    if !crate::session::has_graphic_access() {
+        return Err("cursor overlay requires a Window Server graphic session".into());
+    }
+    if !RENDER
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|map| map.template.enabled)
+    {
+        return Err("cursor overlay is disabled or has not been initialized".into());
+    }
+    unsafe { start_appkit()? };
+    STARTED.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Run the standalone service's AppKit loop after starting its overlay.
+pub fn run_on_main_thread() {
+    if let Err(error) = start_on_main_thread() {
+        tracing::warn!(%error, "running without cursor overlay");
         loop {
             std::thread::park();
         }
     }
-
-    // ------------------------------------------------------------------
-    // AppKit setup (all on the main thread).
-    // ------------------------------------------------------------------
-    unsafe { run_appkit(cfg, rx) };
+    run_appkit_main_loop();
 }
 
 // ── Animation / render state ──────────────────────────────────────────────
@@ -569,45 +688,31 @@ fn render_map_needs_frame_tick(map: &RenderMap) -> bool {
 
 // ── AppKit / CGImage plumbing ─────────────────────────────────────────────
 
-unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMsg>) {
+unsafe fn start_appkit() -> Result<(), String> {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
     use objc2_foundation::NSRect;
 
-    // ---- NSApplication ----
-    // Verify main thread (MainThreadMarker is a zero-size compile-time token).
-    let _mtm = objc2_foundation::MainThreadMarker::new()
-        .expect("run_appkit must be called from the main thread");
-
-    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-    // NSApplicationActivationPolicyAccessory = 1 (no Dock icon, no menu bar)
-    // setActivationPolicy: returns BOOL (success), not void.
-    let _: bool = msg_send![app, setActivationPolicy: 1i64];
-    // Finish launching without presenting a UI (needed for NSApp.run())
-    let _: () = msg_send![app, finishLaunching];
+    initialize_appkit_on_main_thread()?;
 
     // ---- Main screen frame ----
     let main_screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
     if main_screen.is_null() {
-        // Headless environment (CI without display) — skip overlay entirely.
-        // The MCP server continues on the background thread.
-        return;
+        return Err("cursor overlay has no available screen".into());
     }
     let screen_frame: NSRect = msg_send![main_screen, frame];
     let win_w = screen_frame.size.width;
     let win_h = screen_frame.size.height;
     // NSScreen.backingScaleFactor is the most direct source of truth — it's
     // what AppKit will use for the layer's native backing surface anyway.
-    // Fall back to the CG estimator (pixel mode width ÷ logical bounds) when
+    // Fall back to the CG estimator (current-mode pixels ÷ points) when
     // the AppKit call returns a non-positive value, since downstream paint
     // math divides by this and a 0.0 would zero out the cursor.
     let mut backing_scale: f64 = msg_send![main_screen, backingScaleFactor];
     if backing_scale.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-        use core_graphics::display::{CGDisplayBounds, CGMainDisplayID};
+        use core_graphics::display::CGMainDisplayID;
         let display_id = CGMainDisplayID();
-        let bounds = CGDisplayBounds(display_id);
-        backing_scale =
-            crate::tools::get_screen_size::get_backing_scale(display_id, bounds.size.width as i64);
+        backing_scale = crate::tools::get_screen_size::get_backing_scale(display_id);
         if backing_scale.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             backing_scale = 1.0;
         }
@@ -627,7 +732,7 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         w
     };
     if win.is_null() {
-        return;
+        return Err("cursor overlay window could not be created".into());
     }
 
     let _: () = msg_send![win, setOpaque: false];
@@ -678,6 +783,13 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         }
     }
 
+    // Keep the receiver available if native window creation failed.
+    let rx = CMD_RX_CELL
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("cursor overlay render receiver is unavailable")?;
+
     // ---- Show the window ----
     let _: () = msg_send![win, orderFrontRegardless];
 
@@ -688,14 +800,13 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         render_loop(layer_ptr, win_ptr, rx, win_w, win_h);
     });
 
-    // ---- NSApplication run loop (blocks until process exits) ----
-    let _: () = msg_send![app, run];
+    Ok(())
 }
 
 fn render_loop(
     layer_ptr: usize,
     win_ptr: usize,
-    rx: std::sync::mpsc::Receiver<OverlayMsg>,
+    rx: std::sync::mpsc::Receiver<OverlayEnvelope>,
     _win_w: f64,
     _win_h: f64,
 ) {
@@ -710,6 +821,7 @@ fn render_loop(
     let mut repin_frames: u32 = 0;
 
     loop {
+        let mut flushes = Vec::new();
         // When no cursor animation/fade is active, block until the MCP side
         // sends a command. This is the idle-server fast path: no fullscreen
         // pixmap allocation, no CGImage conversion, no 60fps wakeup.
@@ -762,17 +874,17 @@ fn render_loop(
                     // can read its pinned_wid after ticking.
                     let mut last_key: Option<CursorKey> = None;
                     let mut had_msg = false;
-                    if let Some(msg) = first_msg {
+                    let mut apply = |message| {
                         had_msg = true;
-                        if let Some(k) = apply_msg(map, msg) {
-                            last_key = Some(k);
+                        if let Some(key) = apply_envelope(map, message, &mut flushes) {
+                            last_key = Some(key);
                         }
+                    };
+                    if let Some(message) = first_msg {
+                        apply(message);
                     }
-                    while let Ok(msg) = rx.try_recv() {
-                        had_msg = true;
-                        if let Some(k) = apply_msg(map, msg) {
-                            last_key = Some(k);
-                        }
+                    while let Ok(message) = rx.try_recv() {
+                        apply(message);
                     }
                     // Tick every cursor while an animation/fade is in progress
                     // or immediately after a command changed render state. The
@@ -900,7 +1012,7 @@ fn render_loop(
             };
 
             // Convert to CGImage and update layer on the main queue.
-            dispatch_set_layer_contents(layer_ptr, pixmap);
+            dispatch_set_layer_contents(layer_ptr, pixmap, flushes);
         }
 
         frame_tick_needed = next_frame_tick_needed;
@@ -937,15 +1049,24 @@ fn cursor_is_externally_visible(state: &RenderState) -> bool {
 
 /// Convert a `tiny_skia::Pixmap` to a `CGImage` and set it as the contents
 /// of the given `CALayer` via `dispatch_async(main_queue, ...)`.
-fn dispatch_set_layer_contents(layer_ptr: usize, pixmap: tiny_skia::Pixmap) {
+fn dispatch_set_layer_contents(
+    layer_ptr: usize,
+    pixmap: tiny_skia::Pixmap,
+    flushes: Vec<FlushSender>,
+) {
     // Build the CGImage from the pixmap bytes.
     let cg_image_ptr = match pixmap_to_cgimage(&pixmap) {
         Some(p) => p,
-        None => return,
+        None => {
+            for sender in flushes {
+                let _ = sender.send(Err("cursor frame could not be converted to CGImage".into()));
+            }
+            return;
+        }
     };
 
     // Box the payload for the C callback.
-    let payload = Box::new((layer_ptr, cg_image_ptr));
+    let payload = Box::new((layer_ptr, cg_image_ptr, flushes));
 
     // GCD symbols from libdispatch (part of the macOS system library stubs).
     // `dispatch_get_main_queue()` is an inline C function; the underlying
@@ -964,14 +1085,21 @@ fn dispatch_set_layer_contents(layer_ptr: usize, pixmap: tiny_skia::Pixmap) {
     }
 
     unsafe extern "C" fn set_contents_cb(ctx: *mut c_void) {
-        let (layer_ptr, cg_image_ptr): (usize, usize) = *Box::from_raw(ctx as *mut _);
+        let (layer_ptr, cg_image_ptr, flushes): (usize, usize, Vec<FlushSender>) =
+            *Box::from_raw(ctx as *mut _);
         let layer = layer_ptr as *mut objc2::runtime::AnyObject;
         // setContents: expects an `id` (type '@'), not a raw void pointer.
         // CGImageRef is toll-free bridged to NSObject, so we cast it to *mut AnyObject.
         let cg_id = cg_image_ptr as *mut objc2::runtime::AnyObject;
         let _: () = objc2::msg_send![layer, setContents: cg_id];
+        if !flushes.is_empty() {
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+        }
         // Release the CGImage ref we retained in pixmap_to_cgimage.
         CGImageRelease(cg_image_ptr as *mut c_void);
+        for sender in flushes {
+            let _ = sender.send(Ok(()));
+        }
     }
 
     extern "C" {
@@ -985,6 +1113,30 @@ fn dispatch_set_layer_contents(layer_ptr: usize, pixmap: tiny_skia::Pixmap) {
             main_queue,
             Box::into_raw(payload) as *mut c_void,
             set_contents_cb,
+        );
+    }
+}
+
+fn dispatch_flush(sender: FlushSender) {
+    #[link(name = "dispatch", kind = "dylib")]
+    extern "C" {
+        static _dispatch_main_q: u8;
+        fn dispatch_async_f(
+            queue: *const c_void,
+            context: *mut c_void,
+            work: unsafe extern "C" fn(*mut c_void),
+        );
+    }
+    unsafe extern "C" fn acknowledge(ctx: *mut c_void) {
+        let sender: FlushSender = *Box::from_raw(ctx as *mut _);
+        let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+        let _ = sender.send(Ok(()));
+    }
+    unsafe {
+        dispatch_async_f(
+            &raw const _dispatch_main_q as *const c_void,
+            Box::into_raw(Box::new(sender)) as *mut c_void,
+            acknowledge,
         );
     }
 }
@@ -1236,6 +1388,15 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn embedded_start_rejects_a_non_main_thread_before_appkit() {
+        let result = std::thread::spawn(start_on_main_thread).join().unwrap();
+        assert_eq!(
+            result,
+            Err("cursor overlay requires the OS main thread".into())
+        );
+    }
+
+    #[test]
     fn keyed_render_state_carries_the_session_color_identity() {
         let state = render_state_for_key(&CursorConfig::default(), "session-blueprint");
         assert_eq!(state.core.cfg.cursor_id, "session-blueprint");
@@ -1276,6 +1437,29 @@ mod tests {
             template: CursorConfig::default(),
             ended: std::collections::HashSet::new(),
         }
+    }
+
+    #[test]
+    fn flush_receipt_stays_pending_until_the_removed_cursor_frame_is_applied() {
+        let mut map = empty_map();
+        apply_msg(&mut map, move_msg("retired", 20.0, 30.0));
+        let (sender, mut receipt) = tokio::sync::oneshot::channel();
+        let mut flushes = Vec::new();
+        for message in [
+            OverlayEnvelope::Command(OverlayMsg::Remove("retired".into())),
+            OverlayEnvelope::Flush(sender),
+        ] {
+            apply_envelope(&mut map, message, &mut flushes);
+        }
+        assert!(!map.cursors.contains_key("retired"));
+        assert_eq!(
+            receipt.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        for sender in flushes {
+            sender.send(Ok(())).unwrap();
+        }
+        assert_eq!(receipt.try_recv(), Ok(Ok(())));
     }
 
     #[test]

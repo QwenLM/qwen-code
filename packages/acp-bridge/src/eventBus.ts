@@ -506,6 +506,11 @@ export class EventBus {
     return this.subs.size;
   }
 
+  resetReplay(): void {
+    this.compactionEngine?.seedReplayEvents([]);
+    this.ring.length = 0;
+  }
+
   seedReplayEvents(
     inputs: Array<Omit<BridgeEvent, 'id' | 'v'>>,
   ): BridgeEvent[] {

@@ -6,8 +6,10 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -15,6 +17,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
@@ -30,11 +33,16 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -48,12 +56,14 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -63,8 +73,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 /**
@@ -88,11 +101,29 @@ import static org.awaitility.Awaitility.await;
  * the relay's request timeout, then releases it, pinning the
  * partial-fanout honesty the issue names: reached positions reported
  * `sent.` exactly once, changed or stopped ones named with their
- * reason, never silently skipped.
+ * reason, never silently skipped. FG9d cancels alice's Turn before the
+ * relay's first claim (its cancel reply lost once) and while the
+ * handover commit is in flight: a withdrawn send delivers nothing, a
+ * handed-over one is never answered "not sent". FG9e cuts the sender's
+ * and a recipient's public or WebShell stream mid-relay and resumes
+ * each from its cursor: no gap, no duplicate, the ledger frame for frame.
+ * FG9b refuses one journal write of the pass at the store (a test-only
+ * trigger): the sender's outbound, the lead's receipt, the copy-back.
+ * The Session that met it latches its writes, so only a cold Harness
+ * heals it, and the healing runs through the original command — never a
+ * second entry, mint or receipt. FG9c SIGKILLs the Harness mid-fanout
+ * and right after the sender's entry landed unacknowledged: the cold
+ * load re-executes from the journal, so each step lands exactly once.
  */
 class HostedSessionRelayFaultGatesIT {
     private static final String TOKEN = "fg9-fixture";
     private static final String DIGEST = "sha256:" + "b".repeat(64);
+    /** The store client's bounded uncertain-error retry of one commit:
+     * `ManagedSessionStoreHttpClient.appendTransaction`'s commit loop
+     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`),
+     * which retries a 429/5xx/transport failure 250 ms apart and rethrows
+     * once `const exhausted = attempt >= 2`, the third attempt. */
+    private static final int STORE_ATTEMPTS = 3;
     private static final Pattern MEMBER = Pattern.compile(
             "FG9_MEMBER_([a-z]+)_([A-Z]+)");
     private static final Pattern TEAMMATE = Pattern.compile(
@@ -110,7 +141,10 @@ class HostedSessionRelayFaultGatesIT {
     private final AtomicReference<String> carolMode =
             new AtomicReference<>("DONE");
     private final List<String> slotTenants = new ArrayList<>();
+    private final List<Observer> observers = new CopyOnWriteArrayList<>();
     private final AtomicInteger caseSlot = new AtomicInteger();
+    private final List<String> refusals = new ArrayList<>();
+    private final AtomicInteger harnessGeneration = new AtomicInteger();
     private Map<String, CountDownLatch> releases = Map.of();
 
     @TempDir
@@ -123,6 +157,7 @@ class HostedSessionRelayFaultGatesIT {
     private volatile Process harness;
     private volatile JdbcTemplate jdbc;
     private HostedSessionRelayForwardingProxy storeProxy;
+    private HostedSessionRelayForwardingProxy publicProxy;
     private int port;
     private int harnessPort;
     private int brokerPort;
@@ -141,6 +176,10 @@ class HostedSessionRelayFaultGatesIT {
 
     @AfterEach
     void tearDown() {
+        // A stream a failed case left open would hold Spring's graceful
+        // shutdown for its 30 s window; cut, the server notices it at the
+        // next heartbeat write.
+        observers.forEach(observer -> observer.client.shutdownNow());
         if (harness != null) {
             harness.destroyForcibly();
             try {
@@ -149,8 +188,15 @@ class HostedSessionRelayFaultGatesIT {
                 Thread.currentThread().interrupt();
             }
         }
+        if (jdbc != null && spring != null && spring.isActive()) {
+            dropRefusals();
+            jdbc.execute("DROP TABLE IF EXISTS fg9b_fire");
+        }
         if (storeProxy != null) {
             storeProxy.close();
+        }
+        if (publicProxy != null) {
+            publicProxy.close();
         }
         if (spring != null) {
             spring.close();
@@ -179,6 +225,37 @@ class HostedSessionRelayFaultGatesIT {
                 "roster-changed", "recipient-stopping"));
     }
 
+    @Test
+    @Timeout(600)
+    void fg9dCancelledSendsDeliverOnlyWhatTheRelaySettledOnMySql()
+            throws Exception {
+        runLetter("fg9d", List.of("cancel-after-mint", "cancel-reply-lost",
+                "cancel-during-handover"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg9eRelayStreamsStayContinuousAcrossAbortAndResumeOnMySql()
+            throws Exception {
+        runLetter("fg9e", List.of("public-resume", "webshell-resume"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg9bRefusedJournalCommitsHealOnlyThroughTheOriginalCommandOnMySql()
+            throws Exception {
+        runLetter("fg9b", List.of("outbound-commit-refused",
+                "receipt-commit-refused", "answered-commit-refused"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg9cHarnessCrashesNeverMintARelayStepTwiceOnMySql()
+            throws Exception {
+        runLetter("fg9c", List.of("lead-kill-mid-fanout",
+                "member-kill-after-mint"));
+    }
+
     // ---------------------------------------------------------- letters
 
     private void runLetter(String letter, List<String> caseNames)
@@ -205,6 +282,16 @@ class HostedSessionRelayFaultGatesIT {
                     case "partial-timeout" -> partialTimeout();
                     case "roster-changed" -> rosterChanged();
                     case "recipient-stopping" -> recipientStopping();
+                    case "cancel-after-mint" -> cancelAfterMint(false);
+                    case "cancel-reply-lost" -> cancelAfterMint(true);
+                    case "cancel-during-handover" -> cancelDuringHandover();
+                    case "public-resume" -> streamResume("public");
+                    case "webshell-resume" -> streamResume("webshell");
+                    case "outbound-commit-refused" -> outboundCommitRefused();
+                    case "receipt-commit-refused" -> receiptCommitRefused();
+                    case "answered-commit-refused" -> answeredCommitRefused();
+                    case "lead-kill-mid-fanout" -> leadKillMidFanout();
+                    case "member-kill-after-mint" -> memberKillAfterMint();
                     default -> throw new IllegalArgumentException(
                             "unknown case " + letter + "/" + name);
                 }
@@ -370,6 +457,461 @@ class HostedSessionRelayFaultGatesIT {
         settleAndCheckDelivered(lead, "carol");
     }
 
+    // ---------------------------------------- cases: FG9d-1 and FG9d-2
+
+    /** alice's Turn is cancelled while her minted command still waits for
+     * the held relay; with {@code replyLost} the cancel's reply is dropped
+     * after it committed and the client re-issues the same cancel. */
+    private void cancelAfterMint(boolean replyLost) throws Exception {
+        String lead = newTeam(replyLost ? "cancelreply" : "cancelmint",
+                "bob");
+        String alice = attachedSession(lead, "alice");
+        String bob = attachedSession(lead, "bob");
+        String commandId;
+        String turn;
+        CountDownLatch relay = holdRelay();
+        try {
+            openSend();
+            commandId = awaitOutbound(alice, "planned");
+            turn = onlyTurn(alice);
+            String key = "fg9d-cancel-" + turn;
+            if (replyLost) {
+                publicProxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                        (method, path, body) -> "POST".equals(method)
+                                && path.equals(eventsPath(alice))
+                                && body.contains("agent.session.cancel"),
+                        "cancel-reply-loss"));
+                String base = publicProxy.baseUrl();
+                assertThatThrownBy(() -> request(base, "POST",
+                        eventsPath(alice), cancel(turn), key, 202))
+                        .isInstanceOf(IOException.class);
+                assertThat(countOps(publicProxy,
+                        "dropped cancel-reply-loss")).isEqualTo(1);
+            }
+            JsonNode admission = request("POST", eventsPath(alice),
+                    cancel(turn), key, 202);
+            assertThat(admission.path("turn_id").asText()).isEqualTo(turn);
+            assertThat(admission.path("replayed").asBoolean())
+                    .as("the re-issued cancel answers the committed one")
+                    .isEqualTo(replyLost);
+            awaitOutbound(alice, "cancelled");
+            awaitTurnStatus(alice, turn, "CANCELLED");
+            assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_request_receipt"
+                            + " WHERE tenant_id = ? AND idempotency_key = ?",
+                    Integer.class, tenant, key)).isEqualTo(1);
+        } finally {
+            relay.countDown();
+        }
+        settleAndCheckDelivered(lead);
+        // The relay discovers only planned, accepting and unknown entries:
+        // one withdrawn before its first claim never enters the ledger,
+        // however many scans ran since the release.
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_delivery WHERE tenant_id = ? AND"
+                        + " delivery_id = ?",
+                Integer.class, tenant, commandId))
+                .as("the withdrawn command was never claimed").isZero();
+        assertThat(outboundRow(alice).get("revision"))
+                .as("planned, then cancelled, and nothing after").isEqualTo(2L);
+        assertThat(commandsOf(alice, "session_command").get(0)
+                .path("replyRef").isNull()).as("no fabricated reply").isTrue();
+        assertThat(sendAnswers(alice)).containsExactly(
+                "The leader did not take the command before the wait ended;"
+                        + " it was not sent and nothing happened. Send it"
+                        + " again in a fresh turn.");
+        assertThat(commandsOf(lead, "session_command"))
+                .as("no receipt on the lead").isEmpty();
+        assertThat(msgcRows(lead)).as("no minted message").isEmpty();
+        assertThat(commandsOf(bob, "session_message"))
+                .as("nothing reached bob").isEmpty();
+        assertThat(eventCount(alice, turn, "turn.cancel.requested"))
+                .isEqualTo(1);
+        assertThat(eventCount(alice, turn, "turn.cancelled")).isEqualTo(1);
+    }
+
+    // --------------------------------------------------- case: FG9d-3
+
+    /** alice's Turn is cancelled while the relay's handover commit landed
+     * upstream but its reply is held, so the handover is first in her
+     * journal's revision chain and the cancel can no longer withdraw the
+     * command: it must answer "reached the leader", and the receipt the
+     * relay goes on to commit is the only answer copied back. */
+    private void cancelDuringHandover() throws Exception {
+        String lead = newTeam("cancelhandover", "bob");
+        String alice = attachedSession(lead, "alice");
+        String bob = attachedSession(lead, "bob");
+        storeProxy.arm(HostedSessionRelayForwardingProxy.Rule.hold(
+                (method, path, body) -> "POST".equals(method)
+                        && path.contains("/sessions/" + alice
+                                + "/transactions:commit")
+                        && body.contains(
+                                "\"operation\":\"commitSessionCommand\"")
+                        && body.matches("(?s).*\"commandId\":\"cmd_[0-9a-f]+:2\".*"),
+                "handover", 1));
+        openSend();
+        awaitHolding("handover");
+        String commandId = outboundRow(alice).get("record_id").toString();
+        String turn = onlyTurn(alice);
+        request("POST", eventsPath(alice), cancel(turn),
+                "fg9d-cancel-" + turn, 202);
+        awaitTurnStatus(alice, turn, "CANCELLING");
+        // The coordinator sends the admitted cancel at once, and the
+        // Harness answers it only after the Session's in-flight commit:
+        // a beat here keeps the cancel outstanding across the hold, which
+        // the cancel route's own duration proves below.
+        waiting().pollDelay(Duration.ofSeconds(2))
+                .atMost(Duration.ofSeconds(10)).until(() -> true);
+        storeProxy.release("handover");
+        awaitTurnStatus(alice, turn, "CANCELLED");
+        assertThat(cancelRouteMillis(alice))
+                .as("the Harness held the cancel behind the handover")
+                .isGreaterThanOrEqualTo(1_500L);
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                        assertThat(jdbc.queryForObject(
+                                "SELECT transport_state FROM ma_delivery"
+                                        + " WHERE tenant_id = ? AND"
+                                        + " delivery_id = ?",
+                                String.class, tenant, commandId))
+                                .isEqualTo("done"));
+        settleAndCheckDelivered(lead);
+        assertThat(countOps(storeProxy, "holding handover")).isEqualTo(1);
+        // Never both: once the handover landed, nothing may read the
+        // command as withdrawn while the relay executes it.
+        Map<String, Object> outbound = outboundRow(alice);
+        assertThat(outbound.get("delivery_state"))
+                .as("planned, accepting, unknown (the cancel), accepted"
+                        + " (the receipt copied back)")
+                .isEqualTo("accepted");
+        assertThat(outbound.get("revision")).isEqualTo(4L);
+        assertThat(sendAnswers(alice)).containsExactly(
+                "The message reached the leader, but its reply did not"
+                        + " arrive in time; some recipients may already have"
+                        + " it or get it later. Do not send it again; end"
+                        + " your turn and say so in your result.");
+        assertSingleCommandChain(lead, "alice");
+        assertThat(replyBytes(alice, commandsOf(alice, "session_command")
+                .get(0)))
+                .as("the sender holds the receipt's reply byte for byte")
+                .isEqualTo(replyBytes(lead,
+                        commandsOf(lead, "session_command").get(0)));
+        // Which arm the relay's execute took is the race between it and
+        // alice's run settling after the cancel: both are honest, and the
+        // receipt says which.
+        JsonNode reply = receiptReply(lead, "alice");
+        if ("refused".equals(reply.path("outcome").asText())) {
+            assertThat(reply.path("text").asText()).isEqualTo(
+                    "Your run has ended or is being stopped; it takes no"
+                            + " more team commands.");
+            assertThat(msgcRows(lead)).isEmpty();
+            assertThat(commandsOf(bob, "session_message")).isEmpty();
+        } else {
+            assertThat(reply.path("text").asText())
+                    .isEqualTo("Message sent to bob.\n- bob: sent.");
+            assertThat(msgcRows(lead)).hasSize(1);
+            assertThat(commandsOf(bob, "session_message")).hasSize(1);
+        }
+        System.out.println("FG9D cancel-during-handover execute arm: "
+                + reply.path("outcome").asText());
+    }
+
+    // --------------------------------------------- cases: FG9e-1, FG9e-2
+
+    /**
+     * One `*` broadcast observed on one surface from both of its ends:
+     * alice's stream is cut while her command waits for the held relay,
+     * so the whole relay runs while she is disconnected and her Turn's
+     * tail commits only once it answered; bob's stream is cut after his
+     * message was minted and before it was delivered, and his delivery
+     * and consumption land while he is disconnected. The wake Turn that
+     * reads a relayed message is the Harness's own and is not projected,
+     * so his stream's tail is his launch Turn ending. Each stream resumes
+     * from its own cursor only after JDBC proves events committed beyond
+     * it, and the client's view must be the ledger exactly.
+     */
+    private void streamResume(String surface) throws Exception {
+        carolMode.set("WAIT");
+        String lead = newTeam(surface + "resume", "*");
+        String alice = attachedSession(lead, "alice");
+        String bob = attachedSession(lead, "bob");
+        Observer sender;
+        Observer recipient;
+        CountDownLatch relay = holdRelay();
+        try {
+            sender = new Observer(surface, alice, 0);
+            recipient = new Observer(surface, bob, 0);
+            openSend();
+            awaitOutbound(alice, "planned");
+            sender.awaitCaughtUp(alice);
+            sender.abort();
+            assertThat(msgcRows(lead)).as("nothing relayed before the cut")
+                    .isEmpty();
+        } finally {
+            relay.countDown();
+        }
+        awaitMsgcMinted(lead, 2);
+        recipient.awaitCaughtUp(bob);
+        recipient.abort();
+        assertThat(commandsOf(bob, "session_message"))
+                .as("bob's message is minted, not yet delivered").isEmpty();
+        settleAndCheckDelivered(lead);
+        String aliceTurn = onlyTurn(alice);
+        String bobTurn = onlyTurn(bob);
+        awaitTerminal(alice, aliceTurn);
+        awaitTerminal(bob, bobTurn);
+        // The replay is never vacuous: both sessions committed events
+        // beyond the cursor their client was cut at.
+        assertThat(ledger(alice)).hasSizeGreaterThan(
+                sender.frames.size());
+        assertThat(ledger(bob)).hasSizeGreaterThan(
+                recipient.frames.size());
+        Observer senderResumed = new Observer(surface, alice,
+                sender.lastSequence());
+        Observer recipientResumed = new Observer(surface, bob,
+                recipient.lastSequence());
+        List<JsonNode> senderView = senderResumed.continueFrom(sender, alice);
+        List<JsonNode> recipientView = recipientResumed.continueFrom(
+                recipient, bob);
+        assertThat(terminalTurns(senderView)).containsExactly(aliceTurn);
+        assertThat(terminalTurns(recipientView)).contains(bobTurn);
+        assertThat(senderView.stream().filter(frame -> frame.toString()
+                .contains("ALICE_REPORT done")))
+                .as("alice's answer after the relay, once").hasSize(1);
+    }
+
+    // --------------------------------------------------- case: FG9b-1
+
+    /** alice's outbound commit is refused at the store: nothing of the
+     * command exists anywhere, her Session keeps the append unsettled
+     * instead of latching its writes (#14570), and only a cold load
+     * answers the parked call — from the journal, as not sent, never by
+     * minting the command afresh. */
+    private void outboundCommitRefused() throws Exception {
+        String name = "outbound-commit-refused";
+        carolMode.set("WAIT");
+        String lead = newTeam("outrefused", "bob");
+        awaitLeadSettled(lead);
+        String alice = attachedSession(lead, "alice");
+        String bob = attachedSession(lead, "bob");
+        long mark = harnessLogMark();
+        refuse(name, "INSERT", "NEW.session_id = '" + alice
+                + "' AND NEW.domain = 'session_command'");
+        openSend();
+        awaitRefusals(name);
+        awaitHarnessLog(mark, "is recovery blocked: "
+                + "ManagedSessionAppendUnsettledError");
+        String turn = onlyTurn(alice);
+        // Unsettled, not answered: no entry, no ledger row, no answer, and
+        // the Turn stays open rather than settling over its call.
+        assertThat(commandsOf(alice, "session_command")).isEmpty();
+        assertThat(deliveryRows()).isZero();
+        assertThat(sendAnswers(alice)).isEmpty();
+        assertThat(turnStatus(alice, turn)).isEqualTo("RUNNING");
+        dropRefusals();
+        restartHarness(alice);
+        awaitTurnStatus(alice, turn, "COMPLETED");
+        assertThat(sendAnswers(alice)).containsExactly(
+                "The leader did not take the command before the wait ended;"
+                        + " it was not sent and nothing happened. Send it"
+                        + " again in a fresh turn.");
+        assertThat(commandsOf(alice, "session_command"))
+                .as("the call was answered, never minted afresh").isEmpty();
+        assertThat(journalCommits(alice, "sendSessionCommand")).isZero();
+        assertThat(deliveryRows()).isZero();
+        assertThat(commandsOf(lead, "session_command")).isEmpty();
+        assertThat(msgcRows(lead)).isEmpty();
+        assertThat(commandsOf(bob, "session_message")).isEmpty();
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
+        settleAndCheckDelivered(lead);
+    }
+
+    // --------------------------------------------------- case: FG9b-2
+
+    /** The lead's inbound receipt is refused after bob's position was
+     * minted: the execute fails with no receipt and nothing answered, and
+     * the re-execution after the lead's cold load finds the minted
+     * position through the probe — `sent.`, never sent again. */
+    private void receiptCommitRefused() throws Exception {
+        String name = "receipt-commit-refused";
+        carolMode.set("WAIT");
+        String lead = newTeam("receiptrefused", "bob");
+        awaitLeadSettled(lead);
+        String alice = attachedSession(lead, "alice");
+        String bob = attachedSession(lead, "bob");
+        long mark = harnessLogMark();
+        refuse(name, "INSERT", "NEW.session_id = '" + lead
+                + "' AND NEW.domain = 'session_command'");
+        openSend();
+        awaitRefusals(name);
+        awaitHarnessLog(mark, "Hosted command operation execute of session "
+                + lead + " failed in its store");
+        List<String> minted = msgcRows(lead);
+        assertThat(minted).as("bob's position minted before the receipt")
+                .hasSize(1);
+        assertThat(commandsOf(lead, "session_command")).as("no receipt")
+                .isEmpty();
+        assertThat(outboundRow(alice).get("delivery_state"))
+                .isEqualTo("accepting");
+        assertThat(sendAnswers(alice)).isEmpty();
+        dropRefusals();
+        restartHarness(lead);
+        awaitCommandConsumed(lead, "alice");
+        assertSingleCommandChain(lead, "alice");
+        assertThat(receiptReply(lead, "alice").path("text").asText())
+                .isEqualTo("Message sent to bob.\n- bob: sent.");
+        assertThat(msgcRows(lead)).isEqualTo(minted);
+        assertThat(journalCommits(lead, "sendSessionMessage"))
+                .as("the re-execution probed the position, never re-sent it")
+                .isEqualTo(1);
+        assertThat(sendAnswers(alice)).containsExactly(
+                "Message sent to bob.\n- bob: sent.");
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
+        settleAndCheckDelivered(lead);
+        assertThat(commandsOf(bob, "session_message")).hasSize(1);
+    }
+
+    // --------------------------------------------------- case: FG9b-3
+
+    /** The copy-back of the receipt's reply onto alice's journal is
+     * refused: the lead's half is durable, alice's latches, and after her
+     * cold load the relay's retry re-executes into the stored receipt and
+     * copies the same bytes back once. */
+    private void answeredCommitRefused() throws Exception {
+        String name = "answered-commit-refused";
+        carolMode.set("WAIT");
+        String lead = newTeam("answeredrefused", "bob");
+        awaitLeadSettled(lead);
+        String alice = attachedSession(lead, "alice");
+        String bob = attachedSession(lead, "bob");
+        refuse(name, "UPDATE", "NEW.session_id = '" + alice
+                + "' AND NEW.domain = 'session_command' AND"
+                + " NEW.delivery_state = 'accepted'");
+        openSend();
+        // Only the copy-back writes this row in this state, so the fire
+        // count is the whole attribution: the Harness answers the relay
+        // 400 invalid_command_operation for a store failure on this verb
+        // (its RecordError catch also takes the store's errors), with no
+        // log line of its own.
+        awaitRefusals(name);
+        assertThat(commandsOf(lead, "session_command")).as("the receipt")
+                .hasSize(1);
+        assertThat(msgcRows(lead)).hasSize(1);
+        assertThat(outboundRow(alice).get("delivery_state"))
+                .isEqualTo("accepting");
+        assertThat(sendAnswers(alice)).isEmpty();
+        dropRefusals();
+        restartHarness(alice);
+        awaitCommandConsumed(lead, "alice");
+        assertSingleCommandChain(lead, "alice");
+        Map<String, Object> outbound = outboundRow(alice);
+        assertThat(outbound.get("revision"))
+                .as("planned, accepting, accepted, consumed — one accepted")
+                .isEqualTo(4L);
+        assertThat(replyBytes(alice, commandsOf(alice, "session_command")
+                .get(0)))
+                .as("the copied-back reply is the receipt's, byte for byte")
+                .isEqualTo(replyBytes(lead,
+                        commandsOf(lead, "session_command").get(0)));
+        assertThat(sendAnswers(alice)).containsExactly(
+                "Message sent to bob.\n- bob: sent.");
+        assertThat(journalCommits(lead, "sendSessionMessage")).isEqualTo(1);
+        assertThat(journalCommits(lead, "commitSessionCommandReceipt"))
+                .as("the retry re-executed into the stored receipt")
+                .isEqualTo(1);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
+        settleAndCheckDelivered(lead);
+        assertThat(commandsOf(bob, "session_message")).hasSize(1);
+    }
+
+    // --------------------------------------------------- case: FG9c-1
+
+    /** The Harness dies with the broadcast's first position minted and
+     * its commit reply held, before the second position and the receipt.
+     * The re-execution after the cold load reports the first position
+     * `sent.` from the journal, sends only the second, and commits the
+     * one receipt. */
+    private void leadKillMidFanout() throws Exception {
+        carolMode.set("WAIT");
+        String lead = newTeam("leadkill", "*");
+        awaitLeadSettled(lead);
+        String alice = attachedSession(lead, "alice");
+        storeProxy.arm(HostedSessionRelayForwardingProxy.Rule.hold(
+                (method, path, body) -> "POST".equals(method)
+                        && path.contains("/sessions/" + lead
+                                + "/transactions:commit")
+                        && body.contains("\"operation\":\"sendSessionMessage\""),
+                "first-mint", 1));
+        openSend();
+        awaitHolding("first-mint");
+        List<String> first = msgcRows(lead);
+        assertThat(first).as("the first position landed upstream").hasSize(1);
+        assertThat(commandsOf(lead, "session_command")).as("no receipt")
+                .isEmpty();
+        restartHarness(lead, () -> storeProxy.release("first-mint"));
+        awaitMsgcMinted(lead, 2);
+        releases.get("bob").countDown();
+        releases.get("carol").countDown();
+        awaitCommandConsumed(lead, "alice");
+        assertSingleCommandChain(lead, "alice");
+        assertThat(msgcRows(lead)).hasSize(2).containsAll(first);
+        assertThat(journalCommits(lead, "sendSessionMessage"))
+                .as("one mint per position: the first never re-sent")
+                .isEqualTo(2);
+        String reply = "Message sent to every other member of team"
+                + " \"review\".\n- bob: sent.\n- carol: sent.";
+        assertThat(receiptReply(lead, "alice").path("text").asText())
+                .isEqualTo(reply);
+        assertThat(sendAnswers(alice)).containsExactly(reply);
+        assertThat(countOps(storeProxy, "holding first-mint")).isEqualTo(1);
+        settleAndCheckDelivered(lead);
+        assertThat(commandsOf(attachedSession(lead, "bob"),
+                "session_message")).hasSize(1);
+        assertThat(commandsOf(attachedSession(lead, "carol"),
+                "session_message")).hasSize(1);
+    }
+
+    // --------------------------------------------------- case: FG9c-2
+
+    /** The Harness dies with alice's planned entry committed upstream and
+     * its reply held, so the dead process never learned it landed. The
+     * takeover resumes her parked wait from the journal: the entry is the
+     * one command, never minted again, and its answer arrives once. */
+    private void memberKillAfterMint() throws Exception {
+        carolMode.set("WAIT");
+        String lead = newTeam("memberkill", "bob");
+        awaitLeadSettled(lead);
+        String alice = attachedSession(lead, "alice");
+        String commandId;
+        CountDownLatch relay = holdRelay();
+        try {
+            storeProxy.arm(HostedSessionRelayForwardingProxy.Rule.hold(
+                    matchCommitOperation("sendSessionCommand", 1),
+                    "outbound", 1));
+            openSend();
+            awaitHolding("outbound");
+            commandId = awaitOutbound(alice, "planned");
+            restartHarness(alice, () -> storeProxy.release("outbound"));
+        } finally {
+            relay.countDown();
+        }
+        releases.get("bob").countDown();
+        awaitCommandConsumed(lead, "alice");
+        assertSingleCommandChain(lead, "alice");
+        assertThat(outboundRow(alice).get("record_id")).isEqualTo(commandId);
+        assertThat(outboundRow(alice).get("revision")).isEqualTo(4L);
+        assertThat(journalCommits(alice, "sendSessionCommand"))
+                .as("the entry the dead process never acknowledged, once")
+                .isEqualTo(1);
+        assertThat(sendAnswers(alice)).containsExactly(
+                "Message sent to bob.\n- bob: sent.");
+        assertThat(msgcRows(lead)).hasSize(1);
+        assertThat(countOps(storeProxy, "holding outbound")).isEqualTo(1);
+        settleAndCheckDelivered(lead);
+        assertThat(commandsOf(attachedSession(lead, "bob"),
+                "session_message")).hasSize(1);
+    }
+
     // --------------------------------------------------- choreography
 
     private String newTeam(String caseKey, String target) throws Exception {
@@ -417,8 +959,10 @@ class HostedSessionRelayFaultGatesIT {
 
     /** One outbound chain on the member, exactly one inbound receipt at
      * revision 1 on the lead, one delivery ledger row. */
-    private void assertSingleCommandChain(String lead, String member) {
+    private void assertSingleCommandChain(String lead, String member)
+            throws Exception {
         String session = memberSession(lead, member);
+        assertTaskLinksChildSession(lead, member, session);
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT record_id, revision FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? AND"
@@ -671,6 +1215,16 @@ class HostedSessionRelayFaultGatesIT {
         return session;
     }
 
+    /** The member's session once its attach landed on the lead's
+     * child_run record, which can trail the member's first model call. */
+    private String attachedSession(String lead, String member) {
+        AtomicReference<String> session = new AtomicReference<>();
+        waiting().atMost(Duration.ofSeconds(60))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() ->
+                        session.set(memberSession(lead, member)));
+        return session.get();
+    }
+
     private void awaitRunState(String lead, String member, String state) {
         waiting().atMost(Duration.ofSeconds(120))
                 .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
@@ -720,6 +1274,341 @@ class HostedSessionRelayFaultGatesIT {
         }
         throw new AssertionError("no childRunId for " + member
                 + " in team_state of " + lead);
+    }
+
+    /**
+     * Holds the session message relay: its scheduler runs one thread, so a
+     * task parked on it keeps every scan, and with it every handover, from
+     * running until the latch is released (the H4e-b3 hold).
+     */
+    private CountDownLatch holdRelay() throws InterruptedException {
+        return SchedulerHold.hold(spring.getBean("messageRelayScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
+    }
+
+    /** The member's only outbound command row, as committed now. */
+    private Map<String, Object> outboundRow(String member) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT record_id, revision, delivery_state"
+                        + " FROM ma_session_record WHERE tenant_id = ? AND"
+                        + " session_id = ? AND domain = 'session_command'",
+                tenant, member);
+        assertThat(rows).as("one outbound command on " + member).hasSize(1);
+        return rows.get(0);
+    }
+
+    /** Waits for the member's command to reach {@code state}; its id. */
+    private String awaitOutbound(String member, String state) {
+        AtomicReference<String> commandId = new AtomicReference<>();
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    Map<String, Object> row = outboundRow(member);
+                    assertThat(row.get("delivery_state")).isEqualTo(state);
+                    commandId.set(row.get("record_id").toString());
+                });
+        return commandId.get();
+    }
+
+    /** A member's Session holds the one Turn its launch admitted. */
+    private String onlyTurn(String session) {
+        return jdbc.queryForObject(
+                "SELECT CAST(turn_id AS CHAR) FROM ma_turn"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+    }
+
+    private void awaitTurnStatus(String session, String turn,
+            String status) {
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() ->
+                        assertThat(jdbc.queryForObject(
+                                "SELECT status FROM ma_turn WHERE"
+                                        + " tenant_id = ? AND session_id = ?"
+                                        + " AND turn_id = ?",
+                                String.class, tenant, session, turn))
+                                .isEqualTo(status));
+    }
+
+    /** The longest the Harness took to answer a cancel of the Session,
+     * read from its request log. */
+    private long cancelRouteMillis(String session) throws IOException {
+        Matcher route = Pattern.compile("route=POST /session/"
+                + Pattern.quote(session) + "/cancel .*durationMs=(\\d+)")
+                .matcher(Files.readString(harnessLog));
+        long longest = -1;
+        while (route.find()) {
+            longest = Math.max(longest, Long.parseLong(route.group(1)));
+        }
+        return longest;
+    }
+
+    private static String eventsPath(String session) {
+        return "/v1/agents/sessions/" + session + "/events";
+    }
+
+    private static Map<String, Object> cancel(String turn) {
+        return Map.of("type", "agent.session.cancel", "turn_id", turn);
+    }
+
+    private int eventCount(String session, String turn, String type) {
+        return jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND"
+                        + " event_type = ?",
+                Integer.class, tenant, session, turn, type);
+    }
+
+    /** Every answer alice's journal committed for her send call. */
+    private List<String> sendAnswers(String member) {
+        List<String> answers = new ArrayList<>();
+        for (String text : jdbc.queryForList(
+                "SELECT CAST(inline_bytes AS CHAR) FROM ma_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND"
+                        + " kind = 'managed-message'",
+                String.class, tenant, member)) {
+            JsonNode message = jsonBody(text);
+            if (!"tool_result".equals(message.path("type").asText())) {
+                continue;
+            }
+            for (JsonNode part : message.path("message").path("parts")) {
+                JsonNode response = part.path("functionResponse");
+                if ("alice-send".equals(response.path("id").asText())) {
+                    JsonNode answer = response.path("response");
+                    answers.add(answer.has("error")
+                            ? answer.path("error").asText()
+                            : answer.path("output").asText());
+                }
+            }
+        }
+        return answers;
+    }
+
+    /** The stored bytes a session_command body's replyRef names. */
+    private String replyBytes(String session, JsonNode command) {
+        return jdbc.queryForObject(
+                "SELECT CAST(inline_bytes AS CHAR) FROM ma_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND"
+                        + " resource_id = ?",
+                String.class, tenant, session,
+                command.required("replyRef").required("resourceId").asText());
+    }
+
+    /** The Session stream's committed public events, in sequence. */
+    private List<Map<String, Object>> ledger(String session) {
+        return jdbc.queryForList(
+                "SELECT schema_version, projection_version, sequence_id,"
+                        + " CAST(event_id AS CHAR) AS event_id,"
+                        + " CAST(session_id AS CHAR) AS session_id,"
+                        + " CAST(turn_id AS CHAR) AS turn_id,"
+                        + " CAST(item_id AS CHAR) AS item_id,"
+                        + " CAST(content_part_id AS CHAR) AS content_part_id,"
+                        + " event_type, gmt_create, data_json, terminal"
+                        + " FROM ma_public_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND stream_kind = 'SESSION' AND"
+                        + " stream_id = X'' ORDER BY sequence_id",
+                tenant, session);
+    }
+
+    /** One ledger row exactly as the surface serves it (FG8e's mapping:
+     * snake_case and seconds publicly, camelCase and milliseconds on the
+     * WebShell, nulls omitted). */
+    private JsonNode served(Map<String, Object> row, String surface)
+            throws IOException {
+        boolean web = "webshell".equals(surface);
+        long created = ((Number) row.get("gmt_create")).longValue();
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("schema_version", row.get("schema_version"));
+        fields.put("projection_version", row.get("projection_version"));
+        fields.put("sequence", row.get("sequence_id"));
+        fields.put("event_id", row.get("event_id"));
+        fields.put("session_id", row.get("session_id"));
+        fields.put("turn_id", row.get("turn_id"));
+        fields.put("item_id", row.get("item_id"));
+        fields.put("content_part_id", row.get("content_part_id"));
+        fields.put("type", row.get("event_type"));
+        fields.put("created_at", web ? created : created / 1000);
+        fields.put("data", json.readTree(row.get("data_json").toString()));
+        Object terminal = row.get("terminal");
+        fields.put("terminal", terminal instanceof Boolean flag ? flag
+                : ((Number) terminal).intValue() != 0);
+        ObjectNode node = json.createObjectNode();
+        fields.forEach((key, value) -> {
+            if (value != null) {
+                node.set(web ? camel(key) : key, json.valueToTree(value));
+            }
+        });
+        return json.readTree(json.writeValueAsString(node));
+    }
+
+    private void awaitTerminal(String session, String turn) {
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                        assertThat(jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_public_event"
+                                        + " WHERE tenant_id = ? AND"
+                                        + " session_id = ? AND turn_id = ?"
+                                        + " AND terminal",
+                                Integer.class, tenant, session, turn))
+                                .isEqualTo(1));
+    }
+
+    /** The turn of every terminal frame; a turn named twice fails. */
+    private static List<String> terminalTurns(List<JsonNode> frames) {
+        List<String> turns = new ArrayList<>();
+        for (JsonNode frame : frames) {
+            if (frame.path("terminal").asBoolean()) {
+                String turn = frame.has("turn_id")
+                        ? frame.path("turn_id").asText()
+                        : frame.path("turnId").asText();
+                assertThat(turns).as("terminal of %s once", turn)
+                        .doesNotContain(turn);
+                turns.add(turn);
+            }
+        }
+        return turns;
+    }
+
+    /**
+     * One client of a Session's public or WebShell event stream. It owns
+     * its HttpClient, so {@link #abort} cuts the connection mid-stream the
+     * way a lost client does; {@link #frames} is everything it read.
+     */
+    private final class Observer {
+        private final List<JsonNode> frames = new CopyOnWriteArrayList<>();
+        private final AtomicReference<Throwable> failure =
+                new AtomicReference<>();
+        private final HttpClient client = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1).build();
+        private final String surface;
+        private final Thread reader;
+        private volatile boolean aborted;
+
+        Observer(String surface, String session, long after)
+                throws Exception {
+            this.surface = surface;
+            HttpRequest.Builder request;
+            if ("public".equals(surface)) {
+                request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                        + port + eventsPath(session) + "?stream=true")).GET();
+                if (after > 0) {
+                    request.header("Last-Event-ID", Long.toString(after));
+                }
+            } else {
+                request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                        + port + "/api/agent/web-shell/v1/events/stream"))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                json.writeValueAsString(Map.of("sessionId",
+                                        session, "afterSequence", after))));
+            }
+            HttpResponse<InputStream> response = client.send(request
+                    .header("X-Qwen-Tenant-Id", tenant)
+                    .header("X-Fg9-Fixture-Actor", "actor")
+                    .header("Accept", "text/event-stream").build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            assertThat(response.statusCode()).as("%s stream of %s", surface,
+                    session).isEqualTo(200);
+            assertThat(response.headers().firstValue("content-type")
+                    .orElse("")).contains("text/event-stream");
+            reader = new Thread(() -> read(response.body()),
+                    "fg9e-" + surface + "-" + session);
+            reader.setDaemon(true);
+            reader.start();
+            observers.add(this);
+        }
+
+        private void read(InputStream body) {
+            try (BufferedReader lines = new BufferedReader(
+                    new InputStreamReader(body, StandardCharsets.UTF_8))) {
+                String id = null;
+                String event = null;
+                StringBuilder data = new StringBuilder();
+                for (String line = lines.readLine(); line != null;
+                        line = lines.readLine()) {
+                    if (line.startsWith("id:")) {
+                        id = line.substring(3).trim();
+                    } else if (line.startsWith("event:")) {
+                        event = line.substring(6).trim();
+                    } else if (line.startsWith("data:")) {
+                        data.append(data.length() == 0 ? "" : "\n")
+                                .append(line.substring(5).stripLeading());
+                    } else if (line.isEmpty() && data.length() > 0) {
+                        JsonNode frame = json.readTree(data.toString());
+                        if (!frame.path("sequence").asText().equals(id)
+                                || !frame.path("type").asText()
+                                        .equals(event)) {
+                            throw new IllegalStateException("SSE id/event "
+                                    + id + "/" + event + " do not name "
+                                    + frame);
+                        }
+                        frames.add(frame);
+                        id = null;
+                        event = null;
+                        data.setLength(0);
+                    }
+                }
+            } catch (IOException | RuntimeException error) {
+                if (!aborted) {
+                    failure.compareAndSet(null, error);
+                }
+            }
+        }
+
+        long lastSequence() {
+            return frames.isEmpty() ? 0
+                    : frames.get(frames.size() - 1).path("sequence")
+                            .asLong();
+        }
+
+        /** Every event the ledger holds now has reached this client. */
+        void awaitCaughtUp(String session) {
+            waiting().atMost(Duration.ofSeconds(60))
+                    .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                        assertThat(failure.get()).isNull();
+                        assertThat(lastSequence()).isEqualTo(
+                                (long) ledger(session).size());
+                    });
+        }
+
+        void abort() throws InterruptedException {
+            aborted = true;
+            client.shutdownNow();
+            reader.join(10_000);
+            assertThat(reader.isAlive()).as("the cut stream stopped").isFalse();
+        }
+
+        /**
+         * This resumed client's frames after the cut one's, once it read
+         * the ledger's tail: one contiguous sequence from 1 with no gap
+         * and no duplicate, each frame exactly its committed row.
+         */
+        List<JsonNode> continueFrom(Observer cut, String session)
+                throws Exception {
+            long tail = ledger(session).size();
+            waiting().atMost(Duration.ofSeconds(90))
+                    .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                        assertThat(failure.get()).isNull();
+                        assertThat(lastSequence())
+                                .isGreaterThanOrEqualTo(tail);
+                    });
+            abort();
+            List<JsonNode> view = new ArrayList<>(cut.frames);
+            view.addAll(frames);
+            List<Long> sequences = view.stream()
+                    .map(frame -> frame.path("sequence").asLong()).toList();
+            assertThat(sequences).as("%s view of %s: no gap, no duplicate",
+                    surface, session).isEqualTo(LongStream
+                            .rangeClosed(1, sequences.size()).boxed().toList());
+            List<JsonNode> expected = new ArrayList<>();
+            for (Map<String, Object> row : ledger(session)
+                    .subList(0, view.size())) {
+                expected.add(served(row, surface));
+            }
+            assertThat(view).as("%s frames of %s are the ledger", surface,
+                    session).isEqualTo(expected);
+            return view;
+        }
     }
 
     private long countOps(HostedSessionRelayForwardingProxy proxy,
@@ -773,6 +1662,154 @@ class HostedSessionRelayFaultGatesIT {
         };
     }
 
+    // ------------------------------------------- store refusals, crashes
+
+    /**
+     * FG9b's fault source, the FG8b shape: a test-only trigger on the
+     * journal's record table, scoped to the case tenant and one record
+     * kind, refusing every matching write until the case drops it. A
+     * fire-once arm would be healed by the store client's own bounded
+     * retry before the Session saw it. Each fire also lands in fg9b_fire
+     * (MyISAM, so the row survives the signalled rollback) — Spring
+     * flattens the SQLException into a 500, so the fire count is the
+     * attribution.
+     */
+    private void refuse(String name, String event, String condition) {
+        jdbc.execute("CREATE TABLE IF NOT EXISTS fg9b_fire (case_name"
+                + " VARCHAR(64) NOT NULL, fired_at TIMESTAMP(6) NOT NULL"
+                + " DEFAULT CURRENT_TIMESTAMP(6)) ENGINE = MyISAM");
+        String trigger = "fg9b_" + UUID.randomUUID().toString()
+                .replace("-", "");
+        refusals.add(trigger);
+        jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE " + event
+                + " ON ma_session_record FOR EACH ROW BEGIN IF"
+                + " NEW.tenant_id = '" + tenant + "' AND " + condition
+                + " THEN INSERT INTO fg9b_fire (case_name) VALUES ('" + name
+                + "'); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'FG9B_"
+                + name.toUpperCase().replace('-', '_') + "'; END IF; END");
+    }
+
+    private void dropRefusals() {
+        for (String trigger : refusals) {
+            jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
+        }
+        refusals.clear();
+    }
+
+    private int fired(String name) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM fg9b_fire WHERE"
+                + " case_name = ?", Integer.class, name);
+    }
+
+    /** Every attempt of the store client's bounded retry met the
+     * refusal; past it the Session keeps the append unsettled and sends
+     * no more until the refusal drops (#14570). A settle that fires
+     * before the drop retries the same commit, so only the lower bound
+     * is exact. */
+    private void awaitRefusals(String name) {
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
+                });
+    }
+
+    /** The case tenant's relay ledger rows. */
+    private int deliveryRows() {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_delivery WHERE"
+                + " tenant_id = ? AND delivery_kind = 'SESSION_MESSAGE'",
+                Integer.class, tenant);
+    }
+
+    private String turnStatus(String session, String turn) {
+        return jdbc.queryForObject("SELECT status FROM ma_turn WHERE"
+                + " tenant_id = ? AND session_id = ? AND turn_id = ?",
+                String.class, tenant, session, turn);
+    }
+
+    /**
+     * Journal commits of `operation` on the session that the store
+     * accepted, as the store proxy saw them: a refused attempt answers
+     * 500, and a dropped or held reply still landed.
+     */
+    private long journalCommits(String session, String operation) {
+        return storeProxy.operations().stream()
+                .filter(line -> line.startsWith("PROXY passthru ")
+                        || line.startsWith("PROXY dropped ")
+                        || line.startsWith("PROXY holding "))
+                .filter(line -> line.contains("/sessions/" + session
+                        + "/transactions:commit"))
+                .filter(line -> line.contains(" op=" + operation + " "))
+                .filter(line -> line.contains(" status=2"))
+                .count();
+    }
+
+    /** The lead's own Turn has settled. A Turn still open when its
+     * Session latches or its Harness dies keeps the workspace its dead
+     * owner held, and the lead's takeover then churns on
+     * workspace_unavailable instead of executing anything. */
+    private void awaitLeadSettled(String lead) {
+        waiting().atMost(Duration.ofSeconds(60))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    assertThat(jdbc.queryForList("SELECT status FROM ma_turn"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                            String.class, tenant, lead))
+                            .containsExactly("COMPLETED");
+                });
+    }
+
+    private long harnessLogMark() throws IOException {
+        return Files.size(harnessLog);
+    }
+
+    /** The Harness's own log names the fault after `mark`. */
+    private void awaitHarnessLog(long mark, String needle) {
+        waiting().atMost(Duration.ofSeconds(60))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    byte[] log = Files.readAllBytes(harnessLog);
+                    assertThat(new String(log, (int) mark,
+                            log.length - (int) mark, StandardCharsets.UTF_8))
+                            .contains(needle);
+                });
+    }
+
+    private long writerGeneration(String session) {
+        Long generation = jdbc.queryForObject(
+                "SELECT writer_generation FROM ma_session_head"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session);
+        return generation == null ? 0 : generation;
+    }
+
+    private void restartHarness(String session) throws Exception {
+        restartHarness(session, () -> {});
+    }
+
+    /**
+     * SIGKILLs the packaged Harness (POSIX; every Session it hosts dies
+     * with it), runs `whileDown`, and starts a cold one — a new HOME and
+     * QWEN_HOME — on the same port; returns once a new writer generation
+     * holds `session`, the takeover's witness.
+     */
+    private void restartHarness(String session, Runnable whileDown)
+            throws Exception {
+        long generation = writerGeneration(session);
+        harnessGeneration.incrementAndGet();
+        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(20, TimeUnit.SECONDS))
+                .as("the killed Harness exited").isTrue();
+        whileDown.run();
+        startHarness();
+        waiting().atMost(Duration.ofSeconds(100))
+                .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                        assertThat(writerGeneration(session))
+                                .as("a new writer generation holds %s",
+                                        session)
+                                .isGreaterThan(generation));
+    }
+
     // ------------------------------------------------------------- stack
 
     @BeforeEach
@@ -800,9 +1837,6 @@ class HostedSessionRelayFaultGatesIT {
                     temporary.resolve("workspace-" + i));
             Files.createDirectory(workspace.resolve("child"));
         }
-        port = freePort();
-        harnessPort = freePort();
-        brokerPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -821,10 +1855,20 @@ class HostedSessionRelayFaultGatesIT {
         }
         caseSlot.set(0);
         storeProxy = HostedSessionRelayForwardingProxy.start("store",
-                URI.create("http://127.0.0.1:" + port),
                 casesRoot.resolve("store-proxy.log"));
-        startSpring(cli, node, caseCount,
-                "fg9f".equals(letter));
+        // FG9d's lost cancel reply: only the client's own request passes it.
+        publicProxy = HostedSessionRelayForwardingProxy.start("public",
+                casesRoot.resolve("public-proxy.log"));
+        // Reserve the Harness port while the other fixture listeners bind.
+        try (ServerSocket reservation = new ServerSocket(0)) {
+            harnessPort = reservation.getLocalPort();
+            startSpring(cli, node, caseCount, letter);
+            port = spring.getWebServer().getPort();
+            brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
+                    .getPort();
+            storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+            publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+        }
         startHarness();
     }
 
@@ -868,13 +1912,13 @@ class HostedSessionRelayFaultGatesIT {
     }
 
     private void startSpring(Path cli, String node, int caseCount,
-            boolean shortHarnessTimeout) {
+            String letter) {
         // The store proxy sits on the Session-Store boundary (all drops
         // and holds live there); the Harness stays direct: proxied, its
         // warm/createOrLoad chain yields hosted_session_already_attached
         // on the second operation (axis probes fg9.harness.direct).
         List<String> arguments = new ArrayList<>(List.of(
-                "--server.address=127.0.0.1", "--server.port=" + port,
+                "--server.address=127.0.0.1", "--server.port=0",
                 "--spring.datasource.url="
                         + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -894,7 +1938,7 @@ class HostedSessionRelayFaultGatesIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
+                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -908,9 +1952,16 @@ class HostedSessionRelayFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
-        if (shortHarnessTimeout) {
+        if ("fg9f".equals(letter)) {
             arguments.add(
                     "--qwen.managed-agent.harness.request-timeout=3s");
+        }
+        if ("fg9e".equals(letter)) {
+            // A stream the gate cut stays open server-side until its next
+            // write fails, holding Spring's graceful shutdown for its whole
+            // 30 s window; a short heartbeat is that write.
+            arguments.add(
+                    "--qwen.managed-agent.events.heartbeat-interval=2s");
         }
         for (int i = 0; i < caseCount; i++) {
             arguments.add("--qwen.managed-agent.runtime-broker.workspace-mounts["
@@ -957,7 +2008,8 @@ class HostedSessionRelayFaultGatesIT {
                         + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
                 .directory(temporary.resolve("harness-decoy").toFile())
-                .redirectErrorStream(true).redirectOutput(harnessLog.toFile());
+                .redirectErrorStream(true).redirectOutput(
+                        ProcessBuilder.Redirect.appendTo(harnessLog.toFile()));
         Map<String, String> environment = builder.environment();
         environment.clear();
         if (System.getenv("PATH") != null) {
@@ -1004,10 +2056,33 @@ class HostedSessionRelayFaultGatesIT {
         });
     }
 
+    /** #13746 F2: the member's task on the lead names the member's child
+     * Session publicly, and that Session reads through the public route. */
+    private void assertTaskLinksChildSession(String lead, String member,
+            String session) throws Exception {
+        String runId = childRunIdOf(lead, member);
+        String taskId = "task_" + ManagedExtensionProjection.recordKey(lead,
+                "child_run", runId);
+        JsonNode task = request("GET", "/v1/agents/sessions/" + lead
+                + "/tasks/" + taskId, null, null, 200);
+        assertThat(task.path("kind").asText()).isEqualTo("child_agent");
+        assertThat(task.path("child_session_id").asText())
+                .as("the task view links the member's child Session")
+                .isEqualTo(session);
+        assertThat(request("GET", "/v1/agents/sessions/" + session, null,
+                null, 200).path("id").asText()).isEqualTo(session);
+    }
+
     private JsonNode request(String method, String path, Object body,
             String key, int expected) throws Exception {
+        return request("http://127.0.0.1:" + port, method, path, body, key,
+                expected);
+    }
+
+    private JsonNode request(String base, String method, String path,
+            Object body, String key, int expected) throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(
-                URI.create("http://127.0.0.1:" + port + path))
+                URI.create(base + path))
                 .timeout(Duration.ofSeconds(15))
                 .header("X-Qwen-Tenant-Id", tenant)
                 .header("Accept", "application/json")
@@ -1055,13 +2130,16 @@ class HostedSessionRelayFaultGatesIT {
                         }, response));
         filter.setOrder(Ordered.HIGHEST_PRECEDENCE);
         filter.setAsyncSupported(true);
-        filter.addUrlPatterns("/v1/agents/*");
+        filter.setDispatcherTypes(DispatcherType.REQUEST,
+                DispatcherType.ASYNC);
+        filter.addUrlPatterns("/v1/agents/*", "/api/agent/web-shell/v1/*");
         return filter;
     }
 
     // ------------------------------------------------------- the model
 
     private void modelReply(HttpExchange exchange) throws IOException {
+        int generation = harnessGeneration.get();
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             seenReports.addAll(teammatesOf(body));
@@ -1083,6 +2161,12 @@ class HostedSessionRelayFaultGatesIT {
             reply(exchange, List.of(), "OK");
             return;
         } catch (Exception | AssertionError failure) {
+            // A round the killed Harness left open returns into a dead
+            // connection once its latch opens; its re-driven round is the
+            // one that counts.
+            if (generation != harnessGeneration.get()) {
+                return;
+            }
             modelFailure.compareAndSet(null, failure);
             try {
                 reply(exchange, List.of());
@@ -1140,7 +2224,10 @@ class HostedSessionRelayFaultGatesIT {
             return new Step(List.of(call("lead-stop", "request_shutdown",
                     Map.of("to", stop))), null);
         }
-        return new Step(List.of(), null);
+        // A closing round with no text is an empty response the model
+        // client retries for ~20 s; the lead's Turn (and every wake Turn
+        // that reads a member's result) would stay open that long.
+        return new Step(List.of(), "LEAD_REPORT done");
     }
 
     private Step memberPlan(String name, String mode, JsonNode body)
@@ -1258,12 +2345,6 @@ class HostedSessionRelayFaultGatesIT {
         return "";
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
-
     private static void deleteRecursively(Path root) throws IOException {
         if (!Files.exists(root)) {
             return;
@@ -1280,7 +2361,7 @@ class HostedSessionRelayFaultGatesIT {
     }
 
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it",
-                () -> Thread.currentThread().isInterrupted());
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 }

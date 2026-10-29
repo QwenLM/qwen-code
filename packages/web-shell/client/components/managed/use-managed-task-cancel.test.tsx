@@ -95,6 +95,24 @@ describe('useManagedTaskCancel', () => {
     expect(sessionStorage.getItem(key)).toBeNull();
   });
 
+  it('submits for any task kind that advertises cancel and for none that does not', async () => {
+    vi.mocked(provider.tasks!.cancel!.submit).mockResolvedValue(taskOperation);
+    await render();
+    await act(async () => {
+      void current.submit({ ...task, kind: 'background_shell' });
+    });
+    expect(provider.tasks!.cancel!.submit).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      void current.submit({
+        ...task,
+        kind: 'automation_run',
+        taskId: 'task_other',
+        actionCapabilities: [],
+      });
+    });
+    expect(provider.tasks!.cancel!.submit).toHaveBeenCalledTimes(1);
+  });
+
   it('replays a lost reply only on user request with the same key after remount', async () => {
     vi.mocked(provider.tasks!.cancel!.submit).mockRejectedValueOnce(
       new TypeError('network'),
@@ -144,6 +162,29 @@ describe('useManagedTaskCancel', () => {
       'op1',
       expect.objectContaining({ clientId: 'client' }),
     );
+    expect(current.pendingTaskIds).toEqual([]);
+  });
+
+  it('follows a saved cancel of a task of any kind to its settlement', async () => {
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        [task.taskId]: {
+          sessionId,
+          taskId: task.taskId,
+          idempotencyKey: 'original',
+          operationId: 'op1',
+        },
+      }),
+    );
+    vi.mocked(provider.tasks!.get).mockResolvedValue({
+      ...task,
+      kind: 'background_shell',
+      state: 'cancelled',
+      settledAt: 5,
+    });
+    await render();
+    expect(provider.tasks!.cancel!.submit).not.toHaveBeenCalled();
     expect(current.pendingTaskIds).toEqual([]);
   });
 

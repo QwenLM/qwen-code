@@ -2,21 +2,21 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,6 +26,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -108,7 +109,7 @@ class ManagedSessionLifecycleTest {
     private ObjectMapper objectMapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedAgentStore store;
@@ -120,6 +121,7 @@ class ManagedSessionLifecycleTest {
     private RecordingRuntimeWarmer runtime;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Autowired
@@ -411,8 +413,12 @@ class ManagedSessionLifecycleTest {
                         .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("operation_outcome_unknown"));
         assertThat(harness.renameCount()).isEqualTo(sends);
-        lifecycle(post("/v1/agents/sessions/{id}/close", ambiguous), tenant, "close")
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("session_operation_active"));
+        // The parked title waits for the reconciler and holds no lifecycle
+        // hostage (D7-2): the Session still closes, and the title is never
+        // sent again.
+        awaitCompleted(tenant, ambiguous, admit(post("/v1/agents/sessions/{id}/close", ambiguous),
+                tenant, "close-ambiguous").get("id").asText());
+        assertThat(harness.renameCount()).isEqualTo(sends);
         String sessionId = attachedSession(tenant);
         String closeId;
         harness.setAvailable(false);
@@ -429,7 +435,7 @@ class ManagedSessionLifecycleTest {
             ManagedAgentService subject = new ManagedAgentService(store,
                     new RequestDigests(), null, available, null);
             assertThatThrownBy(() -> subject.renameSession(tenant, null, "rename-closing", sessionId, "blocked"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
                         assertThat(error.getCode()).isEqualTo("session_operation_active");
                     });
@@ -488,7 +494,7 @@ class ManagedSessionLifecycleTest {
             assertThatThrownBy(() -> store.beginSessionMutation(tenant,
                     "RENAME_SESSION", "key", "other-digest", target,
                     SessionMutationKind.RENAME))
-                    .isInstanceOfSatisfying(ApiException.class, error ->
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                             assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         }
         harness.rename(tenant, sessionId, "renamed");
@@ -546,7 +552,7 @@ class ManagedSessionLifecycleTest {
         harness.setAvailable(false);
         try {
             assertThatThrownBy(() -> subject.renameSession(tenant, null, "superseded", sessionId, "title"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus().value()).isEqualTo(expectedStatus);
                         assertThat(error.getCode()).isEqualTo(expectedStatus == 409
                                 ? "session_mutation_superseded" : "hosted_harness_unavailable");
@@ -566,7 +572,7 @@ class ManagedSessionLifecycleTest {
         ManagedAgentService subject = new ManagedAgentService(store,
                 new RequestDigests(), null, unavailable, null);
         assertThatThrownBy(() -> subject.renameSession(tenant, null, "refused", sessionId, "new title"))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
                     assertThat(error.getCode()).isEqualTo(disabled
                             ? "hosted_harness_disabled" : "hosted_harness_unavailable");
@@ -593,12 +599,12 @@ class ManagedSessionLifecycleTest {
                 var held = jdbc.queryForMap("SELECT target_revision, attempt_count, phase FROM ma_operation WHERE operation_kind = 'RENAME'"
                         + " AND tenant_id = ? AND session_id = ?", tenant, sessionId);
                 assertThat(held.get("phase")).isEqualTo("PREPARING");
-                var candidate = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
+                var candidate = new com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery(tenant, sessionId,
                         "inline", "new title", ((Number) held.get("target_revision")).longValue(),
                         ((Number) held.get("attempt_count")).intValue());
                 assertThat(store.claimRename(candidate, "peer", Duration.ofMinutes(1))).isEmpty();
                 assertThatThrownBy(() -> subject.renameSession(tenant, null, "inline", sessionId, "new title"))
-                        .isInstanceOfSatisfying(ApiException.class, error ->
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
                 assertThat(store.findCommand(tenant, "RENAME_SESSION", "inline").orElseThrow().status()).isEqualTo("PENDING");
                 return new HarnessConnector.Attachment(FixtureHarness.BOOT_ID);
@@ -664,9 +670,9 @@ class ManagedSessionLifecycleTest {
             var second = store.beginSessionRename(tenant, "k2", "digest-b", sessionId, "B");
             store.completeSessionRename(tenant, "k2", sessionId, "B", boot, second.renameRevision());
             assertThatThrownBy(() -> store.completeSessionRename(tenant, "k1", sessionId, "A", boot, first.renameRevision()))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
             assertThatThrownBy(() -> store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
             assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
             var latest = store.beginSessionRename(tenant, "k3", "digest-c", sessionId, "A");
             assertThat(latest.renameRevision()).isGreaterThan(second.renameRevision());
@@ -679,7 +685,7 @@ class ManagedSessionLifecycleTest {
             store.retryRename(latestDelivery, "latest-owner", 0);
             assertThatThrownBy(() -> store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
                     "", "close", "close-digest"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_operation_active"));
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_operation_active"));
             var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
                     .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
             var claimed = store.claimRename(candidate, "replica-b", Duration.ofMinutes(1)).orElseThrow();
@@ -731,7 +737,7 @@ class ManagedSessionLifecycleTest {
         assertThatThrownBy(() -> store.completeSessionMutation(tenant,
                 "RENAME_SESSION", "k1", sessionId, SessionMutationKind.RENAME,
                 "A", bootId))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("session_mutation_superseded"));
         assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
@@ -836,7 +842,7 @@ class ManagedSessionLifecycleTest {
         assertThatThrownBy(() -> store.beginSessionMutation(tenant,
                 "RENAME_SESSION", "other", "other-digest", sessionId,
                 SessionMutationKind.RENAME))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("session_operation_active"));
     }
 
@@ -860,7 +866,7 @@ class ManagedSessionLifecycleTest {
             }).when(faulted).requireSession(tenant, sessionId);
         } else if ("completion".equals(phase)) {
             doThrow(new IllegalStateException("completion unavailable"))
-                    .when(faulted).completeSessionRename(any(com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery.class),
+                    .when(faulted).completeSessionRename(any(com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery.class),
                             anyString(), anyString());
         } else {
             doThrow(new IllegalStateException("cleanup unavailable"))
@@ -885,7 +891,7 @@ class ManagedSessionLifecycleTest {
         try {
             assertThatThrownBy(() -> subject.renameSession(tenant, null, "key",
                     sessionId, "renamed"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
                         assertThat(error.getCode()).isEqualTo("hosted_harness_unavailable");
                     });
@@ -927,13 +933,13 @@ class ManagedSessionLifecycleTest {
         if (!"lookup".equals(phase)) {
             await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
                     assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'RENAME'"
-                                    + " AND tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isEqualTo("UNKNOWN"));
+                                    + " AND tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isEqualTo("RECOVERY_BLOCKED"));
             int sent = harness.renameCount();
             assertThat(store.deliverableRenames(System.currentTimeMillis()))
                     .noneMatch(delivery -> sessionId.equals(delivery.sessionId()));
             try {
                 assertThatThrownBy(() -> subject.renameSession(tenant, null, "key", sessionId, "renamed"))
-                        .isInstanceOf(ApiException.class);
+                        .isInstanceOf(ManagedAgentException.class);
             } finally {
                 harness.setAvailable(true);
             }
@@ -942,7 +948,7 @@ class ManagedSessionLifecycleTest {
                 // Reconcile the original Harness result, retaining its owner and generation.
                 assertThat(harness.title(sessionId)).isEqualTo("renamed");
                 var original = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?", tenant, sessionId);
-                var delivery = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
+                var delivery = new com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery(tenant, sessionId,
                         "key", "renamed", ((Number) original.get("target_revision")).longValue(),
                         ((Number) original.get("attempt_count")).intValue(), ((Number) original.get("claim_generation")).longValue());
                 new TransactionTemplate(transactionManager).execute(ignored -> store.completeSessionRename(delivery,
@@ -975,7 +981,7 @@ class ManagedSessionLifecycleTest {
                 new IllegalStateException("completion unavailable");
         // The rename flow persists through the dedicated completion call; a
         // store fault there used to surface as a bare 503 with no log line.
-        doThrow(failure).when(faulted).completeSessionRename(any(com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery.class),
+        doThrow(failure).when(faulted).completeSessionRename(any(com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery.class),
                 anyString(), anyString());
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
@@ -990,7 +996,7 @@ class ManagedSessionLifecycleTest {
         try {
             assertThatThrownBy(() -> subject.renameSession(tenant, null,
                     "key", sessionId, "renamed"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getCode())
                                 .isEqualTo("hosted_harness_unavailable");
                         assertThat(error.getCause()).isSameAs(failure);
@@ -1027,7 +1033,7 @@ class ManagedSessionLifecycleTest {
         try {
             assertThatThrownBy(() -> subject.renameSession(tenant, null,
                     "key", sessionId, "renamed"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getCode())
                                 .isEqualTo("hosted_harness_unavailable");
                         assertThat(error.getCause())

@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static com.alibaba.qwen.code.runtimebroker.FakeKubernetesRuntimeClient.map;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeProvisionerTest;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.Inet4Address;
 import java.net.NetworkInterface;
@@ -19,9 +20,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import org.junit.jupiter.api.io.TempDir;
+
+import static com.alibaba.qwen.code.runtimebroker.FakeKubernetesRuntimeClient.map;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Opt-in protocol integration: fake scheduler observations, real Broker and bundled worker. */
 @EnabledIfSystemProperty(named = "qwen.kubernetes.worker-test", matches = "true")

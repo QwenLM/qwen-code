@@ -4,7 +4,8 @@
 
 状态：Step 1 与 Step 2 已实现（D1-D9）。Step 3 的限定原生文件审批与
 主模型切片已实现（#13777）；它的打包门禁、模型轮支路和 Q2 binding 半边
-支路都已是 Hosted MySQL CI 任务的步骤（D11），加入时该任务还没有运行过它们。
+支路都在 `hosted-failover-e2e` CI 任务中运行（D11）；它们最初加入的 Hosted MySQL
+任务没有运行过它们。
 更广的验收矩阵仍未完成，详见
 [Step 3 设计](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
 `728c13de21` 为准，除非某个决策注明了更晚的修正。本设计按 issue 评论
@@ -401,7 +402,7 @@ worker 不会成孤儿，不需要 W0e reclaim，所以代码里对 workspace-tu
 Spring、Broker 与耐久 Worker 持续服务同一个
 `runtime_session_id`，活着的 Broker 在其已持有的代际上重派发（恰为
 `'0'` 或 `'1'`——不再是只允许 `'1'`，也不接受无界值）。但运行这些
-支路的所有 lane 都是 Linux（`hosted-harness-mysql` 仅 ubuntu），所以
+支路的所有 lane 都是 Linux（`hosted-failover-e2e` 仅 ubuntu），所以
 darwin 是一个未被验证的预期，而不是等待首个不可能发生的运行来拍板
 的门禁。
 
@@ -423,6 +424,19 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
   未设置）的 Turn 仍以 `hosted_harness_unavailable` 终结；而带有
   submission 标记的 Turn 无论 code 如何都沿自身路径重试——预算本来就
   不看这些 Turn（那是 `transientFailure` 的既有约定，不是豁免）。
+  已绑定 Session 上的 generation 变化（`HostedHarnessGenerationException`）
+  是另一种豁免等待，准入前后都适用：单次变化受上一代 lease 约束。但每次
+  尝试之间都重启的 Harness 会反复抛出它，所以 Turn 连续四个预算都没有
+  journal 进展后（`consecutive_failures` 达到 4 × `max-pre-admission-retries`
+  或 4 × `max-post-admission-retries`），豁免即告失效：Turn 按预算耗尽处理，
+  以 `hosted_harness_unavailable` 或
+  `hosted_harness_unavailable_after_admission` 失败，而不是与健康重试无从
+  区分地无限重试（#13182 后续，R3-6）。该上限统计这段运行中的每一次
+  尝试，不论由哪种等待构成：没有任何计数器区分等待家族，所以一个已经
+  等了四个预算（等前任受 lease 约束的 409，或等审批）的 Turn，会在随后
+  的第一次 generation 变化时失败；而那些等待本身只要仍是当前失败，就
+  依旧不设上限。预算为零时按一计算，所以即便如此，单次变化仍能重新
+  挂接（上限为四次尝试）。
 - **D9b，请求超时对接管 load。** `HostedHarnessClient.loadSession`
   只在请求带恢复标志（`passiveManagedRuntimeRecovery` 或
   `driveRuntimeRecovery`）时使用独立的 `load-timeout`（默认 120 秒，
@@ -459,8 +473,9 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 
 ### D11 —— 残留门禁：Step 3 进 CI、模型轮支路、Q2 的 binding 半边
 
-runner 新增三项，补上前面各切片留成手工或未证明的门禁。三项都是
-`hosted-harness-mysql` 的步骤，对打包后的栈运行，使用现有的假模型。
+runner 新增三项，补上前面各切片留成手工或未证明的门禁。三项最初作为
+`hosted-harness-mysql` 的步骤加入，现在在 `hosted-failover-e2e` 任务中运行（见本
+决策末尾）；它们对打包后的栈运行，使用现有的假模型。
 
 1. **Step 3 打包门禁进 CI。** Step 3 设计里的 Allow、Deny、Cancel、过期
    与 continuation 收尾五个门禁此前只能手工跑，用 `G3_VERIFY_MODE` 选模式。
@@ -525,14 +540,27 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 快照之内，因为存活 writer 一直在推动这些列。两个控制面同时存活的部署仍不受
 支持（见「边界与开放问题」）。
 
-新增的七个步骤各占 10 分钟上限，步骤上限之和因此为 275（45 + 16×10 + 20 + 50），
-任务上限从 220 分钟调到 290 分钟。
+新增的七个步骤各占 10 分钟上限，当时步骤上限之和因此为 275（45 + 16×10 + 20 + 50），
+任务上限从 220 分钟调到 290 分钟；当前上限见本节末尾。
 
 自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行。
 新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 和此前的 failover
-步骤之后，且都不带 `if:`，因此只有前面每个步骤都通过才会执行。加入这些门禁时，
-Verify 步骤在 `main` 上是失败的，因此还没有任何一次 CI 运行执行过它们；当时的
-证据来自在 CI 之外运行同样的 `package.json` 脚本。
+步骤之后，且所有 failover 步骤都不带 `if:`，因此只有前面每个步骤都通过才会执行。
+当时 Verify 步骤在 `main` 上是失败的，之后的四次运行又各自败在不同的测试上，
+因此没有任何一次 CI 运行执行过这些门禁；它们的证据来自在 CI 之外运行同样的
+`package.json` 脚本。
+
+因此全部十五个 failover 步骤移到了独立任务 `hosted-failover-e2e`
+（`Hosted failover E2E / Java 21`）。这些支路只需要打包好的 CLI、server jar 和
+runner 私有的 `mysqld`，不需要 Hosted MySQL 任务的 MySQL service 或 cgroup 根，
+所以新任务自己构建 CLI、安装 SDK、以 `-DskipTests` 打包 server 并安装 MySQL
+二进制，不对 Hosted MySQL 任务设 `needs:`；和该任务一样，它只在
+`managed-agent-gate.yml` 的 `fast` 档跳过。那里的集成测试失败不再让任何支路被
+跳过。每条支路在 MySQL 二进制安装成功且运行未被取消时执行，所以前面支路的失败
+也不会让后面的支路被跳过；支路自己失败时，任务仍然失败。仅供 runner 使用的
+`QWEN_E2E_REGISTER_STORAGE=1` 与 Step 3 证据上传也一并迁移。Hosted MySQL 任务的
+步骤上限之和现为 170（90 + 10 + 20 + 50），任务上限 185 分钟；新任务十五条支路
+之和为 150，任务上限 165 分钟。
 
 ## 改动与属主
 
@@ -601,8 +629,8 @@ E2E（runner 支路，全部对着打包后的栈）：
 4. CI：`hosted-harness-mysql` 增加 D7 支路、D8 各支路与
    `--session-failover`。这一切片把任务上限从 60 分钟放宽到 120 分钟，
    步骤上限之和为 104（12 + 8×10 + 12——workspace 产出门禁又占了一条
-   12 分钟步骤），不设上限的安装准备步骤仍有余量。之后的门禁又上调过上限；
-   当前上限以 D11 为准：290 分钟，步骤上限之和 275。
+   12 分钟步骤），不设上限的安装准备步骤仍有余量。之后的门禁又上调过上限，
+   这些支路现在也已移到 `hosted-failover-e2e`；两个任务的当前上限以 D11 为准。
 5. D11 的 Step 3 门禁：Allow、Deny、Cancel、过期与 continuation 收尾
    各一个 CI 步骤。
 6. D11 模型轮支路：断言见 D11。把控制面的两条撤回路径都改成空操作后，

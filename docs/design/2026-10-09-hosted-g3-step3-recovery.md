@@ -508,7 +508,44 @@ Focused verification passed 841 core tests and 111 shared-contract tests. The ex
 
 Integration regressions proved that model request preparation failures preserve admitted, unsettled inputs through both the ordinary prompt route and the wake driver, and that interrupted channel settlement confirms the original cleanup owner only after its terminal and file-history retirement. A first release failure retained the cleanup fence; passive resident attachment then released the same binding/generation and added one confirmation without a second terminal. A separate Spring/H2 probe passed the bounded-retraction/replay-floor combination: readers remained usable while the snapshot was rebuilding, and old cursors expired again after snapshot coverage caught up. This probe is not MySQL or process-takeover acceptance.
 
-The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are Hosted MySQL CI steps (D11 says when that job reaches them), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2, though not their attempt and stream identities, the live SSE view or the admission count. Partial-prepare crash, response loss, malformed/foreign refs, snapshot overflow and cleanup crash have focused or fault-probe coverage only, or remain broader packaged acceptance work. Full-owner restart, real-provider acceptance and a real mixed-version cluster remain separate. Q2's binding half has the D11 frozen control-plane arm for a woken former Spring's stale claim and a store test of the bind guards; two live control planes remain a later phase.
+The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are CI steps of the `hosted-failover-e2e` job, which runs apart from the Hosted MySQL verify (see D11), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2, though not their attempt and stream identities, the live SSE view or the admission count.
+
+#14481's packaged gates add ten fault arms to the same job. Seven landed with
+the second step. Five layer one fault on the Allow path: three crash the
+replacement Harness after a
+durable A5 barrier — once the Allow decision is recorded (A5's decision row),
+once the approved execution reaches `PREPARED` while the Runtime Broker's
+`:start` is held (A5a's partial prepare), and once the approved result commits
+while its post-tool model round is held (A5's result-commit barrier) — and two
+drop the control plane's reply after commit: a lost decision response must
+retry to one `ACTION_RESPONSE` operation (A4's decision half), and a lost Turn
+admission must retry to one Turn row (C4). All five leave the original Action,
+prepare key, digest and Runtime identity in place, start a third generation,
+and require exactly one settled execution, one file effect and one terminal;
+the result-commit arm additionally reuses the saved request and retracts the
+published prefix. Three more cover the next barriers: a committed
+`turn.settled` whose reply is lost must be projected once after replacement
+with zero inference or tool calls (no second store commit is required), and
+the surviving public text must still be the recovered answer (C1); and a
+refused terminal write must leave the payable checkpoint to be compensated
+exactly once by the replacement, with the recovered answer still visible
+(C2). A refused cleanup release followed by another crash (C3) is packaged
+too: once the Turn is terminal and its generation is dead, the control plane
+re-drives the owed cleanup through a cleanup-only load until the replacement
+confirms it ([cleanup debt retry](2026-10-28-hosted-cleanup-debt-retry.md)).
+A lost takeover-load reply (A4's load half) stays focused: the packaged arm
+showed the redrive's active handoff leaves the original Turn RUNNING instead
+of projecting its terminal, so fixing that recovery path is separate from
+this acceptance slice. Malformed or foreign refs, snapshot overflow, mixed
+calls and rewritten inputs across a replacement (A3), Hook/MCP/child
+uncertainty (A6), the attempt and stream identities plus the live SSE view
+(B2), the round and cost budgets (B3), the crash between stream Finished and
+the assistant commit (B3a), and the mixed-version reader/bundle closure (R2)
+stay focused or integration evidence. Full-owner restart, real-provider
+acceptance and a real mixed-version cluster remain separate. Q2's binding
+half has the D11 frozen control-plane arm for a woken former Spring's stale
+claim and a store test of the bind guards; two live control planes remain a
+later phase.
 
 ## 10. Implementation surface
 
@@ -576,4 +613,4 @@ Recovery honors an already-durable cancellation before installing the restored d
 
 A trusted local reboot may retire the original Runtime after its file-tool results and file history are committed, while the model continuation is still owed. In the exact `hosted-workspace-files/1` profile, or the #13753 I3 read profile `hosted-workspace-read/1` (whose batches are always Read/Glob), without Hooks/MCP, a `results_ready` checkpoint for the same Prompt with a nonempty, fully settled native Read/Write/Edit/Glob batch may resume its saved model request without reacquiring that retired owner. Require no pending history/undo marker, durable assistant/result parity and readable original outcome resources. File history may be absent only for a wholly read-only Read/Glob batch; Write/Edit require its committed history. The Workspace generation must remain unchanged. Verify the original cleanup descriptor, and obtain the Broker's explicit release confirmation using its original RuntimeSession, binding and generation; a new warm binding alone is insufficient. Retain cleanup as `owed` until the original Turn terminal commits, then confirm that same descriptor through normal reconciliation. Unknown or missing evidence retains recovery blocking.
 
-This bounded recovery does not change Runtime identities within a Turn. If the resumed model requests further physical tools, refuse before acquisition, native-batch commit or reservation and settle the original Turn as a known error; the remaining work can run in a new Turn in the same Session. Already committed calls are never replayed. Acceptance requires an actual changed Linux boot, unchanged original receipt/dispatch count and physical file bytes, original-owner release, saved model request parity, same-Session next-Turn Write/Read on a newer generation, old-release fencing against its holder, and close with physical worker retirement. Also exercise the immediate new-tool refusal, absent physical effects, normal Turn settlement and successful next Turn. These requirements do not promote the earlier five packaged gates to full-host reboot acceptance.
+This bounded recovery does not change Runtime identities within a Turn. If the resumed model requests further physical tools, refuse before acquisition, native-batch commit or reservation and settle the original Turn as a known error; the remaining work can run in a new Turn in the same Session. Already committed calls are never replayed. Acceptance requires an actual changed Linux boot, unchanged original receipt/dispatch count and physical file bytes, original-owner release, saved model request parity, same-Session next-Turn Write/Read on a newer generation, old-release fencing against its holder, and close with physical worker retirement. Also exercise the immediate new-tool refusal, absent physical effects, normal Turn settlement and successful next Turn. A read-profile Session is a snapshot child's: it takes no messages, and the relay closes it once its result is delivered, so the ordinary flow gives it no next Turn. Its acceptance replaces the next-Turn checks with the run's end: the resumed answer settles the task Turn and reaches the parent as the child's result, the child Session closes with physical worker retirement, and its copy is discarded. Its new-tool refusal is exercised with a Read or Glob; the refused work cannot run in a new Turn of the same Session, which closes. These requirements do not promote the earlier five packaged gates to full-host reboot acceptance.

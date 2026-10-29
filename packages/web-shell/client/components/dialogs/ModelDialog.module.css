@@ -6,6 +6,22 @@
   font-size: 12px;
 }
 
+.toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 6px 8px 0;
+}
+
+.toolbar > :first-child {
+  grid-column: 2;
+}
+
+.toolbar > [role='alert'] {
+  grid-column: 1 / -1;
+}
+
 .list {
   display: flex;
   flex-direction: column;
