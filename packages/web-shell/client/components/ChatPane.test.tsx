@@ -4474,6 +4474,33 @@ describe('ChatPane pane title single-click rename', () => {
     expect(findRenameInput()).toBeNull();
   });
 
+  it('suppresses the failure report after a mid-flight owner switch', async () => {
+    const failing = deferred<never>();
+    renameSession.mockReturnValueOnce(failing.promise);
+    const onError = vi.fn();
+    render({ onError });
+    await openRename();
+    setRenameValue('New name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The pane switches sessions before the write settles.
+    act(() => {
+      ownerVersion += 1;
+      rerender({ onError });
+    });
+    await act(async () => {
+      failing.reject(new Error('late boom'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The catalog is still invalidated, but the error is not reported to a
+    // session the user has already switched away from.
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
+    expect(onError).not.toHaveBeenCalled();
+    expect(findRenameInput()).toBeNull();
+  });
+
   it('opens from the keyboard with Enter or Space on the focused title', async () => {
     render();
     const enter = new KeyboardEvent('keydown', {
