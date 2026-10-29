@@ -68,7 +68,7 @@ async function openHarness(
 }
 
 function dialog(page: Page) {
-  return page.locator('[data-web-shell-dialog-title="Add Workspace"]');
+  return page.getByRole('dialog', { name: 'Add workspace', exact: true });
 }
 
 async function openDialog(page: Page) {
