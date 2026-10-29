@@ -107,7 +107,9 @@ public enum ManagedSchemaProjection {
             "tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, "
                     + "definition_revision, definition_digest, goal, cron, timezone, session_mode, "
                     + "overlap, catch_up, catch_up_limit, enabled, state, blocked_reason, armed_at, "
-                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified"),
+                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified, "
+                    + "gate, gate_last_outcome, gate_last_at, gate_quiet_since_delivery, "
+                    + "gate_failures, gate_last_error"),
     SCHEDULE_OCCURRENCE(
             "tenant_id, schedule_id, occurrence_key, run_id, session_id, slot, trigger_kind, "
                     + "outcome, reason, definition_revision, fence, attempts, next_retry_at, last_error, "
@@ -123,7 +125,8 @@ public enum ManagedSchemaProjection {
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
                     + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
-                    + "selected_approval_mode, approval_revision, plan_enabled, public_child_agents_version"),
+                    + "selected_approval_mode, approval_revision, plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
+                    + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
@@ -140,7 +143,7 @@ public enum ManagedSchemaProjection {
                     + "last_sequence, event_count, events_digest, previous_commit_digest, commit_digest, "
                     + "writer_generation, writer_id, writer_token_hash, activation_epoch, "
                     + "latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, "
-                    + "record_digest, gmt_create"),
+                    + "record_digest, activation_lease_until, activation_renewal_seq, gmt_create"),
     SESSION_RECORD(
             "session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, "
                     + "record_id, operation_hash, revision, record_resource_id, task_kind, task_state, "
@@ -179,7 +182,7 @@ public enum ManagedSchemaProjection {
                     + "dispatch_lease_until, error_code, error_message, gmt_create, gmt_modified, "
                     + "completed_at, version, retry_count, consecutive_failures, "
                     + "budget_exempt_failures, retry_after, model_id, model_revision, "
-                    + "approval_mode, approval_revision, plan_enabled");
+                    + "approval_mode, approval_revision, plan_enabled, permission_rules_json");
 
     private final String columns;
 

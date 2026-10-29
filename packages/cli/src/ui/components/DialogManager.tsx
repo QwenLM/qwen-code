@@ -427,7 +427,7 @@ export const DialogManager = ({
   if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
-        <AuthDialog />
+        <AuthDialog availableTerminalHeight={listDialogHeight} />
       </Box>
     );
   }

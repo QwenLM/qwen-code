@@ -24,6 +24,19 @@ for (const width of [1280, 390]) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       const body = request.postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
+      if (path.endsWith('/workspaces/worktrees/options'))
+        return route.fulfill({
+          json: {
+            supported: true,
+            baseCommit: 'a'.repeat(40),
+            branches: ['main'],
+            currentBranch: 'main',
+          },
+        });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -253,6 +266,19 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
+    if (path.endsWith('/workspace-extensions/query'))
+      return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: {
+          supported: true,
+          baseCommit: 'a'.repeat(40),
+          branches: ['main'],
+          currentBranch: 'main',
+        },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query')) {

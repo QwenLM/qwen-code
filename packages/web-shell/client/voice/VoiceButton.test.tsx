@@ -1060,6 +1060,16 @@ describe('VoiceButton', () => {
     expect(onActiveChange).toHaveBeenLastCalledWith(false);
   });
 
+  it('preserves the unavailable-service reason from capture', async () => {
+    mocks.capture.status = 'error';
+    mocks.capture.errorMessage = 'Cannot reach the service.';
+    const { container } = mount(false);
+    await flush();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'daemon.connection.unavailable',
+    );
+  });
+
   it('clears the no-speech notice after two seconds', async () => {
     vi.useFakeTimers();
     const { container } = mount(false);

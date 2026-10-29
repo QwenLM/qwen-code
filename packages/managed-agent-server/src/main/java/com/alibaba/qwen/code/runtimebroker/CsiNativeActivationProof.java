@@ -64,6 +64,17 @@ public final class CsiNativeActivationProof {
             long leaseDurationMs, long expiresAt, long renewalSequence, long epoch, long writerGeneration) {
     }
 
+    public static Activation renewed(Activation activation, Long expiresAt, Long renewalSequence) {
+        if (expiresAt == null && renewalSequence == null) {
+            return activation;
+        }
+        require(activation != null && expiresAt != null && renewalSequence != null
+                && expiresAt >= activation.expiresAt() && expiresAt <= MAX_SAFE
+                && renewalSequence > activation.renewalSequence() && renewalSequence <= MAX_SAFE);
+        return new Activation(activation.activationId(), activation.workerId(), activation.installRef(),
+                activation.leaseDurationMs(), expiresAt, renewalSequence, activation.epoch(), activation.writerGeneration());
+    }
+
     public record TerminalProof(Activation predecessorActivation, Prefix predecessorPrefix, JsonNode boundaryRef,
             long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
             long terminalSequence, String lastRecordUuid) {

@@ -9,18 +9,62 @@
   <body>
     <main class="card">
       <header>
-        <div>
-          <span class="eyebrow">Generated view</span>
+        <div class="heading">
           <h1 id="title">Interactive view</h1>
+          <p id="status" role="status" aria-live="polite" data-state="waiting">
+            Connecting to the host…
+          </p>
         </div>
-        <button id="stop" type="button">Stop</button>
+        <div class="actions">
+          <button id="stop" class="ghost" type="button">Stop</button>
+        </div>
       </header>
-      <p id="summary">Waiting for the completed view…</p>
-      <p id="status" role="status" aria-live="polite" data-state="waiting">
-        Connecting to the host…
-      </p>
+      <div class="summary-box">
+        <p id="summary" data-collapsed="true">
+          Waiting for the completed view…
+        </p>
+        <button
+          id="summary-toggle"
+          class="link"
+          type="button"
+          aria-controls="summary"
+          aria-expanded="false"
+          hidden
+        >
+          Show more
+        </button>
+      </div>
+      <div class="view">
+        <iframe id="view" title="Generated interactive content" hidden></iframe>
+        <div id="stopped" class="stopped" hidden>
+          <p id="stopped-title"></p>
+          <p id="stopped-body"></p>
+        </div>
+      </div>
+      <!-- Below the view: notices that appear mid-interaction must not move it. -->
       <p id="notice" role="status" aria-live="polite" hidden></p>
-      <iframe id="view" title="Generated interactive content" hidden></iframe>
+      <p id="local-notice" class="muted" hidden></p>
+      <footer>
+        <button
+          id="continue-analysis"
+          class="primary"
+          type="button"
+          aria-describedby="continuation-help"
+          disabled
+        >
+          Continue analysis with current parameters
+        </button>
+        <p id="continuation-help">
+          Connect to a Qwen Code host to review parameters before sending.
+        </p>
+        <p
+          id="continuation-status"
+          role="status"
+          aria-live="polite"
+          data-state="idle"
+          hidden
+        ></p>
+      </footer>
     </main>
     <!-- APP_SCRIPT -->
   </body>

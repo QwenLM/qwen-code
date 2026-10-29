@@ -25,6 +25,7 @@ import {
   loadManagedLocalModels,
   type ManagedLocalModel,
 } from './managed-local-models.js';
+import { createHostedHarnessContract } from './hosted-harness-contract.js';
 
 export interface ManagedLocalServeOptions {
   port: number;
@@ -49,6 +50,8 @@ export function managedLocalJavaEnvironment(
   return {
     ...environment,
     SPRING_APPLICATION_JSON: JSON.stringify({
+      'qwen.managed-agent.runtime-broker.session-worktrees-enabled':
+        process.platform !== 'win32',
       'qwen.managed-agent.model-catalog': models,
       'qwen.managed-agent.definition-models': models.map(
         (model) => model.modelId,
@@ -259,6 +262,9 @@ export async function runManagedLocalServe(
     writeStdoutLine(`Starting Managed local services. Data: ${directory}`);
     const javaUrl = `http://127.0.0.1:${state.javaPort}`;
     const harnessUrl = `http://127.0.0.1:${state.harnessPort}`;
+    const lifecycleV2Profiles = createHostedHarnessContract(
+      state.capabilityDigest,
+    ).lifecycleV2Profiles;
     start(
       'harness',
       process.execPath,
@@ -280,7 +286,6 @@ export async function runManagedLocalServe(
         ...process.env,
         QWEN_SERVER_TOKEN: state.harnessToken,
         QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: state.capabilityDigest,
-        QWEN_HOSTED_LIFECYCLE_V2_PROFILES: 'hosted-workspace-shell/1',
         QWEN_MANAGED_RUNTIME_BROKER_URL: `http://127.0.0.1:${state.brokerPort}`,
         QWEN_MANAGED_RUNTIME_BROKER_TOKEN: state.brokerToken,
         QWEN_RUNTIME_DIR: path.join(directory, 'harness'),
@@ -314,9 +319,8 @@ export async function runManagedLocalServe(
           body.hostedHarness.capabilityDigest === state.capabilityDigest &&
           'lifecycleV2Profiles' in body.hostedHarness &&
           Array.isArray(body.hostedHarness.lifecycleV2Profiles) &&
-          body.hostedHarness.lifecycleV2Profiles.includes(
-            'hosted-workspace-shell/1',
-          ),
+          JSON.stringify(body.hostedHarness.lifecycleV2Profiles) ===
+            JSON.stringify(lifecycleV2Profiles),
       );
     });
     await waitFor('Java control plane', async () => {

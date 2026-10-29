@@ -20,9 +20,24 @@ export interface McpAppMessageRequest {
   signal: AbortSignal;
 }
 
+/**
+ * Result metadata naming a review that ended without the session accepting
+ * the message: `cancelled` by the user or the host, `expired` while awaiting
+ * review, or `failed` when it was refused before or at admission.
+ */
+export const MCP_APP_MESSAGE_REVIEW_META = 'qwen-code/message-review';
+
+export interface McpAppMessageResult {
+  isError?: boolean;
+  _meta?: {
+    [MCP_APP_MESSAGE_REVIEW_META]?: 'cancelled' | 'expired' | 'failed';
+  };
+  [key: string]: unknown;
+}
+
 export interface McpAppMessages {
   sessionId: string;
-  requestMessage(request: McpAppMessageRequest): Promise<{ isError?: boolean }>;
+  requestMessage(request: McpAppMessageRequest): Promise<McpAppMessageResult>;
 }
 
 export const McpAppMessagesContext = createContext<McpAppMessages | undefined>(
@@ -49,15 +64,64 @@ export const McpAppGeneratedUiContext = createContext<
   McpAppGeneratedUi | undefined
 >(undefined);
 
-export function useMcpAppAdmission(display?: {
+export interface McpAppGeneratedUiOwnerSource {
+  scopeId: string;
+  sessionId: string;
+  clientId: string;
+  workspaceCwd: string;
+  eventEpoch?: string;
+  captureOwner(): { isCurrent(): boolean };
+}
+
+export interface McpAppGeneratedUiInvalidation {
+  scopeId: string;
+  sessionId?: string;
+  reason:
+    | 'policy'
+    | 'epoch'
+    | 'runtime-stopped'
+    | 'cleared'
+    | 'deleted'
+    | 'rewound'
+    | 'auth-failed'
+    | 'scope-changed';
+}
+
+export interface McpAppGeneratedUiOwner {
+  scopeId: string;
+  workspaceCwd?: string;
+  source?: McpAppGeneratedUiOwnerSource;
+  subscribeInvalidation(
+    listener: (event: McpAppGeneratedUiInvalidation) => void,
+  ): () => void;
+  invalidate(event: McpAppGeneratedUiInvalidation): void;
+  captureSessionDeletion(
+    workspaceCwd: string | undefined,
+  ): (sessionIds: readonly string[]) => void;
+}
+
+export const McpAppGeneratedUiOwnerContext = createContext<
+  McpAppGeneratedUiOwner | undefined
+>(undefined);
+
+export const McpAppVisibilityContext = createContext(true);
+
+export function isBuiltInGeneratedUi(display?: {
   resourceUri: string;
   requiredFeature?: 'generated-ui';
 }): boolean {
+  return (
+    display?.requiredFeature === 'generated-ui' ||
+    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html'
+  );
+}
+
+export function useMcpAppAdmission(
+  display?: Parameters<typeof isBuiltInGeneratedUi>[0],
+): boolean {
   const sessionId = useContext(McpAppSessionContext);
   const capability = useContext(McpAppGeneratedUiContext);
-  const builtIn =
-    display?.requiredFeature === 'generated-ui' ||
-    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html';
+  const builtIn = isBuiltInGeneratedUi(display);
   return (
     !builtIn ||
     ((import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE !==

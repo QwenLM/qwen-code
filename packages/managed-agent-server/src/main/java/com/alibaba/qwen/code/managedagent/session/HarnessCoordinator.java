@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
@@ -26,6 +27,8 @@ import jakarta.annotation.PreDestroy;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -66,6 +69,11 @@ public class HarnessCoordinator {
     // anyway, so an entry could never change an outcome.
     private static final Set<String> LEASE_BOUNDED_409_CODES =
             Set.of("managed_session_writer_conflict");
+    // Capacity discovery and ownership handoff postpone execution; a
+    // waiting Turn has no failed execution attempt to charge.
+    private static final Set<String> POOL_OWNERSHIP_WAIT_CODES = Set.of(
+            "harness_owner_still_live", "harness_placement_changed",
+            "harness_placement_quiescing", "harness_placement_released");
     // `hosted_turn_recovery_in_progress` is the ONLY refusal the daemon
     // provably clears under its own recovery channel: the wake pump
     // settles the park the prompt route still sees. A user Turn arriving
@@ -123,8 +131,8 @@ public class HarnessCoordinator {
 
     public HarnessCoordinator(AgentStateStore store,
             HarnessConnector harness, HarnessEventProjector projector,
-            RuntimeWarmer runtimeWarmer, ExecutorService executor,
-            Clock clock, ManagedAgentProperties properties) {
+            RuntimeWarmer runtimeWarmer, @Qualifier("managedAgentExecutor") ExecutorService executor,
+            @Qualifier("managedAgentClock") Clock clock, ManagedAgentProperties properties) {
         this.store = store;
         this.harness = harness;
         this.projector = projector;
@@ -212,11 +220,14 @@ public class HarnessCoordinator {
 
     public void warmSession(String tenantId, String sessionId) {
         if (!sessionCreateWarm || !runtimeWarmer.isEnabled()
-                || !harness.isWorkspaceFilesAvailable()) {
+                || !harness.isWorkspaceFilesAvailable() || !worktreeReady(tenantId, sessionId)) {
             return;
         }
         executor.execute(() -> {
             try {
+                if (!worktreeReady(tenantId, sessionId)) {
+                    return;
+                }
                 runtimeWarmer.warm(sessionId).whenComplete(
                         (ignored, error) -> {
                             if (error != null) {
@@ -229,13 +240,18 @@ public class HarnessCoordinator {
         });
     }
 
+    private boolean worktreeReady(String tenantId, String sessionId) {
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        return worktree == null || "ready".equals(worktree.state());
+    }
+
     private static void sessionWarmFailed(String tenantId, String sessionId,
             Throwable error) {
         LOG.warn("Managed Runtime create warm failed tenant={} session={}",
                 tenantId, sessionId, error);
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recoverExpiredTurns() {
         if (!harness.isAvailable()) {
@@ -441,6 +457,10 @@ public class HarnessCoordinator {
             AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (!"CANCELLING".equals(claimed.status())
+                && !worktreeReady(claimed.tenantId(), claimed.sessionId())) {
+            return false;
+        }
         if (!"CANCELLING".equals(claimed.status())
                 && AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(claimed.errorCode())) {
             return observeBlockedHarness(claimed, session, leaseLost);
@@ -1554,7 +1574,7 @@ public class HarnessCoordinator {
                 && current.consecutiveFailures()
                         >= (long) Math.max(1, budget)
                                 * GENERATION_CHURN_BUDGET_FACTOR;
-        boolean exempt = exemptFromRetryBudget && !generationChurn;
+        boolean exempt = (exemptFromRetryBudget || isPoolWait(error)) && !generationChurn;
         if (!submissionAttempted
                 && !exempt
                 && (chargedFailures >= maxPreAdmissionRetries
@@ -1669,6 +1689,17 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
+    }
+
+    static boolean isPoolWait(RuntimeException error) {
+        if (error instanceof ManagedAgentException managed) {
+            return managed.getStatus() == HttpStatus.SERVICE_UNAVAILABLE
+                            && "harness_pool_unavailable".equals(managed.getCode())
+                    || managed.getStatus() == HttpStatus.CONFLICT && managed.getCode() != null
+                            && POOL_OWNERSHIP_WAIT_CODES.contains(managed.getCode());
+        }
+        return error instanceof DaemonHttpException http && http.getStatusCode() == 409
+                && "hosted_harness_quiescing".equals(http.getErrorCode());
     }
 
     // #14387: refuse the workflow Turn's unwitnessed re-execution — mark

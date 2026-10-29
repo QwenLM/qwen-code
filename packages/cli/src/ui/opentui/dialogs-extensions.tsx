@@ -19,12 +19,12 @@
  * backend work (dialog-data.ts); MCP servers are managed in the /mcp dialog.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
-import { cycleTab, regionListWindow } from './dialogs-core.js';
+import { chromeRows, cycleTab, regionListWindow } from './dialogs-core.js';
 import {
   DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogSelect,
@@ -33,8 +33,19 @@ import {
   type DialogListItem,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
-import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+import {
+  getCachedStringWidth,
+  stripUnsafeCharacters,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import type { ExtensionUpdateCheckState } from './dialog-data.js';
+import { OpenTuiExtensionDiscoverTab } from './ExtensionDiscoverTab.js';
+import { OpenTuiExtensionSourcesTab } from './ExtensionSourcesTab.js';
+import {
+  OpenTuiExtensionPermission,
+  useExtensionAcquisition,
+  type ExtensionCatalogContext,
+} from './ExtensionAcquisition.js';
 
 export const EXTENSIONS_TABS = {
   INSTALLED: 'installed',
@@ -128,6 +139,7 @@ export type ExtensionDetailAction =
 type InstalledView = 'list' | 'detail' | 'scope-select' | 'uninstall-confirm';
 
 export interface OpenTuiExtensionsDialogProps {
+  catalog?: ExtensionCatalogContext;
   onClose: () => void;
   initialTab?: ExtensionsTab;
   status?: ExtensionsStatusMessage | null;
@@ -164,8 +176,8 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     onClose,
     initialTab,
     status,
-    tabLocked = false,
-    tabFooter,
+    tabLocked: tabLockedProp = false,
+    tabFooter: tabFooterProp,
     discoverFilter: discoverFilterProp,
     onDiscoverFilterChange,
     rowsByTab,
@@ -173,7 +185,25 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     onDetailAction,
     busy = false,
     availableTerminalHeight,
+    catalog,
   } = props;
+  const acquisition = useExtensionAcquisition(catalog);
+  const [catalogLocked, setCatalogLocked] = useState(false);
+  const catalogLockRef = useRef(false);
+  const lockCatalog = useCallback((locked: boolean) => {
+    catalogLockRef.current = locked;
+    setCatalogLocked(locked);
+  }, []);
+  const [catalogFooter, setCatalogFooter] = useState<string | null>(null);
+  const [catalogReload, setCatalogReload] = useState(0);
+  const onCatalogChanged = catalog?.onChanged;
+  const onCatalogStatus = catalog?.onStatus;
+  const catalogChanged = useCallback(() => {
+    onCatalogChanged?.();
+    setCatalogReload((n) => n + 1);
+  }, [onCatalogChanged]);
+  const tabLocked = tabLockedProp || catalogLocked || acquisition.pending;
+  const tabFooter = catalogFooter ?? tabFooterProp;
 
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(
     initialTab ?? EXTENSIONS_TABS.INSTALLED,
@@ -195,12 +225,17 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     onDiscoverFilterChange?.(null);
   }, [onDiscoverFilterChange]);
 
-  const cycle = useCallback((direction: 1 | -1) => {
-    setDiscoverFilter(null);
-    setActiveTab((current) =>
-      cycleTab(EXTENSIONS_TAB_ORDER, current, direction),
-    );
-  }, []);
+  const cycle = useCallback(
+    (direction: 1 | -1) => {
+      onCatalogStatus?.(null);
+      setCatalogFooter(null);
+      setDiscoverFilter(null);
+      setActiveTab((current) =>
+        cycleTab(EXTENSIONS_TAB_ORDER, current, direction),
+      );
+    },
+    [onCatalogStatus],
+  );
 
   const rows: readonly ExtensionRow[] = useMemo(
     () => rowsByTab?.[EXTENSIONS_TABS.INSTALLED] ?? [],
@@ -244,8 +279,19 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     (tabLocked || view !== 'list'
       ? t('Enter to select · Esc to go back')
       : extensionsFooterHint(activeTab));
-  const { width } = useTerminalDimensions();
+  const { width, height } = useTerminalDimensions();
   const extensionsContentWidth = Math.max(1, dialogAreaWidth(width) - 4);
+  const catalogBodyHeight = Math.max(
+    0,
+    (clampDialogHeight(availableTerminalHeight ?? height) ?? height) -
+      (status
+        ? 1 +
+          chromeRows({
+            fixed: 0,
+            runs: [{ text: status.text, width: extensionsContentWidth }],
+          })
+        : 0),
+  );
   const listWindow = regionListWindow(
     clampDialogHeight(availableTerminalHeight),
     {
@@ -263,7 +309,10 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
   const listSelect = useDialogSelect({
     items: listItems,
     numbers: false,
-    focused: activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list',
+    focused:
+      activeTab === EXTENSIONS_TABS.INSTALLED &&
+      view === 'list' &&
+      !acquisition.pending,
     maxItemsToShow: listWindow.maxItemsToShow,
     onSelect: (key) => {
       setSelectedKey(key);
@@ -323,7 +372,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     // range — Enter would read items[5] = undefined.
     resyncKey: view,
     numbers: false,
-    focused: view === 'detail',
+    focused: view === 'detail' && !acquisition.pending,
     onSelect: (action) => {
       if (!currentRow) return;
       if (action === 'change-scope') {
@@ -334,8 +383,8 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
         setView('uninstall-confirm');
         return;
       }
-      if (action === 'mark-update') {
-        void Promise.resolve(onDetailAction?.(currentRow, 'mark-update'))
+      if (action === 'mark-update' || action === 'update') {
+        void Promise.resolve(onDetailAction?.(currentRow, action))
           .then((state) => {
             if (state) setCheckedUpdateState(state);
           })
@@ -376,7 +425,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     // entry re-applies the live-scope initialIndex (the mount-time lazy
     // initializer runs before any row is selected).
     resyncKey: view,
-    focused: view === 'scope-select',
+    focused: view === 'scope-select' && !acquisition.pending,
     onSelect: (scope) => {
       if (currentRow)
         void Promise.resolve(
@@ -387,6 +436,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
   });
 
   useKeyboard((key) => {
+    if (acquisition.pending) return;
     const original = toOriginalKey(key);
     const name = original.name;
 
@@ -411,7 +461,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       return;
     }
 
-    if (tabLocked) return;
+    if (tabLocked || catalogLockRef.current) return;
     if (name === 'tab') {
       // On Discover with an active marketplace filter, Tab clears the
       // filter in place instead of leaving the tab — the "(Tab to clear)"
@@ -655,85 +705,137 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
   };
 
   return (
-    <box
-      flexDirection="column"
-      borderStyle="single"
-      borderColor={C.dim}
-      paddingX={1}
-    >
-      <box flexDirection="row">
-        {EXTENSIONS_TAB_ORDER.map((tab) => {
-          const isActive = tab === activeTab;
-          return (
-            <box key={tab} marginRight={2}>
-              <text
-                fg={isActive ? '#000000' : C.dim}
-                bg={isActive ? C.accent : undefined}
-                attributes={isActive ? 1 : undefined}
-              >
-                {` ${extensionsTabLabel(tab)} `}
+    <>
+      {acquisition.permission ? (
+        <OpenTuiExtensionPermission
+          permission={acquisition.permission}
+          width={extensionsContentWidth}
+          availableTerminalHeight={availableTerminalHeight ?? height}
+        />
+      ) : null}
+      <box
+        visible={!acquisition.permission}
+        flexDirection="column"
+        borderStyle="single"
+        borderColor={C.dim}
+        paddingX={1}
+      >
+        <box flexDirection="row">
+          {EXTENSIONS_TAB_ORDER.map((tab) => {
+            const isActive = tab === activeTab;
+            return (
+              <box key={tab} marginRight={2}>
+                <text
+                  fg={isActive ? '#000000' : C.dim}
+                  bg={isActive ? C.accent : undefined}
+                  attributes={isActive ? 1 : undefined}
+                >
+                  {` ${extensionsTabLabel(tab)} `}
+                </text>
+              </box>
+            );
+          })}
+          <text fg={tabLocked || view !== 'list' ? '#555555' : C.dim}>
+            {
+              // The chrome charges the tab bar one row, so the hint gets the
+              // columns the tabs leave rather than wrapping onto a second.
+              truncateToWidth(
+                t('(Tab / ←→ to switch)'),
+                Math.max(
+                  0,
+                  extensionsContentWidth -
+                    EXTENSIONS_TAB_ORDER.reduce(
+                      (total, tab) =>
+                        total +
+                        getCachedStringWidth(` ${extensionsTabLabel(tab)} `) +
+                        2,
+                      0,
+                    ),
+                ),
+              )
+            }
+          </text>
+        </box>
+
+        <box marginTop={1} flexDirection="column">
+          {activeTab === EXTENSIONS_TABS.DISCOVER &&
+          discoverFilter &&
+          !catalog ? (
+            <text fg={C.dim}>
+              {t('Marketplace: {{name}}', { name: discoverFilter })}{' '}
+              {t('(Tab to clear)')}
+            </text>
+          ) : null}
+          {catalog && activeTab === EXTENSIONS_TABS.DISCOVER ? (
+            <OpenTuiExtensionDiscoverTab
+              manager={catalog.manager}
+              cwd={catalog.cwd}
+              isCurrent={catalog.isCurrent}
+              isActive={!acquisition.permission}
+              availableTerminalHeight={catalogBodyHeight}
+              reloadSignal={catalogReload}
+              marketplaceFilter={discoverFilter}
+              onLockChange={lockCatalog}
+              onStatus={catalog.onStatus}
+              onInstalled={catalogChanged}
+              onFooter={setCatalogFooter}
+              install={(source, scope) =>
+                acquisition.install(source, scope, true)
+              }
+            />
+          ) : catalog && activeTab === EXTENSIONS_TABS.SOURCES ? (
+            <OpenTuiExtensionSourcesTab
+              manager={catalog.manager}
+              cwd={catalog.cwd}
+              isCurrent={catalog.isCurrent}
+              isActive={!acquisition.permission}
+              availableTerminalHeight={catalogBodyHeight}
+              reloadSignal={catalogReload}
+              onLockChange={lockCatalog}
+              onStatus={catalog.onStatus}
+              onChanged={catalogChanged}
+              onFooter={setCatalogFooter}
+              install={(source, scope) =>
+                acquisition.install(source, scope, false)
+              }
+              onBrowse={(name) => {
+                catalog.onStatus(null);
+                lockCatalog(false);
+                setCatalogFooter(null);
+                setDiscoverFilter(stripUnsafeCharacters(name));
+                setActiveTab(EXTENSIONS_TABS.DISCOVER);
+              }}
+            />
+          ) : activeTab === EXTENSIONS_TABS.DISCOVER ? (
+            <box flexDirection="column">
+              <text fg={C.dim}>
+                {t('Discover is not yet available in the OpenTUI renderer.')}
+              </text>
+              <text fg={C.dim}>
+                {t('Manage installed extensions on the Installed tab.')}
               </text>
             </box>
-          );
-        })}
-        <text fg={tabLocked || view !== 'list' ? '#555555' : C.dim}>
-          {
-            // The chrome charges the tab bar one row, so the hint gets the
-            // columns the tabs leave rather than wrapping onto a second.
-            truncateToWidth(
-              t('(Tab / ←→ to switch)'),
-              Math.max(
-                0,
-                extensionsContentWidth -
-                  EXTENSIONS_TAB_ORDER.reduce(
-                    (total, tab) =>
-                      total +
-                      getCachedStringWidth(` ${extensionsTabLabel(tab)} `) +
-                      2,
-                    0,
-                  ),
-              ),
-            )
-          }
-        </text>
-      </box>
-
-      <box marginTop={1} flexDirection="column">
-        {activeTab === EXTENSIONS_TABS.DISCOVER && discoverFilter ? (
-          <text fg={C.dim}>
-            {t('Marketplace: {{name}}', { name: discoverFilter })}{' '}
-            {t('(Tab to clear)')}
-          </text>
-        ) : null}
-        {activeTab === EXTENSIONS_TABS.DISCOVER ? (
-          <box flexDirection="column">
+          ) : activeTab === EXTENSIONS_TABS.SOURCES ? (
             <text fg={C.dim}>
-              {t('Discover is not yet available in the OpenTUI renderer.')}
+              {t(
+                'Marketplace sources are not yet available in the OpenTUI renderer.',
+              )}
             </text>
-            <text fg={C.dim}>
-              {t('Manage installed extensions on the Installed tab.')}
-            </text>
-          </box>
-        ) : activeTab === EXTENSIONS_TABS.SOURCES ? (
-          <text fg={C.dim}>
-            {t(
-              'Marketplace sources are not yet available in the OpenTUI renderer.',
-            )}
-          </text>
-        ) : (
-          renderInstalledContent()
-        )}
-      </box>
-
-      {status && (
-        <box marginTop={1}>
-          <text fg={extensionsStatusColor(status)}>{status.text}</text>
+          ) : (
+            renderInstalledContent()
+          )}
         </box>
-      )}
 
-      <box marginTop={1}>
-        <text fg={C.dim}>{hint}</text>
+        {status && (
+          <box marginTop={1}>
+            <text fg={extensionsStatusColor(status)}>{status.text}</text>
+          </box>
+        )}
+
+        <box marginTop={1}>
+          <text fg={C.dim}>{hint}</text>
+        </box>
       </box>
-    </box>
+    </>
   );
 }

@@ -12,8 +12,9 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
-import { isSettingsChangedData } from '../events.js';
+import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
 import type {
+  DaemonAgentIdentity,
   DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -33,6 +34,7 @@ import {
   getFiniteNumber,
   isRecord,
   redactSensitiveFields,
+  sanitizeTerminalText,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
@@ -227,7 +229,10 @@ export function normalizeDaemonEvent(
       // most once per overflow episode (daemon-side hysteresis).
       if (typeof console !== 'undefined') {
         // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
-        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+        console.warn?.(
+          '[daemon-ui] SSE stream is lagging',
+          sanitizeTerminalText(stringifyJson(event.data)),
+        );
       }
       return [];
     case 'stream_error': {
@@ -278,7 +283,7 @@ export function normalizeDaemonEvent(
       return [];
 
     case 'session_rewound':
-      return normalizeSessionRewound(event, base);
+      return normalizeSessionRewound(event, base, opts);
 
     case 'session_branched':
       return normalizeSessionBranched(event, base);
@@ -578,6 +583,7 @@ function normalizeHistoryTruncated(
 function normalizeSessionRewound(
   event: DaemonEvent,
   base: NormalizedEventBase,
+  opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const promptId = getString(event.data, 'promptId');
   const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
@@ -585,11 +591,25 @@ function normalizeSessionRewound(
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
+  const daemonPromptId = getString(event.data, 'daemonPromptId');
+  let replay: DaemonUiEvent[] | undefined;
+  if (isRecord(event.data) && event.data['replay'] !== undefined) {
+    const known = asKnownDaemonEvent(event);
+    if (known?.type !== 'session_rewound') {
+      return fallbackDebug(event, base, 'malformed session_rewound replay');
+    }
+    // Replacement includes our own formerly optimistic user rows too.
+    replay = known.data.replay?.flatMap((frame) =>
+      normalizeDaemonEvent(frame, { ...opts, suppressOwnUserEcho: false }),
+    );
+  }
   return [
     {
       ...base,
       type: 'session.rewound',
+      ...(replay !== undefined ? { replay } : {}),
       promptId,
+      ...(daemonPromptId ? { daemonPromptId } : {}),
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },
@@ -993,6 +1013,7 @@ function normalizeSessionUpdate(
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       if (
         meta?.['source'] === 'background_task_completed' ||
@@ -1021,6 +1042,7 @@ function normalizeSessionUpdate(
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         });
       }
@@ -1042,6 +1064,7 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       return [
         {
@@ -1049,6 +1072,7 @@ function normalizeSessionUpdate(
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         },
       ];
@@ -1114,6 +1138,7 @@ function normalizeSessionUpdate(
     }
     case 'plan':
       return [normalizePlanUpdate(update, base)];
+    case 'config_option_update':
     case 'current_mode_update':
     case 'session_info_update':
     case 'usage_update':
@@ -1144,6 +1169,34 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+/**
+ * Reads the producer identity the daemon stamps as `_meta.agent`.
+ *
+ * Rejects partial or malformed shapes rather than half-populating them: a
+ * client that keys rendering or policy on `agentName` must never see an
+ * identity whose `depth`/`kind` disagree with it. Absent means the frame came
+ * from the session's root agent, which callers render unattributed.
+ */
+function extractAgentIdentity(
+  update: Record<string, unknown>,
+): DaemonAgentIdentity | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const agent = meta && isRecord(meta['agent']) ? meta['agent'] : undefined;
+  if (!agent) return undefined;
+  const agentName = getString(agent, 'agentName');
+  const kind = getString(agent, 'kind');
+  const depth = numberField(agent, 'depth');
+  if (
+    !agentName ||
+    (kind !== 'root' && kind !== 'subagent' && kind !== 'teammate') ||
+    depth === undefined ||
+    depth < 0
+  ) {
+    return undefined;
+  }
+  return { agentName, depth, kind };
 }
 
 function extractUpdateMeta(
@@ -1285,6 +1338,7 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const agent = extractAgentIdentity(update);
   const startedAt = numberField(metadata, 'startedAt');
   const durationMs = numberField(metadata, 'durationMs');
   return {
@@ -1303,6 +1357,7 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(agent ? { agent } : {}),
     ...(typeof subagentSessionReady === 'boolean'
       ? { subagentSessionReady }
       : {}),

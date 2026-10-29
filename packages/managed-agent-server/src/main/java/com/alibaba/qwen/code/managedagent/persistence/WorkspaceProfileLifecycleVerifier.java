@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -28,7 +29,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private final org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications;
     private final org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results;
 
-    public WorkspaceProfileLifecycleVerifier(JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
+    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
             org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results) {
         this.jdbc = jdbc;
         this.records = new ManagedExtensionRecordStore(jdbc);
@@ -292,7 +293,7 @@ public class WorkspaceProfileLifecycleVerifier {
             byte[] payload = input.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8);
             JsonNode call = ToolPublicationContract.readJson(payload);
             if (call.size() == 2 && call.path("input").isObject()
-                    && List.of("read_file", "write_file", "edit", "glob", "managed_mcp_call").contains(call.path("toolName").asText())) {
+                    && List.of("read_file", "write_file", "edit", "glob", "web_fetch", "managed_mcp_call").contains(call.path("toolName").asText())) {
                 inputs.add(input.path("runtimeSessionId").textValue() + ":sha256:" + ToolPublicationContract.sha256(payload));
             }
         }

@@ -99,6 +99,14 @@ async function installRecovery(page: Page, running = false) {
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
+    if (path.endsWith('/workspace-extensions/query'))
+      return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: { supported: true, currentBranch: 'main', branches: ['main'] },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query'))

@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
@@ -23,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -33,6 +35,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -150,7 +153,8 @@ class HarnessCoordinatorTest {
         }
         verify(executor).execute(any(Runnable.class));
         verify(runtimeWarmer).warm("session");
-        verifyNoInteractions(store);
+        verify(store, times(2)).findSessionWorktree("tenant", "session");
+        verifyNoMoreInteractions(store);
     }
 
     @ParameterizedTest(name = "setting = {0}, warmer = {1}, files = {2}")
@@ -208,7 +212,64 @@ class HarnessCoordinatorTest {
                     .contains("create warm failed")
                     .contains("session=session");
         });
-        verifyNoInteractions(store);
+        verify(store, times(2)).findSessionWorktree("tenant", "session");
+        verifyNoMoreInteractions(store);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"preparing", "failed", "blocked", "removing", "removed"})
+    void unreadyWorktreesNeverWarmOrSpendDispatchRetries(String state) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtime = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(runtime.isEnabled()).thenReturn(true);
+        when(store.findSessionWorktree("tenant", "session")).thenReturn(worktree(state));
+        TurnRecord claimed = turn("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111", null, 0, "ACCEPTED", false, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(boundSessionRecord());
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store, harness, runtime, directExecutor(), true);
+        try {
+            coordinator.warmSession("tenant", "session");
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(runtime, never()).warm(anyString());
+        verify(harness, never()).createOrLoad(anyString(), anyString(), anyBoolean());
+        verify(store, never()).deferTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+        verify(store).releaseTurnLease(eq("tenant"), eq("session"), eq("turn"), anyString());
+    }
+
+    @Test
+    void cancellingAnUnpreparedWorktreeNeedsNoRuntime() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtime = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(store.findSessionWorktree("tenant", "session")).thenReturn(worktree("preparing"));
+        TurnRecord claimed = turn("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111", null, 0, "CANCELLING", false, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(boundSessionRecord());
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store, harness, runtime, directExecutor(), true);
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).cancelBeforeAdmission(eq("tenant"), eq("session"), eq("turn"), anyString());
+        verify(runtime, never()).warm(anyString());
+        verify(harness, never()).createOrLoad(anyString(), anyString(), anyBoolean());
+    }
+
+    private static SessionWorktreeStore.Descriptor worktree(String state) {
+        return new SessionWorktreeStore.Descriptor("worktree", "session", "workspace", state,
+                "qwen/session", "a".repeat(40), ".qwen-managed-worktrees/worktree", "operation", 1, null);
     }
 
     private static HarnessCoordinator sessionCreateWarmCoordinator(
@@ -584,6 +645,45 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong(), eq(false));
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"503,harness_pool_unavailable", "409,harness_owner_still_live",
+            "409,harness_placement_changed", "409,harness_placement_quiescing", "409,harness_placement_released"})
+    void poolCapacityAndOwnershipWaitsOutliveBothAdmissionBudgets(int status, String code) {
+        for (boolean submitted : List.of(false, true)) {
+            var failure = new ManagedAgentException(HttpStatus.valueOf(status), code, "Waiting for a Harness owner");
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+            verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @Test
+    void hostedDrainCutoffOutlivesBothAdmissionBudgets() {
+        for (boolean submitted : List.of(false, true)) {
+            var failure = mock(DaemonHttpException.class);
+            when(failure.getStatusCode()).thenReturn(409);
+            when(failure.getErrorCode()).thenReturn("hosted_harness_quiescing");
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+            verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"503,other_unavailable", "403,writer_credential_invalid", "409,harness_session_scope_ambiguous",
+            "409,harness_placement_not_admitted", "409,harness_placement_epoch_exhausted", "400,harness_pool_unavailable"})
+    void poolConfigurationAndUnclassifiedFailuresStillMeetTheAdmissionBudget(int status, String code) {
+        var failure = new ManagedAgentException(HttpStatus.valueOf(status), code, "Cannot admit this Harness owner");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, false, 100, unboundSessionRecord());
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // A permanent transport failure meets the pre-admission budget even on
