@@ -212,7 +212,7 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
   const sidebar = page.getByRole('complementary');
   const projects = sidebar
     .getByRole('button', {
-      name: 'Project',
+      name: 'Workspaces',
       exact: true,
     })
     .first();
