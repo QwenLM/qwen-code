@@ -1096,7 +1096,7 @@ describe('WebShellSidebar session split action', () => {
       canOpenSplitView: true,
       onAddSessionToSplitView: vi.fn(),
     });
-    await expandArchived();
+    await openArchiveSettings();
     expect(await openSessionMenuItems('Archived target')).not.toContain(
       'Add to Split View',
     );

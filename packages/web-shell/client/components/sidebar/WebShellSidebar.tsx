@@ -5130,8 +5130,11 @@ export function WebShellSidebar({
           ? t('sidebar.currentDeleteDisabled')
           : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
+      // Archived sessions cannot load into a split pane (they leave an empty
+      // pane), so the sidebar withholds the split action for them.
       const showSplit =
         !standalone &&
+        !isArchived &&
         (session.sourceType === undefined ||
           session.sourceType === WEB_SHELL_SESSION_SOURCE_TYPE) &&
         canOpenSplitView &&

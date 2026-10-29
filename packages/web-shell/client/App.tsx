@@ -9979,9 +9979,10 @@ export function App({
   // and the real splitSessionIds is not handed over. Written and cleared
   // alongside pendingSplitOpenRef; surfaced only while its generation is the
   // live one (navigation invalidates it the same way it supersedes the ref).
-  const [pendingSplitPaneIds, setPendingSplitPaneIds] = useState<
-    { generation: number; sessionIds: string[] } | null
-  >(null);
+  const [pendingSplitPaneIds, setPendingSplitPaneIds] = useState<{
+    generation: number;
+    sessionIds: string[];
+  } | null>(null);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
@@ -10579,9 +10580,15 @@ export function App({
   // window must not re-fetch ids already classified (in flight or settled);
   // transient failures are dropped so a retry re-classifies them. The memo is
   // cleared on the same identities sanitizeSplitSessionIds is rebuilt on, so a
-  // daemon switch never reuses the previous target's answers.
+  // daemon switch never reuses the previous target's answers. Entries that
+  // are still in flight when their open is cancelled by navigation are
+  // dropped at the next begin (see beginSplitClassification), so a re-open
+  // never waits on the cancelled open's classification.
   const splitSessionClassificationRef = useRef<
-    Map<string, Promise<SplitSessionOutcome>>
+    Map<
+      string,
+      { promise: Promise<SplitSessionOutcome>; settled: boolean }
+    >
   >(new Map());
   useEffect(() => {
     splitSessionClassificationRef.current.clear();
@@ -10590,7 +10597,7 @@ export function App({
     (sessionId: string): Promise<SplitSessionOutcome> => {
       const memo = splitSessionClassificationRef.current;
       const cached = memo.get(sessionId);
-      if (cached) return cached;
+      if (cached) return cached.promise;
       if (
         !workspace.capabilities?.features?.includes(
           STANDALONE_SESSIONS_CAPABILITY,
@@ -10599,19 +10606,19 @@ export function App({
         // Capability-absent fast path: every id is eligible, nothing to cache.
         return Promise.resolve('workspace');
       }
-      const outcome = workspace.client
-        .getStandaloneSession(sessionId)
-        .then(
-          () => 'standalone' as const,
-          (error) =>
-            (isStandaloneSessionNotFoundError(error)
-              ? 'workspace'
-              : 'failed') as SplitSessionOutcome,
-        );
+      const outcome = workspace.client.getStandaloneSession(sessionId).then(
+        () => 'standalone' as const,
+        (error) =>
+          (isStandaloneSessionNotFoundError(error)
+            ? 'workspace'
+            : 'failed') as SplitSessionOutcome,
+      );
+      const entry = { promise: outcome, settled: false };
       outcome.then((result) => {
+        entry.settled = true;
         if (result === 'failed') memo.delete(sessionId);
       });
-      memo.set(sessionId, outcome);
+      memo.set(sessionId, entry);
       return outcome;
     },
     [workspace.capabilities, workspace.client],
@@ -10619,22 +10626,44 @@ export function App({
   // Publishes a pending open when a split classification starts: bumps the
   // generation refs, records the requested ids as the live pending open, and
   // un-settles the split view so pane-bound reclaim waits for the decision.
-  // Returns the new generation.
-  const beginSplitClassification = useCallback((requested: readonly string[]) => {
-    const generation = splitClassificationGenerationRef.current + 1;
-    splitClassificationGenerationRef.current = generation;
-    splitClassificationStartGenerationRef.current = generation;
-    const pending =
-      requested.length > 0
-        ? { generation, sessionIds: [...requested] }
-        : null;
-    pendingSplitOpenRef.current = pending;
-    setPendingSplitPaneIds(pending);
-    // A new decision is pending: un-settle so reclaim waits for it. The
-    // empty-request branch settles without classifying.
-    if (requested.length > 0) setSplitViewSettled(false);
-    return generation;
-  }, []);
+  // A pending open already superseded by navigation drops its still-in-flight
+  // classifications (see below). Returns the new generation.
+  const beginSplitClassification = useCallback(
+    (requested: readonly string[]) => {
+      // A pending open that is no longer on the live generation was
+      // superseded by navigation before it settled: its in-flight
+      // classifications are orphaned (the daemon call may never resolve),
+      // and a new open reusing them would stall, so drop the still-in-flight
+      // entries. Settled outcomes stay reusable; a live pending open (merged
+      // sidebar re-open) keeps its in-flight promises so the merged list
+      // doesn't re-classify.
+      const supersededPending = pendingSplitOpenRef.current;
+      if (
+        supersededPending &&
+        supersededPending.generation !==
+          splitClassificationGenerationRef.current
+      ) {
+        const memo = splitSessionClassificationRef.current;
+        for (const [id, entry] of memo) {
+          if (!entry.settled) memo.delete(id);
+        }
+      }
+      const generation = splitClassificationGenerationRef.current + 1;
+      splitClassificationGenerationRef.current = generation;
+      splitClassificationStartGenerationRef.current = generation;
+      const pending =
+        requested.length > 0
+          ? { generation, sessionIds: [...requested] }
+          : null;
+      pendingSplitOpenRef.current = pending;
+      setPendingSplitPaneIds(pending);
+      // A new decision is pending: un-settle so reclaim waits for it. The
+      // empty-request branch settles without classifying.
+      if (requested.length > 0) setSplitViewSettled(false);
+      return generation;
+    },
+    [],
+  );
   // Clears the pending open when its generation settles; no-op once a newer
   // generation (or navigation) has superseded it.
   const settlePendingSplitOpen = useCallback((generation: number) => {
@@ -10663,11 +10692,7 @@ export function App({
         isSplitEligibleSession,
       );
     },
-    [
-      isSplitEligibleSession,
-      workspace.capabilities,
-      workspace.client,
-    ],
+    [isSplitEligibleSession, workspace.capabilities, workspace.client],
   );
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via

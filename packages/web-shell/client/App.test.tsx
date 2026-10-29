@@ -36994,9 +36994,9 @@ describe('App session callbacks', () => {
       ).toBe(expected);
       // One classification per distinct id — merged re-opens reuse the
       // memoized in-flight promise instead of re-classifying the list.
-      expect(
-        mockWorkspace.client.getStandaloneSession,
-      ).toHaveBeenCalledTimes(calls);
+      expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledTimes(
+        calls,
+      );
     },
   );
 
