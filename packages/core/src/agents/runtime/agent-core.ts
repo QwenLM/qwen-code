@@ -150,10 +150,11 @@ import {
   getExcludedToolsForCurrentContext,
   getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
+  hasAgentSkillBridge,
+  hasAgentSkillExecBinding,
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
-  hasAgentSkillExecBinding,
   isAgentSkillEagerHidden,
   matchesAgentToolBlocklist,
   toolConfigAllowsSkill,
@@ -683,6 +684,7 @@ export class AgentCore {
       isAgentSkillEagerHidden(this.runtimeContext),
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
       skillRegistered,
+      hasAgentSkillBridge(this.runtimeContext),
     );
   }
 

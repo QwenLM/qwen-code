@@ -76,6 +76,7 @@ import {
   extractParentToolNames,
 } from './runtime/agent-core.js';
 import {
+  hasAgentSkillBridge,
   hasAgentSkillExecBinding,
   isAgentSkillEagerHidden,
   toolConfigAllowsSkill,
@@ -147,6 +148,7 @@ function subagentWillHaveSkillTool(
   skillEagerHidden = false,
   codeModeOnly = false,
   skillRegistered = true,
+  deferredBridgeAvailable = false,
 ): boolean {
   // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
   // and `resolveToolNames`' `for...of` walks a bare string per character,
@@ -178,6 +180,7 @@ function subagentWillHaveSkillTool(
     skillEagerHidden,
     codeModeOnly,
     skillRegistered,
+    deferredBridgeAvailable,
   );
 }
 
@@ -1049,6 +1052,7 @@ export class BackgroundAgentResumeService {
                     .getToolRegistry()
                     .getAllToolNames()
                     .includes(ToolNames.SKILL),
+                  hasAgentSkillBridge(activeAgentConfig),
                 ),
               })
             )[0],

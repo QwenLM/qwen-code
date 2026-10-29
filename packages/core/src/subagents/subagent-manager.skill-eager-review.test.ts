@@ -14,6 +14,7 @@ import { AgentHeadless } from '../agents/runtime/agent-headless.js';
 import { AgentCore } from '../agents/runtime/agent-core.js';
 import { resolveAgentDelegationSurface } from '../skills/agent-delegation-skill.js';
 import { ToolMode } from '../tools/code-mode.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 describe('nested agents retain their actual Skill availability', () => {
   it.each([
@@ -64,7 +65,10 @@ describe('nested agents retain their actual Skill availability', () => {
         );
       const handles: Array<{ dispose(): Promise<void> }> = [];
       let parent = config;
-      const expected = mode === ToolMode.CodeModeOnly || visible;
+      // Direct declarations and the exec gateway. A hybrid agent whose Skill
+      // is eager-hidden loses both, but keeps the capability while the
+      // deferred-tool bridge is registered (R22-1).
+      const directlyInvokable = mode === ToolMode.CodeModeOnly || visible;
       try {
         for (let depth = 1; depth <= 3; depth++) {
           handles.push(
@@ -97,26 +101,36 @@ describe('nested agents retain their actual Skill availability', () => {
           const declared = new Set(
             (await core.prepareTools()).map((declaration) => declaration.name),
           );
+          const toolNames = context.getToolRegistry().getAllToolNames();
+          const bridgeReachesSkill =
+            (tools === undefined || tools.tools.some((tool) => tool === '*')) &&
+            toolNames.includes(ToolNames.TOOL_SEARCH) &&
+            toolNames.includes(ToolNames.TOOL_CALL);
+          const reachable = directlyInvokable || bridgeReachesSkill;
           expect
             .soft(!!context.getSkillManager(), `depth ${depth}`)
-            .toBe(expected);
+            .toBe(reachable);
           expect
             .soft(announced, `announcement at depth ${depth}`)
-            .toBe(expected);
+            .toBe(reachable);
           expect
             .soft(
               observed.canInvokeSkill(declared),
               `invocation at depth ${depth}`,
             )
-            .toBe(expected);
-          if (!expected) {
-            expect
-              .soft(
-                resolveAgentDelegationSurface(context),
-                `pointer at depth ${depth}`,
-              )
-              .toBe('inline');
-          }
+            .toBe(directlyInvokable);
+          expect
+            .soft(
+              resolveAgentDelegationSurface(context),
+              `pointer at depth ${depth}`,
+            )
+            .toBe(
+              reachable
+                ? bridgeReachesSkill && !directlyInvokable
+                  ? 'pointer-via-tool-search'
+                  : 'pointer'
+                : 'inline',
+            );
           parent = context;
         }
       } finally {

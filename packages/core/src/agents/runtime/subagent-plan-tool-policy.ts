@@ -89,8 +89,9 @@ type AgentSkillContext = Pick<
   'getToolMode' | 'getToolRegistry' | 'getVisibleTools'
 >;
 
-export function isAgentSkillEagerHidden(
+function isAgentToolEagerHidden(
   context: AgentSkillContext,
+  toolName: string,
   registryWillBeRebuilt = false,
 ): boolean {
   const registry = context.getToolRegistry?.();
@@ -98,10 +99,37 @@ export function isAgentSkillEagerHidden(
   // discovery metadata, but deliberately leave transient reveals behind.
   return (
     context.getToolMode?.() === ToolMode.CodeMode &&
-    registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
-    !context.getVisibleTools?.().has(ToolNames.SKILL) &&
+    registry?.isPermissionDeferred?.(toolName) === true &&
+    !context.getVisibleTools?.().has(toolName) &&
     (registryWillBeRebuilt ||
-      registry?.isDeferredToolRevealed?.(ToolNames.SKILL) !== true)
+      registry?.isDeferredToolRevealed?.(toolName) !== true)
+  );
+}
+
+export function isAgentSkillEagerHidden(
+  context: AgentSkillContext,
+  registryWillBeRebuilt = false,
+): boolean {
+  return isAgentToolEagerHidden(
+    context,
+    ToolNames.SKILL,
+    registryWillBeRebuilt,
+  );
+}
+
+/**
+ * Whether the deferred-tool bridge is registered: `tool_search` reviews a
+ * deferred schema and `tool_call` invokes it. A hybrid agent whose `skill` is
+ * demoted by `tools.eager` keeps the capability this bridge carries, so the
+ * eager-hidden veto must not fire while both halves are present.
+ *
+ * Does not reuse `isDeferredToolBridgeAvailable` (tools/tool-search.ts): that
+ * module imports this one, so the dependency would be circular.
+ */
+export function hasAgentSkillBridge(context: AgentSkillContext): boolean {
+  const names = context.getToolRegistry?.().getAllToolNames() ?? [];
+  return (
+    names.includes(ToolNames.TOOL_SEARCH) && names.includes(ToolNames.TOOL_CALL)
   );
 }
 
@@ -123,6 +151,9 @@ export function hasAgentSkillExecBinding(
   return (
     mode === ToolMode.CodeModeOnly ||
     (mode === ToolMode.CodeMode &&
+      // `tools.eager` can demote exec too; prepareTools() then drops it from
+      // the Hybrid declarations and from the exec binding set.
+      !isAgentToolEagerHidden(context, ToolNames.EXEC, registryWillBeRebuilt) &&
       !isAgentSkillEagerHidden(context, registryWillBeRebuilt))
   );
 }
@@ -142,11 +173,14 @@ export function hasAgentSkillExecBinding(
  * be loaded — the disagreement #12424 reports.
  *
  * Callers supply whether exec bindings are reachable in the current mode and
- * registry, and whether the Skill factory is registered there at all. A
- * finite list naming exec can therefore reach Skill without naming it
- * directly. CodeModeOnly retains eager-deferred nested targets;
- * The eager-hidden input vetoes every route in Hybrid, including wildcards
- * and explicit Skill entries. Other permission bounds stay in prepareTools().
+ * registry, whether the Skill factory is registered there at all, and whether
+ * the deferred-tool bridge is registered. A finite list naming exec can
+ * therefore reach Skill without naming it directly. CodeModeOnly retains
+ * eager-deferred nested targets. In Hybrid, an eager-hidden Skill is vetoed
+ * only when the bridge cannot reach it: `prepareTools()` keeps the schema out
+ * of the direct declarations, but `tool_search` + `tool_call` still discover
+ * and invoke the registered tool. Other permission bounds stay in
+ * prepareTools().
  * Registry deny/exclude rules remain the bundled-reference resolver's concern;
  * this predicate supplies the per-agent policy that resolver cannot see.
  *
@@ -179,8 +213,26 @@ export function toolConfigAllowsSkill(
   skillEagerHidden = false,
   codeModeOnly = false,
   skillRegistered = true,
+  deferredBridgeAvailable = false,
 ): boolean {
-  if (skillEagerHidden || EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  const names =
+    toolConfig?.tools.filter(
+      (tool): tool is string => typeof tool === 'string',
+    ) ?? [];
+  // Only a wildcard inherits the registry, exactly as `prepareTools()` does.
+  // Neither an explicit empty list (the documented deny-all contract) nor a
+  // list holding only inline declarations inherits: both take the explicit
+  // branch there, which declares no registry tool.
+  const inheritsRegistry = !toolConfig || names.includes('*');
+  const bridgeReachesSkill =
+    deferredBridgeAvailable &&
+    (inheritsRegistry ||
+      (names.includes(ToolNames.TOOL_SEARCH) &&
+        names.includes(ToolNames.TOOL_CALL)));
+  if (skillEagerHidden && !bridgeReachesSkill) {
     return false;
   }
   // exec binds only registered tools, so a registry without the Skill
@@ -197,14 +249,6 @@ export function toolConfigAllowsSkill(
   if (matchesAgentToolBlocklist(toolConfig.disallowedTools, ToolNames.SKILL)) {
     return false;
   }
-  const names = toolConfig.tools.filter(
-    (tool): tool is string => typeof tool === 'string',
-  );
-  // Only a wildcard inherits the registry, exactly as `prepareTools()` does.
-  // Neither an explicit empty list (the documented deny-all contract) nor a
-  // list holding only inline declarations inherits: both take the explicit
-  // branch there, which declares no registry tool.
-  const inheritsRegistry = names.includes('*');
   // The exec wrapper does not need an execution-list entry in code modes.
   // An explicit nested list is authoritative; otherwise either Skill itself
   // or the exec carve-out grants the nested binding, as in AgentCore.

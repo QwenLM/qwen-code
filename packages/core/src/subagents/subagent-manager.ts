@@ -90,6 +90,7 @@ import {
 } from '../tools/agent/agent.js';
 import { ToolMode } from '../tools/code-mode.js';
 import {
+  hasAgentSkillBridge,
   hasAgentSkillExecBinding,
   isAgentSkillEagerHidden,
   toolConfigAllowsSkill,
@@ -1223,6 +1224,7 @@ export class SubagentManager {
         skillEagerHidden,
         runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
         skillRegistered,
+        hasAgentSkillBridge(runtimeContext),
       );
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(

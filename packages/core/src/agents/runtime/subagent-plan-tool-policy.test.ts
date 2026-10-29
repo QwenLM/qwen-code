@@ -344,6 +344,34 @@ describe('subagent plan tool policy', () => {
     );
   });
 
+  it('reaches an eager-hidden Skill through a declared bridge', () => {
+    const toolConfig = {
+      tools: [ToolNames.SKILL, ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+    };
+    expect(
+      toolConfigAllowsSkill(toolConfig, false, true, false, true, true),
+    ).toBe(true);
+    expect(
+      toolConfigAllowsSkill({ tools: ['*'] }, false, true, false, true, true),
+    ).toBe(true);
+  });
+
+  it('vetoes an eager-hidden Skill the bridge cannot reach', () => {
+    expect(
+      toolConfigAllowsSkill({ tools: ['*'] }, false, true, false, true, false),
+    ).toBe(false);
+    expect(
+      toolConfigAllowsSkill(
+        { tools: [ToolNames.SKILL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+  });
+
   describe('hasAgentSkillExecBinding', () => {
     const contextWith = (
       mode: ToolMode,
@@ -361,6 +389,31 @@ describe('subagent plan tool policy', () => {
       }
       return config;
     };
+
+    it('reports no exec route when exec is eager-hidden in Hybrid', () => {
+      // `tools.eager` can demote `exec` too. prepareTools() then drops it from
+      // the Hybrid declarations and from the exec binding set, so the gateway
+      // is closed even though the registry still counts the factory.
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerPermissionDeferredFactory(
+        ToolNames.EXEC,
+        async () => new ExecTool(config),
+      );
+      registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+        new Set([ToolNames.SKILL]),
+      );
+      expect(hasAgentSkillExecBinding(config)).toBe(false);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.EXEC] },
+          hasAgentSkillExecBinding(config),
+          isAgentSkillEagerHidden(config),
+        ),
+      ).toBe(false);
+    });
 
     it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
       'reports no exec route in %s when exec was never registered',

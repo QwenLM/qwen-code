@@ -15,6 +15,7 @@ import { MockTool } from '../../test-utils/mock-tool.js';
 import { ToolMode } from '../../tools/code-mode.js';
 import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import { ToolSearchTool } from '../../tools/tool-search.js';
+import { ToolCallTool } from '../../tools/tool-call.js';
 import { hasAgentSkillExecBinding } from './subagent-plan-tool-policy.js';
 import type { ToolConfig } from './agent-types.js';
 
@@ -444,6 +445,65 @@ describe('AgentCore skill-gate inputs', () => {
         expect(gate(core, declared)).toBe(willHaveSkill);
       },
     );
+
+    it('keeps a hybrid wildcard Skill reachable through the deferred-tool bridge', async () => {
+      // `tools.eager` demotes `skill` without disabling it; the deferred-tool
+      // bridge is the route that keeps the capability. Withholding the
+      // SkillManager here would unregister the factory and leave the bridge
+      // nothing to discover.
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerPermissionDeferredFactory(
+        ToolNames.SKILL,
+        async () => new MockTool({ name: ToolNames.SKILL }),
+      );
+      registry.registerTool(new ToolSearchTool(config));
+      registry.registerTool(new ToolCallTool(registry));
+      const core = new AgentCore(
+        'skill-eager-bridge',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        { tools: ['*'] },
+      );
+      const announced = (
+        core as unknown as { willHaveSkillTool: () => boolean }
+      ).willHaveSkillTool();
+      expect(announced).toBe(true);
+      const declared = await declaredNames(core);
+      expect(declared.has(ToolNames.SKILL)).toBe(false);
+      expect(declared.has(ToolNames.TOOL_SEARCH)).toBe(true);
+      expect(declared.has(ToolNames.TOOL_CALL)).toBe(true);
+    });
+
+    it('stays silent when the eager-hidden Skill has no declared bridge', () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerPermissionDeferredFactory(
+        ToolNames.SKILL,
+        async () => new MockTool({ name: ToolNames.SKILL }),
+      );
+      registry.registerTool(new ToolSearchTool(config));
+      registry.registerTool(new ToolCallTool(registry));
+      const core = new AgentCore(
+        'skill-eager-no-bridge',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        { tools: [ToolNames.SKILL] },
+      );
+      expect(
+        (
+          core as unknown as { willHaveSkillTool: () => boolean }
+        ).willHaveSkillTool(),
+      ).toBe(false);
+    });
 
     it('opens for a hybrid nested-only skill', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
