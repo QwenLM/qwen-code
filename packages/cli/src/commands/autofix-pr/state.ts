@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import {
   closeSync,
@@ -24,7 +24,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { isWithinRoot } from '../../config/path-comparison.js';
 import {
@@ -360,12 +360,19 @@ export function resolveWatchRoot(prNumber: number): string {
 }
 
 /**
- * The session-owned anchor store, outside every workspace. A round is confined
- * to its session's working directory (and that session's isolation worktrees),
- * so it can rewrite the watch state and even the session checkout's `.git` —
- * but not a file under the user's home. The genuine clone identity is kept here,
- * where the round cannot reach it. `QWEN_AUTOFIX_ANCHOR_DIR` overrides the root
- * for tests.
+ * The anchor store, outside every workspace. It records the clone a watch was
+ * confirmed against, kept apart from the watch state and the session checkout
+ * so the git-level gitfile-rewrite attack (a round repointing a `.git` pointer
+ * inside its working directory) does not trivially forge it.
+ *
+ * Usability and defense-in-depth, NOT a security boundary: the daemon shell
+ * guard confines git relocation, not general file writes, so a round that can
+ * write any same-user file can write here too. Such a round is already a full
+ * compromise — it can read the daemon discovery sidecar and rewrite source and
+ * settings — and no file-based anchor can be the authority against it. A
+ * genuinely protected anchor needs daemon-mediated validation over the ACP
+ * trust oracle; see the design doc's "Threat model and limitations".
+ * `QWEN_AUTOFIX_ANCHOR_DIR` overrides the root for tests.
  */
 export function anchorStoreRoot(): string {
   return (
@@ -375,14 +382,18 @@ export function anchorStoreRoot(): string {
 }
 
 /**
- * The anchor file for a PR of one repository, keyed by the repository (not the
- * session or the clone path) so it survives take-overs and clone moves. Two
- * clones watching the same PR share a key; the loser fails closed below, which
- * is safe — a round cannot create an anchor, only prepare/resume can.
+ * The anchor file for a PR of one repository in one clone. The key combines the
+ * repository, the PR, and a discriminator for the clone's main worktree, so two
+ * independent clones watching the same PR keep distinct anchors — preparing or
+ * resuming one cannot revoke the other's. The discriminator is the helper's own
+ * cwd-derived main worktree: a repointed cwd resolves to a different
+ * (unconfirmed) key and fails closed. It survives take-overs (same clone); a
+ * clone move re-confirms under the new main on resume.
  */
 export function anchorPath(
   repository: { host: string; owner: string; repo: string },
   prNumber: number,
+  cloneRoot: string,
 ): string {
   assertPositiveInteger(prNumber, 'PR number');
   const slug = [
@@ -392,7 +403,13 @@ export function anchorPath(
   ]
     .join('+')
     .replace(/[^a-z0-9._@+-]/g, '_');
-  return join(anchorStoreRoot(), slug, `pr-${prNumber}.json`);
+  // Lexical resolve, not realpath: the discriminator must be stable for a path
+  // that may no longer exist (a stale anchor left by a clone move).
+  const cloneKey = createHash('sha256')
+    .update(resolve(cloneRoot))
+    .digest('hex')
+    .slice(0, 16);
+  return join(anchorStoreRoot(), slug, `${cloneKey}-pr-${prNumber}.json`);
 }
 
 export interface WatchAnchor {
@@ -403,18 +420,21 @@ export interface WatchAnchor {
 }
 
 /**
- * Record the genuine clone for a watch, from a cwd trusted at prepare/resume
- * time (before any round runs). Written atomically, replacing any link, outside
- * the workspace so a round cannot forge it. A resume re-confirms from the
- * current trusted cwd, which also migrates the anchor after a legitimate clone
- * move (`git worktree repair`).
+ * Record the clone a watch is confirmed against, from the helper's cwd at
+ * prepare/resume time. Written atomically, replacing any link, in the store
+ * outside the workspace. A resume re-confirms from the current cwd, which also
+ * re-establishes the anchor under a new main after a legitimate clone move
+ * (`git worktree repair`). Defense-in-depth, not a security boundary — see
+ * `anchorStoreRoot`.
  */
 export function writeAnchor(
   repository: { host: string; owner: string; repo: string },
   prNumber: number,
   trustRoot: string,
 ): void {
-  const path = anchorPath(repository, prNumber);
+  // Key by the clone being confirmed (the value), not the transient cwd, so the
+  // write is correct regardless of where the caller's cwd points at this moment.
+  const path = anchorPath(repository, prNumber, trustRoot);
   mkdirSync(dirname(path), { recursive: true });
   const anchor: WatchAnchor = { trustRoot, ...repository };
   atomicWriteFileSync(path, `${JSON.stringify(anchor, null, 2)}\n`, NO_FOLLOW);
@@ -425,7 +445,9 @@ export function readAnchor(
   repository: { host: string; owner: string; repo: string },
   prNumber: number,
 ): WatchAnchor | null {
-  const path = anchorPath(repository, prNumber);
+  // Key by the clone the helper runs in; a genuine helper matches the clone
+  // confirmed at prepare, a repointed cwd resolves to an unconfirmed key.
+  const path = anchorPath(repository, prNumber, repoRoot());
   if (!isRegularFile(path)) return null;
   try {
     const parsed = JSON.parse(
@@ -447,13 +469,14 @@ export function readAnchor(
 }
 
 /**
- * The genuine clone a watch's gitfile is validated against: the anchor confirmed
- * at prepare/resume time and kept in the session-owned store outside the
- * workspace. Neither the watch state nor the helper's cwd is an authority — a
- * round can rewrite both (the state file, and the session checkout's `.git`
- * that `repoRoot()` reads) — so the anchor is read only from the store, and a
- * watch with no confirmed anchor fails closed rather than falling back to a
- * round-writable source. No git command runs in a possibly hostile anchor.
+ * The clone a watch's gitfile is validated against: the anchor confirmed at
+ * prepare/resume time, read from the store outside the workspace and keyed by
+ * the helper's current main worktree (`repoRoot()`). A watch with no confirmed
+ * anchor for that clone fails closed rather than falling back to the
+ * round-writable state. This defeats the git-level gitfile-rewrite attack — a
+ * repointed cwd resolves to an unconfirmed key — and is defense-in-depth, not a
+ * security boundary against a round that can write any same-user file (see
+ * `anchorStoreRoot` and the design doc's "Threat model and limitations").
  */
 export function trustAnchor(state: {
   prNumber: number;

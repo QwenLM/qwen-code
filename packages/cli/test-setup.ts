@@ -89,13 +89,18 @@ import { afterEach, beforeEach } from 'vitest';
 
 import './src/test-utils/customMatchers.js';
 
-// The autofix trust anchor store lives outside the workspace by design (a round
-// must not be able to rewrite it). Give every test its own temp dir so anchors
-// never leak between tests or onto the host's real ~/.qwen; a test confirms an
-// anchor for its clone via writeAnchor in its own beforeEach.
+// Give every test its own autofix anchor dir so anchors never leak between
+// tests or onto the host's real ~/.qwen; a test confirms an anchor for its
+// clone via writeAnchor in its own beforeEach. Capture the base root at module
+// load, BEFORE any suite repoints TMPDIR/TEMP/TMP (script-lint-isolation does,
+// to exercise a fail-closed path): os.tmpdir() inside a beforeEach would then
+// throw ENOENT before the test body runs.
+const autofixAnchorBase = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'autofix-anchor-base-'),
+);
 let autofixAnchorDir: string | undefined;
 beforeEach(() => {
-  autofixAnchorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-anchor-'));
+  autofixAnchorDir = fs.mkdtempSync(path.join(autofixAnchorBase, 'case-'));
   process.env['QWEN_AUTOFIX_ANCHOR_DIR'] = autofixAnchorDir;
 });
 afterEach(() => {

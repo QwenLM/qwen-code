@@ -98,7 +98,7 @@ fallback 只扫描主 worktree（恒为第一条），而不冒伪造根的风�
 落盘的 watch 与主 clone 会话行为完全一致。唯一的行为变化发生在 linked-worktree
 daemon 会话——而它们今天是死角。
 
-### 2. 信任始终锚定到 genuine clone
+### 2. 信任锚定到 genuine clone（纵深防御）
 
 信任检查函数（`packages/cli/src/commands/autofix-pr/worktree.ts` 的
 `untrustedGitfile` / `untrustedSubmodules`）本身不变：用
@@ -109,26 +109,24 @@ watch，但兄弟检出的 `.git` 是一个 gitfile，在其中运行过的代�
 指向一个替换仓库——所以绝不能把发现来的 worktree 当作信任根，否则它会为自己
 嵌套的 watch 担保，`status` 就会执行替换仓库的 `core.fsmonitor`。
 
-**会话工作目录之内**的任何来源都不能作锚。round 被限制在该目录（及会话的隔离
-worktree）内，但其中 `working_dir` 只是 cwd pin、不是文件系统沙箱：round 既能
-改写 watch state（`../autofix-pr-<n>-state.json`），也能改写会话检出自身的
-`.git`（`../../../.git`，即 `repoRoot()` 所读）。所以记录的 `state.trustRoot`
-与 cwd 推导的 `repoRoot()`——即便要求两者一致——都能被同一种能力一起伪造。
+genuine clone 身份记录在**每个 workspace 之外的锚存储**：
+`~/.qwen/autofix-anchors/<host>+<owner>+<repo>/<cloneKey>-pr-<n>.json`
+（`QWEN_AUTOFIX_ANCHOR_DIR` 供测试覆盖根目录）。`<cloneKey>` 是 clone 主
+worktree 路径的哈希，所以两个独立 clone watch 同一 PR 会保持**各自独立**的锚
+——prepare 或 resume 其中一个不会撤销另一个的。`prepare`/resume 从当时 helper
+的 cwd 记录锚（`writeAnchor`）；`trustAnchor(state)` 按仓库、PR 与 helper 当前
+主 worktree（`repoRoot()`）读回，**该 clone 没有已确认的锚就 fail-closed**
+——绝不回退到可被 round 改写的 watch state。resume 从当前 cwd 重新确认，顺带
+在合法 clone 移动（`git worktree repair`）后于新主根下重新建立锚，使移动后的
+clone 能 resume 其 watch，而不是搁浅在孤立的键上。列表把每个 watch 的信任检查
+（及 `unsavedWork`）锚定到 `trustAnchor(state)`；写路径的 `requireWorktree`
+接收独立的 `trustRoot`，与其 `root`（watch 根，仍作符号链接 walk 的停止点）
+分开，`push`/`sync` 传入 `trustAnchor(state)`。
 
-因此 genuine clone 身份保存在**每个 workspace 之外的 session-owned 锚存储**：
-`~/.qwen/autofix-anchors/<host>+<owner>+<repo>/pr-<n>.json`
-（`QWEN_AUTOFIX_ANCHOR_DIR` 供测试覆盖根目录）。daemon guard 把 round 限制在
-其工作目录内，所以用户 home 下的文件超出其可达范围。`prepare`/resume 在**当时
-可信、任何 round 运行之前**的 cwd 写入锚（`writeAnchor`）；`trustAnchor(state)`
-按 watch 的仓库 + PR（跨 take-over 与 clone 移动稳定）读回，**没有已确认的锚就
-fail-closed**——绝不回退到可被 round 改写的来源，也不在可能敌意的锚里跑 git。
-resume 从当前可信 cwd 重新确认，顺带在合法 clone 移动（`git worktree repair`）
-后迁移锚，使移动后的 clone 能 resume 其 watch，而不是搁浅在陈旧的绝对路径上。
-列表把每个 watch 的信任检查（及 `unsavedWork`）锚定到 `trustAnchor(state)`；
-写路径的 `requireWorktree` 接收独立的 `trustRoot`，与其 `root`（watch 根，仍作
-符号链接 walk 的停止点）分开，`push`/`sync` 传入 `trustAnchor(state)`。两个
-clone watch 同一 PR 会共享键，失败者 fail-closed，这是安全的——round 造不出锚，
-只有 prepare/resume 能写。
+把锚放在 workspace 之外、按 clone 键控，可挫败 **git 层面**的 gitfile 改写
+攻击：round 在其工作目录内改写 `.git` 指针后，会解析到一个不同的（未确认的）
+键并 fail-closed，而不会为替换仓库担保。这是**纵深防御与可用性，不是安全
+边界**——它究竟防得住什么、防不住什么，见下文「威胁模型与限制」。
 
 ### 3. 按 clone 全量列出 watch
 
@@ -164,6 +162,45 @@ watch。daemon 视图会对 `unreadable[].error` 里的兄弟绝对路径与状�
 daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会落在会话工作
 目录之外时（例如会话位于该 worktree 的子目录）它仍然拒绝，并指明应去哪个
 目录 prepare。
+
+## 威胁模型与限制
+
+锚是**可用性与纵深防御，不是安全边界**。这一点是在评审期间经调查确立的，
+且该区分至关重要：
+
+- **daemon shell guard 限制的是 git 重定位，而非一般文件写入。**
+  `daemon-git-worktree-guard.ts` 分析命令是否在会话边界之外做 git 仓库重定位/
+  变更，否则放行（`return denial ?? { allowed: true }`；在会话自身 cwd 里、已
+  过权限检查的调用直接放行）。因此 round 能用非 git 命令（`node -e …`、
+  `printf > …`）写任意 same-user 文件——包括 `~/.qwen/autofix-anchors`。锚文件
+  **并不**超出 round 的可达范围。
+- **能写任意 same-user 文件的 round 已是完全 compromise。** 它能读 daemon
+  discovery sidecar、改写 CLI 源码与 bundled skill、编辑 `~/.qwen/settings.json`。
+  没有任何文件锚能作为对抗这种 round 的信任权威。锚挫败的是 *git 层面*的
+  gitfile 改写攻击（在工作目录内改写 `.git` 指针）——即评审 witness 所行使的
+  能力——并为可用性区分 clone。它不会、也不能防御拥有无限制 same-user 文件
+  写入的 round。
+- **真正受保护的锚需要 daemon 中介验证，这是一项独立的核心 initiative。**
+  helper 子进程**不持有任何 daemon 凭证**：`runAutofixPrHelper`
+  （`packages/core/src/tools/autofix-pr.ts`）用 `sanitizeChildEnv` 构造其环境，
+  剥离 `QWEN_SERVER_TOKEN` / `QWEN_DAEMON_TOKEN` / guard 与私有 ACP capability
+  token（issue #6601），`spawnChannel.ts` 再剥离一次。所以 helper 无法经鉴权
+  socket 查询 daemon，而给它凭证既违反该策略、又可被 round 伪造。唯一不可伪造
+  的 child→daemon 信任通道是 ACP extMethod oracle
+  （`packages/acp-bridge/src/bridgeClient.ts` 的 `handleExternalToolGuard` /
+  `handleWorkflowAncestorTrust`），daemon 从自己的 `SessionEntry` 内存注入
+  `effectiveCwd` 并绑定会话所有权；它由 tool-flow 中介，任意子进程不可达。真正
+  的锚权威须把信任验证移进 daemon、经一个新的 extMethod oracle——在会话创建时
+  （任何 round 运行之前）捕获 clone 根——由 autofix 工具中介、raw-shell 调用
+  fail-closed。这横跨 `packages/core`、`packages/acp-bridge` 与
+  `packages/cli/src/serve`（maintainer-only core），还须处理运行在既有（非
+  pristine）worktree 的会话与 daemon 重启时的锚丢失。它不在本可用性改动范围内，
+  经维护者决定记录于此，作为未来核心 initiative 的方向。
+
+在此威胁模型下锚仍值得保留：它挫败 witness 所行使的 git 层面攻击、让两个 clone
+的 watch 不互相撤销、并 fail-closed 而非信任可被 round 改写的来源。本 PR 的
+主张据此收口——它交付按 worktree 落盘、按 clone 全量列表与 history 合并，锚是
+纵深防御，**不是**对抗 same-user round 的沙箱。
 
 ## 设计决策与理由
 
@@ -216,7 +253,9 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
   顺序都能判别）；`vouchedScanRoots`（嵌套 watch worktree 与外来失效条目不被
   读取）；主根读取失败被 surface；信任在列表与写路径（`requireWorktree`/
   `unsavedWork`）都锚定 genuine clone，被改写的兄弟 gitfile 绝不执行其配置；
-  daemon 跨 worktree 列表且 `unreadable` 路径脱敏。
+  锚按 clone 键控（两个独立 clone watch 同一 PR 保持各自独立的锚、互不撤销），
+  对未确认的 clone 或被改指的 cwd fail-closed，并在 clone 根变化后于 resume
+  重新确认；daemon 跨 worktree 列表且 `unreadable` 路径脱敏。
 - 回退 pin：linked worktree 里的 daemon 会话 prepare 出一个 worktree 落在
   会话 cwd 之内的 watch，且 `assertSessionCanRunWorktree` 通过（即 b1887512
   的 exact 失败场景）。

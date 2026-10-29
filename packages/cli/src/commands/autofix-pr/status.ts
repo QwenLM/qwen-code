@@ -266,10 +266,10 @@ export function runStatus(args: {
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
-        // Trust is anchored to the genuine clone recorded for the watch (or
-        // the main worktree for a legacy watch), never to a discovered
-        // worktree whose `.git` a round's code could rewrite. Only asked when
-        // git checks run — the daemon's `git: false` listing runs no git.
+        // Trust is anchored to the genuine clone recorded for the watch, never
+        // to a discovered worktree whose `.git` a round's code could rewrite.
+        // Only asked when git checks run — the daemon's `git: false` listing
+        // runs no git.
         gitTrusted:
           args.git !== false &&
           existsSync(paths.worktreePath) &&

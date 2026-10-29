@@ -214,11 +214,13 @@ function untrustedSubmodulesIn(
  * push would publish that branch's commits and a reset would discard them.
  *
  * `root` is the watch's root worktree, the stop of the symlink walk. `trustRoot`
- * is the genuine clone the gitfile is validated against — it must be a
- * worktree whose `.git` the calling round cannot rewrite (the main worktree,
- * `repoRoot()`), never a linked worktree the round could repoint at a
- * replacement repository. They differ whenever a watch is rooted in a linked
- * worktree, so the trust anchor is a separate parameter, not `root`.
+ * is the genuine clone the gitfile is validated against — the clone's main
+ * worktree (`repoRoot()`), the stable identity of the clone, never a linked
+ * worktree a round could repoint at a replacement repository. They differ
+ * whenever a watch is rooted in a linked worktree, so the trust anchor is a
+ * separate parameter, not `root`. This is defense-in-depth against the
+ * git-level gitfile rewrite, not a boundary against a round that can write any
+ * same-user file (see `anchorStoreRoot` in state.ts).
  */
 export function requireWorktree(
   paths: AutofixPrPaths,

@@ -110,7 +110,7 @@ main-rooted watches and main-clone sessions behave identically. The only
 behavior change is for linked-worktree daemon sessions, which today are dead
 zones.
 
-### 2. Trust stays anchored to the genuine clone
+### 2. Trust anchored to the genuine clone (defense-in-depth)
 
 The trust-check functions (`untrustedGitfile` / `untrustedSubmodules` in
 `packages/cli/src/commands/autofix-pr/worktree.ts`) are unchanged: they
@@ -123,32 +123,30 @@ rewrite to point at a replacement repository — so a discovered worktree must
 never be passed as the trust root, or it would vouch for its own nested
 watches and `status` would execute the replacement's `core.fsmonitor`.
 
-No source _inside the session's working directory_ can be the anchor. A round
-is confined to that directory (and the session's isolation worktrees), but
-within it `working_dir` is a cwd pin, not a filesystem sandbox: the round can
-rewrite the watch state (`../autofix-pr-<n>-state.json`) **and** the session
-checkout's own `.git` (`../../../.git`) that `repoRoot()` reads. So both a
-recorded `state.trustRoot` and a cwd-derived `repoRoot()` — even required to
-agree — are forgeable together with the same capability.
+The genuine clone identity is recorded in an **anchor store outside every
+workspace**:
+`~/.qwen/autofix-anchors/<host>+<owner>+<repo>/<cloneKey>-pr-<n>.json`
+(`QWEN_AUTOFIX_ANCHOR_DIR` overrides the root for tests). `<cloneKey>` is a
+hash of the clone's main worktree path, so two independent clones watching the
+same PR keep **distinct** anchors — preparing or resuming one cannot revoke the
+other's. `prepare`/resume records the anchor (`writeAnchor`) from the helper's
+cwd at that time; `trustAnchor(state)` reads it back keyed by the repository,
+the PR, and the helper's current main worktree (`repoRoot()`), and **fails
+closed when no anchor was confirmed for that clone** — it never falls back to
+the round-writable watch state. A resume re-confirms from the current cwd,
+which also re-establishes the anchor under a new main after a legitimate clone
+move (`git worktree repair`), so a moved clone resumes its watches instead of
+stranding them on an orphaned key. The listing anchors each watch's trust check
+(and `unsavedWork`) to `trustAnchor(state)`; the write path's `requireWorktree`
+takes a separate `trustRoot` distinct from its `root` (the watch root, the
+symlink-walk stop), and `push`/`sync` pass `trustAnchor(state)`.
 
-The genuine clone identity is therefore kept in a **session-owned anchor store
-outside every workspace**: `~/.qwen/autofix-anchors/<host>+<owner>+<repo>/pr-<n>.json`
-(`QWEN_AUTOFIX_ANCHOR_DIR` overrides the root for tests). The daemon guard
-confines a round to its working directory, so a file under the user's home is
-beyond its reach. `prepare`/resume writes the anchor (`writeAnchor`) from the
-cwd that is trusted _at that moment, before any round runs_; `trustAnchor(state)`
-reads it back keyed by the watch's repository + PR (stable across take-overs and
-clone moves) and **fails closed when no anchor was confirmed** — it never falls
-back to a round-writable source, and runs no git command in a possibly hostile
-anchor. A resume re-confirms from the current trusted cwd, which also migrates
-the anchor after a legitimate clone move (`git worktree repair`), so a moved
-clone resumes its watches instead of stranding them on a stale absolute path.
-The listing anchors each watch's trust check (and `unsavedWork`) to
-`trustAnchor(state)`; the write path's `requireWorktree` takes a separate
-`trustRoot` distinct from its `root` (the watch root, the symlink-walk stop),
-and `push`/`sync` pass `trustAnchor(state)`. Two clones watching the same PR
-share a key; the loser fails closed, which is safe — a round cannot create an
-anchor, only prepare/resume can.
+Keeping the anchor outside the workspace, keyed by the clone, defeats the
+**git-level** gitfile-rewrite attack: a round that repoints a `.git` pointer
+inside its working directory resolves to a different (unconfirmed) key and
+fails closed, rather than vouching for a replacement repository. This is
+**defense-in-depth and usability, not a security boundary** — see "Threat model
+and limitations" below for exactly what it does and does not protect against.
 
 ### 3. Clone-wide watch listing
 
@@ -191,6 +189,57 @@ now passes for linked-worktree daemon sessions (worktree inside cwd). It still
 refuses when the worktree would fall outside the session's working directory
 (e.g. the session sits in a subdirectory of the worktree), naming the directory
 to prepare from.
+
+## Threat model and limitations
+
+The anchor is **usability and defense-in-depth, not a security boundary**.
+This was established by investigation during review, and the distinction is
+load-bearing:
+
+- **The daemon shell guard confines git relocation, not general file writes.**
+  `daemon-git-worktree-guard.ts` analyses a command for git repository
+  relocation/mutation outside the session boundary and otherwise allows it
+  (`return denial ?? { allowed: true }`; a permission-checked call in the
+  session's own cwd is allowed outright). A round can therefore write any
+  same-user file — including `~/.qwen/autofix-anchors` — with a non-git command
+  (`node -e …`, `printf > …`). The anchor file is **not** beyond a round's
+  reach.
+- **A round that can write any same-user file is already a full compromise.**
+  It can read the daemon discovery sidecar, rewrite the CLI source and the
+  bundled skill, and edit `~/.qwen/settings.json`. No file-based anchor can be
+  the trust authority against such a round. The anchor defeats the _git-level_
+  gitfile-rewrite attack (repointing a `.git` pointer within the working
+  directory) — the capability the review witnesses exercised — and separates
+  clones for usability. It does not, and cannot, defend against a round with
+  unrestricted same-user file write.
+- **A genuinely protected anchor needs daemon-mediated validation, a separate
+  core initiative.** The helper subprocess holds **no daemon credential**:
+  `runAutofixPrHelper` (`packages/core/src/tools/autofix-pr.ts`) builds its env
+  with `sanitizeChildEnv`, which strips `QWEN_SERVER_TOKEN` /
+  `QWEN_DAEMON_TOKEN` / the guard and private ACP capability tokens (issue
+  #6601), and `spawnChannel.ts` scrubs them again. So a helper cannot query the
+  daemon over the authenticated socket, and handing it a credential would both
+  violate that policy and be round-forgeable. The only unforgeable child→daemon
+  trust channel is the ACP extMethod oracle (`handleExternalToolGuard` /
+  `handleWorkflowAncestorTrust` in `packages/acp-bridge/src/bridgeClient.ts`),
+  where the daemon injects `effectiveCwd` from its own `SessionEntry` memory and
+  binds session ownership; it is tool-flow-mediated, not reachable from an
+  arbitrary subprocess. A real anchor authority would move trust validation
+  into the daemon over a new extMethod oracle — capturing the clone root at
+  session creation, before any round runs — with the autofix tool mediating and
+  raw-shell invocations failing closed. That spans `packages/core`,
+  `packages/acp-bridge` and `packages/cli/src/serve` (maintainer-only core), and
+  must handle sessions that run in a pre-existing (non-pristine) worktree and
+  anchor loss on daemon restart. It is out of scope for this usability change
+  and recorded here, by maintainer decision, as the direction for a future core
+  initiative.
+
+Within this threat model the anchor is still worth keeping: it defeats the
+git-level attack the witnesses exercised, keeps two clones' watches from
+revoking each other, and fails closed rather than trusting a round-writable
+source. The PR's claims are scoped accordingly — it delivers worktree-rooted
+storage, clone-wide listing and history reconciliation, with the anchor as
+defense-in-depth, **not** a sandbox against a same-user round.
 
 ## Design decisions and rationale
 
@@ -252,8 +301,11 @@ to prepare from.
   entry are not read); the primary root's read failure is surfaced; trust
   anchored to the genuine clone on both the listing and the write path
   (`requireWorktree`/`unsavedWork`), a rewritten sibling gitfile never
-  executing its config; the daemon listing across worktrees with `unreadable`
-  paths redacted.
+  executing its config; the anchor is clone-keyed (two independent clones
+  watching one PR keep distinct anchors, neither revoking the other), fails
+  closed for an unconfirmed clone or a repointed cwd, and is re-confirmed on
+  resume after the clone root changed; the daemon listing across worktrees
+  with `unreadable` paths redacted.
 - Regression pin: a daemon session in a linked worktree prepares a watch
   whose worktree is inside the session cwd and `assertSessionCanRunWorktree`
   passes (the exact b1887512 failure).

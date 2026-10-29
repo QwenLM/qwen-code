@@ -605,8 +605,8 @@ export function runPrepare(args: PrepareArgs): void {
           authorCanPush: canPush,
           ...remotes,
         };
-        // Re-confirm the anchor from this trusted cwd; this also migrates it
-        // after a legitimate clone move (`git worktree repair`).
+        // Re-confirm the anchor from the current cwd; this also re-establishes
+        // it under a new main after a clone move (`git worktree repair`).
         writeAnchor(current, current.prNumber, repoRoot());
         if (JSON.stringify(next) !== JSON.stringify(current)) {
           writeState(paths.statePath, next);
@@ -820,8 +820,8 @@ export function runPrepare(args: PrepareArgs): void {
           }
         : {}),
     };
-    // Confirm the genuine clone in the session-owned anchor store (outside the
-    // workspace, where a round cannot rewrite it) while this cwd is trusted.
+    // Record the clone this watch is confirmed against, in the anchor store
+    // outside the workspace (defense-in-depth; see `anchorStoreRoot`).
     writeAnchor({ host, owner, repo: repoName }, args.pr, repoRoot());
     writeState(paths.statePath, state);
     return state;
