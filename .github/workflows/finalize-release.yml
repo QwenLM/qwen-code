@@ -250,6 +250,8 @@ jobs:
               --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi
 
+          gh pr update-branch "${pr_url}"
+
           echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
           echo "SHOULD_MERGE=true" >> "${GITHUB_OUTPUT}"
 
@@ -263,15 +265,30 @@ jobs:
           set -euo pipefail
           gh pr review "${PR_URL}" --approve --body "Automated approval for the release version bump."
 
+      # Second approval uses CI_BOT_PAT which MUST be a different GitHub user
+      # from both CI_REVIEW_BOT_PAT (PR author) and CI_DEV_BOT_PAT (first
+      # approver). GitHub rejects self-approval at the API level. If this step
+      # fails with "Can not approve your own pull request", rotate CI_BOT_PAT
+      # to a distinct account. The step is non-blocking so that auto-merge can
+      # still proceed when a human has already approved or when branch
+      # protection only requires one approval. See #14341.
       - name: 'Approve release PR (second bot)'
+        id: 'second_approve'
         if: |-
           ${{ steps.meta.outputs.is_stable == 'true' && steps.pr.outputs.SHOULD_MERGE == 'true' }}
+        continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |-
           set -euo pipefail
           gh pr review "${PR_URL}" --approve --body "Automated second approval for the release version bump."
+
+      - name: 'Warn on second-bot approve failure'
+        if: |-
+          ${{ steps.meta.outputs.is_stable == 'true' && steps.pr.outputs.SHOULD_MERGE == 'true' && steps.second_approve.outcome == 'failure' }}
+        run: |-
+          echo "::warning::Second-bot approve failed — CI_BOT_PAT may be the same GitHub user as the PR author (CI_REVIEW_BOT_PAT). Rotate CI_BOT_PAT to a distinct account. See https://github.com/QwenLM/qwen-code/issues/14341"
 
       - name: 'Enable auto-merge for release PR'
         if: |-

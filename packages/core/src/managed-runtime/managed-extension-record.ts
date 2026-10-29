@@ -25,7 +25,7 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // The managed-extension-record/1 contract (H0b of #12827): the records that
 // the Stage H capabilities share. The shared fixtures in
 // contracts/managed-extension-record-v1.fixtures.json pin it, and
-// ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
+// ManagedExtensionRecords in packages/managed-agent-server replays
 // the same cases. The Session authority commits them (H0c, see
 // managed-extension-projection.ts).
 
@@ -779,9 +779,13 @@ export function parseExtensionRun(value: unknown, label = 'run'): ExtensionRun {
     fail(`${label} has nothing dispatched while reserved.`);
   }
   // An execution that nobody can prove never passes for a settled one.
+  // The one failure that needs no proof: the run stopped inside its turn,
+  // so `failed` names the turn, `outcome_unknown` names what could not be
+  // known, and the pair stays visible instead of guessed (F3).
   if (
     (execution === 'outcome_unknown' || execution === 'corrupt') &&
-    state !== 'recovery_blocked'
+    state !== 'recovery_blocked' &&
+    !(execution === 'outcome_unknown' && state === 'failed')
   ) {
     fail(
       `${label}.state must be recovery_blocked while execution is ${execution}.`,
@@ -790,7 +794,8 @@ export function parseExtensionRun(value: unknown, label = 'run'): ExtensionRun {
   if (
     isTerminal(state) &&
     execution !== null &&
-    !PROVEN_EXECUTION_STATES.includes(execution)
+    !PROVEN_EXECUTION_STATES.includes(execution) &&
+    !(state === 'failed' && execution === 'outcome_unknown')
   ) {
     fail(`${label}.state ${state} needs an execution proven to have ended.`);
   }

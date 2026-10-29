@@ -5,8 +5,267 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
+
+describe('TUI product evidence', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const steps = workflow.jobs.parity.steps;
+  const classify = new (Object.getPrototypeOf(async () => {}).constructor)(
+    'github',
+    'context',
+    workflow.jobs.changes.steps[0].with.script,
+  );
+  const serverFile = 'packages/managed-agent-server/src/main/java/Service.java';
+  async function required(
+    files,
+    count = files.length,
+    eventName = 'pull_request',
+  ) {
+    const github = {
+      paginate: vi.fn().mockResolvedValue(files),
+      rest: { pulls: { listFiles: vi.fn() } },
+    };
+    // A real dispatch payload carries no `pull_request` key. Handing the
+    // dispatch case a populated one would keep this suite green if the
+    // `context.payload.pull_request` read were ever hoisted above the
+    // eventName guard, while every real dispatch then throws.
+    const payload =
+      eventName === 'pull_request'
+        ? { pull_request: { number: 15261, changed_files: count } }
+        : {};
+    const result = await classify(github, {
+      eventName,
+      repo: { owner: 'QwenLM', repo: 'qwen-code' },
+      payload,
+    });
+    if (eventName === 'pull_request') {
+      expect(github.paginate).toHaveBeenCalledWith(
+        github.rest.pulls.listFiles,
+        {
+          owner: 'QwenLM',
+          repo: 'qwen-code',
+          pull_number: 15261,
+          per_page: 100,
+        },
+      );
+    } else {
+      expect(github.paginate).not.toHaveBeenCalled();
+    }
+    return result;
+  }
+
+  it('runs the foreground shell wholefile in all three product legs without retries', () => {
+    const step = steps.find(
+      (entry) =>
+        entry.name ===
+        'Three-leg product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)',
+    );
+    expect(step.run).toContain('node:ink bun:ink bun:opentui');
+    expect(step.run).toContain('interactive/tui-foreground-shell.test.ts');
+    expect(step.run).toContain('--retry=0');
+    expect(step.run).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    expect(step.run).not.toContain(' -t ');
+  });
+
+  it('cancels superseded PRs while keeping dispatches independent', () => {
+    expect(workflow.concurrency).toEqual({
+      group:
+        '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}',
+      'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
+    });
+  });
+
+  it('skips Java service changes with accompanying design documentation', async () => {
+    expect(
+      await required([
+        { filename: serverFile },
+        { filename: 'docs/design/runtime.md' },
+      ]),
+    ).toBe(false);
+  });
+
+  it.each([
+    'packages/cli/src/ui/App.tsx',
+    'packages/core/src/core/client.ts',
+    'packages/channels/base/index.ts',
+    'packages/web-templates/package.json',
+    'packages/new-cli-dependency/index.ts',
+    'packages/managed-agent-server-extra/index.ts',
+    'integration-tests/interactive/tui-migration.test.ts',
+    'scripts/copy_bundle_assets.js',
+    'integrations/generated-ui/package.json',
+    'patches/ink+7.0.3.patch',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'tsconfig.json',
+    '.nvmrc',
+    '.github/workflows/tui-parity.yml',
+  ])('runs mixed PRs touching %s', async (filename) => {
+    expect(await required([{ filename: serverFile }, { filename }])).toBe(true);
+  });
+
+  it('checks the source of a rename into an unrelated directory', async () => {
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename: 'packages/cli/src/index.ts',
+        },
+      ]),
+    ).toBe(true);
+  });
+
+  it('still skips a rename contained within the unrelated subtrees', async () => {
+    // Pins the negative arm: `previous_filename` present, but itself
+    // unrelated. Without it, weakening that arm to a presence check keeps the
+    // suite green while re-running both gates on any server-side restructure.
+    expect(
+      await required([
+        {
+          filename: serverFile,
+          previous_filename:
+            'packages/managed-agent-server/src/main/java/Old.java',
+        },
+      ]),
+    ).toBe(false);
+  });
+
+  it('uses files beyond the first API page and runs on incomplete diffs', async () => {
+    const files = Array.from({ length: 101 }, () => ({ filename: serverFile }));
+    expect(
+      await required([...files, { filename: 'packages/cli/src/index.ts' }]),
+    ).toBe(true);
+    expect(await required(files, 102)).toBe(true);
+    expect(await required(files, null)).toBe(true);
+    expect(
+      await required(
+        Array.from({ length: 3000 }, () => ({ filename: serverFile })),
+      ),
+    ).toBe(true);
+  });
+
+  it('always runs manual dispatches without querying PR files', async () => {
+    expect(await required([], 0, 'workflow_dispatch')).toBe(true);
+  });
+
+  it('retains named checks and runs them when impact detection fails', () => {
+    expect(workflow.jobs.changes.permissions).toEqual({
+      'pull-requests': 'read',
+    });
+    expect(workflow.jobs.changes.outputs.required).toBe(
+      '${{ steps.changes.outputs.result }}',
+    );
+    for (const job of [workflow.jobs.parity, workflow.jobs.noflicker]) {
+      expect(job.needs).toBe('changes');
+      expect(job.if).toBe(
+        "${{ !cancelled() && github.event_name != 'schedule' && (needs.changes.result != 'success' || needs.changes.outputs.required != 'false') }}",
+      );
+      expect(job.steps.find((step) => step.name === 'Build cli').run).toBe(
+        'npm run build -- --cli-only',
+      );
+    }
+    expect(workflow.jobs.parity.name).toBe(
+      'TUI parity snapshots (ink vs opentui)',
+    );
+    expect(workflow.jobs.noflicker.name).toBe('OpenTUI no-flicker gate');
+  });
+
+  it('watches shared build inputs and retains all package dependencies', () => {
+    // Exact set, not arrayContaining: a floor still passes when a later PR
+    // drops a trigger, and the three entries it hides are load-bearing —
+    // esbuild.config.js drives the bundle step, package.json drives the
+    // --cli-only filter, tui-parity.yml is this workflow's own self-trigger.
+    expect([...workflow.on.pull_request.paths].sort()).toEqual(
+      [
+        '.github/actions/**',
+        '.github/scripts/**',
+        '.github/workflows/tui-parity.yml',
+        '.npmrc',
+        '.nvmrc',
+        'esbuild.config.js',
+        'integration-tests/**',
+        'integrations/**',
+        'package.json',
+        'packages/**',
+        'patches/**',
+        'pnpm-lock.yaml',
+        'pnpm-workspace.yaml',
+        'scripts/**',
+        'tsconfig.json',
+      ].sort(),
+    );
+    expect(
+      workflow.on.pull_request.paths.some((path) => path.startsWith('!')),
+    ).toBe(false);
+  });
+
+  it('budgets cold setup and all three serial product acceptance legs', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+  });
+
+  it('treats unhandled errors as acceptance failures on every runner', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    const commands = product.run
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      expect(command).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    }
+  });
+
+  it('runs durable session recovery in every runtime leg', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    expect(product.run).toMatch(/for leg in node:ink bun:ink bun:opentui; do/);
+    const runtimeLoop = product.run.match(
+      /for leg[^\n]*; do([\s\S]*?)\n\s*done/,
+    );
+    expect(runtimeLoop).not.toBeNull();
+    const commands = runtimeLoop[1]
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(1);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-session-recovery.test.ts',
+    );
+    expect(
+      existsSync('integration-tests/interactive/tui-session-recovery.test.ts'),
+    ).toBe(true);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-extension-acquisition.test.ts',
+    );
+    expect(
+      existsSync(
+        'integration-tests/interactive/tui-extension-acquisition.test.ts',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps fresh evidence retrievable when the same head is rerun', () => {
+    const upload = steps.find(
+      (step) => step.name === 'Upload product acceptance evidence',
+    );
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.name).toContain('github.event.pull_request.head.sha');
+    expect(upload.with.name).toContain('${{ github.run_attempt }}');
+    const artifactName = (attempt) =>
+      upload.with.name.replace('${{ github.run_attempt }}', String(attempt));
+    expect(artifactName(1)).not.toBe(artifactName(2));
+    expect(upload.with.path.replace(/\/$/, '')).toBe(
+      product.env.QWEN_TUI_ACCEPTANCE_OUT,
+    );
+  });
+});
 
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
@@ -26,13 +285,10 @@ describe('e2e workflow', () => {
     );
   });
 
-  it('scopes the concurrency group by event and ref', () => {
-    // Scoping by event keeps main pushes coalescing with each other without
-    // touching the nightly schedule or a manual dispatch on the same ref.
-    const group = yml.concurrency.group;
-    expect(group).toContain('github.workflow');
-    expect(group).toContain('github.event_name');
-    expect(group).toContain('github.head_ref || github.ref_name');
+  it('scopes main pushes by SHA and other events by ref', () => {
+    expect(yml.concurrency.group.trim()).toBe(
+      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref_name }}",
+    );
   });
 
   it('isolates child-process-heavy suites from the three parallel forks', () => {
@@ -116,6 +372,28 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
+    });
+
+    it('limits image cleanup to less than the build-lock wait', () => {
+      const pruneMatch = e2eRunScript
+        .replace(/\\\r?\n/g, '')
+        .match(
+          /^[ \t]*timeout[ \t]+(?:(?:-[ks][ \t]*|--(?:kill-after|signal)(?:=|[ \t]+))\S+[ \t]+)*(\d+)([smhd]?)[ \t]+docker[ \t]+image[ \t]+prune\b/m,
+        );
+      expect(
+        pruneMatch,
+        'Expected a timeout on docker image prune',
+      ).not.toBeNull();
+
+      const unitSeconds = { s: 1, m: 60, h: 3600, d: 86400 };
+      const pruneSeconds =
+        Number(pruneMatch[1]) * unitSeconds[pruneMatch[2] || 's'];
+      const lockWaitSeconds = Number(
+        e2eRunScript.match(/flock --wait (\d+) 7/)?.[1],
+      );
+
+      expect(pruneSeconds).toBeGreaterThan(0);
+      expect(pruneSeconds).toBeLessThan(lockWaitSeconds);
     });
 
     it('reuses a commit-qualified image', () => {
@@ -671,5 +949,240 @@ describe('e2e workflow', () => {
   it('routes Linux E2E scratch files away from /tmp', () => {
     expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
     expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
+  });
+});
+
+describe('installed npm acceptance workflow', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const job = workflow.jobs['installed-npm'];
+  it('runs installed acceptance nightly and manually, never for PR updates', () => {
+    expect(Object.keys(workflow.on).sort()).toEqual([
+      'pull_request',
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(workflow.on.schedule).toEqual([{ cron: '17 19 * * *' }]);
+    expect(job.if).toBe(
+      "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+    );
+    expect(job.needs).toBeUndefined();
+    expect(workflow.jobs.changes.if).toBe(
+      "${{ github.event_name != 'schedule' }}",
+    );
+  });
+  it('keeps installed setup independent of the original source parity budget', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(60);
+    expect(
+      job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),
+    ).toBe(false);
+  });
+  it('runs the full installed file without retries or ignored unhandled errors', () => {
+    const step = job.steps.find(
+      (entry) => entry.name === 'Nine installed npm acceptance cases',
+    );
+    expect(step.run).toContain(
+      '--config integration-tests/vitest.installed.config.ts',
+    );
+    expect(step.run).toContain('--retry=0');
+    expect(step.run).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    expect(step.run).not.toContain(' -t ');
+  });
+  it('always retains unique attempt evidence', () => {
+    const upload = job.steps.find(
+      (entry) => entry.name === 'Upload installed npm evidence',
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.name).toContain('github.run_id');
+    expect(upload.with.name).toContain('github.run_attempt');
+    expect(upload.with['if-no-files-found']).toBe('error');
+  });
+});
+
+describe('installed distribution matrix workflow', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const canonical = workflow.jobs['installed-npm'];
+  const job = workflow.jobs['installed-distribution'];
+  const names = job.steps.map((step) => step.name);
+  const named = (name) => job.steps.find((step) => step.name === name);
+
+  it('uploads one successful audited tarball and both canonical sidecars', () => {
+    const upload = canonical.steps.find(
+      (step) => step.name === 'Upload canonical installed npm artifact',
+    );
+    expect(upload.if).toBe('${{ success() }}');
+    expect(canonical.outputs['canonical-artifact-id']).toBe(
+      '${{ steps.canonical.outputs.artifact-id }}',
+    );
+    expect(upload.id).toBe('canonical');
+    expect(upload.with.name).toBe(
+      'installed-npm-canonical-${{ github.run_id }}-${{ github.run_attempt }}',
+    );
+    const root =
+      '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}';
+    expect(upload.with.path.split('\n')).toEqual([
+      `${root}/AUDITED-ARTIFACT.json`,
+      `${root}/published-files.json`,
+      `${root}/tarballs/*.tgz`,
+    ]);
+    expect(upload.with['if-no-files-found']).toBe('error');
+    const canonicalNames = canonical.steps.map((step) => step.name);
+    expect(canonicalNames.indexOf(upload.name)).toBeGreaterThan(
+      canonicalNames.indexOf('Nine installed npm acceptance cases'),
+    );
+  });
+
+  it('runs all four actual POSIX hosts after canonical acceptance succeeds', () => {
+    expect(job.needs).toBe('installed-npm');
+    expect(job.if).toBeUndefined();
+    expect(job['runs-on']).toBe('${{ matrix.os }}');
+    expect(job.strategy['fail-fast']).toBe(false);
+    expect(job.strategy.matrix.include).toEqual([
+      {
+        os: 'ubuntu-24.04',
+        target: 'linux-x64',
+        platform: 'linux',
+        arch: 'x64',
+      },
+      {
+        os: 'ubuntu-24.04-arm',
+        target: 'linux-arm64',
+        platform: 'linux',
+        arch: 'arm64',
+      },
+      {
+        os: 'macos-15',
+        target: 'darwin-arm64',
+        platform: 'darwin',
+        arch: 'arm64',
+      },
+      {
+        os: 'macos-15-intel',
+        target: 'darwin-x64',
+        platform: 'darwin',
+        arch: 'x64',
+      },
+    ]);
+    const host = named('Assert actual distribution host');
+    expect(host.env).toEqual({
+      EXPECTED_PLATFORM: '${{ matrix.platform }}',
+      EXPECTED_ARCH: '${{ matrix.arch }}',
+    });
+    expect(host.run).toContain(
+      'assert.equal(process.platform,process.env.EXPECTED_PLATFORM)',
+    );
+    expect(host.run).toContain(
+      'assert.equal(process.arch,process.env.EXPECTED_ARCH)',
+    );
+    expect(host.run).toContain('getconf GNU_LIBC_VERSION');
+    expect(job['timeout-minutes']).toBe(120);
+  });
+
+  it('captures real pinned Node/npm pairs before returning to the Node24 controller', () => {
+    const setups = job.steps.filter((step) =>
+      step.uses?.startsWith('actions/setup-node@'),
+    );
+    expect(setups.map((step) => step.with['node-version'])).toEqual([
+      '22.23.2',
+      '26.4.0',
+      '24.19.0',
+    ]);
+    for (const version of ['22', '26']) {
+      const capture = named(`Capture actual Node${version} npm toolchain`);
+      expect(capture.run).toContain(
+        `QWEN_DISTRIBUTION_NODE${version}=$(command -v node)`,
+      );
+      expect(capture.run).toContain(
+        `QWEN_DISTRIBUTION_NPM${version}=$(node -p`,
+      );
+      expect(capture.run).toContain('realpathSync(process.argv[1])');
+    }
+    expect(
+      job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),
+    ).toBe(false);
+    expect(named('Install dependencies').env.QWEN_SKIP_PREPARE).toBe('1');
+    expect(named('Build and bundle checkout').run).toBe(
+      'npm run build && npm run bundle',
+    );
+  });
+
+  it('binds the same downloaded canonical artifact once before either product leg', () => {
+    const download = named('Download canonical installed npm artifact');
+    expect(download.uses).toMatch(/^actions\/download-artifact@/);
+    expect(download.with['artifact-ids']).toBe(
+      '${{ needs.installed-npm.outputs.canonical-artifact-id }}',
+    );
+    expect(download.with.name).toBeUndefined();
+    expect(download.with.path).toBe(
+      '${{ env.QWEN_DISTRIBUTION_ARTIFACT_DIR }}',
+    );
+    expect(named('Bind canonical artifact to this checkout').run).toBe(
+      'node --import tsx integration-tests/installed/bind-distribution-artifact.ts "$QWEN_DISTRIBUTION_ARTIFACT_DIR" "$QWEN_DISTRIBUTION_ARTIFACT"',
+    );
+    expect(
+      names.indexOf('Download canonical installed npm artifact'),
+    ).toBeLessThan(names.indexOf('Bind canonical artifact to this checkout'));
+    expect(
+      names.indexOf('Bind canonical artifact to this checkout'),
+    ).toBeLessThan(
+      names.indexOf('Twelve Node22 global and npx acceptance cases'),
+    );
+    const paths = named('Prepare distribution attempt paths');
+    expect(paths.env.DISTRIBUTION_TARGET).toBe('${{ matrix.target }}');
+    expect(paths.run).toContain(
+      'QWEN_DISTRIBUTION_ARTIFACT=${RUNNER_TEMP}/qwen-distribution-bound.json',
+    );
+    expect(paths.run).toContain('>> "$GITHUB_ENV"');
+    expect(names.indexOf(paths.name)).toBeLessThan(
+      names.indexOf('Capture actual Node22 npm toolchain'),
+    );
+    expect(
+      job.steps.some((step) => /npm pack|prepare:package/.test(step.run ?? '')),
+    ).toBe(false);
+  });
+
+  it('runs two serial whole-file legs without masking failure or retrying assertions', () => {
+    const node22 = named('Twelve Node22 global and npx acceptance cases');
+    const node26 = named('Twelve Node26 global and npx acceptance cases');
+    for (const [major, patch, step] of [
+      ['22', '22.23.2', node22],
+      ['26', '26.4.0', node26],
+    ]) {
+      expect(step.env).toEqual({
+        QWEN_DISTRIBUTION_NODE:
+          '${{ env.QWEN_DISTRIBUTION_NODE' + major + ' }}',
+        QWEN_DISTRIBUTION_NPM: '${{ env.QWEN_DISTRIBUTION_NPM' + major + ' }}',
+        QWEN_DISTRIBUTION_NODE_VERSION: patch,
+        QWEN_DISTRIBUTION_OUT:
+          '${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/node' + major,
+      });
+      expect(step.run).toBe(
+        'npx vitest run --config integration-tests/vitest.distribution.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false',
+      );
+      expect(step.if).toBeUndefined();
+      expect(step['continue-on-error']).toBeUndefined();
+    }
+    expect(job['continue-on-error']).toBeUndefined();
+    expect(names.indexOf(node22.name)).toBeLessThan(names.indexOf(node26.name));
+  });
+
+  it('always uploads uniquely named host/run/attempt evidence', () => {
+    const upload = named('Upload distribution attempt evidence');
+    expect(upload.if).toBe('${{ always() }}');
+    expect(upload.with.name).toBe(
+      'installed-distribution-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}',
+    );
+    expect(upload.with.path.split('\n')).toEqual([
+      '${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}',
+      '${{ env.QWEN_DISTRIBUTION_ARTIFACT }}',
+      '!${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/**/home/.npm/**',
+      '!${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/**/verified-tar/**',
+      '!${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/**/global-ignore-scripts/prefix/**',
+    ]);
+    expect(upload.with['if-no-files-found']).toBe('error');
   });
 });

@@ -206,6 +206,32 @@ describe('AcpConnection readTextFile error mapping', () => {
   });
 });
 
+describe('AcpConnection submitted prompt', () => {
+  it('forwards only an explicitly supplied original submission', async () => {
+    const prompt = vi.fn().mockResolvedValue({});
+    const connection = createConnection({
+      child: createMockChild(),
+      sdkConnection: { prompt },
+      sessionId: 'session-1',
+    }) as unknown as AcpConnection;
+
+    await connection.sendPrompt('derived ultracode attachment');
+    expect(prompt).toHaveBeenLastCalledWith({
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'derived ultracode attachment' }],
+    });
+
+    await connection.sendPrompt('derived ultracode attachment', {
+      submittedPrompt: 'inspect this file',
+    });
+    expect(prompt).toHaveBeenLastCalledWith({
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'derived ultracode attachment' }],
+      _meta: { 'qwen.submittedPrompt': 'inspect this file' },
+    });
+  });
+});
+
 describe('AcpConnection.isConnected', () => {
   it('returns true when child is alive', () => {
     const conn = createConnection({

@@ -114,6 +114,14 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
     this.processResult = result;
   }
 
+  /**
+   * The background lane's platform-stop marker (#13856 A8). This capture
+   * serves the foreground lane, whose envelope has no stop projection, so
+   * the marker is accepted and intentionally unused here; the remote
+   * capture (managed-shell-publisher) is the one that forwards it.
+   */
+  setStopRequested(): void {}
+
   failCapture(): void {
     this.fail(new Error('Capture transport failed.'));
   }

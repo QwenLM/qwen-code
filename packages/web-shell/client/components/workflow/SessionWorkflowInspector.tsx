@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { artifactDisplayName } from '../artifacts/artifactUtils';
 import { getSubagentDetailsUnavailableReason } from '../messages/toolFormatting';
 import { formatRuntime } from '../../utils/formatRuntime';
 import {
@@ -464,7 +465,7 @@ export function SessionWorkflowInspector({
               type="button"
             >
               <span className={styles.itemText}>
-                <strong>{artifact.title}</strong>
+                <strong>{artifactDisplayName(artifact)}</strong>
                 <small className={styles.metrics}>
                   <span>{artifact.kind}</span>
                   <span>{artifact.status}</span>

@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 // 模拟依赖项
 class MockConfig {
@@ -1125,7 +1126,7 @@ describe('NativeLspService', () => {
   // typed cast so the private method need not be public just for tests.
   describe('applyTextEdits — error branches', () => {
     let tmpDir: string;
-    const noChmod = process.platform === 'win32' || process.getuid?.() === 0;
+    const noChmod = !arePermissionBitsEnforced();
 
     const applyEdit = (filePath: string, newText: string) =>
       (

@@ -1,6 +1,9 @@
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall } from '../../adapters/types.js';
+import { isAskUserQuestionToolName } from '../../constants/toolNames.js';
 
-export { isActiveToolStatus } from '../../adapters/toolClassification';
+export { isAskUserQuestionToolName } from '../../constants/toolNames.js';
+
+export { isActiveToolStatus } from '../../adapters/toolClassification.js';
 
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
@@ -12,15 +15,6 @@ export { isActiveToolStatus } from '../../adapters/toolClassification';
  * write, …) are web-shell-only conveniences with no core equivalent.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  // Workspace-agent collaboration surface. Named the same way core names them
-  // so the drift test above stays a real check rather than two lists that
-  // happen to agree.
-  thread_post: 'ThreadPost',
-  thread_wait: 'ThreadWait',
-  thread_block: 'ThreadBlock',
-  thread_review: 'ThreadReview',
-  thread_create: 'ThreadCreate',
-  thread_read: 'ThreadRead',
   exec: 'Exec',
   edit: 'Edit',
   write_file: 'WriteFile',
@@ -50,6 +44,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cron_create: 'CronCreate',
   cron_list: 'CronList',
   cron_delete: 'CronDelete',
+  autofix_pr: 'AutofixPr',
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
@@ -167,11 +162,6 @@ export function localizeToolDisplayName(
   return displayName;
 }
 
-export function isAskUserQuestionToolName(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
-}
-
 export function isAdvisorToolName(toolName: string): boolean {
   return toolName.toLowerCase() === 'advisor';
 }
@@ -223,6 +213,8 @@ export function truncateText(text: string, max: number): string {
 // bloating the DOM.
 const MAX_DESCRIPTION_LENGTH = 2000;
 
+const GENERATED_UI_TOOL_NAME = 'mcp__generated-ui__generated_ui_show';
+
 export function getToolDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
@@ -230,6 +222,12 @@ export function getToolDescription(
   if (isSkillToolName(tool.toolName)) {
     const skillName = getStringArg(tool.args, 'skill');
     if (skillName) return truncateText(skillName, MAX_DESCRIPTION_LENGTH);
+  }
+  if (tool.toolName === GENERATED_UI_TOOL_NAME) {
+    // The card title says what the view shows; the tool title only repeats
+    // the protocol name.
+    const title = getStringArg(tool.args, 'title');
+    if (title) return truncateText(title, MAX_DESCRIPTION_LENGTH);
   }
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
@@ -269,6 +267,17 @@ export function extractText(tool: ACPToolCall): string | null {
     if (b.type === 'content' && b.content?.text) return b.content.text;
   }
   return extractRawOutputText(tool.rawOutput);
+}
+
+export function hasRecordedOutput(tool: ACPToolCall): boolean {
+  return (
+    tool.rawOutput != null ||
+    (tool.content?.some(
+      (block) =>
+        block.type === 'content' && typeof block.content?.text === 'string',
+    ) ??
+      false)
+  );
 }
 
 export function getAdvisorDisplayText(tool: ACPToolCall): string | null {

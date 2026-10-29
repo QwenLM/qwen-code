@@ -58,7 +58,14 @@ export type ResolvedPath = string & { readonly __brand: 'ResolvedPath' };
  * resolved path itself and surfaces the natural ENOENT to the
  * caller, so the resolver doesn't need to pre-emptively reject.
  */
-export type Intent = 'read' | 'write' | 'edit' | 'list' | 'glob' | 'stat';
+export type Intent =
+  | 'read'
+  | 'write'
+  | 'edit'
+  | 'delete'
+  | 'list'
+  | 'glob'
+  | 'stat';
 
 /**
  * Intents that tolerate a non-existent leaf — see `Intent`'s

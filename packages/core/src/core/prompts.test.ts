@@ -2009,12 +2009,11 @@ describe('assembleSystemPrompt', () => {
       base: 'BASE',
       contextFiles: 'CONTEXT_FILES',
       appendPrompt: 'APPEND',
-      gitStatus: 'GIT_STATUS',
       autoMemory: 'AUTO_MEMORY',
     });
 
     expect(result).toBe(
-      'BASE\n\n---\n\nCONTEXT_FILES\n\n---\n\nAPPEND\n\nGIT_STATUS\n\n---\n\nAUTO_MEMORY',
+      'BASE\n\n---\n\nCONTEXT_FILES\n\n---\n\nAPPEND\n\n---\n\nAUTO_MEMORY',
     );
   });
 
@@ -2025,7 +2024,6 @@ describe('assembleSystemPrompt', () => {
         base: 'BASE',
         contextFiles: '',
         appendPrompt: '   ',
-        gitStatus: null,
         autoMemory: '',
       }),
     ).toBe('BASE');
@@ -2039,19 +2037,6 @@ describe('assembleSystemPrompt', () => {
     });
 
     expect(result).toBe('BASE\n\n---\n\nAPPEND\n\n---\n\nAUTO_MEMORY');
-  });
-
-  it('keeps the volatile auto-memory slot last even after git status', () => {
-    const result = assembleSystemPrompt({
-      base: 'BASE',
-      gitStatus: 'GIT_STATUS',
-      autoMemory: 'AUTO_MEMORY',
-    });
-
-    expect(result.endsWith('\n\n---\n\nAUTO_MEMORY')).toBe(true);
-    expect(result.indexOf('GIT_STATUS')).toBeLessThan(
-      result.indexOf('AUTO_MEMORY'),
-    );
   });
 
   it('matches the composition getCoreSystemPrompt produces for the same inputs', () => {

@@ -12,7 +12,7 @@ on:
         required: true
         type: 'string'
       qwen_code_ref:
-        description: 'Qwen Code branch or commit to bundle, reachable from main. A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
+        description: 'Qwen Code branch or commit to bundle, reachable from main. Must contain the desktop crate (packages/desktop/src-tauri). A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
         required: true
         default: 'main'
         type: 'string'
@@ -92,7 +92,8 @@ jobs:
           github.event.release.prerelease == false
         )
       }}
-    runs-on: 'ubuntu-latest'
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     outputs:
       already_published: '${{ steps.published.outputs.already_published }}'
@@ -100,6 +101,11 @@ jobs:
       tag: '${{ steps.version.outputs.tag }}'
       version: '${{ steps.version.outputs.version }}'
     steps:
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
@@ -225,10 +231,78 @@ jobs:
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
+  desktop_shell:
+    name: 'Desktop Shell (${{ matrix.os }})'
+    needs: 'prepare'
+    if: "${{ needs.prepare.outputs.already_published != 'true' }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['ubuntu-22.04', 'windows-2022']
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: 'bash'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ needs.prepare.outputs.qwen_code_sha }}'
+          fetch-depth: 1
+
+      - name: 'Check desktop crate'
+        id: 'filter'
+        run: |-
+          changed=true
+          if [[ ! -f packages/desktop/src-tauri/Cargo.toml ]]; then
+            echo "::error::packages/desktop/src-tauri is absent from the release commit."
+            exit 1
+          fi
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+
+      # cargo test links the Tauri/wry webview, so the WebKit/GTK dev headers
+      # must be present (mirrors the Linux build job in desktop-release.yml).
+      - name: 'Install Linux dependencies'
+        if: "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils
+
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        if: "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}"
+        with:
+          node-version: '22.x'
+
+      - uses: 'dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4' # stable
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+
+      - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        with:
+          workspaces: 'packages/desktop/src-tauri -> target'
+
+      - name: 'Compile and test the desktop crate'
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        working-directory: 'packages/desktop'
+        run: 'cargo test --manifest-path src-tauri/Cargo.toml'
+
+      - name: 'Run desktop release tests'
+        if: "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}"
+        working-directory: 'packages/desktop'
+        run: 'node scripts/test-release.js'
+
   build:
     name: 'Build ${{ matrix.name }}'
     if: "${{ needs.prepare.outputs.already_published != 'true' }}"
     needs: 'prepare'
+    # desktop_shell runs in parallel with build, not ahead of it: build
+    # itself compiles and tests the same pinned revision on every matrix
+    # entry, so serializing the shell lane would only add up to 45 minutes
+    # before the build. publish joins on both, so nothing is released
+    # unchecked.
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 120
     strategy:
@@ -269,6 +343,8 @@ jobs:
       QWEN_DESKTOP_TARGET: '${{ matrix.rust_target }}'
     steps:
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ needs.prepare.outputs.qwen_code_sha }}'
       - name: 'Configure source directory'
         shell: 'bash'
         run: 'echo "QWEN_CODE_ROOT=$RUNNER_TEMP/qwen-code-source" >> "$GITHUB_ENV"'
@@ -542,6 +618,11 @@ jobs:
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = 'Linux' ]; then
+            QWEN_DESKTOP_PATCHELF="$(command -v patchelf)"
+            PATCHELF="$GITHUB_WORKSPACE/packages/desktop/scripts/patchelf-immutable-runtime.sh"
+            export QWEN_DESKTOP_PATCHELF PATCHELF
+          fi
           args=( ${{ matrix.tauri_args }} )
           if [ "$DRY_RUN" = 'true' ]; then
             args+=(--no-sign)
@@ -549,6 +630,11 @@ jobs:
             args+=(--config "$WINDOWS_CONFIG")
           fi
           npm run tauri -- build "${args[@]}"
+
+      - name: 'Verify Linux installer runtimes'
+        if: "runner.os == 'Linux'"
+        working-directory: 'packages/desktop'
+        run: 'npm run smoke:linux-installers -- src-tauri/target/${{ matrix.rust_target }}/release/bundle'
 
       - name: 'Verify macOS signature'
         if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
@@ -684,6 +770,7 @@ jobs:
     if: "${{ (github.event_name == 'release' || inputs.dry_run == false) && github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.already_published != 'true' }}"
     needs:
       - 'prepare'
+      - 'desktop_shell'
       - 'build'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
@@ -695,6 +782,8 @@ jobs:
       contents: 'write'
     steps:
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ needs.prepare.outputs.qwen_code_sha }}'
 
       - uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
@@ -743,7 +832,22 @@ jobs:
           RELEASE_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
+          # `gh release create --generate-notes` lets the Release Notes API pick
+          # its own start tag. This repo carries several tag families (v*,
+          # desktop-v*, sdk-typescript-v*, cua-driver-rs-v*), so the API anchors
+          # on an unrelated release (observed: cua-driver-rs-v*) and every
+          # Desktop release re-lists the PRs since then. Anchor the notes at the
+          # previous stable Desktop release instead. The API needs an existing
+          # release tag, so resolve it from the release list, not `git tag`.
+          previous_tag="$(
+            gh release list --limit 100 --exclude-drafts --json tagName,isPrerelease \
+              --jq '.[] | select(.isPrerelease | not) | .tagName' \
+              | grep -x 'desktop-v[0-9].*' \
+              | grep -vF -x "$RELEASE_TAG" \
+              | head -n1 || true
+          )"
           args=("$RELEASE_TAG" release-assets/* --target "$GITHUB_SHA" --title "Qwen Code Desktop v$RELEASE_VERSION" --generate-notes --latest=false)
+          if [ -n "$previous_tag" ]; then args+=(--notes-start-tag "$previous_tag"); fi
           if [ "$RELEASE_DRAFT" = 'true' ]; then args+=(--draft); fi
           if [ "$RELEASE_PRERELEASE" = 'true' ]; then args+=(--prerelease); fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
@@ -768,9 +872,16 @@ jobs:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
           FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
         run: |
           set -euo pipefail
+          # The README links here, so every stable publish rewrites the page title
+          # and notes to name the current release rather than the assets below.
+          title="Qwen Code Desktop latest (v$RELEASE_VERSION)"
+          notes="$(printf '%s\n\n%s' \
+            "Download Qwen Code Desktop v$RELEASE_VERSION for macOS, Windows, and Linux: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            'This release is the stable auto-update feed. Files attached here serve the auto-updater; download installers from the link above.')"
           feed_assets=(release-assets/desktop-latest.json)
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
             shopt -s nullglob
@@ -813,8 +924,11 @@ jobs:
               exit 0
             fi
             gh release upload "$FEED_TAG" "${feed_assets[@]}" --clobber
+            # Page text is cosmetic; it must not fail the job that gates the OSS mirror.
+            gh release edit "$FEED_TAG" --title "$title" --notes "$notes" --latest=false ||
+              echo "::warning::Could not update the $FEED_TAG release title and notes; the feed itself was published."
           else
-            gh release create "$FEED_TAG" "${feed_assets[@]}" --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false
+            gh release create "$FEED_TAG" "${feed_assets[@]}" --title "$title" --notes "$notes" --latest=false
           fi
 
       - name: 'Publish release summary'

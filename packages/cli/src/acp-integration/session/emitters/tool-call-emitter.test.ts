@@ -57,11 +57,67 @@ describe('ToolCallEmitter', () => {
       sessionId: 'test-session-id',
       config: {
         getToolRegistry: () => mockToolRegistry,
+        getSessionId: () => 'test-session-id',
+        getChatRecordingService: () => undefined,
       } as unknown as Config,
       sendUpdate: sendUpdateSpy,
     };
 
     emitter = new ToolCallEmitter(mockContext);
+  });
+
+  it('emits lifecycle without overwriting card content or status', async () => {
+    await emitter.emitLifecycle({
+      v: 1,
+      kind: 'tool',
+      sessionId: 'owner',
+      executionId: 'e',
+      callId: 'c',
+      toolName: 'shell',
+      phase: 'started',
+      executionStatus: 'running',
+      startedAt: 100,
+    });
+    expect(sendUpdateSpy).toHaveBeenCalledWith({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'c',
+      _meta: {
+        toolLifecycle: expect.objectContaining({
+          executionId: 'e',
+          startedAt: 100,
+        }),
+      },
+    });
+  });
+
+  it('still closes a discarded preparation when lifecycle delivery fails', async () => {
+    await emitter.emitStart({
+      callId: 'discard',
+      toolName: 'read_file',
+      args: {},
+      phase: 'preparing',
+    });
+    sendUpdateSpy.mockClear();
+    sendUpdateSpy.mockRejectedValueOnce(
+      new Error('metadata transport failure'),
+    );
+    await expect(
+      emitter.emitPreparationDiscarded('discard', 'read_file'),
+    ).resolves.toBeUndefined();
+    expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+    expect(sendUpdateSpy.mock.calls[0][0]).toMatchObject({
+      _meta: {
+        toolLifecycle: {
+          phase: 'ended',
+          executionStatus: 'not_started',
+          outcome: 'cancelled',
+        },
+      },
+    });
+    expect(sendUpdateSpy.mock.calls[1][0]).toMatchObject({
+      status: 'failed',
+      _meta: { preparationDiscarded: true },
+    });
   });
 
   it('emits recorded timing on starts, results and errors without using send time', async () => {

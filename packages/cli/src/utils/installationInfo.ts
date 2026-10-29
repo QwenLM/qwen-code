@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import { promisify } from 'node:util';
+import { getNpmNodePath } from './npm-runtime.js';
 
 export enum PackageManager {
   NPM = 'npm',
@@ -24,7 +25,7 @@ export enum PackageManager {
 }
 
 export function getNpmCliPath(
-  nodePath = process.execPath,
+  nodePath = getNpmNodePath(),
   platform = process.platform,
 ): string {
   if (platform === 'win32') {
@@ -75,6 +76,12 @@ const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
+// Both the detector message and the formatter's split read this one constant.
+// The sentence must stay byte-identical to the i18n catalogue key in
+// locales/*.js; the trailing space separates the interpolated command and is
+// trimmed from the line handed to t().
+const STANDALONE_UPDATE_PREFIX =
+  'Standalone install detected. Please rerun the standalone installer to update: ';
 
 function getStandaloneInstallerUrl(): string {
   return process.platform === 'win32'
@@ -129,6 +136,13 @@ function formatUpdateMessage(
     return [
       'Update requires sudo. Please run:',
       `  ${message.slice(sudoPrefix.length)}`,
+    ];
+  }
+
+  if (message.startsWith(STANDALONE_UPDATE_PREFIX)) {
+    return [
+      STANDALONE_UPDATE_PREFIX.trimEnd(),
+      ` ${message.slice(STANDALONE_UPDATE_PREFIX.length)}`,
     ];
   }
 
@@ -400,7 +414,7 @@ function getStandaloneInstallInfo(
     standaloneDir: installDir,
     updateMessage: isAutoUpdateEnabled
       ? 'Standalone install detected. Attempting to automatically update now...'
-      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
+      : `${STANDALONE_UPDATE_PREFIX}${updateCommand}`,
   };
 }
 

@@ -43,7 +43,7 @@
 
 ## 代码位置
 
-代码是现有 `packages/sdk-java/runtime-broker` 模块中的包 `com.alibaba.qwen.code.runtimebroker.managedworkspace`，这是 #12380 的决定。单独建 Maven 模块的方案被放弃了：在任何 Registry 逻辑可以评审之前，它就要先付出单独的 pom、CI lane 和 workflow 守护测试的成本。放在同一模块的包里，改动只集中在领域代码上，W0c 也能在同一模块内经 `HarnessSessionResolver` 接入绑定。如果 Registry 将来需要自己的 schema 生命周期，或者出现不能引入 Broker 的使用方，再把它拆成独立模块。
+代码是现有 `packages/managed-agent-server` 模块中的包 `com.alibaba.qwen.code.runtimebroker.managedworkspace`，这是 #12380 的决定。单独建 Maven 模块的方案被放弃了：在任何 Registry 逻辑可以评审之前，它就要先付出单独的 pom、CI lane 和 workflow 守护测试的成本。放在同一模块的包里，改动只集中在领域代码上，W0c 也能在同一模块内经 `HarnessSessionResolver` 接入绑定。如果 Registry 将来需要自己的 schema 生命周期，或者出现不能引入 Broker 的使用方，再把它拆成独立模块。
 
 这个包保持不依赖框架：只使用 JDK，不依赖其他 Broker 类、Spring、CLI 内部实现或调度器，也不在持久化数据源失败时退回内存状态。共享 fixtures 以及规则和摘要的 TypeScript 实现都放在 `packages/cli/src/serve` 下，与现有的 Runtime 契约相邻。
 
@@ -251,13 +251,13 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 
 ## 涉及文件
 
-- `packages/sdk-java/runtime-broker` 中的包 `com.alibaba.qwen.code.runtimebroker.managedworkspace`（新增）：
+- `packages/managed-agent-server` 中的包 `com.alibaba.qwen.code.runtimebroker.managedworkspace`（新增）：
   - Registry 的记录与状态、Registry 接口，以及配置快照及其后继检查。
   - actor、访问级别与策略，以及显式授权策略。
   - 负责列表与解析的 catalog。
   - 选择与已解析的 Workspace、工作目录规则、`ContextBinding`，以及异常类型。
   - 对应测试包中的测试，包括 fixtures 的消费方。
-- `packages/sdk-java/runtime-broker/README.md` 与 `QWEN.md`：新增一节介绍这个包。
+- `packages/managed-agent-server/README.md` 与 `QWEN.md`：新增一节介绍这个包。
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` 与 `.schema.json`（新增）。
 - `packages/cli/src/serve/managed-workspace-binding.ts` 及其测试（新增）。这是工作目录规则和摘要的 TypeScript 实现。自 W0c-1 起 worker 使用它。
 - 本设计文档的中英文两个版本。
@@ -274,7 +274,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
   - 工作目录规则，以及 ContextBinding 的校验与摘要。
 - **Fixtures 消费方：** Java 与 TypeScript 都运行全部路径用例、绑定用例和字符探针用例。TypeScript 用严格模式的 Ajv 按 schema 校验 fixtures 文件。
 - **变异检查：** 逐一回退或削弱每道守卫。这包括让每个字符类多接受或少接受任意一个被探测的码点、豁免单个控制字符、给正则表达式加标志、改为忽略大小写比较、去掉 `equals` 中的类型检查，以及把构造函数改为 public。改变行为的变异必须让测试失败，存活的变异必须证明是等价的。
-- **命令：** 在 JDK 21 上于 `packages/sdk-java/runtime-broker` 中运行 `mvn test` 和 `mvn checkstyle:check`；运行 `npm run build && npm run typecheck`；运行相关的 Vitest 用例。
+- **命令：** 在 JDK 21 上于 `packages/managed-agent-server` 中运行 `mvn test` 和 `mvn checkstyle:check`；运行 `npm run build && npm run typecheck`；运行相关的 Vitest 用例。
 - **CI：** 现有的 `runtime-broker` 步骤会在 Linux、macOS 和 Windows 的 Java 21 任务中运行这个包的测试，并在 Linux 上运行 Checkstyle。该模块的 Checkstyle 配置只检查 main 源码，不检查测试。
 
 ## 验收标准

@@ -61,14 +61,14 @@ function merge(
 }
 
 describe('managed-child-acceptance-record/1 shared contract', () => {
-  it('projects no task and stays disabled for submission', () => {
+  it('projects no task and, since H4b, is enabled for submission', () => {
     const body = MANAGED_EXTENSION_RECORD_BODIES.child_acceptance!;
     expect(
       body.taskKindOf(
         parseChildAcceptance(fixtures.templates['child_acceptance']),
       ),
     ).toBeNull();
-    expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('child_acceptance');
+    expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain('child_acceptance');
     expect(fixtures.contract).toBe('managed-child-acceptance-record/1');
   });
 

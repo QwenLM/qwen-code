@@ -831,6 +831,40 @@ button.livePendingSession:hover {
   cursor: pointer;
 }
 
+/* A parent row keeps its chevron left of the title; a child row aligns its
+   title under the parent's, so the lineage reads as one block. */
+.sessionRow.sessionTreeRow {
+  padding-left: 40px;
+}
+
+.sessionTreeToggle {
+  position: absolute;
+  top: 50%;
+  left: 25px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.sessionTreeToggle:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: currentColor;
+}
+
+.sessionTreeToggle:focus-visible {
+  outline: 2px solid var(--sidebar-ring, currentColor);
+  outline-offset: 1px;
+}
+
 .collapsedSessionPopover {
   overscroll-behavior: contain;
   width: min(
@@ -1372,6 +1406,12 @@ button.livePendingSession:hover {
 
 @media (hover: hover) {
   .sessionRow:hover .sessionMetaSlot {
+    min-width: var(--session-actions-width, 78px);
+  }
+
+  /* Rows with a PR badge hold the overlay's width at rest, so revealing the
+     actions never moves the badge out from under the pointer. */
+  .sessionMetaSlotReserved {
     min-width: var(--session-actions-width, 78px);
   }
 
@@ -2085,82 +2125,6 @@ button.livePendingSession:hover {
   white-space: nowrap;
 }
 
-.archivedSection {
-  display: flex;
-  flex-direction: column;
-  padding-top: 4px;
-  border-top: 1px solid var(--sidebar-border);
-}
-
-.archivedHeader {
-  appearance: none;
-  width: 100%;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
-  cursor: pointer;
-}
-
-.archivedHeader:hover,
-.archivedHeader:focus-visible {
-  background: var(--sidebar-accent);
-  color: var(--sidebar-accent-foreground);
-  outline: none;
-}
-
-.archivedChevron {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.archivedChevron svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.archivedTitle {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-}
-
-.archivedCount {
-  flex: 0 0 auto;
-  min-width: 20px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--secondary);
-  color: var(--secondary-foreground);
-  font-size: 11px;
-  font-weight: 500;
-}
-
 .archivedList {
   display: flex;
   flex-direction: column;
@@ -2398,4 +2362,25 @@ button.livePendingSession:hover {
   margin: -12px 0 12px;
   padding: 10px 4px;
   border-bottom: 1px solid var(--sidebar-border);
+}
+
+.homePopoverAnchor {
+  display: contents;
+}
+
+.homePopover {
+  width: min(
+    var(--collapsed-session-popover-width, 300px),
+    var(--radix-popover-content-available-width)
+  );
+  min-width: 0;
+  height: var(--radix-popover-content-available-height);
+  gap: 0;
+  border: 0;
+  transition: none;
+}
+
+.homePopover .homeColumn {
+  padding: 12px;
+  border-right: 0;
 }

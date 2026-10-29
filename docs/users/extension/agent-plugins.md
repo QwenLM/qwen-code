@@ -6,7 +6,7 @@ packages. The package keeps its standard `plugin.json`, `mcp.json`, and
 rewrite portable files.
 
 Use the existing extension commands with a local directory, link, archive,
-Git repository, archive URL, or scoped npm package:
+Git repository, archive URL, or npm package:
 
 ```bash
 qwen extensions install ./my-agent-plugin

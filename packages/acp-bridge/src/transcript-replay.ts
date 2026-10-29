@@ -88,6 +88,7 @@ export interface PendingTranscriptToolCall {
    * entry because a page can split between a call and its telemetry.
    */
   readonly timingMatched?: true;
+  readonly toolLifecycleExecutionId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -176,6 +177,16 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly errorMessage?: string;
   readonly artifacts?: readonly unknown[];
   readonly contentPrefix?: readonly ToolCallContent[];
+  /**
+   * Producer identity for the AgentTool call this result closes. Rebuilt by
+   * replay from the `task_execution` display so a reloaded session carries
+   * the same `_meta.agent` the live wire had.
+   */
+  readonly agent?: {
+    agentName: string;
+    depth: number;
+    kind: 'subagent';
+  };
 }
 
 export interface TranscriptTodoItem {
@@ -309,6 +320,9 @@ const AGENT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'cancelled',
   'offline',
 ] satisfies SessionAgentTerminalStatus[]);
+
+/** `SubagentValidator`'s name constraint, re-checked on the replay side. */
+const SUBAGENT_NAME_PATTERN = /^[\p{L}\p{N}_-]+$/u;
 
 function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
   if (
@@ -556,6 +570,7 @@ export function createTranscriptUsageUpdate(
  * worse than one that shows none.
  */
 export interface TranscriptTimingMeta {
+  readonly executionId?: string;
   readonly kind: 'request' | 'tool';
   /**
    * Epoch ms. A request is logged when its stream ends, so its start time is
@@ -604,6 +619,238 @@ export function createTranscriptTimingUpdate(
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: '' },
     _meta: meta,
+  } as SessionUpdate;
+}
+
+export type TranscriptToolLifecycle = {
+  readonly v: 1;
+  readonly kind: 'tool';
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly callId: string;
+  readonly toolName: string;
+  readonly subagentId?: string;
+} & (
+  | {
+      readonly phase: 'started';
+      readonly executionStatus: 'running';
+      readonly startedAt: number;
+    }
+  | {
+      readonly phase: 'ended';
+      readonly executionStatus: 'not_started';
+      readonly endedAt: number;
+      readonly outcome: 'success' | 'error' | 'cancelled';
+    }
+  | {
+      readonly phase: 'ended';
+      readonly executionStatus: 'success' | 'error' | 'cancelled';
+      readonly startedAt: number;
+      readonly endedAt: number;
+      readonly executionDurationMs: number;
+      readonly outcome: 'success' | 'error' | 'cancelled';
+    }
+);
+
+export function parseToolLifecycle(
+  value: unknown,
+): TranscriptToolLifecycle | undefined {
+  if (!isObjectRecord(value) || value['v'] !== 1 || value['kind'] !== 'tool')
+    return undefined;
+  const strings: Record<string, string> = {};
+  for (const key of ['executionId', 'sessionId', 'callId', 'toolName']) {
+    const entry = value[key];
+    if (typeof entry !== 'string' || !entry.trim()) return undefined;
+    strings[key] = entry;
+  }
+  const subagentId = value['subagentId'];
+  if (
+    subagentId !== undefined &&
+    (typeof subagentId !== 'string' || !subagentId.trim())
+  )
+    return undefined;
+  const shared = {
+    v: 1 as const,
+    kind: 'tool' as const,
+    executionId: strings['executionId']!,
+    sessionId: strings['sessionId']!,
+    callId: strings['callId']!,
+    toolName: strings['toolName']!,
+    ...(typeof subagentId === 'string' ? { subagentId } : {}),
+  };
+  const startedAt = finiteNumber(value['startedAt']);
+  if (value['phase'] === 'started') {
+    if (
+      value['executionStatus'] !== 'running' ||
+      startedAt === undefined ||
+      startedAt < 0 ||
+      value['endedAt'] !== undefined ||
+      value['outcome'] !== undefined ||
+      value['executionDurationMs'] !== undefined
+    )
+      return undefined;
+    return {
+      ...shared,
+      phase: 'started',
+      executionStatus: 'running',
+      startedAt,
+    };
+  }
+  if (value['phase'] !== 'ended') return undefined;
+  const endedAt = finiteNumber(value['endedAt']);
+  const outcome = value['outcome'];
+  if (
+    endedAt === undefined ||
+    endedAt < 0 ||
+    (outcome !== 'success' && outcome !== 'error' && outcome !== 'cancelled')
+  )
+    return undefined;
+  const executionStatus = value['executionStatus'];
+  if (executionStatus === 'not_started') {
+    if (
+      value['startedAt'] !== undefined ||
+      value['executionDurationMs'] !== undefined
+    )
+      return undefined;
+    return { ...shared, phase: 'ended', executionStatus, endedAt, outcome };
+  }
+  const executionDurationMs = finiteNumber(value['executionDurationMs']);
+  if (
+    (executionStatus !== 'success' &&
+      executionStatus !== 'error' &&
+      executionStatus !== 'cancelled') ||
+    startedAt === undefined ||
+    startedAt < 0 ||
+    endedAt < startedAt ||
+    executionDurationMs === undefined ||
+    executionDurationMs < 0
+  )
+    return undefined;
+  return {
+    ...shared,
+    phase: 'ended',
+    executionStatus,
+    startedAt,
+    endedAt,
+    executionDurationMs,
+    outcome,
+  };
+}
+
+export function createTranscriptToolLifecycleUpdate(
+  toolLifecycle: TranscriptToolLifecycle,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: toolLifecycle.callId,
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), toolLifecycle },
+    }),
+  } as SessionUpdate;
+}
+
+export type TranscriptExecutionLifecycle = {
+  readonly v: 1;
+  readonly kind: 'request';
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly promptId: string;
+  readonly model: string;
+  readonly startedAt: number;
+  readonly subagentId?: string;
+} & (
+  | { readonly phase: 'started' }
+  | {
+      readonly phase: 'ended';
+      readonly endedAt: number;
+      readonly durationMs: number;
+      readonly outcome: 'success' | 'error' | 'cancelled' | 'interrupted';
+      readonly reason?: 'consumer_closed';
+    }
+);
+
+export function parseExecutionLifecycle(
+  value: unknown,
+): TranscriptExecutionLifecycle | undefined {
+  if (
+    !isObjectRecord(value) ||
+    value['v'] !== 1 ||
+    value['kind'] !== 'request'
+  ) {
+    return undefined;
+  }
+  const strings: Record<string, string> = {};
+  for (const key of ['executionId', 'sessionId', 'promptId', 'model']) {
+    const entry = value[key];
+    if (typeof entry !== 'string' || !entry.trim()) return undefined;
+    strings[key] = entry;
+  }
+  const startedAt = finiteNumber(value['startedAt']);
+  if (startedAt === undefined || startedAt < 0) return undefined;
+  const subagentId = value['subagentId'];
+  if (
+    subagentId !== undefined &&
+    (typeof subagentId !== 'string' || !subagentId.trim())
+  ) {
+    return undefined;
+  }
+  const shared = {
+    v: 1 as const,
+    kind: 'request' as const,
+    executionId: strings['executionId']!,
+    sessionId: strings['sessionId']!,
+    promptId: strings['promptId']!,
+    model: strings['model']!,
+    startedAt,
+    ...(typeof subagentId === 'string' ? { subagentId } : {}),
+  };
+  if (value['phase'] === 'started') return { ...shared, phase: 'started' };
+  if (value['phase'] !== 'ended') return undefined;
+  const endedAt = finiteNumber(value['endedAt']);
+  const durationMs = finiteNumber(value['durationMs']);
+  const outcome = value['outcome'];
+  if (
+    endedAt === undefined ||
+    endedAt < startedAt ||
+    durationMs === undefined ||
+    durationMs < 0 ||
+    (outcome !== 'success' &&
+      outcome !== 'error' &&
+      outcome !== 'cancelled' &&
+      outcome !== 'interrupted')
+  ) {
+    return undefined;
+  }
+  if (
+    value['reason'] !== undefined &&
+    (value['reason'] !== 'consumer_closed' || outcome !== 'interrupted')
+  )
+    return undefined;
+  return {
+    ...shared,
+    phase: 'ended',
+    endedAt,
+    durationMs,
+    outcome,
+    ...(value['reason'] === 'consumer_closed'
+      ? { reason: 'consumer_closed' as const }
+      : {}),
+  };
+}
+
+export function createTranscriptExecutionLifecycleUpdate(
+  executionLifecycle: TranscriptExecutionLifecycle,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), executionLifecycle },
+    }),
   } as SessionUpdate;
 }
 
@@ -717,6 +964,9 @@ function parseTelemetryTiming(
   return {
     kind: 'request',
     ...shared,
+    ...(nonEmptyString(uiEvent['execution_id']) !== undefined
+      ? { executionId: nonEmptyString(uiEvent['execution_id']) }
+      : {}),
     ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
     status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
     ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
@@ -771,6 +1021,7 @@ export function createTranscriptToolCallResultUpdate(
         ...(options.artifacts && options.artifacts.length > 0
           ? { artifacts: options.artifacts }
           : {}),
+        ...(options.agent ? { agent: options.agent } : {}),
         ...(options.extra ?? {}),
       },
     }),
@@ -1432,6 +1683,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           resultDisplay,
           record.uuid,
         ),
+        // The live wire stamps `_meta.agent` on the AgentTool call from
+        // `SubAgentTracker`; persistence keeps only the `subagentName` in the
+        // `task_execution` display, so rebuild the root-parented identity
+        // here to keep a reloaded session attributable.
+        ...(isTaskExecutionDisplay(resultDisplay)
+          ? { agent: agentIdentityFromTaskExecution(resultDisplay) }
+          : {}),
         ...meta,
       }),
     );
@@ -1463,6 +1721,54 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       // with no carried state. Stateless frames survive any page split; the
       // client pairs them across its own contiguous event window.
       if (!this.options.includeTiming) return;
+      const payload = record.systemPayload;
+      const uiEvent = isObjectRecord(payload) ? payload['uiEvent'] : undefined;
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'request_lifecycle'
+      ) {
+        const lifecycle = parseExecutionLifecycle(uiEvent);
+        if (lifecycle)
+          yield emit(createTranscriptExecutionLifecycleUpdate(lifecycle, meta));
+        return;
+      }
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'tool_lifecycle'
+      ) {
+        const lifecycle = parseToolLifecycle(uiEvent);
+        if (lifecycle) {
+          let callId = lifecycle.callId;
+          if (!lifecycle.subagentId) {
+            const candidates = [...this.pendingToolCalls.values()].filter(
+              (pending) =>
+                (pending.rawCallId ?? pending.callId) === lifecycle.callId &&
+                (pending.toolName === lifecycle.toolName ||
+                  pending.resolvedToolName === lifecycle.toolName),
+            );
+            const pending =
+              candidates.find(
+                (item) =>
+                  item.toolLifecycleExecutionId === lifecycle.executionId,
+              ) ??
+              candidates.find(
+                (item) => item.toolLifecycleExecutionId === undefined,
+              );
+            if (pending) {
+              callId = pending.callId;
+              this.pendingToolCalls.set(callId, {
+                ...pending,
+                toolLifecycleExecutionId: lifecycle.executionId,
+              });
+            }
+          }
+          yield emit({
+            ...createTranscriptToolLifecycleUpdate(lifecycle, meta),
+            toolCallId: callId,
+          } as SessionUpdate);
+        }
+        return;
+      }
       const timing = parseTelemetryTiming(record.systemPayload);
       if (!timing) return;
       yield emit(
@@ -2069,6 +2375,10 @@ function parseInitialState(
           ...(typeof pending['rawCallId'] === 'string'
             ? { rawCallId: pending['rawCallId'] }
             : {}),
+          ...(typeof pending['toolLifecycleExecutionId'] === 'string' &&
+          pending['toolLifecycleExecutionId'].length > 0
+            ? { toolLifecycleExecutionId: pending['toolLifecycleExecutionId'] }
+            : {}),
           ...(pending['timingMatched'] === true
             ? { timingMatched: true as const }
             : {}),
@@ -2367,6 +2677,44 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
   });
 }
 
+function agentIdentityFromTaskExecution(
+  display: Record<string, unknown>,
+): { agentName: string; depth: number; kind: 'subagent' } | undefined {
+  const subagentName = display['subagentName'];
+  if (typeof subagentName !== 'string' || subagentName.length === 0) {
+    return undefined;
+  }
+  // `executionMode` separates a validated name from the raw model-supplied
+  // `subagent_type` (`buildSpawnBlockedResult` sets neither), but it is written
+  // by rejection paths too — worktree-provisioning failure and the foreground
+  // model-slot cancel both persist it for a subagent whose session never
+  // registered. `subagentSessionReady` is the positive evidence that a session
+  // existed, so a mode-shaped display without it stays unattributed rather
+  // than minting an identity the live wire never stamped.
+  const executionMode = display['executionMode'];
+  if (executionMode === 'foreground' || executionMode === 'background') {
+    if (display['subagentSessionReady'] !== true) return undefined;
+  } else {
+    // Positive allowlist. A persisted record may come from a truncated or
+    // older writer, so an absent or non-string status is not evidence that
+    // anything ran; a negative allowlist would mint on exactly that input.
+    const status = display['status'];
+    if (
+      typeof status !== 'string' ||
+      (status !== 'completed' &&
+        status !== 'running' &&
+        status !== 'background' &&
+        status !== 'cancelled')
+    ) {
+      return undefined;
+    }
+  }
+  if (!SUBAGENT_NAME_PATTERN.test(subagentName)) return undefined;
+  // A persisted `task_execution` carries no lineage beyond its own type name,
+  // so replay can only ever rebuild the root-parented form; nested identity
+  // still requires the live wire.
+  return { agentName: `/root/${subagentName}`, depth: 1, kind: 'subagent' };
+}
 function isTaskExecutionDisplay(
   value: unknown,
 ): value is Record<string, unknown> {

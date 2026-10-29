@@ -19,6 +19,7 @@ import { getSelectedText } from '../selection/selection-text.js';
 import { fitPendingSlice } from './pending-rendered-height.js';
 import * as codeColorizer from './CodeColorizer.js';
 import * as latexRenderer from './latexRenderer.js';
+import { splitFencedMarkdown } from './markdown-utilities.js';
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -435,6 +436,37 @@ describe('<MarkdownDisplay />', () => {
       );
       expect(lastFrame()).toMatchSnapshot();
     });
+
+    it.each([
+      ['~~~', '```'],
+      ['```', '~~~'],
+    ])(
+      'renders %s code across an inner %s line after a streaming split',
+      (outer, inner) => {
+        const text =
+          `${outer}md\nHere:\n${inner}\nstill inside\n${outer}\nAfter.`.replace(
+            /\n/g,
+            eol,
+          );
+        const { after } = splitFencedMarkdown(text, text.indexOf('still'));
+        for (const renderedText of [text, after]) {
+          for (const isPending of [false, true]) {
+            const { lastFrame, unmount } = renderWithProviders(
+              <MarkdownDisplay
+                {...baseProps}
+                text={renderedText}
+                isPending={isPending}
+              />,
+            );
+            const frame = stripAnsi(lastFrame() ?? '');
+            expect(frame).toMatch(/3\s+still inside/);
+            expect(frame).toContain('After.');
+            expect(frame).not.toContain('qwen-code');
+            unmount();
+          }
+        }
+      },
+    );
 
     it('clips a long pending message to availableTerminalHeight', () => {
       // A long streaming message must NOT render all its lines: the live
