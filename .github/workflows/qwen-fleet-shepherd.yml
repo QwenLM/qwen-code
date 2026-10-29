@@ -311,8 +311,8 @@ jobs:
           # token is contents:read and cannot create a dispatch, so the write
           # rides CI_DEV_BOT_PAT like every other PAT write here, and every PAT
           # write must first prove it is the bot. A rotated or misconfigured
-          # secret then costs this tick one warning instead of minting rescues
-          # attributed to a human account.
+          # secret then fails the tick at the identity gate instead of minting
+          # rescues attributed to a human account.
           #
           # ONE table decides everything here, and it is the same table the
           # design note carries. A run belongs to a LIVE lane if it is a
@@ -334,11 +334,13 @@ jobs:
           # KNOWN LIMITATION, accepted deliberately: a wedged holder — a run
           # GitHub created and never started, the class documented at
           # ZOMBIE_QUEUED_MINUTES — suppresses the rescue for as long as it sits
-          # there. The remedy is the one this file already documents: check
-          # `gh run view <id> --json jobs` and delete the wedged run, which the
-          # dashboard's wedge banner names. Automating that was judged worse than
-          # the manual step, because the automatic version kept misreading a
-          # merely slow pool as a dead one.
+          # there. The remedy is manual: list this workflow's own runs
+          # (`gh run list --workflow qwen-fleet-shepherd.yml`), check
+          # `gh run view <id> --json jobs` on the one that never started, and
+          # delete it. The dashboard's wedge banner cannot name it — that banner
+          # is built from autofix runs, not from these. Automating the delete was
+          # judged worse than the manual step, because the automatic version kept
+          # misreading a merely slow pool as a dead one.
           #
           # Completion, not success: a shepherd that fails on every tick is
           # broken, not starved, and re-dispatching it each watch would multiply

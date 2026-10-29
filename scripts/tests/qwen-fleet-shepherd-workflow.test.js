@@ -3727,7 +3727,8 @@ exit 1`;
       try {
         // `runs: null` is the unreadable arm (no fixture at all); `runs: []`
         // is the empty ARRAY arm. Both must take no action, for different
-        // reasons, and both land in the same `unusable` log line.
+        // reasons: a failed read logs `unreadable`, a successful read that
+        // yields nothing logs `unusable`.
         if (runs !== null) {
           writeFileSync(join(dir, 'fixture.json'), JSON.stringify(runs));
         }
@@ -3825,7 +3826,7 @@ ACTIONS_TOKEN='workflow-token-value'
       ],
     });
     expect(selfAndSibling.log).toContain('dispatched a rescue');
-    expect(selfAndSibling.log).not.toContain('a tick is in progress');
+    expect(selfAndSibling.log).not.toContain('a live run is queued or running');
 
     // A fresh completion → no dispatch. updatedAt is what counts: a run that
     // queued for two hours and finished a minute ago is FRESH.
@@ -3974,11 +3975,10 @@ ACTIONS_TOKEN='workflow-token-value'
 
     // At most one outstanding rescue: it keeps its queue position in its own
     // group, so a second would only add pressure.
-    // The rescue must be IN PROGRESS here, not merely pending: a pending
-    // rescue is no longer counted by the in-flight gate, so only a running one
-    // makes the gate ORDER observable. With a pending fixture, moving the
-    // rescue gate back to second stays green — the mutation this case exists
-    // for would survive.
+    // The rescue must be IN PROGRESS here. A pending rescue trips the
+    // in-flight gate as well, so either state makes the ORDER observable — but
+    // a running one is the case an operator actually hits, and it keeps this
+    // fixture honest if the in-flight rule is ever narrowed again.
     const queued = replay({
       runs: [
         staleTick,
@@ -5023,7 +5023,7 @@ ${section.replace(/\n {10}/g, '\n')}`,
     expect(marker).toBeTruthy();
     const PREV =
       '<!-- fleet-shepherd queue-sample: ts=2026-10-27T23:45:00Z ids=1,2,3 -->';
-    const emit = (ok, complete, prev = PREV) =>
+    const emit = (ok, complete, prev = PREV, n = '2') =>
       execFileSync(
         'bash',
         [
@@ -5031,7 +5031,7 @@ ${section.replace(/\n {10}/g, '\n')}`,
           `set -eo pipefail
 QUEUE_OK='${ok}'
 QUEUE_COMPLETE='${complete}'
-QUEUE_N='2'
+QUEUE_N='${n}'
 QUEUE_IDS='7,8'
 PREV_QUEUE_LINE='${prev}'
 ${marker.replace(/\n {12}/g, '\n')}`,
@@ -5050,5 +5050,11 @@ ${marker.replace(/\n {12}/g, '\n')}`,
     // Nothing to carry forward → no marker at all, never an empty one that
     // would read as "the queue was empty".
     expect(emit('false', 'false', '')).toBe('');
+    // A complete, readable tick that enumerated NOTHING must not record a
+    // sample either: it would erase the baseline with an empty id set. This is
+    // the arm the `QUEUE_N -gt 0` clause exists for, and without this case
+    // deleting that clause leaves the suite green.
+    expect(emit('true', 'true', PREV, '0')).toBe(PREV);
+    expect(emit('true', 'true', '', '0')).toBe('');
   });
 });
