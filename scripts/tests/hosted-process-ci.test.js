@@ -169,6 +169,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run refused cleanup release E2E',
+    'test:e2e:managed-harness-restart-approval-cleanup-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'cleanup-failed',
+    ],
+  ],
+  [
     'Run Harness-restart continuation closeout E2E',
     'test:e2e:managed-harness-restart-continuation-closeout',
     ['--continuation-failover', '--harness-only', '--g3-verify continuation'],
@@ -298,20 +310,14 @@ describe('Hosted real-process gates', () => {
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    // The non-Hosted slice runs once per engine, so the Hosted lane stays the
-    // only place Hosted*IT executes while MariaDB keeps a real leg (#14971).
+    // Hosted*IT executes only in the separate Hosted lane.
     const nonHostedLane = java.jobs['mysql-integration'];
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mysql:8.4.6' }),
-    );
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mariadb:10.11.18' }),
-    );
+    expect(nonHostedLane.strategy).toBeUndefined();
     expect(
       nonHostedLane.steps.find(
         (step) => step.name === 'Start the database without native AIO',
       ).run,
-    ).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -607,8 +613,8 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 291, 304],
-    // Twenty-two failover arms at 10 each.
-    ['hosted-failover-e2e', 220, 235],
+    // Twenty-three failover arms at 10 each.
+    ['hosted-failover-e2e', 230, 245],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
