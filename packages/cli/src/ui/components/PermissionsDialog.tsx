@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as nodePath from 'node:path';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -25,12 +26,11 @@ import type {
   RuleType,
 } from '@qwen-code/qwen-code-core/permissions/types.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
-  shortenPath,
-  tildeifyPath,
-} from '@qwen-code/qwen-code-core/utils/paths.js';
-import { getCachedStringWidth } from '../utils/textUtils.js';
+  SCOPE_LABEL_GAP,
+  permissionScopeItems,
+  scopeRowWidth,
+} from '../utils/permission-scope-row.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 
 // ---------------------------------------------------------------------------
@@ -54,71 +54,6 @@ type DialogView =
   | 'ws-dir-list' // workspace directory list
   | 'ws-add-dir-input' // text input for adding a directory
   | 'ws-remove-confirm'; // confirm directory removal
-
-// ---------------------------------------------------------------------------
-// Scope items (matches Claude Code screenshot layout)
-// ---------------------------------------------------------------------------
-
-interface PermScopeItem {
-  label: string;
-  description: string;
-  value: SettingScope;
-  key: string;
-}
-
-export function getPermScopeItems(): PermScopeItem[] {
-  const userLabel = t('User settings');
-  return [
-    {
-      label: t('Project settings'),
-      description: t('Checked in at .qwen/settings.json'),
-      value: SettingScope.Workspace,
-      key: 'project',
-    },
-    {
-      label: userLabel,
-      description: t(SAVED_IN_TEMPLATE, {
-        path: savedSettingsPath(userLabel),
-      }),
-      value: SettingScope.User,
-      key: 'user',
-    },
-  ];
-}
-
-/**
- * An 80-column terminal leaves this row 67 columns for
- * `label + gap + description`. Budgeting the path from the localized label and
- * the rest of the template keeps the file name visible in every locale; a fixed
- * character budget sized for English let longer translations clip the name away.
- */
-const SCOPE_ROW_COLUMNS = 67;
-const SCOPE_LABEL_GAP = 4;
-const SAVED_IN_TEMPLATE = 'Saved in {{path}}';
-
-function savedSettingsPath(label: string): string {
-  const nonPathWidth = getCachedStringWidth(t(SAVED_IN_TEMPLATE, { path: '' }));
-  const budget =
-    SCOPE_ROW_COLUMNS -
-    getCachedStringWidth(label) -
-    SCOPE_LABEL_GAP -
-    nonPathWidth;
-  const settingsPath = tildeifyPath(Storage.getGlobalSettingsPath());
-  // shortenPath budgets code units, but this row is clipped in display
-  // columns: wide characters make a path wider than its length, so charge that
-  // overhead first or a path that fits the budget is clipped and loses its
-  // file name.
-  const widthOverhead =
-    getCachedStringWidth(settingsPath) - settingsPath.length;
-  const shortened = shortenPath(
-    settingsPath,
-    Math.max(10, budget - Math.max(0, widthOverhead)),
-  );
-  const name = settingsPath.slice(settingsPath.lastIndexOf(nodePath.sep) + 1);
-  // shortenPath always keeps the first segment, which can crowd out the file
-  // name this row exists to show; keep the name alone when that happens.
-  return shortened.includes(name) ? shortened : `...${nodePath.sep}${name}`;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -194,6 +129,7 @@ export function PermissionsDialog({
   const config = useConfig();
   const settings = useSettings();
   const pm = config.getPermissionManager?.() as PermissionManager | null;
+  const { columns } = useTerminalSize();
 
   // --- Tab state ---
   const tabs = useMemo(() => getTabs(), []);
@@ -885,7 +821,9 @@ export function PermissionsDialog({
   }
 
   if (view === 'add-rule-scope') {
-    const scopeItems = getPermScopeItems();
+    // The frame spends a border and a padding column on each side; the list
+    // then charges its cursor box and number gutter.
+    const scopeItems = permissionScopeItems(scopeRowWidth(columns - 4, 2));
     return (
       <Box flexDirection="column">
         <Box
@@ -908,7 +846,7 @@ export function PermissionsDialog({
           <Text>{t('Where should this rule be saved?')}</Text>
           <RadioButtonSelect
             items={scopeItems.map((s) => ({
-              label: `${s.label}    ${s.description}`,
+              label: `${s.label}${' '.repeat(SCOPE_LABEL_GAP)}${s.description}`,
               value: s.value,
               key: s.key,
             }))}

@@ -24,13 +24,8 @@ import { useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
-import { SettingScope } from '../../config/settings.js';
+import type { SettingScope } from '../../config/settings.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import {
-  shortenPath,
-  tildeifyPath,
-} from '@qwen-code/qwen-code-core/utils/paths.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
@@ -49,6 +44,11 @@ import {
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 
+import {
+  SCOPE_LABEL_GAP,
+  permissionScopeItems,
+  scopeRowWidth,
+} from '../utils/permission-scope-row.js';
 import {
   getCachedStringWidth,
   sanitizeTerminalLine,
@@ -116,66 +116,6 @@ export function permissionScopeLabel(scope: string): string {
     default:
       return scope;
   }
-}
-
-/** Parity of getPermScopeItems in PermissionsDialog.tsx. */
-export function getPermissionScopeItems(): Array<{
-  label: string;
-  description: string;
-  value: SettingScope;
-  key: string;
-}> {
-  const userLabel = t('User settings');
-  return [
-    {
-      label: t('Project settings'),
-      description: t('Checked in at .qwen/settings.json'),
-      value: SettingScope.Workspace,
-      key: 'project',
-    },
-    {
-      label: userLabel,
-      description: t(SAVED_IN_TEMPLATE, {
-        path: savedSettingsPath(userLabel),
-      }),
-      value: SettingScope.User,
-      key: 'user',
-    },
-  ];
-}
-
-/**
- * An 80-column terminal leaves this row 67 columns for
- * `label + gap + description`. Budgeting the path from the localized label and
- * the rest of the template keeps the file name visible in every locale; a fixed
- * character budget sized for English let longer translations clip the name away.
- */
-const SCOPE_ROW_COLUMNS = 67;
-const SCOPE_LABEL_GAP = 4;
-const SAVED_IN_TEMPLATE = 'Saved in {{path}}';
-
-function savedSettingsPath(label: string): string {
-  const nonPathWidth = getCachedStringWidth(t(SAVED_IN_TEMPLATE, { path: '' }));
-  const budget =
-    SCOPE_ROW_COLUMNS -
-    getCachedStringWidth(label) -
-    SCOPE_LABEL_GAP -
-    nonPathWidth;
-  const settingsPath = tildeifyPath(Storage.getGlobalSettingsPath());
-  // shortenPath budgets code units, but this row is clipped in display
-  // columns: wide characters make a path wider than its length, so charge that
-  // overhead first or a path that fits the budget is clipped and loses its
-  // file name.
-  const widthOverhead =
-    getCachedStringWidth(settingsPath) - settingsPath.length;
-  const shortened = shortenPath(
-    settingsPath,
-    Math.max(10, budget - Math.max(0, widthOverhead)),
-  );
-  const name = settingsPath.slice(settingsPath.lastIndexOf(nodePath.sep) + 1);
-  // shortenPath always keeps the first segment, which can crowd out the file
-  // name this row exists to show; keep the name alone when that happens.
-  return shortened.includes(name) ? shortened : `...${nodePath.sep}${name}`;
 }
 
 /** One scope row, clipped with an ellipsis when it cannot fit the column budget. */
@@ -409,19 +349,21 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     },
   });
 
-  const scopeItems = getPermissionScopeItems().map((s) => ({
-    ...s,
-    key: s.key,
-    value: s.value,
-  }));
+  // The scope step's DialogFrame pays its border and padding first, so the row
+  // budget is four columns narrower than the region.
+  const scopeItems = permissionScopeItems(scopeRowWidth(areaWidth - 4, 2)).map(
+    (s) => ({
+      ...s,
+      key: s.key,
+      value: s.value,
+    }),
+  );
   // ink gives every row `wrap="truncate"`; an unclipped rule or path wraps
   // its row into two physical rows the window charged as one. DialogSelect
   // sizes the number box from the full list's length, so the label's budget
   // is the container's width minus the `›` box (2) and that box — the bare
   // region's width for the list views, four columns less for the scope step,
   // whose DialogFrame pays border and padding first.
-  const rowLabelWidth = (containerWidth: number, itemCount: number) =>
-    Math.max(0, containerWidth - 2 - (String(itemCount).length + 2));
   // The scope step's chrome: the frame (4), the two spacer rows (2) and the
   // footer's margin row (1) are the rows no run can wrap into; the title,
   // the question and the footer are charged the rows they wrap into at the
@@ -743,7 +685,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             <text fg={titleColor}>
               {truncateToWidth(
                 sanitizeTerminalLine(item.label),
-                rowLabelWidth(areaWidth, dirListItems.length),
+                scopeRowWidth(areaWidth, dirListItems.length),
               )}
             </text>
           )}
@@ -827,7 +769,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               <text fg={titleColor}>
                 {formatScopeRow(
                   item,
-                  rowLabelWidth(areaWidth - 4, scopeItems.length),
+                  scopeRowWidth(areaWidth - 4, scopeItems.length),
                 )}
               </text>
             )}
@@ -936,7 +878,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           <text fg={titleColor}>
             {truncateToWidth(
               sanitizeTerminalLine(item.label),
-              rowLabelWidth(areaWidth, ruleListItems.length),
+              scopeRowWidth(areaWidth, ruleListItems.length),
             )}
           </text>
         )}

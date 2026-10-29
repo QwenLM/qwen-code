@@ -7,11 +7,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
-import { getPermScopeItems } from './PermissionsDialog.js';
+import {
+  SCOPE_LABEL_GAP,
+  permissionScopeItems,
+} from '../utils/permission-scope-row.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
 
-describe('getPermScopeItems', () => {
+describe('permissionScopeItems', () => {
   const originalQwenHome = process.env['QWEN_HOME'];
   // Anchored at the filesystem root so the fixture can never sit under the
   // home directory, where tildeifyPath would rewrite it to `~/...`.
@@ -30,14 +33,14 @@ describe('getPermScopeItems', () => {
 
   it('shortens the default global settings path to a tilde', () => {
     delete process.env['QWEN_HOME'];
-    expect(getPermScopeItems()[1]?.description).toBe(
+    expect(permissionScopeItems(67)[1]?.description).toBe(
       `Saved in ~${nodePath.sep}.qwen${nodePath.sep}settings.json`,
     );
   });
 
   it('names the resolved global directory when QWEN_HOME is set', () => {
     process.env['QWEN_HOME'] = qwenHome;
-    expect(getPermScopeItems()[1]?.description).toBe(
+    expect(permissionScopeItems(67)[1]?.description).toBe(
       `Saved in ${qwenHome}${nodePath.sep}settings.json`,
     );
   });
@@ -50,14 +53,22 @@ describe('getPermScopeItems', () => {
       'shared',
       'fixtures',
     );
-    const description = getPermScopeItems()[1]?.description ?? '';
+    const description = permissionScopeItems(67)[1]?.description ?? '';
     expect(description.endsWith(`${nodePath.sep}settings.json`)).toBe(true);
     // 50 is the description column this row gets at an 80-column terminal.
     expect(description.length).toBeLessThanOrEqual(50);
   });
+
+  it('strips control characters from a path taken from the environment', () => {
+    process.env['QWEN_HOME'] = `${qwenHome}\n\x1b[2J`;
+    const description = permissionScopeItems(67)[1]?.description ?? '';
+
+    expect(description).not.toContain('\n');
+    expect(description).not.toContain('\x1b');
+  });
 });
 
-describe('getPermScopeItems row width', () => {
+describe('permissionScopeItems row width', () => {
   const originalQwenHome = process.env['QWEN_HOME'];
   const deepQwenHome = nodePath.join(
     nodePath.parse(os.tmpdir()).root,
@@ -93,12 +104,12 @@ describe('getPermScopeItems row width', () => {
     async (language) => {
       process.env['QWEN_HOME'] = deepQwenHome;
       await setLanguageAsync(language);
-      const item = getPermScopeItems()[1]!;
+      const item = permissionScopeItems(ROW_COLUMNS)[1]!;
 
       expect(item.description).toContain('settings.json');
       expect(
         getCachedStringWidth(item.label) +
-          4 +
+          SCOPE_LABEL_GAP +
           getCachedStringWidth(item.description),
       ).toBeLessThanOrEqual(ROW_COLUMNS);
     },
@@ -109,14 +120,23 @@ describe('getPermScopeItems row width', () => {
     async (language) => {
       process.env['QWEN_HOME'] = wideQwenHome;
       await setLanguageAsync(language);
-      const item = getPermScopeItems()[1]!;
+      const item = permissionScopeItems(ROW_COLUMNS)[1]!;
 
       expect(item.description).toContain('settings.json');
       expect(
         getCachedStringWidth(item.label) +
-          4 +
+          SCOPE_LABEL_GAP +
           getCachedStringWidth(item.description),
       ).toBeLessThanOrEqual(ROW_COLUMNS);
     },
   );
+
+  it('budgets from the row it is given, not from an 80-column terminal', () => {
+    process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+    const item = permissionScopeItems(60)[1]!;
+    const row = `${item.label}${' '.repeat(SCOPE_LABEL_GAP)}${item.description}`;
+
+    expect(row).toContain('settings.json');
+    expect(getCachedStringWidth(row)).toBeLessThanOrEqual(60);
+  });
 });
