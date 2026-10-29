@@ -247,6 +247,16 @@ function recordPage(
   };
 }
 
+function readBranchRecordId(update: SessionUpdate): string | undefined {
+  const meta = (update as { _meta?: Record<string, unknown> })._meta;
+  const transcript =
+    meta && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const branchRecordId = transcript?.['branchRecordId'];
+  return typeof branchRecordId === 'string' ? branchRecordId : undefined;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -459,16 +469,6 @@ describe('history replay page', () => {
       encodeCursor: vi.fn(),
     });
 
-    const readBranchRecordId = (update: SessionUpdate): string | undefined => {
-      const meta = (update as { _meta?: Record<string, unknown> })._meta;
-      const transcript =
-        meta && typeof meta['qwenTranscript'] === 'object'
-          ? (meta['qwenTranscript'] as Record<string, unknown>)
-          : undefined;
-      const branchRecordId = transcript?.['branchRecordId'];
-      return typeof branchRecordId === 'string' ? branchRecordId : undefined;
-    };
-
     const decorated = result.updates.filter(
       (update) => readBranchRecordId(update) !== undefined,
     );
@@ -491,6 +491,46 @@ describe('history replay page', () => {
     );
     expect(firstChunk).toBeDefined();
     expect(readBranchRecordId(firstChunk!)).toBeUndefined();
+  });
+
+  it('stamps load-replay updates with the checkpoint of their source record', async () => {
+    // ACP session/load replays through collectHistoryReplayUpdates; the
+    // restored window must carry branchRecordId or Web Shell hides Branch
+    // (#13782).
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [assistantRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      branchPointsByAssistantUuid: {
+        'assistant-record': 'checkpoint-record',
+      },
+    });
+
+    const chunks = result.updates.filter(
+      (update) => update.sessionUpdate === 'agent_message_chunk',
+    );
+    expect(chunks).not.toHaveLength(0);
+    const decorated = chunks.filter(
+      (update) => readBranchRecordId(update) !== undefined,
+    );
+    expect(decorated).toHaveLength(1);
+    expect(readBranchRecordId(decorated[0]!)).toBe('checkpoint-record');
+    expect(decorated[0]).toMatchObject({
+      content: { type: 'text', text: 'answer' },
+    });
+  });
+
+  it('leaves load-replay updates without branch points undecorated', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [assistantRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.updates).not.toHaveLength(0);
+    for (const update of result.updates) {
+      expect(readBranchRecordId(update)).toBeUndefined();
+    }
   });
 
   it('fails incrementally before collecting an update above the count limit', async () => {
@@ -1418,6 +1458,77 @@ describe('history replay page', () => {
 });
 
 describe('Managed streaming replay', () => {
+  it('counts branch metadata inside the existing bulk byte budget', async () => {
+    const original = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [assistantRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [assistantRecord()],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: {
+          maxBytes: Buffer.byteLength(JSON.stringify(original.updates), 'utf8'),
+          maxUpdates: 10,
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: HistoryReplayLimitError.name,
+      reason: 'bytes',
+    });
+  });
+
+  it('stamps the last visible streamed chunk before reading the next record', async () => {
+    const updates: SessionUpdate[] = [];
+    const records = {
+      async *[Symbol.asyncIterator]() {
+        yield {
+          ...assistantRecord(),
+          message: {
+            role: 'model' as const,
+            parts: [
+              { text: 'first' },
+              { text: 'thought', thought: true },
+              { text: 'last' },
+            ],
+          },
+        };
+        const decorated = updates.filter(
+          (update) => readBranchRecordId(update) !== undefined,
+        );
+        expect(decorated).toHaveLength(1);
+        expect(decorated[0]).toMatchObject({
+          content: { type: 'text', text: 'last' },
+          _meta: { 'qwen.session.recordId': 'assistant-record' },
+        });
+        expect(readBranchRecordId(decorated[0]!)).toBe('checkpoint-record');
+        yield { ...assistantRecord(), uuid: 'next-record' };
+      },
+    };
+    await streamHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records,
+      branchPointsByAssistantUuid: {
+        'assistant-record': 'checkpoint-record',
+      },
+      cumulativeUsage: createReplayCumulativeUsage(),
+      sendUpdate: async (update) => {
+        updates.push(update);
+      },
+    });
+    expect(updates.filter((update) => readBranchRecordId(update))).toHaveLength(
+      1,
+    );
+    expect(updates.at(-1)).toMatchObject({
+      _meta: { 'qwen.session.recordId': 'next-record' },
+    });
+  });
+
   it('delivers each record before reading the next without accumulating a replay array', async () => {
     let sent = 0;
     let opened = 0;

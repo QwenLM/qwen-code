@@ -469,6 +469,54 @@ describe('Managed transcript disk queries', () => {
     expect(exported.map((record) => record.uuid)).toContain('goal-1');
   });
 
+  it.each(['recent', 'all'] as const)(
+    'retains certified branch points on a frozen managed %s restore',
+    async (kind) => {
+      const h = await harness();
+      await h.write('u1', 'user', null);
+      await h.write('a1', 'assistant', 'u1');
+      await h.write('checkpoint-1', 'system', 'a1', {
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: 'u1',
+          assistantRecordUuid: 'a1',
+        } as ChatRecord['systemPayload'],
+      });
+      const projection = await h.reader.readLiveRestoreProjection(SESSION, {
+        replay:
+          kind === 'recent'
+            ? { kind, limit: 20, hideInheritedHistory: false }
+            : { kind, hideInheritedHistory: false },
+      });
+      if (kind === 'recent') {
+        expect(projection?.replay?.branchPointsByAssistantUuid).toEqual({
+          a1: 'checkpoint-1',
+        });
+        return;
+      }
+      expect(projection?.replay?.records).toEqual([]);
+      expect(projection?.replay?.branchPointsByAssistantUuid).toBeUndefined();
+      expect(projection?.replay?.branchPointForRecord).toBeTypeOf('function');
+      await h.write('u2', 'user', 'checkpoint-1');
+      await h.write('a2', 'assistant', 'u2');
+      await h.write('checkpoint-2', 'system', 'a2', {
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: 'u2',
+          assistantRecordUuid: 'a2',
+        } as ChatRecord['systemPayload'],
+      });
+      const lookup = projection!.replay!.branchPointForRecord!;
+      const records = await collect(projection!.replay!.recordHistory!);
+      expect(records.map((record) => record.uuid)).not.toContain('a2');
+      const assistant = records.find((record) => record.uuid === 'a1')!;
+      expect(lookup(assistant)).toBe('checkpoint-1');
+      expect(lookup({ ...assistant, uuid: 'a2' })).toBeUndefined();
+    },
+  );
+
   it('keeps turn/tool-result boundaries and certified branch points when paging backwards', async () => {
     const h = await harness();
     await h.write('u1', 'user', null);

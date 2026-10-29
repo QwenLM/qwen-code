@@ -5,6 +5,7 @@
  */
 
 import { tmpdir } from 'node:os';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { HistoryReplayLimitError } from './history-replay-limit.js';
 import { FileManagedSessionHistory } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import type {
@@ -23,6 +24,7 @@ import {
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
   type PendingTranscriptToolCall,
   type TranscriptReplayMachine,
+  type TranscriptReplayEmission,
   type TranscriptReplayPresentationAdapter,
   type TranscriptReplayStateV1,
 } from '@qwen-code/acp-bridge/transcriptReplay';
@@ -65,6 +67,7 @@ export interface HistoryReplayPageOptions {
    * bulk `replay()` path, which runs against a fixed update cap, does not.
    */
   includeTiming?: boolean;
+  branchPointForRecord?: (record: ChatRecord) => string | undefined;
 }
 
 export type HistoryReplayRecords =
@@ -113,6 +116,7 @@ export class HistoryReplayer {
       goalBootstrap?: HistoryReplayGoalBootstrap;
       skipFinalizeCallIds?: ReadonlySet<string>;
       finalizeDangling?: boolean;
+      branchPointForRecord?: (record: ChatRecord) => string | undefined;
     } = {},
   ): Promise<void> {
     try {
@@ -132,6 +136,9 @@ export class HistoryReplayer {
       await this.replayPage(records, {
         finalizeDangling: options.finalizeDangling ?? true,
         gaps,
+        ...(options.branchPointForRecord
+          ? { branchPointForRecord: options.branchPointForRecord }
+          : {}),
         ...(options.skipFinalizeCallIds
           ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
           : {}),
@@ -201,12 +208,24 @@ export class HistoryReplayer {
           const emissions = scratch
             ? this.machine.projectAsync(record, claim)
             : this.machine.project(record);
+          const branchPoint =
+            record.type === 'assistant'
+              ? options.branchPointForRecord?.(record)
+              : undefined;
+          const buffered: TranscriptReplayEmission[] | undefined =
+            branchPoint === undefined ? undefined : [];
           for await (const emission of emissions) {
-            this.setActiveRecordId(
-              emission.sourceRecordId,
-              emission.sourceTimestamp,
+            if (buffered) buffered.push(emission);
+            else await this.sendEmission(emission);
+          }
+          if (buffered) {
+            const branchPoints: Record<string, string> = Object.create(null);
+            branchPoints[record.uuid] = branchPoint!;
+            stampBranchPoints(
+              buffered.map((emission) => emission.update),
+              branchPoints,
             );
-            await this.sendUpdate(emission.update);
+            for (const emission of buffered) await this.sendEmission(emission);
           }
         }
       } catch (error) {
@@ -310,6 +329,13 @@ export class HistoryReplayer {
     };
   }
 
+  private async sendEmission(
+    emission: TranscriptReplayEmission,
+  ): Promise<void> {
+    this.setActiveRecordId(emission.sourceRecordId, emission.sourceTimestamp);
+    await this.sendUpdate(emission.update);
+  }
+
   private async sendUpdate(
     update: Parameters<SessionEmitterContext['sendUpdate']>[0],
   ): Promise<void> {
@@ -364,4 +390,67 @@ function toLegacyPendingToolCall(
     ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
     ...(pending.timingMatched ? { timingMatched: true as const } : {}),
   };
+}
+
+function readTranscriptSourceRecordIds(
+  update: SessionUpdate,
+): string[] | undefined {
+  const value = update as unknown as Record<string, unknown>;
+  const meta =
+    value['_meta'] && typeof value['_meta'] === 'object'
+      ? (value['_meta'] as Record<string, unknown>)
+      : undefined;
+  const transcript =
+    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const sourceRecordIds = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(sourceRecordIds)) return undefined;
+  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
+}
+
+// A checkpoint marks the END of its source record, which can replay as
+// several chunks (text/thought/text). Only the LAST visible assistant chunk
+// of the record may expose the branch point: an earlier chunk would restore
+// the record's later content when branched from, and an empty-text usage
+// chunk normalizes to `assistant.usage`, which drops the metadata.
+export function stampBranchPoints(
+  updates: SessionUpdate[],
+  branchPoints: Readonly<Record<string, string>>,
+): void {
+  const lastChunkIndexByRecordId = new Map<string, number>();
+  updates.forEach((update, index) => {
+    if (update.sessionUpdate !== 'agent_message_chunk') return;
+    const text = (update as { content?: { text?: unknown } }).content?.text;
+    if (typeof text !== 'string' || text.length === 0) return;
+    for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+      // Own-property check: transcript record uuids are untrusted input,
+      // and names like 'toString' would otherwise pass via the prototype
+      // chain.
+      if (Object.hasOwn(branchPoints, recordId)) {
+        lastChunkIndexByRecordId.set(recordId, index);
+      }
+    }
+  });
+  const decoratedIndexes = new Set<number>();
+  for (const [recordId, index] of lastChunkIndexByRecordId) {
+    if (decoratedIndexes.has(index)) continue;
+    decoratedIndexes.add(index);
+    const value = updates[index] as unknown as Record<string, unknown>;
+    const meta =
+      value['_meta'] && typeof value['_meta'] === 'object'
+        ? (value['_meta'] as Record<string, unknown>)
+        : undefined;
+    const transcript =
+      meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+        ? (meta['qwenTranscript'] as Record<string, unknown>)
+        : undefined;
+    value['_meta'] = {
+      ...meta,
+      qwenTranscript: {
+        ...transcript,
+        branchRecordId: branchPoints[recordId],
+      },
+    };
+  }
 }

@@ -72,6 +72,8 @@ CSI application inventory 包含两张历史表的完整类型定义及 main 的
 
 新的 Legacy 通知查询在首条记录之前可能找不到 transcript，此时继续原有严格持久化路径。没有 recorder 时，准入仍为 `accepted: false`。Managed transcript 缺失、固定前缀恢复查询失败及其他 I/O 错误仍然拒绝，不能把不可用的历史解释为不存在的通知。
 
+恢复回放将认证后的分支 checkpoint 标在每个源记录最后一个非空、可见的 assistant chunk 上。近期 Managed 投影携带有界 branch-point map；全量投影使用以迭代器实际产出记录对象为键的弱引用元数据。迭代器通过已经打开的固定前缀查询解析每个分支点，在完成或拒绝时关闭查询，避免逐记录重扫目录。回放仅暂存一个带 checkpoint 记录的 emissions，保留每项的来源身份与时间戳，在字节/更新数预算核算前标注，并在读取下一条记录前发送完毕。不引入完整历史数组或强身份 map；本次合并范围之外、继承的冷加载非 bulk 行为仍保持原范围。
+
 已提交模型输出的恢复判断读取固定前缀的完整尾部：后续终态记录必须阻止再次恢复已结算输出。终态身份来自 payload 中的 prompt ID，即使记录没有 daemon prompt ID；其他 prompt 的终态不能阻止本次恢复。该判断与选择对话 parent 不同，不能使用仅消息的流。
 
 单事件和批量事件 producer 仅在完成命令历史重放、范围、内容冲突及预期前缀检查后执行。重试返回原 transaction 和当前提交水位，不再次调用 producer，冷恢复后同样如此。这补齐新增真实 HTTP 恢复验收暴露的既有 producer 顺序缺口，不改变追加结算或 actor fence。

@@ -279,10 +279,12 @@ export interface SelectiveSessionRestoreOptions {
 export interface SessionRestoreReplayPage {
   records: ChatRecord[];
   recordHistory?: AsyncIterable<ChatRecord>;
+  branchPointForRecord?: (record: ChatRecord) => string | undefined;
   gaps: HistoryGap[];
   hasMore: boolean;
   anchorRecordId?: string;
   replay?: unknown;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
   goalRecoverySourceUuid?: string;
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
@@ -2536,6 +2538,22 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
   );
 }
 
+// Null prototype: record uuids are untrusted, and '__proto__' would silently
+// drop the entry on a plain object.
+function branchPointsForRecords(
+  index: TranscriptIndex,
+  records: readonly ChatRecord[],
+): Record<string, string> | undefined {
+  let branchPoints: Record<string, string> | undefined;
+  for (const record of records) {
+    const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+    if (checkpointUuid !== undefined) {
+      (branchPoints ??= Object.create(null))[record.uuid] = checkpointUuid;
+    }
+  }
+  return branchPoints;
+}
+
 function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
@@ -2680,6 +2698,7 @@ export class SessionTranscriptReader {
   private managedHistory(
     source: ManagedTranscriptSource,
     hideInheritedHistory?: boolean,
+    branchPoints?: WeakMap<ChatRecord, string>,
   ): AsyncIterable<ChatRecord> {
     const open = () => this.openManaged(source);
     return {
@@ -2690,9 +2709,18 @@ export class SessionTranscriptReader {
             source.sessionKey.sessionId,
           );
         try {
-          yield* hideInheritedHistory === undefined
-            ? query.records()
-            : query.visibleRecords(hideInheritedHistory);
+          const records =
+            hideInheritedHistory === undefined
+              ? query.records()
+              : query.visibleRecords(hideInheritedHistory);
+          for await (const record of records) {
+            if (branchPoints && record.type === 'assistant') {
+              const checkpoint = await query.branchPoint(record.uuid);
+              if (checkpoint !== undefined)
+                branchPoints.set(record, checkpoint);
+            }
+            yield record;
+          }
           await query.assertUnchanged();
         } finally {
           await query.close();
@@ -2788,20 +2816,26 @@ export class SessionTranscriptReader {
       ...(goal.sourceUuid ? { goalRecoverySourceUuid: goal.sourceUuid } : {}),
       ...(goalRecords.length ? { goalBootstrapRecords: goalRecords } : {}),
     };
-    if (selection.kind === 'all')
+    if (selection.kind === 'all') {
+      // Metadata follows the exact record objects without retaining old records.
+      const branchPoints = new WeakMap<ChatRecord, string>();
       return {
         records: [],
         recordHistory: this.managedHistory(
           source,
           selection.hideInheritedHistory,
+          branchPoints,
         ),
+        branchPointForRecord: (record) => branchPoints.get(record),
         gaps: [],
         hasMore: false,
         ...goalFacts,
       };
+    }
     const replaySize = await query.replaySize(selection.hideInheritedHistory);
     const start = Math.max(0, replaySize - selection.limit);
     const records: ChatRecord[] = [];
+    const branchPoints: Record<string, string> = Object.create(null);
     let bytes = 0;
     for (let position = start; position < replaySize; position++) {
       const entry = await query.replayEntry(
@@ -2815,7 +2849,12 @@ export class SessionTranscriptReader {
           bytes,
           getExpandedPageBytes(),
         );
-      records.push(await query.read(entry.position));
+      const record = await query.read(entry.position);
+      records.push(record);
+      if (record.type === 'assistant') {
+        const checkpoint = await query.branchPoint(record.uuid);
+        if (checkpoint !== undefined) branchPoints[record.uuid] = checkpoint;
+      }
     }
     const first =
       start < replaySize
@@ -2830,6 +2869,9 @@ export class SessionTranscriptReader {
     return {
       records,
       gaps: [],
+      ...(Object.keys(branchPoints).length
+        ? { branchPointsByAssistantUuid: branchPoints }
+        : {}),
       ...goalFacts,
       ...(initialGoal
         ? {
@@ -3727,12 +3769,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(replayGoalRecoverySourceUuid &&
         !replaySet.has(replayGoalRecoverySourceUuid)
@@ -3993,12 +4039,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(goalState
           ? {
@@ -4202,15 +4252,7 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? pageStartPosition + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    // Null prototype: record uuids are untrusted, and '__proto__' would
-    // silently drop the entry on a plain object.
-    const pageBranchPoints: Record<string, string> = Object.create(null);
-    for (const record of records) {
-      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
-      if (checkpointUuid !== undefined) {
-        pageBranchPoints[record.uuid] = checkpointUuid;
-      }
-    }
+    const pageBranchPoints = branchPointsForRecords(index, records);
     const backwardGoalState =
       direction === 'backward' || options.atRecordId !== undefined
         ? await readGoalStatePayloadBeforePosition(
@@ -4264,7 +4306,7 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
-      ...(Object.keys(pageBranchPoints).length > 0
+      ...(pageBranchPoints
         ? { branchPointsByAssistantUuid: pageBranchPoints }
         : {}),
       ...(options.atRecordId !== undefined

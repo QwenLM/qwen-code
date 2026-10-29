@@ -6190,6 +6190,9 @@ class QwenAgent implements Agent {
                     records: replayPage.recordHistory ?? replayPage.records,
                     gaps: replayPage.gaps,
                     cumulativeUsage: createReplayCumulativeUsage(),
+                    branchPointsByAssistantUuid:
+                      replayPage.branchPointsByAssistantUuid,
+                    branchPointForRecord: replayPage.branchPointForRecord,
                     replayState: replayPage.replay,
                     goalBootstrap: await replayGoalBootstrap(projection),
                     suppressRestoreAskUserQuestion,
@@ -6236,6 +6239,13 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: await replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
+                branchPointForRecord: replayPage.branchPointForRecord,
+                ...(replayPage.branchPointsByAssistantUuid
+                  ? {
+                      branchPointsByAssistantUuid:
+                        replayPage.branchPointsByAssistantUuid,
+                    }
+                  : {}),
                 // The restore gate already drained active turns and blocks
                 // new ones (and a drain timeout rejects before replay), so
                 // a trailing unmatched call here is genuinely abandoned —
@@ -6451,6 +6461,14 @@ class QwenAgent implements Agent {
                     replayState: projection.replay!.replay,
                     goalBootstrap: await replayGoalBootstrap(projection),
                     suppressRestoreAskUserQuestion,
+                    branchPointForRecord:
+                      projection.replay!.branchPointForRecord,
+                    ...(projection.replay!.branchPointsByAssistantUuid
+                      ? {
+                          branchPointsByAssistantUuid:
+                            projection.replay!.branchPointsByAssistantUuid,
+                        }
+                      : {}),
                     limits: {
                       maxBytes: LOAD_REPLAY_MAX_BYTES,
                       maxUpdates: LOAD_REPLAY_MAX_UPDATES,

@@ -33561,6 +33561,60 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it.each(['stream', 'bulk'] as const)(
+    'live load forwards certified branch lookup to %s replay',
+    async (mode) => {
+      bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [{ role: 'user', parts: [{ text: 'first' }] }],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      await agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      });
+      const live = lastSessionMock!;
+      const records = [{ role: 'model', parts: [{ text: 'answer' }] }];
+      const lookup = vi.fn(() => 'checkpoint');
+      live
+        .getConfig()
+        .getSessionService()
+        .readLiveRestoreProjection.mockResolvedValue({
+          sessionId: 'persisted-1',
+          startTime: '2026-10-29T00:00:00.000Z',
+          lastUpdated: '2026-10-29T00:00:01.000Z',
+          replay: {
+            records,
+            gaps: [],
+            hasMore: false,
+            branchPointForRecord: lookup,
+          },
+          goalRecords: [],
+        });
+      mockHistoryReplay.mockClear();
+      mockHistoryReplay.mockImplementation(async () => undefined);
+      await agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        ...(mode === 'bulk'
+          ? { _meta: { 'qwen.session.loadReplayMode': 'bulk' } }
+          : {}),
+      });
+      expect(mockHistoryReplay).toHaveBeenCalledWith(
+        expect.anything(),
+        records,
+        [],
+        expect.objectContaining({ branchPointForRecord: lookup }),
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
   it('live load returns authoritative bulk replay and artifacts without mutating usage', async () => {
     const initialMessages = [{ role: 'user', parts: [{ text: 'first' }] }];
     const authoritativeMessages = [
