@@ -365,6 +365,10 @@ public final class WorkspaceMigrationStore {
         check(count("SELECT COUNT(*) FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
                 + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')") == 0,
                 "migration_work_unsettled");
+        check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_worktree WHERE physical_key IN"
+                        + " (SELECT physical_key FROM ma_storage WHERE alias_key = ?) AND state <> 'REMOVED'", Integer.class,
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0,
+                "migration_work_unsettled");
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
         String after = "";

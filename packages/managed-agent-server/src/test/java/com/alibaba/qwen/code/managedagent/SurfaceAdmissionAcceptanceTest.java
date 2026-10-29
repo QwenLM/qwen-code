@@ -29,6 +29,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -144,6 +145,7 @@ class SurfaceAdmissionAcceptanceTest {
     private MockMvc mvc;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -371,6 +373,15 @@ class SurfaceAdmissionAcceptanceTest {
     void belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
             throws Exception {
         switch (entry.ruleClass()) {
+            case SESSION_WORKTREE -> {
+                expect(entry, null, 401, "actor_required");
+                if (entry.template().endsWith("/options")) {
+                    expect(entry, STRANGER, 404, "workspace_not_found");
+                    expect(entry, READER, 403, "workspace_forbidden");
+                } else {
+                    expect(entry, STRANGER, 404, "worktree_not_found");
+                }
+            }
             case SESSION_EXTENSION_READER -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, "session_not_found");
@@ -1490,6 +1501,7 @@ class SurfaceAdmissionAcceptanceTest {
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
         variables.put("workspaceId", "ws");
+        variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
         variables.put("packageDigest", digest());
@@ -1605,6 +1617,7 @@ class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";

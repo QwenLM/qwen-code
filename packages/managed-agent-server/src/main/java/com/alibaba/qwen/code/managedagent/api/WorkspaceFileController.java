@@ -29,7 +29,7 @@ public class WorkspaceFileController {
         this.uploads = uploads;
     }
 
-    public record QueryRequest(@NotBlank String workspaceId, @NotBlank String cwdRelative,
+    public record QueryRequest(String sessionId, String workspaceId, String cwdRelative,
             @NotBlank @Size(max = 1024) String directory, @Size(max = 256) String query,
             @Size(max = 64) String expectedScopeRevision) {
         @JsonAnySetter
@@ -38,7 +38,7 @@ public class WorkspaceFileController {
         }
     }
 
-    public record ReadRequest(@NotBlank String workspaceId, @NotBlank String cwdRelative,
+    public record ReadRequest(String sessionId, String workspaceId, String cwdRelative,
             @NotBlank @Size(max = 1024) String path, @NotBlank @Size(max = 64) String expectedScopeRevision) {
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
@@ -57,7 +57,7 @@ public class WorkspaceFileController {
     public ResponseEntity<WorkspaceFileStore.QueryResult> query(TenantContext tenant,
             @Valid @RequestBody QueryRequest request) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(files.query(tenant.tenantId(),
-                tenant.requireActorId(), request.workspaceId(), request.cwdRelative(), request.directory(),
+                tenant.requireActorId(), new WorkspaceFileStore.Locator(request.sessionId(), request.workspaceId(), request.cwdRelative()), request.directory(),
                 request.query() == null ? "" : request.query(), request.expectedScopeRevision()));
     }
 
@@ -65,20 +65,23 @@ public class WorkspaceFileController {
     public ResponseEntity<WorkspaceFileStore.FileResult> read(TenantContext tenant,
             @Valid @RequestBody ReadRequest request) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(files.read(tenant.tenantId(),
-                tenant.requireActorId(), request.workspaceId(), request.cwdRelative(), request.path(), request.expectedScopeRevision()));
+                tenant.requireActorId(), new WorkspaceFileStore.Locator(request.sessionId(), request.workspaceId(), request.cwdRelative()),
+                request.path(), request.expectedScopeRevision()));
     }
 
     @PostMapping(value = "/api/agent/web-shell/v1/workspaces/files/upload", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<WorkspaceFileUploadStore.UploadResult> upload(TenantContext tenant,
-            @RequestParam String workspaceId, @RequestParam String cwdRelative, @RequestParam String path,
+            @RequestParam(required = false) String sessionId, @RequestParam(required = false) String workspaceId,
+            @RequestParam(required = false) String cwdRelative, @RequestParam String path,
             @RequestParam String expectedScopeRevision, @RequestParam String uploadId, HttpServletRequest request) throws java.io.IOException {
         String actor = tenant.requireActorId();
         String encoding = request.getHeader("Content-Encoding");
         if (encoding != null && !"identity".equalsIgnoreCase(encoding)) {
             throw new ManagedAgentException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "invalid_request", "Encoded Workspace uploads are unsupported.");
         }
+        var locator = new WorkspaceFileStore.Locator(sessionId, workspaceId, cwdRelative);
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(uploads.upload(tenant.tenantId(), actor,
-                workspaceId, cwdRelative, path, expectedScopeRevision, uploadId, request.getInputStream(), request.getContentLengthLong()));
+                locator, path, expectedScopeRevision, uploadId, request.getInputStream(), request.getContentLengthLong()));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/files/uploads/query")

@@ -2,6 +2,8 @@
 
 [English](2026-10-20-sdk-java-fair-lock-queue.md) | [简体中文](2026-10-20-sdk-java-fair-lock-queue.zh-CN.md)
 
+数据库集成现仅运行 MySQL。下文原 MariaDB 集成站点的相关内容保留历史测量记录；其未变的锁、缓存写回和预算规则适用于保留的 MySQL 任务。参见[当前数据库验证范围](managed-runtime-broker-jdbc.zh-CN.md#数据库验证范围)。
+
 ## 问题
 
 `.github/workflows/sdk-java.yml` 通过 `flock --wait` 把所有 self-hosted 的
