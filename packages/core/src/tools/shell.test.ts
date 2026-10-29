@@ -1577,6 +1577,20 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit made no changes');
       });
 
+      it('does not report a CRLF edit whose only effect is the carriage return', async () => {
+        // `.$` consumes the `\r` under dotAll, but the write path restores CRLF,
+        // so the bytes on disk would be identical to the original.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
       it.each([
         { code: 'ENOENT', type: ToolErrorType.FILE_NOT_FOUND },
         { code: 'EACCES', type: ToolErrorType.READ_CONTENT_FAILURE },

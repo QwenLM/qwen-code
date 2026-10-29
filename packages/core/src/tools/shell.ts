@@ -107,6 +107,7 @@ import {
 } from '../utils/sedEditParser.js';
 import {
   detectLineEnding,
+  prepareTextFileContentAsync,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
@@ -1902,15 +1903,32 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw new SedEditSimulationError(getErrorMessage(err));
     }
 
+    const meta = {
+      ..._meta,
+      lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+    };
+    // Judge the edit by the bytes the write will actually produce: the write
+    // path restores CRLF for `lineEnding: 'crlf'`, so a substitution whose only
+    // effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF file) would
+    // otherwise report an applied edit whose bytes never change.
+    const prepared = await prepareTextFileContentAsync(
+      filePath,
+      newContent,
+      meta,
+    );
+    const asWritten = Buffer.isBuffer(prepared.data)
+      ? prepared.data.toString(prepared.encoding ?? 'utf-8')
+      : prepared.data;
+    if (asWritten === content) {
+      newContent = content;
+    }
+
     return {
       filePath,
       fileName: path.basename(filePath),
       originalContent: content,
       newContent,
-      meta: {
-        ..._meta,
-        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
-      },
+      meta,
     };
   }
 
