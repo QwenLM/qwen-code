@@ -139,14 +139,6 @@ export class AcpFileSystemService implements FileSystemService {
     private readonly options: AcpFileSystemServiceOptions = {},
   ) {}
 
-  /**
-   * A client-side write stores `content` verbatim, only adding the BOM, so it
-   * never re-applies the file's line endings. The local fallback does.
-   */
-  get restoresLineEndingsOnWrite(): boolean {
-    return !this.capabilities.writeTextFile;
-  }
-
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {

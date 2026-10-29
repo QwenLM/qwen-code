@@ -167,7 +167,6 @@ describe('ShellTool', () => {
   let mockFileSystemService: {
     readTextFile: ReturnType<typeof vi.fn>;
     writeTextFile: ReturnType<typeof vi.fn>;
-    restoresLineEndingsOnWrite?: boolean;
   };
   let mockFileHistoryService: {
     trackEdit: ReturnType<typeof vi.fn>;
@@ -1616,23 +1615,6 @@ describe('ShellTool', () => {
 
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
           expect.objectContaining({ content: 'bar\r\n' }),
-        );
-        expect(result.llmContent).toContain('sed edit applied');
-      });
-
-      it('applies a CRLF edit when the writer stores content verbatim', async () => {
-        // A client-side write never restores CRLF, so removing the `\r` is a
-        // real edit, not a no-op.
-        mockFileSystemService.restoresLineEndingsOnWrite = false;
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'abc\r\n',
-          _meta: { ...sedMeta(), lineEnding: 'crlf' },
-        });
-
-        const result = await applySed("sed -i 's/\\r$//' file.txt");
-
-        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
-          expect.objectContaining({ content: 'abc\n' }),
         );
         expect(result.llmContent).toContain('sed edit applied');
       });

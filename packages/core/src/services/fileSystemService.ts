@@ -152,13 +152,6 @@ export interface TextFileIo {
 
 export interface FileSystemService {
   readonly textFileIo?: TextFileIo;
-  /**
-   * Whether `writeTextFile` re-applies the file's own line endings (CRLF) to
-   * the content it is given. Unset is treated as `true`; a writer that stores
-   * the content verbatim must set it to `false` so callers do not predict a
-   * normalization that will not happen.
-   */
-  readonly restoresLineEndingsOnWrite?: boolean;
   withReadFile?<T>(
     request: FileReadRequest,
     operation: (source: FileReadSource) => Promise<T>,
@@ -401,8 +394,6 @@ export async function encodeTextFileContentAsync(
  * Standard file system implementation
  */
 export class StandardFileSystemService implements FileSystemService {
-  readonly restoresLineEndingsOnWrite = true;
-
   async withReadFile<T>(
     request: FileReadRequest,
     operation: (source: FileReadSource) => Promise<T>,

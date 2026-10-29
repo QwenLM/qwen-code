@@ -1915,12 +1915,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // whose only effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF
     // file) would otherwise report an applied edit whose bytes never change.
     // Comparing strings also keeps a BOM or a non-UTF-8 encoding from making
-    // the comparison false on a file that did not change. A client-side write
-    // stores the content verbatim, so its prediction is not normalized — or a
-    // real edit such as `s/\r$//` would be suppressed.
+    // the comparison false on a file that did not change. The prediction
+    // always assumes the normalization: a write capability says a client *can*
+    // write, not how it stores the content, and the in-repo `qwen serve` writer
+    // re-applies CRLF, so assuming verbatim would report a false success there.
     const restored =
-      fileSystemService.restoresLineEndingsOnWrite !== false &&
-      (meta.lineEnding === 'crlf' || needsCrlfLineEndings(filePath));
+      meta.lineEnding === 'crlf' || needsCrlfLineEndings(filePath);
     if (
       (restored ? ensureCrlfLineEndings(newContent) : newContent) === content
     ) {
