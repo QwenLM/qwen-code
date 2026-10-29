@@ -338,6 +338,42 @@ responsible for — which head was read, and that the round found no Critical �
 and `--reviewed-by` records who asserted them, which the daemon log names when
 it starts the round.
 
+### Watching a PR instead of handing off once
+
+If you do not want to rely on the reviewer remembering to hand off, register the
+PR for observation:
+
+```bash
+# Watch a PR: every head that comes back cleanly approved is handed off
+qwen review verify-watch 15846 --repo QwenLM/qwen-code
+
+qwen review verify-watch --list      # what is being watched
+qwen review verify-watch --once      # run one observation pass now
+qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
+```
+
+The daemon re-reads each watched PR every five minutes and hands off a head when
+**all** of these hold:
+
+- the PR is open and not a draft;
+- GitHub's `reviewDecision` is `APPROVED` — the current aggregate, not an old
+  review's text. Pushing a new commit dismisses an earlier approval even though
+  that review still reads "Approving", and a dismissed approval hands off
+  nothing;
+- no review thread is both unresolved and non-outdated. Any such thread counts
+  as a blocker; the observer does not try to guess which are "only questions";
+- the thread list was read in full. A truncated read hands off nothing, because
+  the page it could not read may hold the blocker.
+
+This works no matter who reviewed — another agent, the CI bot, or a person — and
+needs nothing from them. Each head is handed off once, and a head already
+verified through any other route is not handed off again. The daemon log names
+the approving reviewers, so a published report is attributable.
+
+Observation reads GitHub today. A watch on another platform is registered and
+declined with a reason until that platform has a backend. `review.autoVerify:
+false` stops observation as well as spawning.
+
 ## Project Review Rules
 
 You can customize review criteria per project. `/review` reads rules from these files (in order):

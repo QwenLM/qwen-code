@@ -77,8 +77,8 @@ qwen-code 会话的事件。
   自动化消费的持久化记录，而 CLI 就是它的入口：本地生产者不需要 daemon socket、
   不需要 token、也不需要 daemon 正在运行。路由只会为「另一台机器上的生产者」
   增加可达性，而这里没有这种场景。
-- 不自动观测 qwen-code 没做过的评审（下文 E2）。契约保持开放，以便日后加上观测
-  时不必搬动任何东西。
+- 不自动观测 GitHub 以外平台上的评审：观测器读的是 GitHub GraphQL，因此 Aone 或
+  GitLab 的 watch 会被登记下来并以原因拒绝，直到有对应的 provider 后端。
 - 不改评审裁决、ledger 标记或发布规则。
 
 ## 方案
@@ -255,6 +255,55 @@ runtime-base 上下文——以及规范化后的仓库根。工作区 `.env` �
 hosted-harness profile 中关闭——它属于同一类「后台派生会话」的自动化，受同一个
 开关治理。
 
+### 6. 观测 qwen-code 没做过的评审（E2）
+
+E1 仍然需要评审者主动调一次。`review/lib/review-verify-observe.ts` 什么都不需要
+它做：它读平台已经持有的批准态，因此别的 agent、CI bot 或人发布的评审会自己完成
+交接。
+
+```bash
+qwen review verify-watch 15846 --repo QwenLM/qwen-code   # 登记
+qwen review verify-watch --list                          # 查看
+qwen review verify-watch --once                          # 立刻跑一趟
+qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
+```
+
+watch 列表与观测 cursor 就放在事件旁边（`watches.json`、`observed.json`），同样
+宿主受信，按坐标而非 head 建键——一个 watch 跨多个 head。daemon 每五分钟重读
+每个 watch（各一次 GraphQL 调用），产出的事件由同一趟文件消费立即处理，而不必等
+下一个周期。
+
+**判定口径**（`judgeCleanApproval`，纯函数）：
+
+- `state === 'OPEN'` 且非 draft；
+- `reviewDecision === 'APPROVED'`——GitHub 会重算的这个聚合态，**而不是**某条
+  评审正文。新 head 会把先前的批准降为 dismissed，而那条评审的正文仍写着
+  「Approving」；读正文就会去验证一个没人批准过的 head；
+- 没有 `isResolved: false` 且 `isOutdated: false` 的线程。任何未决且未过期的线程
+  都算阻塞：去区分哪些「只是提问」等于凭散文判严重级，那是比管线自身更弱的第二
+  套判定，而且失败方向错了；
+- `reviewThreads` 连接被截断（`hasNextPage`）**不算**干净——没读到的那一页可能
+  正好装着阻塞项。
+
+归因取自 `commit.oid` 等于当前 head 的那些批准，记为
+`reviewedBy: github:<logins>`；对更早 commit 的批准不在其中。
+
+**为什么是独立观测器，而不是给 `autofix-pr` 探针加一个 action。** 那个探针每个
+PR 只有一个 cursor，它的 gate 包装拒绝共存，因为第二个消费者会吃掉第一个需要的
+转移。daemon 轮询若与它共用，就会饿死拥有它的 autofix 与 `/verify-pr --watch`
+会话。本观测器自带状态，只问它需要的三个事实，而不是探针的三十个。代价是每个被
+watch 的 PR 每个周期多一次调用。
+
+**为什么读取是异步的。** review 子命令共用的 `gh()` 是 `execFileSync` 加同步重试
+循环——对批处理 CLI 是对的，对 daemon 是错的：它会卡住 daemon 服务的每一个会话。
+观测器改用 `execFile` 调 `gh`，带 30 s 上限，并把轮询周期本身当作重试。host 走
+子进程 env，而不走 `setGhHost`——后者改的是 daemon 共享的模块级全局状态。
+
+两个 cursor，两份职责：`observed.json` 防止本观测器把自己已经交接过的 head 再交
+一次；消费者的 `spawned.json` 防止任何生产者已验证过的 head 被派生第二次。因此
+观测 cursor 丢失只会多读一次，绝不会多验证一次——而已被别处验证的 head 会被它
+采纳，使轮询不再把它当候选。
+
 ## 设计决定
 
 - **入口是一份契约，不是一个管线钩子。** 第一版只从 `save-artifact` 产出，等于
@@ -321,7 +370,18 @@ hosted-harness profile 中关闭——它属于同一类「后台派生会话」
 - `review/lib/review-settings.test.ts` —— `autoVerify` 默认开、只以布尔存活、
   设置读不出来时降级为关、且从 operator 作用域读取。
 - `commands/review.test.ts` —— 子命令清单与其 `demandCommand` 枚举都包含
-  `verify-event`。
+  `verify-event` 与 `verify-watch`。
+- `review/lib/review-verify-observe.test.ts` —— 判定口径的每一个否定态（merged、
+  draft、未批准、无 head、不可读、线程不可读、未决阻塞、线程页被截断）、
+  「被 dismiss 的批准」陷阱、已解决/已过期线程不算阻塞、归因只取当前 head；
+  watch 列表的增/替换/删与宿主受信位置；每个 head 只交接一次、新 head 会交接、
+  已被别处验证的 head 被采纳而非重复产出、非 GitHub watch 不发起读取就拒绝、
+  读取失败被报出但不丢 watch、一个 watch 失败不影响其他、cursor 丢失只多读一次
+  而不会多派生一次。
+- `review/verify-watch.test.ts` —— 登记/查看/删除/`--once`，坐标经共享校验器解析，
+  Aone watch 被登记为 Aone，以及每一种畸形调用都是「什么都不写」的用法错误。
+- `serve/review-verify-automation.test.ts`（观测职责）—— 周期到点会观测并为发现
+  的 head 走无父路径派生；operator 开关会完全停止观测；`stop()` 会 halt 它。
 
 手工/E2E（`.qwen/e2e-tests/review-clean-auto-verify.md`）：在 daemon 会话里对一个
 干净 PR 跑真实 `/review`，产出事件并派生一个执行 `/verify-pr --publish` 的子会话；
@@ -341,28 +401,22 @@ hosted-harness profile 中关闭——它属于同一类「后台派生会话」
 - 带 Critical 的轮次、fail-closed 被 cap 的轮次、local/file 目标、非 github.com
   平台，都不派生。
 - 同一 head 的两轮干净评审只派生一次验证，无论是哪个生产者写的。
+- 已登记的 watch，其 PR 达到 `reviewDecision: APPROVED` 且无未决未过期线程时，
+  在评审者毫不作为的情况下把该 head 交接一次，并派生同样的顶层会话；被 dismiss
+  的批准、未决阻塞、draft、被截断的线程页都不交接。
 - User 设置里的 `review.autoVerify: false` 停止派生但不停止事件产出；工作区作用域
   里无论 true 还是 false 都被忽略。
 - `npm run build`、`npm run typecheck` 与所改包的单元测试通过。
 
 ## 后续工作
 
-- **E2 —— 观测 qwen-code 没做过的评审。** 生产者中立的入口仍然需要对方主动调用。
-  自动化的一面是平台上已发布的评审——任何评审者都会留下它：给
-  `autofix-pr snapshot --gate` 探针加一个 `verify` 转移，产出同一条事件。两条约束
-  已经明确：
-  - 探针**每个 PR 只有一个 cursor**，而 `verify-pr-watch-gate.mjs` 拒绝共存，因为
-    第二个消费者会饿死第一个。E2 必须是既有 gate 转发的一个新 action，或者一个
-    独立的 cursor 命名空间——绝不能在同一 cursor 上再挂一个 watcher。
-  - 干净判定必须读**当前**批准态，而不是某条评审正文：新 head 会把先前的 APPROVE
-    降为 DISMISSED，而正文仍写着「Approving」。已定口径：
-    `reviewDecision === 'APPROVED'` **且**没有未决、未过期的阻塞线程
-    （`reviewThreads` 中 `isResolved: false`、`isOutdated: false`）。探针今天不读
-    `reviewDecision`，由 E2 补上。
-- `/verify-pr` 的 Aone 与 GitLab 后端，然后放开消费者的平台闸门。探针今天是
-  GitHub GraphQL，因此其他平台上的 E2 要走 review 的 provider 注册表。
+- `/verify-pr` 的 Aone 与 GitLab 后端，然后放开消费者的平台闸门。观测器今天读
+  GitHub GraphQL，因此其他平台上的观测要走 review 的 provider 注册表；watch
+  列表、判定口径的形状与事件契约都不变。
 - 给 `/verify-pr` 加 `--host` 旗标，使 GitHub Enterprise 目标可以被表达。
 - 按会话解析 skill 的方式去找它（user 与 extension 作用域），而不只找工作区的项目
   副本。今天把 `verify-pr` 装在 user 作用域的操作者，会得到一条已披露的
   `skill-unavailable` 拒绝，而不是派生。
+- 自动推导 watch（从工作区已绑定的 PR，或从某个 PR 的第一次交接），使观测无需
+  显式登记。今天 watch 是操作者的决定，这让网络开销按 PR 逐个 opt-in。
 - 在同一条记录上提供一个可选 hook 事件，供想用自己消费者替代内置消费者的操作者。

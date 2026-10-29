@@ -54,10 +54,24 @@ export interface VerifyEventResult {
   host: string;
 }
 
-export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
-  // Usage errors surface before anything is written: a malformed coordinate
-  // can never be fixed by retrying, and exit 2 is the caller's "repair the
-  // invocation" signal (the same contract `review meta` uses).
+export interface PrCoordinates {
+  platform: string;
+  host: string;
+  ownerRepo: string;
+  number: number;
+}
+
+/**
+ * The one coordinate validation for both handoff entrances (`verify-event` and
+ * `verify-watch`). Usage errors are TypeErrors so the handlers can exit 2 — a
+ * malformed coordinate can never be fixed by retrying, the same contract
+ * `review meta` uses.
+ */
+export function resolvePrCoordinates(args: {
+  pr: number;
+  repo: string;
+  host?: string;
+}): PrCoordinates {
   if (!Number.isInteger(args.pr) || args.pr < 1) {
     throw new TypeError(
       `--pr must be a positive integer, got ${JSON.stringify(args.pr)}`,
@@ -66,24 +80,6 @@ export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(
       `expected --repo owner/repo, got ${JSON.stringify(args.repo)}`,
-    );
-  }
-  const head = args.head.trim().toLowerCase();
-  if (!HEAD_SHA_RE.test(head)) {
-    throw new TypeError(
-      `--head must be a 7-64 character hex commit sha, got ${JSON.stringify(args.head)}`,
-    );
-  }
-  const event = args.event ?? 'APPROVE';
-  if (event !== 'APPROVE' && event !== 'COMMENT') {
-    throw new TypeError(
-      `--event must be APPROVE or COMMENT — a round that requested changes is not a clean round, got ${JSON.stringify(args.event)}`,
-    );
-  }
-  const round = args.round ?? 1;
-  if (!Number.isInteger(round) || round < 1) {
-    throw new TypeError(
-      `--round must be a positive integer, got ${JSON.stringify(args.round)}`,
     );
   }
   const hostFlag = args.host?.trim() || undefined;
@@ -102,6 +98,29 @@ export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
       `a ${platform} target needs --host — there is no default host off GitHub`,
     );
   }
+  return { platform, host, ownerRepo: args.repo, number: args.pr };
+}
+
+export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
+  const { platform, host, ownerRepo, number } = resolvePrCoordinates(args);
+  const head = args.head.trim().toLowerCase();
+  if (!HEAD_SHA_RE.test(head)) {
+    throw new TypeError(
+      `--head must be a 7-64 character hex commit sha, got ${JSON.stringify(args.head)}`,
+    );
+  }
+  const event = args.event ?? 'APPROVE';
+  if (event !== 'APPROVE' && event !== 'COMMENT') {
+    throw new TypeError(
+      `--event must be APPROVE or COMMENT — a round that requested changes is not a clean round, got ${JSON.stringify(args.event)}`,
+    );
+  }
+  const round = args.round ?? 1;
+  if (!Number.isInteger(round) || round < 1) {
+    throw new TypeError(
+      `--round must be a positive integer, got ${JSON.stringify(args.round)}`,
+    );
+  }
   const workspaceRoot = resolve(args.workspaceRoot?.trim() || process.cwd());
   const sessionId =
     args.sessionId?.trim() ||
@@ -112,8 +131,8 @@ export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
     target: {
       platform,
       host,
-      ownerRepo: args.repo,
-      number: args.pr,
+      ownerRepo,
+      number,
       headSha: head,
     },
     round,

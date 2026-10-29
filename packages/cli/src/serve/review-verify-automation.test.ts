@@ -477,3 +477,97 @@ describe('startReviewVerifyAutomation', () => {
     expect(existsSync(join(root, 'verify-events'))).toBe(false);
   });
 });
+
+describe('startReviewVerifyAutomation — observing watched PRs (E2)', () => {
+  /** Stands in for the real reader: writes the event a clean approval would
+   *  write, and reports it, exactly as `observeWatches` does. */
+  function observingStub() {
+    return async () => {
+      emitReviewCleanEvent({
+        workspaceRoot: root,
+        target,
+        round: 1,
+        verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+        reviewedBy: 'github:reviewer-1',
+      });
+      return [
+        {
+          key: 'github:github.com:QwenLM/qwen-code:15846',
+          action: 'emitted' as const,
+          reason: 'approved',
+          headSha: target.headSha,
+        },
+      ];
+    };
+  }
+
+  it('observes on its interval and spawns for the head it found', async () => {
+    installSkill();
+    const { bridge, calls } = stubBridge();
+    launch = vi.fn(async () => ({ sessionId: 'child-1' }));
+    notices = [];
+    automation = startReviewVerifyAutomation({
+      boundWorkspace: root,
+      launch,
+      getBridge: () => bridge,
+      intervalMs: 600_000,
+      observeIntervalMs: 5,
+      observe: observingStub(),
+      isEnabled: () => true,
+      onNotice: (message) => notices.push(message),
+    });
+    await vi.waitFor(() => expect(calls.spawn.length).toBeGreaterThan(0), {
+      timeout: 5000,
+    });
+    expect(notices.join('\n')).toContain('observed a clean approval');
+    expect(calls.prompts[0]?.text).toBe(
+      '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+    );
+    // The observation is not a qwen-code review: no parent, no launcher.
+    expect(launch).not.toHaveBeenCalled();
+    expect(calls.spawn[0]).not.toHaveProperty('parentSessionId');
+  }, 10000);
+
+  it('does not observe when the operator turned the automation off', async () => {
+    installSkill();
+    const observe = vi.fn(observingStub());
+    notices = [];
+    launch = vi.fn(async () => ({ sessionId: 'child-1' }));
+    automation = startReviewVerifyAutomation({
+      boundWorkspace: root,
+      launch,
+      intervalMs: 600_000,
+      observeIntervalMs: 5,
+      observe,
+      isEnabled: () => false,
+      onNotice: (message) => notices.push(message),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(observe).not.toHaveBeenCalled();
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+  });
+
+  it('stops observing on stop()', async () => {
+    installSkill();
+    const observe = vi.fn(observingStub());
+    notices = [];
+    launch = vi.fn(async () => ({ sessionId: 'child-1' }));
+    const started = startReviewVerifyAutomation({
+      boundWorkspace: root,
+      launch,
+      intervalMs: 600_000,
+      observeIntervalMs: 5,
+      observe,
+      isEnabled: () => true,
+      onNotice: (message) => notices.push(message),
+    });
+    automation = started;
+    await vi.waitFor(() => expect(observe).toHaveBeenCalled(), {
+      timeout: 5000,
+    });
+    started.stop();
+    const callsAtStop = observe.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(observe.mock.calls.length).toBe(callsAtStop);
+  }, 10000);
+});

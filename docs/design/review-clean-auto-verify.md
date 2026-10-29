@@ -92,8 +92,9 @@ Verified against the tree this change is built on:
   local producer needs no daemon socket, no token, and no running daemon. A
   route would only add reach for a producer on another machine, which is not a
   case here.
-- No automatic observation of reviews qwen-code did not perform (E2 below). The
-  contract is open so that observation can be added without moving anything.
+- No automatic observation of reviews on platforms other than GitHub: the
+  observer reads GitHub GraphQL, so an Aone or GitLab watch is registered and
+  declined with a reason until a provider backend exists.
 - No change to the review verdict, the ledger marker, or the posting rules.
 
 ## Solution
@@ -295,6 +296,64 @@ The whole block sits under `deps.manageScheduledTaskSessions`, which
 therefore runs in an ordinary daemon and is off in the hosted-harness profile —
 the same class of background session-spawning automation, under the same switch.
 
+### 6. Observing reviews qwen-code did not perform (E2)
+
+E1 still needs the reviewer to call it. `review/lib/review-verify-observe.ts`
+needs nothing from them: it reads the approval state the platform already
+holds, so a review posted by another agent, the CI bot, or a person hands off
+by itself.
+
+```bash
+qwen review verify-watch 15846 --repo QwenLM/qwen-code   # register
+qwen review verify-watch --list                          # inspect
+qwen review verify-watch --once                          # run one pass now
+qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
+```
+
+The watch list and the observation cursor live beside the events
+(`watches.json`, `observed.json`), host-trusted, keyed by coordinates rather
+than by head — a watch spans heads. The daemon re-reads every watch on a five
+minute interval (one GraphQL call each), and an emitted event is consumed by the
+same file pass immediately rather than waiting for the next interval.
+
+**The criterion** (`judgeCleanApproval`, a pure function):
+
+- `state === 'OPEN'` and not a draft;
+- `reviewDecision === 'APPROVED'` — the aggregate GitHub recomputes, **not** a
+  review body. A new head dismisses an earlier approval while that review's
+  body still says "Approving"; reading the body would verify a head nobody
+  approved;
+- no thread with `isResolved: false` and `isOutdated: false`. Every unresolved
+  non-outdated thread counts as a blocker: classifying which are "only
+  questions" would mean judging severity from prose, a second weaker judgement
+  than the pipeline's own, and the wrong direction to fail in;
+- a cut `reviewThreads` connection (`hasNextPage`) is **not** clean — an unread
+  page may hold the blocker.
+
+Attribution comes from the approvals whose `commit.oid` equals the current
+head, recorded as `reviewedBy: github:<logins>`; an approval of an earlier
+commit is not one of them.
+
+**Why a separate observer, not a new action on the `autofix-pr` probe.** That
+probe keeps one cursor per PR and its gate wrapper refuses coexistence, because
+a second consumer eats the transitions the first needs. A daemon poller sharing
+it would starve the autofix and `/verify-pr --watch` sessions that own it. This
+observer keeps its own state and asks for the three facts it needs instead of
+the probe's thirty. The cost is one extra call per watched PR per interval.
+
+**Why the reader is async.** The review subcommands' shared `gh()` helper is
+`execFileSync` with a synchronous retry loop — right for a batch CLI, wrong
+inside the daemon, where it would stall every session it serves. The observer
+calls `gh` through `execFile` with a 30 s ceiling and lets the poll interval be
+the retry. The host rides in the child's env, not through `setGhHost`, which
+mutates module-global state the daemon shares.
+
+Two cursors, two jobs: `observed.json` stops this observer re-handing-off a head
+it already emitted; the consumer's `spawned.json` stops a second spawn for a
+head verified through any producer. A lost observation cursor therefore costs a
+re-read, never a duplicate verification — and a head already verified elsewhere
+is adopted into it so the poll stops treating it as a candidate.
+
 ## Design decisions
 
 - **The entrance is a contract, not a pipeline hook.** The first cut emitted only
@@ -387,6 +446,21 @@ Unit tests (collocated, vitest):
   operator scopes.
 - `commands/review.test.ts` — the subcommand surface and its `demandCommand`
   enumeration include `verify-event`.
+- `review/lib/review-verify-observe.test.ts` — the criterion's every negative
+  (merged, draft, not approved, no head, unreadable, threads unreadable, an open
+  blocker, a cut thread page), the dismissed-approval trap, resolved/outdated
+  threads not blocking, attribution only at the current head; watch list
+  add/replace/remove and its host-trusted location; one handoff per head, a new
+  head handed off, a head verified elsewhere adopted not re-emitted, a
+  non-GitHub watch declined without a fetch, a failed read reported without
+  losing the watch, one failing watch not stopping the others, and a lost
+  cursor costing a re-read rather than a second spawn.
+- `review/verify-watch.test.ts` — register/list/remove/`--once`, coordinates
+  resolved through the shared validator, an Aone watch registered as Aone, and
+  every malformed invocation a usage error that writes nothing.
+- `serve/review-verify-automation.test.ts` (observation duty) — the interval
+  observes and spawns for what it finds, through the parentless path; the
+  operator switch stops observation entirely; `stop()` halts it.
 
 Manual/E2E (`.qwen/e2e-tests/review-clean-auto-verify.md`): a real `/review` of a
 clean PR in a daemon session produces the event and a sub-session that runs
@@ -409,33 +483,26 @@ session; turning `review.autoVerify` off produces the event and no session.
   non-github.com platform spawns nothing.
 - Two clean rounds at the same head spawn one verification, whichever producer
   wrote them.
+- A registered watch whose PR reaches `reviewDecision: APPROVED` with no
+  unresolved non-outdated thread hands off that head once, with no action from
+  the reviewer, and spawns the same top-level session; a dismissed approval, an
+  open blocker, a draft, or a cut thread page hands off nothing.
 - `review.autoVerify: false` in User settings stops the spawn without stopping
   the event; a workspace-scoped value of either sign is ignored.
 - `npm run build`, `npm run typecheck` and the touched packages' unit tests pass.
 
 ## Follow-ups
 
-- **E2 — observe reviews qwen-code did not perform.** The producer-neutral
-  entrance still needs the other agent to call it. The automatic source is the
-  platform's own posted reviews, which any reviewer leaves: extend the
-  `autofix-pr snapshot --gate` probe with a `verify` transition that emits this
-  same event. Two constraints are already known:
-  - The probe keeps **one cursor per PR**, and `verify-pr-watch-gate.mjs` refuses
-    coexistence because a second consumer starves the first. E2 must be a new
-    action forwarded by the existing gate, or a separate cursor namespace — not
-    a second watcher on the same cursor.
-  - The clean judgement must read the **current** approval state, not a review
-    body: a new head dismisses an earlier APPROVE while its body still says
-    "Approving". Decided criterion: `reviewDecision === 'APPROVED'` **and** no
-    unresolved, non-outdated blocking thread (`reviewThreads` with
-    `isResolved: false`, `isOutdated: false`). The probe does not read
-    `reviewDecision` today; E2 adds it.
 - Aone and GitLab backends for `/verify-pr`, then lifting the consumer's
-  platform gate. The probe is GitHub GraphQL today, so E2 on other platforms
-  goes through the review provider registry.
+  platform gate. The observer reads GitHub GraphQL today, so observation on
+  other platforms goes through the review provider registry; the watch list,
+  the criterion's shape and the event contract do not change.
 - A `--host` flag for `/verify-pr` so GitHub Enterprise targets can be expressed.
 - Resolve the skill the way a session does (user and extension scopes), not only
   the workspace's project copy. Today an operator who installed `verify-pr` at
   user scope gets a disclosed `skill-unavailable` decline rather than a spawn.
+- Derive watches automatically (from a workspace's bound PRs, or from the first
+  handoff for a PR) so observation needs no explicit registration. Today a watch
+  is an operator decision, which keeps the network spend opt-in per PR.
 - An optional hook event over the same record, for operators who want their own
   consumer instead of the built-in one.

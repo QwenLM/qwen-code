@@ -56,6 +56,10 @@ import {
   type ReviewCleanEventV1,
 } from '../commands/review/lib/review-events.js';
 import { operatorReviewSettings } from '../commands/review/lib/review-settings.js';
+import {
+  observeWatches,
+  type ObservationOutcome,
+} from '../commands/review/lib/review-verify-observe.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 const log = createDebugLogger('REVIEW_VERIFY');
@@ -132,6 +136,11 @@ const DEFAULT_INTERVAL_MS = 60_000;
 
 /** Same debounce the scheduled-task keepalive uses on its tasks file. */
 const WATCH_DEBOUNCE_MS = 500;
+
+/** How often the daemon re-reads watched PRs. This one spends a network call
+ *  per watch, unlike the file pass, so it is minutes rather than seconds; a
+ *  review approval is not a latency-sensitive event. */
+const DEFAULT_OBSERVE_INTERVAL_MS = 300_000;
 
 /** The project skill the spawned prompt invokes. A workspace without it would
  *  spawn a session that can only report the command is unknown. */
@@ -212,6 +221,11 @@ export interface ReviewVerifyAutomationOptions {
    *  silently dropped. */
   getBridge?: () => ReviewVerifyBridge | undefined;
   intervalMs?: number;
+  /** How often to re-read the watched PRs' approval state (E2). Defaults to
+   *  five minutes; each pass spends one GraphQL call per watch. */
+  observeIntervalMs?: number;
+  /** The observation pass, injectable for tests. Defaults to the real reader. */
+  observe?: (root: string) => Promise<ObservationOutcome[]>;
   /** Re-read each pass that has work, so flipping the setting needs no
    *  restart. Defaults to the operator-scoped `review.autoVerify`. */
   isEnabled?: () => boolean;
@@ -414,14 +428,74 @@ export function startReviewVerifyAutomation(
   }
 
   let stopped = false;
+
+  // E2: re-read the watched PRs and hand off any head that came back clean.
+  // Separate timer and guard from the file pass: this one spends network calls
+  // and must not delay consuming an event that is already on disk.
+  const observe = opts.observe ?? observeWatches;
+  const observeIntervalMs =
+    opts.observeIntervalMs ?? DEFAULT_OBSERVE_INTERVAL_MS;
+  let observing = false;
+  // A watch that cannot be read (no gh auth, a deleted PR) fails every interval;
+  // report each distinct failure once rather than filling the log.
+  const reportedObserveFailures = new Set<string>();
+  const observeTick = async (): Promise<void> => {
+    if (stopped || observing) return;
+    observing = true;
+    try {
+      if (!isEnabled()) return;
+      const outcomes = await observe(boundWorkspace);
+      let emitted = 0;
+      for (const outcome of outcomes) {
+        if (outcome.action === 'emitted') {
+          emitted++;
+          notice(
+            `review-verify: observed a clean approval for ${outcome.key} at ${outcome.headSha}`,
+          );
+        } else if (outcome.action === 'failed') {
+          const dedupe = `${outcome.key}:${outcome.reason}`;
+          if (!reportedObserveFailures.has(dedupe)) {
+            reportedObserveFailures.add(dedupe);
+            notice(
+              `review-verify: observation failed for ${outcome.key} (${outcome.reason})`,
+            );
+          }
+        } else {
+          log.debug(
+            'review-verify observation',
+            outcome.key,
+            outcome.action,
+            outcome.reason,
+          );
+        }
+      }
+      // Consume what this pass just wrote without waiting for the watch or the
+      // next file interval.
+      if (emitted > 0) runPass();
+    } catch (error) {
+      notice(
+        `review-verify: observation pass failed (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+    } finally {
+      observing = false;
+    }
+  };
+  const observeTimer: ReturnType<typeof setInterval> = setInterval(() => {
+    void observeTick();
+  }, observeIntervalMs);
+  observeTimer.unref?.();
+
   return {
     get activeWork() {
-      return activeTicks > 0;
+      return activeTicks > 0 || observing;
     },
     stop: () => {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      clearInterval(observeTimer);
       if (debounce) clearTimeout(debounce);
       watcher?.close();
     },

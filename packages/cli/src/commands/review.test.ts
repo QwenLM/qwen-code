@@ -81,6 +81,7 @@ describe('reviewCommand', () => {
       'compose-review',
       'save-artifact',
       'verify-event',
+      'verify-watch',
       'submit',
       'cleanup',
       'watch-repo',
