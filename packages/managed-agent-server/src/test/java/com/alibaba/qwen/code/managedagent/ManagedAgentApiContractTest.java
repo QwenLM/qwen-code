@@ -152,6 +152,15 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.CleanupRequest.class, List.of("WebShellSessionWorktreeCleanupRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.Page.class, List.of("WebShellSessionWorktreePage")),
+                    entry(com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService.Options.class, List.of("WebShellSessionWorktreeOptions")),
+                    entry(com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService.Inspection.class, List.of("WebShellSessionWorktreeInspection")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor.class, List.of("WebShellSessionWorktree")),
+                    entry(ApiModels.PublicSessionWorktree.class, List.of("SessionWorktree")),
                     entry(ApiModels.WebShellLifecycleOperation.class, List.of("WebShellLifecycleOperation")),
                     entry(ApiModels.WebShellExportRequest.class, List.of("WebShellExportRequest")),
                     entry(ApiModels.WebShellExportPage.class, List.of("WebShellExportPage")),
@@ -348,6 +357,7 @@ class ManagedAgentApiContractTest {
     private FixtureHarness harness;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -1665,6 +1675,27 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/user-messages/command").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"missing\",\"idempotencyKey\":\"queue-missing\",\"command\":{\"action\":\"resume\"}}");
         exchangeExtensions(drift, workspaceTenant, actor, publicBoundId);
+        exchange(drift, "webShellSessionWorktreeOptions", 200,
+                post(WEB_SHELL + "/workspaces/worktrees/options").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
+        exchange(drift, "webShellSessionWorktreeQuery", 200,
+                post(WEB_SHELL + "/workspaces/worktrees/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\"}");
+        exchange(drift, "webShellSessionWorktreeInspect", 404,
+                post(WEB_SHELL + "/workspaces/worktrees/inspect").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"worktreeId\":\"missing\"}");
+        exchange(drift, "webShellSessionWorktreeCleanup", 404,
+                post(WEB_SHELL + "/workspaces/worktrees/cleanup").header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"worktreeId\":\"missing\",\"idempotencyKey\":\"cleanup\"}");
+        exchange(drift, "sessionWorktreeOptions", 200,
+                get("/v1/agents/workspaces/ws-default/worktrees/options").header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "sessionWorktreeQuery", 200,
+                get("/v1/agents/workspaces/ws-default/worktrees").header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "sessionWorktreeInspect", 404,
+                get("/v1/agents/workspaces/ws-default/worktrees/missing").header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "sessionWorktreeCleanup", 404,
+                post("/v1/agents/workspaces/ws-default/worktrees/missing/cleanup").header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "cleanup"), null);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(

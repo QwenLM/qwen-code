@@ -506,6 +506,7 @@ export type { QueryOptions } from './query/createQuery.js';
 export type {
   EffortOverride,
   EffortStatus,
+  WorkflowModeState,
   EffortTier,
 } from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';

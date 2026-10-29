@@ -38,6 +38,8 @@
     <properties>
         <java.version>21</java.version>
         <managed.operator-tools.attach>true</managed.operator-tools.attach>
+        <managed.operator-tools.jar.phase>package</managed.operator-tools.jar.phase>
+        <managed.operator-tools.skip>false</managed.operator-tools.skip>
         <druid.version>1.2.25</druid.version>
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
         <fastjson2.version>2.0.65</fastjson2.version>
@@ -56,6 +58,10 @@
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-lang3</artifactId>
@@ -91,10 +97,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
+            <optional>true</optional>
             <exclusions>
                 <exclusion>
                     <groupId>com.zaxxer</groupId>
@@ -104,7 +112,7 @@
         </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
-            <artifactId>druid-spring-boot-3-starter</artifactId>
+            <artifactId>druid</artifactId>
             <version>${druid.version}</version>
         </dependency>
         <dependency>
@@ -114,10 +122,12 @@
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-mysql</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>com.mysql</groupId>
@@ -128,6 +138,7 @@
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>runtime</scope>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -164,15 +175,74 @@
         </resources>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-jar</id>
+                        <configuration><excludes><exclude>application*.yml</exclude></excludes></configuration>
+                    </execution>
+                    <execution>
+                        <id>workspace-bundle-resources</id>
+                        <phase>${managed.operator-tools.jar.phase}</phase>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>workspace-bundle</classifier></configuration>
+                    </execution>
+                    <execution>
+                        <id>workspace-migration-resources</id>
+                        <phase>${managed.operator-tools.jar.phase}</phase>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>workspace-migration</classifier></configuration>
+                    </execution>
+                    <execution>
+                        <id>workspace-maintenance-recovery-resources</id>
+                        <phase>${managed.operator-tools.jar.phase}</phase>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>workspace-maintenance-recovery</classifier></configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-session-resources</id>
+                        <phase>${managed.operator-tools.jar.phase}</phase>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>csi-session</classifier></configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-runtime-resources</id>
+                        <phase>${managed.operator-tools.jar.phase}</phase>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>csi-runtime</classifier></configuration>
+                    </execution>
+                    <execution>
+                        <id>operator-recovery-resources</id>
+                        <phase>${managed.operator-tools.jar.phase}</phase>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>operator-recovery</classifier></configuration>
+                    </execution>
+                    <execution>
+                        <id>standalone-resources</id>
+                        <goals><goal>jar</goal></goals>
+                        <configuration><classifier>exec</classifier></configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <executions>
+                    <execution>
+                        <id>repackage</id>
+                        <configuration>
+                            <classifier>exec</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication</mainClass>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>workspace-bundle</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-bundle</classifier>
                             <attach>${managed.operator-tools.attach}</attach>
+                            <skip>${managed.operator-tools.skip}</skip>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
@@ -182,6 +252,7 @@
                         <configuration>
                             <classifier>workspace-migration</classifier>
                             <attach>${managed.operator-tools.attach}</attach>
+                            <skip>${managed.operator-tools.skip}</skip>
                             <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceMigrationMain</mainClass>
                         </configuration>
                     </execution>
@@ -191,6 +262,7 @@
                         <configuration>
                             <classifier>workspace-maintenance-recovery</classifier>
                             <attach>${managed.operator-tools.attach}</attach>
+                            <skip>${managed.operator-tools.skip}</skip>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceMaintenanceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
@@ -200,6 +272,7 @@
                         <configuration>
                             <classifier>csi-session</classifier>
                             <attach>${managed.operator-tools.attach}</attach>
+                            <skip>${managed.operator-tools.skip}</skip>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiSessionMain</mainClass>
                         </configuration>
                     </execution>
@@ -209,6 +282,7 @@
                         <configuration>
                             <classifier>csi-runtime</classifier>
                             <attach>${managed.operator-tools.attach}</attach>
+                            <skip>${managed.operator-tools.skip}</skip>
                             <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeMain</mainClass>
                         </configuration>
                     </execution>
@@ -218,6 +292,7 @@
                         <configuration>
                             <classifier>operator-recovery</classifier>
                             <attach>${managed.operator-tools.attach}</attach>
+                            <skip>${managed.operator-tools.skip}</skip>
                             <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
@@ -267,6 +342,20 @@
                         <ALIBABA_CLOUD_WORKER_ENV_PROBE>present</ALIBABA_CLOUD_WORKER_ENV_PROBE>
                     </environmentVariables>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>artifact-packaging</id>
+                        <phase>integration-test</phase>
+                        <goals><goal>test</goal></goals>
+                        <configuration>
+                            <includes><include>**/ManagedAgentPackagingIT.java</include></includes>
+                            <systemPropertyVariables>
+                                <managed.artifact.version>${project.version}</managed.artifact.version>
+                                <managed.operator.tools.enabled>${managed.operator-tools.attach}</managed.operator.tools.enabled>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -307,9 +396,19 @@
 
     <profiles>
         <profile>
+            <id>no-operator-tools</id>
+            <activation><property><name>managed.operator-tools.attach</name><value>false</value></property></activation>
+            <properties>
+                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
+                <managed.operator-tools.skip>true</managed.operator-tools.skip>
+            </properties>
+        </profile>
+        <profile>
             <id>central-release</id>
             <properties>
                 <managed.operator-tools.attach>false</managed.operator-tools.attach>
+                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
+                <managed.operator-tools.skip>true</managed.operator-tools.skip>
             </properties>
             <build>
                 <plugins>
@@ -401,6 +500,14 @@
                         <configuration>
                             <excludes>
                                 <exclude>**/Hosted*IT.java</exclude>
+                                <!-- Packaging verification reads the jars the
+                                     package phase wrote and needs the
+                                     managed.artifact.version system property.
+                                     Only the surefire artifact-packaging
+                                     execution provides both; failsafe's
+                                     default *IT include would run it again
+                                     without either. -->
+                                <exclude>**/ManagedAgentPackagingIT.java</exclude>
                             </excludes>
                             <forkCount>${mysql.integration.forks}</forkCount>
                             <reuseForks>true</reuseForks>

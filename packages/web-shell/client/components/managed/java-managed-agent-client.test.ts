@@ -23,6 +23,53 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('sends Session file locators without a caller-selected Workspace or cwd', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await client.queryWorkspaceFiles({
+      sessionId: 'session-a',
+      directory: '.',
+    });
+    await client.readWorkspaceFile({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+    });
+    await client.uploadWorkspaceFile(
+      {
+        sessionId: 'session-a',
+        path: 'file.txt',
+        expectedScopeRevision: 'scope',
+        uploadId: 'upload-id',
+      },
+      new Blob(['text']),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      sessionId: 'session-a',
+      directory: '.',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+    });
+    expect(
+      Object.fromEntries(
+        new URL(String(fetchImpl.mock.calls[2][0])).searchParams,
+      ),
+    ).toEqual({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+      uploadId: 'upload-id',
+    });
+  });
+
   it('uploads raw bytes to the authenticated Workspace route and queries the same upload ID', async () => {
     const result = {
       scopeRevision: 'scope',

@@ -329,6 +329,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
