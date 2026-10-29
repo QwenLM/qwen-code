@@ -11225,6 +11225,17 @@ describe('CoreToolScheduler telemetry spans', () => {
       'The tool had already completed',
       'User intentionally cancelled this tool call. Stop',
     ],
+    [
+      'tells the model a returned interruption result never completed',
+      {
+        llmContent:
+          'Command was cancelled by user before it could complete. There was no output before it was cancelled.',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+      'User intentionally cancelled this tool call.',
+      'had already completed',
+    ],
   ])('%s', async (_title, outcome, notice, wrongNotice) => {
     const { call } = await runAbortedDuringExecution({}, outcome);
 

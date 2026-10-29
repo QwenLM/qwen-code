@@ -6597,8 +6597,12 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        // `execute()` returned a result here, so the tool's work did finish.
-        let cancelMessage = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        // `execute()` returned a result, but that alone does not mean the work
+        // finished: producers that signal interruption by returning (the shell
+        // tool on user cancel) set `interruptedBeforeCompletion`.
+        let cancelMessage = toolResult.interruptedBeforeCompletion
+          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(

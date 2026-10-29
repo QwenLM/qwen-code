@@ -2153,6 +2153,22 @@ describe('ShellTool', () => {
       expectSpawned('npm test');
     });
 
+    it('marks a user-cancelled command as interrupted before completion', async () => {
+      const result = await runFg('npm test', {
+        output: 'start',
+        exitCode: null,
+        signal: 15,
+        aborted: true,
+      });
+
+      // The tool returns (rather than throws), so the scheduler needs this
+      // signal to avoid reporting a killed command as already completed.
+      expect(result.interruptedBeforeCompletion).toBe(true);
+      expect(String(result.llmContent)).toContain(
+        'Command was cancelled by user before it could complete.',
+      );
+    });
+
     it('preserves shell wrapper environment and flags during foreground execution', async () => {
       const command = `FOO=bar bash -e -c 'echo "$FOO"; false; echo bad'`;
       await runFg(command);
