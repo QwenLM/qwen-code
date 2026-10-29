@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Part } from '@google/genai';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core';
 import {
   MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
   MID_TURN_USER_MESSAGE_PREFIX,
@@ -15,7 +16,7 @@ import {
 describe('prefixMidTurnUserMessageParts', () => {
   it('returns a text-only part when parts normalize to empty', () => {
     expect(prefixMidTurnUserMessageParts([], 'fallback')).toEqual([
-      { text: `${MID_TURN_USER_MESSAGE_PREFIX}fallback` },
+      markTypedPrompt({ text: `${MID_TURN_USER_MESSAGE_PREFIX}fallback` }),
     ]);
   });
 
@@ -34,8 +35,36 @@ describe('prefixMidTurnUserMessageParts', () => {
     };
 
     expect(prefixMidTurnUserMessageParts([imagePart], 'inspect this')).toEqual([
+      markTypedPrompt({ text: `${MID_TURN_USER_MESSAGE_PREFIX}inspect this` }),
+      imagePart,
+    ]);
+  });
+
+  it('leaves the text it adds unmarked when a part already holds the typed prompt', () => {
+    // The marked part already carries what the user typed; marking the
+    // added copy too would quote it twice after compaction.
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'abc' },
+    };
+    const typed = markTypedPrompt({ text: 'inspect this' });
+
+    expect(
+      prefixMidTurnUserMessageParts([imagePart, typed], 'inspect this'),
+    ).toEqual([
       { text: `${MID_TURN_USER_MESSAGE_PREFIX}inspect this` },
       imagePart,
+      typed,
+    ]);
+  });
+
+  it('keeps the mark on a marked first text part it prefixes', () => {
+    expect(
+      prefixMidTurnUserMessageParts(
+        [markTypedPrompt({ text: 'hello' })],
+        'hello',
+      ),
+    ).toEqual([
+      markTypedPrompt({ text: `${MID_TURN_USER_MESSAGE_PREFIX}hello` }),
     ]);
   });
 

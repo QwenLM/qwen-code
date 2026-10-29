@@ -27515,9 +27515,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: [User message with attachments]',
-            },
+            }),
             {
               inlineData: {
                 mimeType: 'image/png',
@@ -27617,9 +27617,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: [User message with attachments]',
-            },
+            }),
             {
               inlineData: {
                 mimeType: 'image/png',

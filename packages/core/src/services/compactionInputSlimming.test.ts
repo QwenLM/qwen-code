@@ -1660,6 +1660,49 @@ describe('compactionInputSlimming', () => {
       expect(quote).not.toContain('hook says hi');
     });
 
+    it('quotes every marked part of a turn, as messages typed while tools ran', () => {
+      // ACP appends each such message to the tool results' turn with its
+      // own marked part, so one turn can hold several.
+      const midTurn = '\n[User message received during tool execution]: ';
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [markTypedPrompt({ text: 'build the parser' })],
+        },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'c0', name: 'read_file', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'c0',
+                name: 'read_file',
+                response: { output: 'ok' },
+              },
+            },
+            markTypedPrompt({ text: `${midTurn}look at @src/app.ts` }),
+            { text: '\nContent from src/app.ts:\n' },
+            { text: 'x'.repeat(20_000) },
+            markTypedPrompt({ text: `${midTurn}do not touch the schema` }),
+          ],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const quote = quotesIn(blockText(condensed[0]!)).find((text) =>
+        text.includes('look at @src/app.ts'),
+      );
+      expect(quote).toContain('do not touch the schema');
+      expect(quote).toContain('[Attached, not quoted: src/app.ts]');
+      expect(quote).not.toContain('x'.repeat(100));
+    });
+
     it('says the quotes are verbatim only when none was shortened', () => {
       const shortHistory: Content[] = [
         { role: 'user', parts: [{ text: 'first request' }] },
