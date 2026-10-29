@@ -95,6 +95,8 @@ import {
   type TurnNotificationObserver,
 } from './turn-notification-context.js';
 import { persistStableClientId } from './clientLifecycle.js';
+import { DaemonAvailability } from '../availability.js';
+import { DaemonAvailabilityContext } from '../availability-context.js';
 
 interface MockSession {
   backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
@@ -14842,6 +14844,96 @@ describe('DaemonSessionProvider', () => {
     expect(firstSession.detach).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['load', 'replay', 'iterator'] as const)(
+    'does not close a healthy daemon gate for a local %s TypeError',
+    async (mode) => {
+      let releaseHealth!: (response: Response) => void;
+      const native = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              releaseHealth = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(Response.json({ features: [] }));
+      const availability = new DaemonAvailability(
+        'https://healthy.example',
+        undefined,
+        native,
+      );
+      const session = createMockSession();
+      if (mode === 'load') {
+        sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+          new TypeError('Local metadata decode failed'),
+        );
+      } else {
+        if (mode === 'replay')
+          session.replaySnapshot.compactedReplay =
+            null as unknown as DaemonEvent[];
+        if (mode === 'iterator')
+          session.events = async function* () {
+            throw new TypeError('Local event decode failed');
+            yield* [];
+          };
+        sdkMocks.sessions.push(session);
+      }
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+      try {
+        await renderWithProvider(
+          <Harness />,
+          { autoConnect: true, autoReconnect: false, sessionId: 'session-1' },
+          undefined,
+          availability,
+        );
+        await act(async () => {
+          for (let i = 0; i < 10; i++) await flushPromises();
+        });
+        expect(connection?.error).toBeDefined();
+        expect(native).toHaveBeenCalledOnce();
+        expect(availability.getSnapshot()).toBe('available');
+        expect(availability.getGeneration()).toBe(0);
+        releaseHealth(Response.json({ status: 'ok' }));
+        await act(async () => availability.check());
+        expect(availability.getSnapshot()).toBe('available');
+        expect(availability.getGeneration()).toBe(0);
+        expect(native).toHaveBeenCalledTimes(2);
+      } finally {
+        act(() => availability.dispose());
+      }
+    },
+  );
+
+  it('warns about cleanup detach failure without a workspace availability controller', async () => {
+    const detachFetch = vi.fn(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal('fetch', detachFetch);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.sessions.push(
+      createMockSession({
+        clientId: 'cleanup-client',
+        events: createIdleEvents(),
+      }),
+    );
+    await renderWithProvider(null, {
+      autoConnect: true,
+      sessionId: 'session-1',
+    });
+    await act(async () => {
+      root?.unmount();
+      root = undefined;
+      await flushPromises();
+    });
+    expect(detachFetch).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] detach failed:',
+      expect.any(Error),
+    );
+  });
+
   it('clears connection state when detaching the current session fails', async () => {
     const detachError = new Error('detach failed');
     const firstSession = createMockSession({
@@ -26658,6 +26750,7 @@ describe('DaemonSessionProvider', () => {
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
     notifications?: TurnNotificationObserver,
+    availability?: DaemonAvailability,
   ) {
     const defaultSessionId =
       props.autoConnect === true &&
@@ -26670,7 +26763,7 @@ describe('DaemonSessionProvider', () => {
     document.body.appendChild(container);
     root = createRoot(container);
 
-    const provider = (
+    const sessionProvider = (
       <DaemonSessionProvider
         baseUrl="http://127.0.0.1:4170"
         autoConnect={false}
@@ -26679,6 +26772,13 @@ describe('DaemonSessionProvider', () => {
       >
         {children}
       </DaemonSessionProvider>
+    );
+    const provider = availability ? (
+      <DaemonAvailabilityContext.Provider value={availability}>
+        {sessionProvider}
+      </DaemonAvailabilityContext.Provider>
+    ) : (
+      sessionProvider
     );
     act(() => {
       root?.render(

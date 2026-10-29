@@ -5,6 +5,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import type {
   DaemonWorkspaceFileUploadRequest,
   DaemonWorkspaceFileUploadResult,
@@ -105,6 +107,7 @@ export function useFileUpload(
   options: UseFileUploadOptions,
 ): UseFileUploadReturn {
   const { client, maxBytes, targetKey } = options;
+  const availability = useDaemonAvailabilityController();
   const [uploads, setUploads] = useState<FileUploadItem[]>([]);
   const uploadsRef = useRef<FileUploadItem[]>([]);
   const queueRef = useRef<QueuedUpload[]>([]);
@@ -159,7 +162,9 @@ export function useFileUpload(
         }
         activeUploadRef.current = next;
         patchItem(id, { status: 'uploading', progress: 0 });
+        const availabilityGeneration = availability?.getGeneration();
         try {
+          availability?.assertAvailable();
           const result = await activeClient.uploadWorkspaceFile({
             path: targetPath,
             data: file,
@@ -203,6 +208,11 @@ export function useFileUpload(
             console.error('Failed to handle uploaded file', err);
           }
         } catch (err) {
+          availability?.reportFailure(
+            err,
+            controller.signal,
+            availabilityGeneration,
+          );
           if (generationRef.current !== generation) return;
           if (controller.signal.aborted) {
             // Canceled/removed: drop the row. A late server publish is best
@@ -213,10 +223,15 @@ export function useFileUpload(
             commit();
             continue;
           }
-          patchItem(id, {
-            status: 'error',
-            error: err instanceof Error ? err.message : String(err),
-          });
+          patchItem(
+            id,
+            isDaemonUnavailableError(err)
+              ? { status: 'error', errorCode: 'noDaemon', error: undefined }
+              : {
+                  status: 'error',
+                  error: err instanceof Error ? err.message : String(err),
+                },
+          );
         } finally {
           if (activeUploadRef.current === next) {
             activeUploadRef.current = undefined;
@@ -228,7 +243,7 @@ export function useFileUpload(
       // Items may have been queued while this loop was winding down.
       if (queueRef.current.length > 0) void processQueue();
     }
-  }, [commit, patchItem]);
+  }, [availability, commit, patchItem]);
 
   const uploadFiles = useCallback(
     (files: File[], targetDir: string, onUploaded?: (path: string) => void) => {
