@@ -19,6 +19,8 @@ describe('TUI product evidence', () => {
     workflow.jobs.changes.steps[0].with.script,
   );
   const serverFile = 'packages/managed-agent-server/src/main/java/Service.java';
+  const companionFile =
+    'packages/vscode-ide-companion/src/services/settingsWriter.ts';
   async function required(
     files,
     count = files.length,
@@ -87,8 +89,24 @@ describe('TUI product evidence', () => {
     ).toBe(false);
   });
 
+  it('skips Companion-only source changes and their tests', async () => {
+    expect(
+      await required([
+        { filename: companionFile },
+        {
+          filename:
+            'packages/vscode-ide-companion/src/services/settingsWriter.test.ts',
+        },
+      ]),
+    ).toBe(false);
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
+    'packages/vscode-ide-companion/package.json',
+    'packages/vscode-ide-companion/esbuild.js',
+    'packages/vscode-ide-companion/tsconfig.json',
+    'packages/vscode-ide-companion/src-extra/index.ts',
     'packages/core/src/core/client.ts',
     'packages/channels/base/index.ts',
     'packages/web-templates/package.json',
@@ -104,19 +122,28 @@ describe('TUI product evidence', () => {
     '.nvmrc',
     '.github/workflows/tui-parity.yml',
   ])('runs mixed PRs touching %s', async (filename) => {
-    expect(await required([{ filename: serverFile }, { filename }])).toBe(true);
-  });
-
-  it('checks the source of a rename into an unrelated directory', async () => {
     expect(
       await required([
-        {
-          filename: serverFile,
-          previous_filename: 'packages/cli/src/index.ts',
-        },
+        { filename: serverFile },
+        { filename: companionFile },
+        { filename },
       ]),
     ).toBe(true);
   });
+
+  it.each([serverFile, companionFile])(
+    'checks the source of a rename into %s',
+    async (filename) => {
+      expect(
+        await required([
+          {
+            filename,
+            previous_filename: 'packages/cli/src/index.ts',
+          },
+        ]),
+      ).toBe(true);
+    },
+  );
 
   it('still skips a rename contained within the unrelated subtrees', async () => {
     // Pins the negative arm: `previous_filename` present, but itself
@@ -125,9 +152,9 @@ describe('TUI product evidence', () => {
     expect(
       await required([
         {
-          filename: serverFile,
+          filename: companionFile,
           previous_filename:
-            'packages/managed-agent-server/src/main/java/Old.java',
+            'packages/vscode-ide-companion/src/services/oldWriter.ts',
         },
       ]),
     ).toBe(false);

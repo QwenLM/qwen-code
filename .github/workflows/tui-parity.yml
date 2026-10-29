@@ -56,7 +56,9 @@ jobs:
             // The files API caps results at 3,000. An incomplete diff must run.
             if (files.length !== context.payload.pull_request.changed_files || files.length >= 3000) return true;
             const unrelated = (path) =>
-              path.startsWith('packages/managed-agent-server/') || path.startsWith('docs/');
+              path.startsWith('packages/managed-agent-server/') ||
+              path.startsWith('packages/vscode-ide-companion/src/') ||
+              path.startsWith('docs/');
             return files.some((file) =>
               !unrelated(file.filename) || (file.previous_filename && !unrelated(file.previous_filename)));
 
