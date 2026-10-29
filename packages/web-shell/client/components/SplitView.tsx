@@ -471,7 +471,10 @@ export function SplitView({
     () => allSessions.filter((session) => !paneIds.includes(session.sessionId)),
     [allSessions, paneIds],
   );
-  const canAdd = paneIds.length < MAX_PANES && available.length > 0;
+  // The cached catalog may lag behind sessions created elsewhere, so the button
+  // must stay clickable whenever another pane fits. The picker reloads on open
+  // and reports an empty list itself.
+  const canAdd = paneIds.length < MAX_PANES;
   // Only offer per-pane maximize once there's another pane to maximize against —
   // a lone pane already fills the split.
   const canMaximize = paneIds.length > 1;
@@ -532,8 +535,13 @@ export function SplitView({
           >
             + {t('splitView.addPane')}
           </button>
-          {pickerOpen && available.length > 0 && (
+          {pickerOpen && (
             <ul className={styles.picker} role="listbox">
+              {available.length === 0 && (
+                <li className={styles.pickerEmpty} role="presentation">
+                  {t('splitView.noOtherSessions')}
+                </li>
+              )}
               {available.map((session) => (
                 <li key={session.sessionId} role="option" aria-selected="false">
                   <button

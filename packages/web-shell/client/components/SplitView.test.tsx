@@ -1072,6 +1072,45 @@ describe('SplitView', () => {
     expect(hiddenSlots()).toHaveLength(0);
   });
 
+  it('keeps the add button enabled when the catalog has no other sessions', () => {
+    sessionsState = [
+      { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
+    ];
+    render({ sessionIds: ['s3'] });
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    // The cached catalog is not authoritative: another session may exist
+    // elsewhere, so an empty list must not disable the entry point.
+    expect(addButton.disabled).toBe(false);
+    openPicker();
+    expect(pickerOptions()).toEqual([]);
+    expect(container!.querySelector('[role="listbox"]')?.textContent).toContain(
+      'No other sessions',
+    );
+  });
+
+  it('picks up a session created elsewhere after opening the empty picker', () => {
+    sessionsState = [
+      { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
+    ];
+    render({ sessionIds: ['s3'] });
+    openPicker();
+    expect(pickerOptions()).toEqual([]);
+    // A session is created elsewhere while the picker was open.
+    sessionsState = [
+      ...sessionsState,
+      { sessionId: 's6', workspaceCwd: '/w', displayName: 'Six' },
+    ];
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    openPicker();
+    expect(pickerOptions()).toEqual(['Six']);
+  });
+
   it('reloads the session list when the picker opens (never a stale list)', () => {
     render({ sessionIds: ['s1'] });
     // `useSessions` only fetches on mount; nothing reloads until the user acts.
