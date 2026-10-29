@@ -60,6 +60,7 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdown-utilities.js';
+import { realUserPromptTexts } from '../utils/historyUtils.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
@@ -1626,7 +1627,7 @@ describe('useLlmStream', () => {
     }
   });
 
-  it('keeps display-only composer text intact in row, recall and cancel without creating hook provenance', async () => {
+  it('keeps display text separate from expanded recall and cancel without creating hook provenance', async () => {
     const placeholder = '[Pasted Content 1200 chars]';
     const body = 'pasted workflow payload'.padEnd(1200, 'x');
     const literal = `<system-reminder>user-authored literal</system-reminder>\nworkflow inspect\n${placeholder}`;
@@ -1656,9 +1657,16 @@ describe('useLlmStream', () => {
         },
       );
     });
-    expect(logMessage).toHaveBeenCalledWith(MessageSenderType.USER, literal);
+    expect(logMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      literal.replace(placeholder, body),
+    );
     expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'user', text: literal }),
+      expect.objectContaining({
+        type: 'user',
+        text: literal,
+        recallText: literal.replace(placeholder, body),
+      }),
       expect.any(Number),
     );
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
@@ -1681,6 +1689,52 @@ describe('useLlmStream', () => {
     expect(cancel.mock.calls[0]?.[0]?.lastTurnUserItem).not.toHaveProperty(
       'submittedPrompt',
     );
+  });
+
+  it('preserves distinct same-size paste bodies through recall and editing without human provenance', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const firstBody = 'PASTE_ALPHA '.padEnd(1200, 'a');
+    const secondBody = 'PASTE_BETA '.padEnd(1200, 'b');
+    const logMessage = vi.fn();
+    mockSendMessageStream.mockImplementation(async function* () {});
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    for (const body of [firstBody, secondBody]) {
+      await act(async () => {
+        await result.current.submitQuery(
+          `<system-reminder>model-only notice</system-reminder>\n${body}`,
+          SendMessageType.UserQuery,
+          undefined,
+          {
+            displayText: placeholder,
+            pasteExpansions: new Map([[placeholder, body]]),
+          },
+        );
+      });
+    }
+    const rows = mockAddItem.mock.calls
+      .map(([item], index) => ({ ...item, id: index }) as HistoryItem)
+      .filter((item) => item.type === 'user');
+    const recalled = realUserPromptTexts(rows);
+    expect(recalled).toEqual([firstBody, secondBody]);
+    expect(logMessage.mock.calls.map(([, text]) => text)).toEqual(recalled);
+    expect(rows.map((item) => item.text)).toEqual([placeholder, placeholder]);
+
+    const edited = `${recalled.at(-1)} RECALL_EDIT workflow ultracode`;
+    await act(async () => {
+      await result.current.submitQuery(
+        edited,
+        SendMessageType.UserQuery,
+        undefined,
+        { displayText: edited, hasUnknownInput: true },
+      );
+    });
+    const sent = mockSendMessageStream.mock.calls.at(-1)!;
+    expect(sent[0]).toBe(`${secondBody} RECALL_EDIT workflow ultracode`);
+    expect(sent[0]).not.toContain(firstBody);
+    expect(sent[3]).not.toHaveProperty('humanInput');
+    expect(sent[3]).not.toHaveProperty('onWorkflowIntentApplied');
   });
 
   describe('vision bridge gate', () => {
@@ -10636,6 +10690,99 @@ describe('useLlmStream', () => {
       await submitPromise;
     });
   });
+
+  it.each(['success', 'error', 'cancelled', 'executing'] as const)(
+    'orders a %s tool around every pending interleaved continuation segment',
+    async (status) => {
+      const toolCall = {
+        request: {
+          callId: 'interleaved-tool-continuation',
+          name: 'advisor',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-tool-continuation',
+        },
+        status,
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'interleaved-tool-continuation',
+          responseParts: [],
+          resultDisplay: 'advisor feedback',
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: { displayName: 'Advisor' },
+        invocation: { getDescription: () => 'Consult Advisor' },
+      } as unknown as TrackedToolCall;
+      let finishSummary!: () => void;
+      const summaryGate = new Promise<void>((resolve) => {
+        finishSummary = resolve;
+      });
+      let finishMessage!: () => void;
+      const messageGate = new Promise<void>((resolve) => {
+        finishMessage = resolve;
+      });
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'before summary' };
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { description: 'continuation summary' },
+          };
+          await summaryGate;
+          yield { type: ServerLlmEventType.Content, value: 'after summary' };
+          await messageGate;
+        })(),
+      );
+      const { result } = renderTestHook([toolCall]);
+      let submitPromise: Promise<unknown> | undefined;
+      act(() => {
+        submitPromise = result.current.submitQuery(
+          [],
+          SendMessageType.ToolResult,
+        );
+      });
+      const completed = status !== 'executing';
+      const leadingTypes = completed
+        ? ['tool_group', 'gemini', 'gemini_thought']
+        : ['gemini', 'gemini_thought', 'tool_group'];
+      await waitFor(() => {
+        expect(
+          result.current.pendingHistoryItems.map((item) => item.type),
+        ).toEqual(leadingTypes);
+        expect(
+          result.current.pendingHistoryItems.find(
+            (item) => item.type === 'gemini_thought',
+          ),
+        ).toEqual(
+          expect.objectContaining({
+            text: 'continuation summary',
+            isStreaming: true,
+          }),
+        );
+      });
+      await act(async () => finishSummary());
+      await waitFor(() => {
+        expect(
+          result.current.pendingHistoryItems.map((item) => item.type),
+        ).toEqual([...leadingTypes, 'gemini_content']);
+        expect(
+          result.current.pendingHistoryItems.find(
+            (item) => item.type === 'gemini_thought',
+          ),
+        ).toEqual(
+          expect.objectContaining({
+            text: 'continuation summary',
+            isStreaming: false,
+          }),
+        );
+      });
+      await act(async () => {
+        finishMessage();
+        await submitPromise;
+      });
+    },
+  );
 
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
     // Race A repro, DROP side of the boundary this PR introduces: history
@@ -19849,6 +19996,638 @@ describe('useLlmStream', () => {
           expect.any(Number),
         ),
       );
+    });
+
+    it.each(['fresh retry', 'model fallback'])(
+      'discards every chunk of an active interleaved summary on %s',
+      async (transition) => {
+        const summary = 'a'.repeat(16_384 * 2 + 123);
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          (text: string, max?: number) =>
+            max !== undefined && text.length > max ? max : text.length,
+        );
+        let releaseStream!: () => void;
+        const holdStream = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'before' };
+            yield {
+              type: ServerLlmEventType.Thought,
+              value: { description: summary },
+            };
+            await holdStream;
+            yield transition === 'model fallback'
+              ? {
+                  type: ServerLlmEventType.ModelFallback,
+                  fromModel: 'primary',
+                  toModel: 'fallback',
+                  fallbackIndex: 1,
+                }
+              : { type: ServerLlmEventType.Retry, isContinuation: false };
+            yield { type: ServerLlmEventType.Content, value: 'replacement' };
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        const { result } = renderTestHook();
+        act(() => {
+          void result.current.submitQuery('Interrupt long interleaved summary');
+        });
+        await waitFor(() => {
+          expect(
+            result.current.pendingHistoryItems.map((item) => item.type),
+          ).toEqual([
+            'gemini',
+            'gemini_thought',
+            'gemini_thought_content',
+            'gemini_thought_content',
+          ]);
+        });
+        await act(async () => releaseStream());
+        await waitFor(() => {
+          expect(
+            mockAddItem.mock.calls.some(
+              ([item]) => item.type === 'gemini' && item.text === 'replacement',
+            ),
+          ).toBe(true);
+        });
+        expect(
+          mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter((item) => item.type.startsWith('gemini')),
+        ).toEqual([
+          expect.objectContaining({ type: 'gemini', text: 'replacement' }),
+        ]);
+      },
+    );
+
+    it.each([
+      {
+        name: 'ChatCompressed',
+        event: { type: ServerLlmEventType.ChatCompressed, value: null },
+        expectedType: 'info',
+      },
+      {
+        name: 'MaxSessionTurns',
+        event: { type: ServerLlmEventType.MaxSessionTurns },
+        expectedType: 'info',
+      },
+      {
+        name: 'SessionTokenLimitExceeded',
+        event: {
+          type: ServerLlmEventType.SessionTokenLimitExceeded,
+          value: { currentTokens: 200, limit: 100, message: 'limit' },
+        },
+        expectedType: 'error',
+      },
+      {
+        name: 'Citation',
+        event: { type: ServerLlmEventType.Citation, value: 'Citation text' },
+        expectedType: 'info',
+      },
+      {
+        name: 'HookSystemMessage',
+        event: {
+          type: ServerLlmEventType.HookSystemMessage,
+          value: 'hook message',
+        },
+        expectedType: 'stop_hook_system_message',
+      },
+      {
+        name: 'UserPromptSubmitBlocked',
+        event: {
+          type: ServerLlmEventType.UserPromptSubmitBlocked,
+          value: { reason: 'blocked', originalPrompt: 'prompt' },
+        },
+        expectedType: 'user_prompt_submit_blocked',
+      },
+      {
+        name: 'StopHookLoop',
+        event: {
+          type: ServerLlmEventType.StopHookLoop,
+          value: { iterationCount: 1, reasons: ['block'], stopHookCount: 1 },
+        },
+        expectedType: 'stop_hook_loop',
+      },
+      {
+        name: 'GoalSettlementFailed',
+        event: {
+          type: ServerLlmEventType.GoalSettlementFailed,
+          value: 'goal failed',
+        },
+        expectedType: 'warning',
+      },
+      {
+        name: 'GoalState',
+        event: {
+          type: ServerLlmEventType.GoalState,
+          cause: 'complete' as const,
+          value: {
+            v: 2 as const,
+            activity: 'idle' as const,
+            goal: {
+              goalId: 'goal-order',
+              revision: 1,
+              objective: 'deliver',
+              status: 'complete' as const,
+              evidenceCursor: { recordId: 'record-1' },
+              turnCount: 1,
+              activeTimeMs: 1,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          },
+        },
+        expectedType: 'goal_state',
+      },
+    ])(
+      'commits interleaved output before $name',
+      async ({ event, expectedType }) => {
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'before' };
+            yield {
+              type: ServerLlmEventType.Thought,
+              value: { description: 'summary' },
+            };
+            yield event;
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('Show interleaved output');
+        });
+        expect(
+          mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter(
+              (item) =>
+                item.type.startsWith('gemini') || item.type === expectedType,
+            )
+            .map((item) => item.type),
+        ).toEqual(['gemini', 'gemini_thought', expectedType]);
+      },
+    );
+
+    it.each(['short', 'oversized'])(
+      'finishes a %s staged summary before the following message finishes',
+      async (size) => {
+        const summary =
+          size === 'short' ? 'summary' : 'r'.repeat(16_384 * 2 + 123);
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          (text: string, max?: number) =>
+            max !== undefined && text.length > max ? max : text.length,
+        );
+        let startMessage!: () => void;
+        const reasoningGate = new Promise<void>((resolve) => {
+          startMessage = resolve;
+        });
+        let finishResponse!: () => void;
+        const messageGate = new Promise<void>((resolve) => {
+          finishResponse = resolve;
+        });
+        mockSendMessageStream.mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'before' };
+            yield {
+              type: ServerLlmEventType.Thought,
+              value: { description: summary },
+            };
+            await reasoningGate;
+            yield { type: ServerLlmEventType.Content, value: 'after' };
+            await messageGate;
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        const { result } = renderTestHook();
+        act(() => {
+          void result.current.submitQuery('Show reasoning and continue');
+        });
+        const pendingThoughts = () =>
+          result.current.pendingHistoryItems.filter(
+            (item) =>
+              item.type === 'gemini_thought' ||
+              item.type === 'gemini_thought_content',
+          );
+        await waitFor(() => {
+          expect(
+            pendingThoughts()
+              .map((item) => item.text)
+              .join(''),
+          ).toBe(summary);
+        });
+        const groupId = pendingThoughts()[0].thoughtGroupId;
+        expect(groupId).toBeLessThan(0);
+        expect(
+          pendingThoughts().every((item) => item.isStreaming === true),
+        ).toBe(true);
+        await act(async () => startMessage());
+        await waitFor(() => {
+          expect(result.current.pendingHistoryItems.at(-1)).toEqual(
+            expect.objectContaining({ type: 'gemini_content', text: 'after' }),
+          );
+          expect(
+            pendingThoughts().every((item) => item.isStreaming === false),
+          ).toBe(true);
+        });
+        expect(
+          pendingThoughts().every((item) => item.thoughtGroupId === groupId),
+        ).toBe(true);
+        expect(
+          mockAddItem.mock.calls.some(([item]) =>
+            item.type.startsWith('gemini'),
+          ),
+        ).toBe(false);
+        await act(async () => finishResponse());
+        await waitFor(() =>
+          expect(result.current.pendingHistoryItems).toEqual([]),
+        );
+        const committedThoughts = mockAddItem.mock.calls
+          .map(([item]) => item)
+          .filter(
+            (item) =>
+              item.type === 'gemini_thought' ||
+              item.type === 'gemini_thought_content',
+          );
+        expect(
+          committedThoughts.every((item) => item.thoughtGroupId === groupId),
+        ).toBe(true);
+        expect(
+          committedThoughts.every((item) => item.isStreaming === false),
+        ).toBe(true);
+
+        mockSendMessageStream.mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'next response' };
+            yield {
+              type: ServerLlmEventType.Thought,
+              value: { description: 'new summary' },
+            };
+          })(),
+        );
+        await act(async () => {
+          await result.current.submitQuery('A different response');
+        });
+        const nextThought = mockAddItem.mock.calls
+          .map(([item]) => item)
+          .find(
+            (item) =>
+              item.type === 'gemini_thought' && item.text === 'new summary',
+          );
+        expect(nextThought.thoughtGroupId).toBeLessThan(groupId);
+      },
+    );
+
+    it('should preserve interleaved reasoning summary and content order', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { subject: '', description: 'SUMMARY_A' },
+          };
+          yield {
+            type: ServerLlmEventType.Content,
+            value: 'MESSAGE_X',
+          };
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { subject: '', description: 'SUMMARY_B' },
+          };
+          yield {
+            type: ServerLlmEventType.Content,
+            value: 'MESSAGE_Y',
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Show interleaved summaries');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item)
+        .filter((item) => item.type.startsWith('gemini'));
+      expect(assistantItems).toEqual([
+        expect.objectContaining({ type: 'gemini_thought', text: 'SUMMARY_A' }),
+        expect.objectContaining({ type: 'gemini', text: 'MESSAGE_X' }),
+        expect.objectContaining({ type: 'gemini_thought', text: 'SUMMARY_B' }),
+        expect.objectContaining({ type: 'gemini_content', text: 'MESSAGE_Y' }),
+      ]);
+    });
+
+    it.each(['finished', 'end of stream'])(
+      'commits a trailing interleaved summary on %s',
+      async (ending) => {
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'before' };
+            yield {
+              type: ServerLlmEventType.Thought,
+              value: { description: 'summary' },
+            };
+            if (ending === 'finished') {
+              yield {
+                type: ServerLlmEventType.Finished,
+                value: { reason: 'STOP', usageMetadata: undefined },
+              };
+            }
+          })(),
+        );
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('Show a trailing summary');
+        });
+        expect(
+          mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter((item) => item.type.startsWith('gemini')),
+        ).toEqual([
+          expect.objectContaining({ type: 'gemini', text: 'before' }),
+          expect.objectContaining({ type: 'gemini_thought', text: 'summary' }),
+        ]);
+        expect(result.current.pendingHistoryItems).toEqual([]);
+      },
+    );
+
+    it.each([false, true])(
+      'discards staged interleaved output on an explicit retry after a thrown stream (tool call: %s)',
+      async (withToolCall) => {
+        mockSendMessageStream
+          .mockReturnValueOnce(
+            (async function* () {
+              yield { type: ServerLlmEventType.Content, value: 'before' };
+              yield {
+                type: ServerLlmEventType.Thought,
+                value: { description: 'summary' },
+              };
+              if (withToolCall) {
+                yield {
+                  type: ServerLlmEventType.ToolCallRequest,
+                  value: {
+                    callId: 'failed-call',
+                    name: 'read_file',
+                    args: { path: '/foo' },
+                    isClientInitiated: false,
+                    prompt_id: 'p1',
+                  },
+                };
+              }
+              throw new Error('stream failed');
+            })(),
+          )
+          .mockReturnValueOnce(
+            (async function* () {
+              yield { type: ServerLlmEventType.Content, value: 'replacement' };
+              yield {
+                type: ServerLlmEventType.Finished,
+                value: { reason: 'STOP', usageMetadata: undefined },
+              };
+            })(),
+          );
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('Show an interleaved summary');
+        });
+        expect(result.current.pendingHistoryItems).toEqual([
+          expect.objectContaining({ type: 'gemini', text: 'before' }),
+          expect.objectContaining({ type: 'gemini_thought', text: 'summary' }),
+          expect.objectContaining({ type: 'error' }),
+        ]);
+        await act(async () => {
+          await result.current.submitQuery(
+            'Show an interleaved summary',
+            SendMessageType.Retry,
+          );
+        });
+        expect(
+          mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter((item) => item.type.startsWith('gemini')),
+        ).toEqual([
+          expect.objectContaining({ type: 'gemini', text: 'replacement' }),
+        ]);
+      },
+    );
+
+    it('commits interleaved output before a direct cancellation notice', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'before' };
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { description: 'summary' },
+          };
+          await holdStream;
+          yield { type: ServerLlmEventType.UserCancelled };
+        })(),
+      );
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('Cancel an interleaved summary');
+      });
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toHaveLength(2);
+      });
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => releaseStream());
+      expect(
+        mockAddItem.mock.calls
+          .map(([item]) => item)
+          .filter(
+            (item) => item.type.startsWith('gemini') || item.type === 'info',
+          ),
+      ).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        expect.objectContaining({ type: 'gemini_thought', text: 'summary' }),
+        { type: 'info', text: 'Request cancelled.' },
+      ]);
+      expect(result.current.pendingHistoryItems).toEqual([]);
+    });
+
+    it('keeps earlier content before an actively streaming reasoning summary', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'before' };
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { description: 'summary' },
+          };
+          await holdStream;
+          yield { type: ServerLlmEventType.Content, value: 'after' };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('Stream an interleaved summary');
+      });
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual([
+          expect.objectContaining({ type: 'gemini', text: 'before' }),
+          expect.objectContaining({ type: 'gemini_thought', text: 'summary' }),
+        ]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(([item]) =>
+          item.type.startsWith('gemini'),
+        ),
+      ).toEqual([]);
+      await act(async () => releaseStream());
+      await waitFor(() => {
+        expect(
+          mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter((item) => item.type.startsWith('gemini')),
+        ).toEqual([
+          expect.objectContaining({ type: 'gemini', text: 'before' }),
+          expect.objectContaining({ type: 'gemini_thought', text: 'summary' }),
+          expect.objectContaining({ type: 'gemini_content', text: 'after' }),
+        ]);
+      });
+    });
+
+    it.each(['fresh retry', 'model fallback', 'continuation retry'])(
+      'handles staged interleaved summaries on %s',
+      async (transition) => {
+        let releaseStream!: () => void;
+        const holdStream = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        const isContinuation = transition === 'continuation retry';
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'before' };
+            yield {
+              type: ServerLlmEventType.Thought,
+              value: { description: 'summary' },
+            };
+            yield { type: ServerLlmEventType.Content, value: 'after' };
+            await holdStream;
+            yield transition === 'model fallback'
+              ? {
+                  type: ServerLlmEventType.ModelFallback,
+                  fromModel: 'primary',
+                  toModel: 'fallback',
+                  fallbackIndex: 1,
+                }
+              : { type: ServerLlmEventType.Retry, isContinuation };
+            yield {
+              type: ServerLlmEventType.Content,
+              value: isContinuation ? ' continued' : 'replacement',
+            };
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        const { result } = renderTestHook();
+        act(() => {
+          void result.current.submitQuery('Retry interleaved output');
+        });
+        await waitFor(() => {
+          expect(result.current.pendingHistoryItems).toEqual([
+            expect.objectContaining({ type: 'gemini', text: 'before' }),
+            expect.objectContaining({
+              type: 'gemini_thought',
+              text: 'summary',
+            }),
+            expect.objectContaining({ type: 'gemini_content', text: 'after' }),
+          ]);
+        });
+        expect(
+          mockAddItem.mock.calls.filter(([item]) =>
+            item.type.startsWith('gemini'),
+          ),
+        ).toEqual([]);
+        await act(async () => releaseStream());
+        await waitFor(() => {
+          const textItems = mockAddItem.mock.calls
+            .map(([item]) => item)
+            .filter(
+              (item) =>
+                item.type === 'gemini' || item.type === 'gemini_content',
+            );
+          expect(textItems.map((item) => item.text)).toEqual(
+            isContinuation ? ['before', 'after continued'] : ['replacement'],
+          );
+        });
+      },
+    );
+
+    it('keeps earlier content before every chunk of an oversized interleaved summary', async () => {
+      const summary = 'a'.repeat(16_384 * 2 + 123);
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (text: string, max?: number) =>
+          max !== undefined && text.length > max ? max : text.length,
+      );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'before' };
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { description: summary },
+          };
+          yield { type: ServerLlmEventType.Content, value: 'after' };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('Show a long interleaved summary');
+      });
+      const items = mockAddItem.mock.calls
+        .map(([item]) => item)
+        .filter((item) => item.type.startsWith('gemini'));
+      expect(items[0]).toEqual(
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+      );
+      expect(items.at(-1)).toEqual(
+        expect.objectContaining({ type: 'gemini_content', text: 'after' }),
+      );
+      expect(items.slice(1, -1).map((item) => item.type)).toEqual([
+        'gemini_thought',
+        'gemini_thought_content',
+        'gemini_thought_content',
+      ]);
+      expect(
+        items
+          .slice(1, -1)
+          .map((item) => item.text)
+          .join(''),
+      ).toBe(summary);
     });
 
     it('should commit thought and finalize dual output on UserCancelled', async () => {

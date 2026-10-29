@@ -101,6 +101,11 @@ jobs:
       tag: '${{ steps.version.outputs.tag }}'
       version: '${{ steps.version.outputs.version }}'
     steps:
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0

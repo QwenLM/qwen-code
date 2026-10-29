@@ -102,7 +102,8 @@ export function useHistory(): UseHistoryManagerReturn {
           if (
             lastItem.type === 'user' &&
             newItem.type === 'user' &&
-            lastItem.text === newItem.text
+            lastItem.text === newItem.text &&
+            lastItem.recallText === newItem.recallText
           ) {
             return prevHistory; // Don't add the duplicate
           }

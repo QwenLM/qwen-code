@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
@@ -27,8 +28,8 @@ import org.springframework.transaction.PlatformTransactionManager;
         name = "enabled", havingValue = "true")
 public class ToolPublicationConfiguration {
     @Bean
-    public ToolPublicationStore toolPublicationStore(JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ManagedSessionStore sessions,
+    public ToolPublicationStore toolPublicationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedSessionStore sessions,
             ToolExecutionRepository executions, RuntimeBindingRepository bindings,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
@@ -46,8 +47,8 @@ public class ToolPublicationConfiguration {
     }
 
     @Bean
-    public ToolPublicationDataStore toolPublicationDataStore(JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ToolPublicationStore grants,
+    public ToolPublicationDataStore toolPublicationDataStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ToolPublicationStore grants,
             ManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
@@ -65,15 +66,15 @@ public class ToolPublicationConfiguration {
     }
 
     @Bean
-    public ToolPublicationAdmissionStore toolPublicationAdmissionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ManagedSessionStore sessions,
+    public ToolPublicationAdmissionStore toolPublicationAdmissionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedSessionStore sessions,
             ToolPublicationDataStore data) {
         return new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
     }
 
     @Bean
-    public ToolPublicationRetentionStore toolPublicationRetentionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ManagedAgentProperties properties) {
+    public ToolPublicationRetentionStore toolPublicationRetentionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedAgentProperties properties) {
         var grace = properties.getToolPublication().getDeletionGrace();
         if (grace == null || grace.isNegative()) {
             throw new IllegalStateException("Tool output deletion grace must be nonnegative");
@@ -87,12 +88,12 @@ public class ToolPublicationConfiguration {
         return new ToolPublicationRetentionObserver(retention, properties);
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedToolOutputScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("managed-tool-output-").build();
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedToolVerificationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("managed-tool-verification-scan-").build();
     }
@@ -105,14 +106,14 @@ public class ToolPublicationConfiguration {
     }
 
     @Bean
-    public ToolPublicationCollector toolPublicationCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public ToolPublicationCollector toolPublicationCollector(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects, ManagedAgentProperties properties) {
         return new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
     }
 
     @Bean
-    public SessionResourceCollectionCollector sessionResourceCollectionCollector(JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ManagedAgentProperties properties) {
+    public SessionResourceCollectionCollector sessionResourceCollectionCollector(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedAgentProperties properties) {
         return new SessionResourceCollectionCollector(jdbc, manager, properties);
     }
 

@@ -5,8 +5,8 @@
  */
 
 // The Java integration-test jobs split `*IT.java` by name: `Hosted*IT` runs
-// only in the Hosted MySQL job, and every other `*IT` runs in both engines'
-// legs of the mysql-integration job (MySQL 8.4 and MariaDB 10.11).
+// only in the Hosted MySQL job, and every other `*IT` runs in the MySQL 8.4
+// mysql-integration job.
 // Maven still passes when a profile's <includes>, or -Dit.test in MAVEN_ARGS
 // or .mvn/maven.config, narrows that selection, so after a job's tests this
 // compares the failsafe reports with the source tree of each module: every
@@ -48,6 +48,38 @@ if (!inFamily || modules.length === 0) {
 }
 
 const simpleName = (className) => className.split('.').at(-1);
+
+// A module can bind an `*IT` class to a surefire execution instead of failsafe.
+// Such a class is then excluded from the mysql-integration failsafe (so it can
+// never have a report) while still matching the non-hosted roster below, which
+// is a contradiction rather than a missed run: #15820 item 1. Name each such
+// class here, and keep the pom in agreement — the check below fails if a name
+// is not bound to a surefire include and a failsafe exclude in that module.
+const SUREFIRE_BOUND = new Map([
+  ['packages/managed-agent-server', ['ManagedAgentPackagingIT']],
+]);
+
+// The module argument is whatever the job passed to Maven: relative on CI,
+// absolute in the meta-tests, so match its trailing segments.
+const boundNames = (module) => {
+  const normalized = path.normalize(module).split(path.sep).join('/');
+  for (const [dir, names] of SUREFIRE_BOUND) {
+    if (normalized === dir || normalized.endsWith(`/${dir}`)) return names;
+  }
+  return [];
+};
+
+const rosterExempt = (module, name) => boundNames(module).includes(name);
+
+const pomBindsBoth = (module, name) => {
+  const pom = path.join(module, 'pom.xml');
+  if (!existsSync(pom)) return false;
+  const xml = readFileSync(pom, 'utf8');
+  return (
+    xml.includes(`<include>**/${name}.java</include>`) &&
+    xml.includes(`<exclude>**/${name}.java</exclude>`)
+  );
+};
 // Not readdirSync's `recursive`: a Node older than 18.17 ignores it, and the
 // check would then find no integration test at all.
 const javaFiles = (dir, prefix = []) =>
@@ -61,7 +93,21 @@ for (const module of modules) {
   const expected = javaFiles(path.join(module, 'src', 'test', 'java'))
     .filter((file) => file.endsWith('.java'))
     .map((file) => file.slice(0, -'.java'.length))
-    .filter((className) => inFamily(simpleName(className)));
+    .filter((className) => inFamily(simpleName(className)))
+    .filter((className) => {
+      const name = simpleName(className);
+      if (!rosterExempt(module, name)) return true;
+      console.log(`${module}: ${name} runs under surefire, not failsafe`);
+      return false;
+    });
+  for (const name of boundNames(module)) {
+    if (!pomBindsBoth(module, name)) {
+      failed = true;
+      console.error(
+        `::error::${module}: ${name} is listed as surefire-bound but its pom no longer binds it to a surefire include and a failsafe exclude`,
+      );
+    }
+  }
   if (optIn && expected.length !== 1) {
     failed = true;
     console.error(

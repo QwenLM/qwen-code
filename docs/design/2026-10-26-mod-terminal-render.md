@@ -103,15 +103,16 @@ The debug log records each refusal and adjustment in Claude Code's words, such a
 ### 5. Drawing in Ink
 
 - **Place.** The band sits in the composer, between the session feedback survey and the prompt input, and shows only while the input does. A dialog that takes the composer's place hides it. Agent tabs, which use their own composer, do not show it.
-- **Size.** The band is at most `maxRows` rows tall and clips a taller tree. It is laid out `bodyColumns` wide.
+- **Size.** The band is at most `maxRows` rows tall and clips a taller tree. It is laid out `bodyColumns` wide and clips horizontal overflow to the composer's width.
 - **Mapping.** A `Box` becomes an Ink `Box` and a `Text` an Ink `Text`, with these conversions:
   - a string inside a `Box` is drawn as a `Text`;
+  - text wrap values `end` and `middle` become `truncate-end` and `truncate-middle`;
   - spacing steps become cells: `xs` and `sm` are 1 across and 0 down, `md` 2 and 1, `lg` 3 and 1, `xl` 4 and 2;
   - `weight: "semibold"` or `"bold"` draws bold; `size`, `mono`, `tabular` and `dir` are dropped, as Claude Code's terminal drops them;
   - a color that is one of Claude Code's theme keys maps to the active Qwen Code theme: `text` to the primary text color, `subtle` and `inactive` to the secondary one, `success`, `error` and `warning` to the status colors, and `claude` and `suggestion` to the accent;
   - Claude Code's other theme keys, such as `permission` or `diffAdded`, draw in the default color in this stage;
   - any other color draws when Ink accepts it (a name or hex value) and otherwise draws in the default color;
-  - all text is sanitized for the terminal, as Mod transcript lines are.
+  - all text is sanitized for the terminal, as Mod transcript lines are; tabs become spaces to the next 8-column stop, as Claude Code's Ink expands them.
 - **Failures.** An error boundary wraps the band. A tree that throws while drawn shows nothing, and that answer is not drawn again. The next answer is drawn afresh.
 - **Layout.** Ink measures the controls under the transcript to size the transcript's viewport. The band's height joins the inputs of that measurement, as the live agent panel's already does, so the alternate screen does not clip the prompt.
 - **Wiring.** The interactive Mod session gains a small store of the band's last tree. The band reads it with `useSyncExternalStore`, and Ink reports the site's input to the session, which keys and queues the renders.
@@ -141,7 +142,7 @@ These go into the user guide:
 - Only the `AbovePrompt` site is raised, and only in Ink. Elements other than `Box` and `Text` fail the tree.
 - The band has no collapse mark, focus, scrolling or `n more` row. A tree taller than `maxRows` is clipped. `maxRows` is a third of the terminal's rows, where Claude Code gives the bottom slot's remaining rows in fullscreen and the terminal's height otherwise. `bodyColumns` keeps Claude Code's five-column reservation.
 - `$.ui.invalidate` takes effect after the dispatch that called it, since Qwen Code Mods have no timers.
-- A render can wait behind a tool call and its approval, and the band keeps its last tree meanwhile.
+- A render can wait behind a tool call and its approval, and the band keeps its last tree meanwhile. A tool call, command or turn event queued behind a running render waits for it, up to 10 seconds for each `ui.render` hook in the chain.
 - `ui.resolve` hooks are skipped as unsupported. `hover` is checked but not drawn.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
 - JSX is not compiled yet, although `h` and `Fragment` exist.
@@ -192,5 +193,5 @@ Acceptance: Token Weather's line shows in Ink with the icon, word, percentage, t
 
 - The band takes rows from the transcript. The cap of a third of the terminal keeps it small. Whether to match Claude Code's fullscreen slot more closely is open.
 - A render that waits behind a long tool call leaves the band stale. That is acceptable for a band that changes per turn. Concurrent roots in the worker would lift it.
-- A slow render hook delays the tool middleware queued behind it by up to the hook's 10-second budget.
+- A slow render hook delays the tool middleware queued behind it by up to 10 seconds for each `ui.render` hook in the chain.
 - Whether refusal lines should also reach the transcript under `--debug`, since there is no hot reload to show them, is open.

@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -28,7 +29,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private final org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications;
     private final org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results;
 
-    public WorkspaceProfileLifecycleVerifier(JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
+    public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
             org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results) {
         this.jdbc = jdbc;
         this.records = new ManagedExtensionRecordStore(jdbc);

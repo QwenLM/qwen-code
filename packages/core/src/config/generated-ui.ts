@@ -16,6 +16,7 @@ export interface BundledGeneratedUiStatus {
   enabled: boolean;
   reason?:
     | 'setting-disabled'
+    | 'unsupported-client'
     | 'unsupported-runtime'
     | 'workspace-untrusted'
     | 'provider-conflict'

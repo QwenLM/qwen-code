@@ -103,15 +103,16 @@ hook 收到 Claude Code 为横带定义的输入：
 ### 5. 在 Ink 中绘制
 
 - **位置。** 横带放在输入区里，位于会话反馈调查和输入框之间，只在输入框显示时显示。占用输入区位置的对话框会把它一起替换掉。agent 标签页使用自己的输入区，不显示横带。
-- **尺寸。** 横带最多 `maxRows` 行高，更高的树会被裁掉。它按 `bodyColumns` 的宽度布局。
+- **尺寸。** 横带最多 `maxRows` 行高，更高的树会被裁掉。它按 `bodyColumns` 的宽度布局，超出输入区宽度的水平内容会被裁掉。
 - **映射。** `Box` 画成 Ink 的 `Box`，`Text` 画成 Ink 的 `Text`，并做以下转换：
   - `Box` 里的字符串画成一个 `Text`；
+  - 文本换行值 `end` 和 `middle` 分别转换为 `truncate-end` 和 `truncate-middle`；
   - 间距档位换算成单元格：`xs` 和 `sm` 为横 1、竖 0，`md` 为 2 和 1，`lg` 为 3 和 1，`xl` 为 4 和 2；
   - `weight: "semibold"` 或 `"bold"` 画成粗体；`size`、`mono`、`tabular` 和 `dir` 丢弃，与 Claude Code 的终端一致；
   - 属于 Claude Code 主题键的颜色映射到当前 Qwen Code 主题：`text` 对应主文本色，`subtle` 和 `inactive` 对应次文本色，`success`、`error` 和 `warning` 对应状态色，`claude` 和 `suggestion` 对应强调色；
   - Claude Code 的其他主题键，例如 `permission` 或 `diffAdded`，本阶段画成默认颜色；
   - 其他颜色在 Ink 能接受时（颜色名或十六进制值）照常绘制，否则画成默认颜色；
-  - 所有文本都做终端清洗，与 Mod 的对话记录行相同。
+  - 所有文本都做终端清洗，与 Mod 的对话记录行相同；制表符展开为空格，补到下一个 8 列制表位，与 Claude Code 的 Ink 相同。
 - **失败处理。** 横带外面包一个错误边界。绘制时抛错的树什么都不显示，这个答复也不再重画；下一个答复重新绘制。
 - **布局。** Ink 会测量对话记录下方各控件的高度，来确定对话记录视口的大小。横带的高度要加入这次测量的输入，和 live agent 面板现在的做法一样，这样备用屏幕就不会把输入框裁掉。
 - **接线。** 交互式 Mod 会话新增一个小 store，保存横带的上一棵树。横带用 `useSyncExternalStore` 读取它。Ink 把位置的输入报告给会话，由会话计算输入键并排队渲染。
@@ -141,7 +142,7 @@ hook 收到 Claude Code 为横带定义的输入：
 - 只触发 `AbovePrompt` 位置，且只在 Ink 中。`Box` 和 `Text` 以外的元素会使整棵树不合格。
 - 横带没有折叠标记、焦点、滚动和 `n more` 行。高于 `maxRows` 的树会被裁掉。`maxRows` 取终端行数的三分之一；Claude Code 在全屏时给出底部槽剩余的行数，否则给出终端高度。`bodyColumns` 保留 Claude Code 的五列预留。
 - `$.ui.invalidate` 在调用它的那次调度结束后才生效，因为 Qwen Code 的 Mod 没有定时器。
-- 渲染可能要排在工具调用及其审批之后，期间横带保持上一棵树。
+- 渲染可能要排在工具调用及其审批之后，期间横带保持上一棵树。排在正在运行的渲染后面的工具调用、命令或回合事件也要等待该渲染完成，最长为链上每个 `ui.render` hook 各 10 秒。
 - `ui.resolve` hook 作为不支持的事件被跳过。`hover` 会校验，但不绘制。
 - 拒绝信息只进调试日志，因为 Qwen Code 没有热重载。
 - 虽然有 `h` 和 `Fragment`，但还不编译 JSX。
@@ -192,5 +193,5 @@ Token Weather 样例读取的是 `e.hasSurvey` 和 `e.bodyColumns`，但 Claude 
 
 - 横带会占用对话记录的行数。三分之一终端高度的上限让它保持很小。是否要更贴近 Claude Code 的全屏底部槽，尚未决定。
 - 排在长时间工具调用后面的渲染会让横带过时。对每轮才变一次的横带来说可以接受。worker 支持并发根调度后可以解决。
-- 慢的渲染 hook 会让排在它后面的工具中间件延迟，最长为该 hook 的 10 秒预算。
+- 慢的渲染 hook 会让排在它后面的工具中间件延迟，最长为链上每个 `ui.render` hook 各 10 秒。
 - 由于没有热重载来显示拒绝信息，是否在 `--debug` 下把它们也写进对话记录，尚未决定。

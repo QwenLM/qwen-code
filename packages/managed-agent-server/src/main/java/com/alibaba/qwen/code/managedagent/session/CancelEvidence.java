@@ -9,6 +9,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -22,7 +23,7 @@ public class CancelEvidence implements AcceptanceEvidence {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
 
-    public CancelEvidence(JdbcTemplate jdbc, ObjectMapper json) {
+    public CancelEvidence(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.json = json;
     }

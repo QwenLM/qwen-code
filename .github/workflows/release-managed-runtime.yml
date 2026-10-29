@@ -10,7 +10,7 @@ on:
         type: 'string'
         required: true
       dry_run:
-        description: 'Build and verify without publishing to Central, GitHub, or OSS.'
+        description: 'Build and verify without publishing to GitHub or OSS.'
         type: 'boolean'
         required: true
         default: true
@@ -127,6 +127,31 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
+      - name: 'Repair the 0.26.3 ownership test fixture'
+        if: "${{ env.RELEASE_TAG == 'v0.26.3' }}"
+        run: |-
+          set -euo pipefail
+          if [[ "${SOURCE_SHA}" != 'eeee1443a7e36ab22b2f1dcded8dec64b621a7ee' ]]; then
+            echo 'The 0.26.3 test repair requires the original release commit.' >&2
+            exit 1
+          fi
+          test_file='packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180HardenedVerificationTest.java'
+          patch='.qwen/managed-release-tools/scripts/patches/managed-runtime-v0.26.3-tests.patch'
+          git diff --exit-code HEAD
+          if [[ "$(git apply --numstat "${patch}" | cut -f3)" != "${test_file}" ]]; then
+            echo 'The 0.26.3 repair must change only the ownership test.' >&2
+            exit 1
+          fi
+          git apply --check "${patch}"
+          git apply "${patch}"
+          [[ "$(git diff --name-only HEAD)" == "${test_file}" ]]
+          {
+            echo '### Managed runtime 0.26.3 test repair'
+            echo "Product source: ${SOURCE_SHA}; original tag unchanged."
+            echo "Test-only patch blob: $(git hash-object "${patch}")"
+            echo 'The complete SDK and server verification gates remain enabled.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: 'Build the matching CLI prerequisites'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -146,8 +171,12 @@ jobs:
 
       - name: 'Verify the executable JAR and publication profile'
         run: |-
-          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
-          node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -DforkCount=1 -DreuseForks=false -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
+          runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}-exec.jar"
+          # Older release tags shipped the executable as the main artifact.
+          if [[ ! -f "${runtime_jar}" ]]; then runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar"; fi
+          unzip -p "${runtime_jar}" META-INF/MANIFEST.MF | tr -d '\r' | grep -Fx 'Main-Class: org.springframework.boot.loader.launch.JarLauncher'
+          node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "${runtime_jar}" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
 
       - name: 'Retain verified JAR and checksum'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -201,9 +230,6 @@ jobs:
           fi
           gh api "repos/QwenLM/qwen-code/releases/tags/${RELEASE_TAG}" | jq --exit-status '.draft == false'
           jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
-          central="https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}"
-          state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${central}" --file "dist/managed-runtime/${jar}") || exit 1
-          echo "central=${state}" >> "${GITHUB_OUTPUT}"
           : > "${RUNNER_TEMP}/managed-github-missing"
           : > "${RUNNER_TEMP}/managed-oss-missing"
           for asset in "${jar}" "${jar}.sha256"; do
@@ -218,46 +244,6 @@ jobs:
               echo "dist/managed-runtime/${asset}" >> "${RUNNER_TEMP}/managed-oss-missing"
             fi
           done
-
-      - name: 'Configure signed Central publication'
-        if: "${{ (github.event_name == 'release' || !inputs.dry_run) && steps.publication.outputs.central == 'missing' }}"
-        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-          server-id: 'central'
-          server-username: 'MAVEN_USERNAME'
-          server-password: 'MAVEN_PASSWORD'
-          gpg-private-key: '${{ secrets.MAVEN_GPG_PRIVATE_KEY }}'
-          gpg-passphrase: 'MAVEN_GPG_PASSPHRASE'
-
-      - name: 'Publish the signed server artifact to Central'
-        if: "${{ (github.event_name == 'release' || !inputs.dry_run) && steps.publication.outputs.central == 'missing' }}"
-        env:
-          MAVEN_USERNAME: '${{ secrets.CENTRAL_USERNAME }}'
-          MAVEN_PASSWORD: '${{ secrets.CENTRAL_PASSWORD }}'
-          MAVEN_GPG_PRIVATE_KEY: '${{ secrets.MAVEN_GPG_PRIVATE_KEY }}'
-          MAVEN_GPG_PASSPHRASE: '${{ secrets.MAVEN_GPG_PASSPHRASE }}'
-        run: |-
-          set -euo pipefail
-          for name in MAVEN_USERNAME MAVEN_PASSWORD MAVEN_GPG_PRIVATE_KEY MAVEN_GPG_PASSPHRASE; do
-            [[ -n "${!name}" ]] || { echo "Missing production-release secret: ${name}" >&2; exit 1; }
-          done
-          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml deploy -Pcentral-release -DskipTests -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
-          cmp "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" "dist/managed-runtime/qwen-managed-agent-server-${CLI_VERSION}.jar"
-
-      - name: 'Verify Central availability before distribution'
-        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
-        run: |-
-          set -euo pipefail
-          jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
-          for attempt in {1..40}; do
-            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}" --file "dist/managed-runtime/${jar}")
-            if [[ "${state}" == 'present' ]]; then exit 0; fi
-            sleep 30
-          done
-          echo 'The exact server JAR is not yet available on Central.' >&2
-          exit 1
 
       - name: 'Attach only missing GitHub release assets'
         if: "${{ github.event_name == 'release' || !inputs.dry_run }}"

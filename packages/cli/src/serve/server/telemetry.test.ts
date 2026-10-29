@@ -1175,17 +1175,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 describe('legacy session telemetry route catalog', () => {
   // Shell runtime and message group routes resolve the live session owner
   // in the handler, preserving the two pre-resolved routes.
-  it('contains 83 unique routes with the audited 81/2 attribution split', () => {
+  it('contains 85 unique routes with the audited 83/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(83);
-    expect(new Set(keys).size).toBe(83);
+    expect(keys).toHaveLength(85);
+    expect(new Set(keys).size).toBe(85);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(81);
+    ).toHaveLength(83);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
@@ -1219,7 +1219,7 @@ describe('legacy session telemetry route catalog', () => {
         route: entry.route,
         attribution: entry.attribution,
         ...(entry.path.includes('/:id') ? { sessionId: 'session-1' } : {}),
-        ...(entry.path.includes('/:requestId')
+        ...(entry.path.endsWith('/permission/:requestId')
           ? { permissionRequestId: 'request-1' }
           : {}),
       });
@@ -1256,6 +1256,18 @@ describe('legacy session telemetry route catalog', () => {
       });
     },
   );
+
+  it('does not label a BTW cancellation request as a permission request', () => {
+    const route = resolveDaemonTelemetryRoute(
+      mockReq('DELETE', '/session/session-1/btw/stream/btw-123'),
+    );
+    expect(route).toEqual({
+      route: 'DELETE /session/:id/btw/stream/:requestId',
+      attribution: 'handler_resolved',
+      sessionId: 'session-1',
+    });
+    expect(route).not.toHaveProperty('permissionRequestId');
+  });
 
   it('decodes and validates permission request ids after segment matching', () => {
     expect(
