@@ -34,7 +34,12 @@ the existing prompt-scoped cleanup-only load through
 `HarnessConnector.recheckRecoveryCleanup`. That load pays the original
 Runtime identity and commits `confirmed` under the same cleanup ID. No new
 route, protocol field, schema column or stored retry row is introduced: the
-debt projection is the retry state.
+debt projection is the retry state. The store reads the dedicated
+`managedJdbcTemplate` by qualifier, so an embedded deployment never scans the
+host's business database. The scan is keyset-paginated: its cursor advances
+over every raw row it reads, including unreadable descriptors, and wraps to the
+start when a page comes up short, so a stuck prefix cannot starve the
+recoverable debts behind it.
 
 ## Scope and boundaries
 
@@ -54,14 +59,16 @@ debt projection is the retry state.
 ## Retry and concurrency
 
 An attempt that reports no actionable evidence, or that throws, is paced in
-memory: 10 seconds for the first retry, doubling to a 5-minute cap, reset when
-the debt disappears. The pacing map is bounded by the current scan page. An
-attempt that loses the daemon, sees a moved generation or a vanished reference
-also drops the connector's cached attachment, so the next one performs its own
-cold cleanup load instead of reusing a reference to the dead generation. A
-named refusal (live work, recovery required) only backs off: evicting that
-attachment would churn a Session whose Turn is still running. At most one debt
-per Session is attempted per tick.
+memory: 10 seconds for the first retry, doubling to a 5-minute cap. A pacing
+entry is dropped once it has been idle for twice the cap, which only happens
+after its debt has been confirmed and left the projection; rotation therefore
+never resets a still-owed debt's backoff. An attempt that loses the daemon,
+sees a moved generation or a vanished reference also drops the connector's
+cached attachment, so the next one performs its own cold cleanup load instead
+of reusing a reference to the dead generation. A named refusal (live work,
+recovery required) only backs off: evicting that attachment would churn a
+Session whose Turn is still running. At most one debt per Session is attempted
+per tick.
 
 Two control planes may scan the same debt. The cleanup load is idempotent: a
 concurrent attachment is refused by the Harness while live work is present,
@@ -73,10 +80,17 @@ have one active control plane, as in the rest of Step 3.
 
 - `HostedCleanupDebtStoreTest` runs against the real schema in H2 and pins the
   listing rules: own Session, no active Turn, inline descriptor, Workspace
-  present; foreign and unreadable descriptors are not returned.
+  present; foreign and unreadable descriptors are not returned. It also pins
+  the cursor: a page of twenty unreadable descriptors returns no debt yet is
+  not exhausted, and advancing the cursor reaches the valid debt behind them.
 - `HostedCleanupRetryCoordinatorTest` pins the retry path, per-Session pacing,
-  one-debt-per-tick, stale-attachment eviction and the unavailable-Harness
-  no-op.
+  one-debt-per-tick, the cursor advancing on a full page and wrapping on a
+  short one, stale-attachment eviction (and keeping the attachment on a named
+  refusal) and the unavailable-Harness no-op.
+- `ManagedAgentEmbeddingTest` pins that the store binds the dedicated
+  `managedJdbcTemplate`: with the host business database present, the scan
+  reads the managed schema instead of failing with `ma_resource_ref` not
+  found. Removing the qualifier reproduces that failure.
 - The packaged C3 arm (`--g3-fault cleanup-failed`) refuses the first release,
   waits until the control plane projected the terminal, kills that generation,
   starts a replacement, and requires the replacement to release the original

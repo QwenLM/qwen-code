@@ -1781,15 +1781,18 @@ event and no remaining `HOSTED_CLEANUP` projection:
 npm run test:e2e:managed-harness-restart-approval-cleanup-failed
 ```
 
-The control plane retries that debt itself. A periodic scan lists outstanding
+The control plane retries that debt itself. A periodic scan reads the dedicated
+managed database (never an embedded host's business database), lists outstanding
 `HOSTED_CLEANUP` owners whose Session has no active Turn, resolves the owed
 Turn from the cleanup descriptor, and issues the same prompt-scoped
-cleanup-only load an operator recheck uses. Retries back off in memory from 10
-seconds to 5 minutes; an attempt that loses the daemon or its reference drops
-the connector's cached attachment so the next one loads the replacement
-generation, while a named refusal of live work only backs off. A Session with
-live work, an unsupported profile or unreadable evidence keeps its debt and
-waits for the operator recheck route. See
+cleanup-only load an operator recheck uses. The scan is keyset-paginated and
+wraps around, advancing past unreadable descriptors so a stuck prefix cannot
+starve later debts. Retries back off in memory from 10 seconds to 5 minutes; an
+attempt that loses the daemon or its reference drops the connector's cached
+attachment so the next one loads the replacement generation, while a named
+refusal of live work only backs off. A Session with live work, an unsupported
+profile or unreadable evidence keeps its debt and waits for the operator
+recheck route. See
 [the cleanup debt design](../../docs/design/2026-10-28-hosted-cleanup-debt-retry.md).
 
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;

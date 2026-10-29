@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore.CleanupDebt;
+import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore.ScanPage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -28,6 +29,11 @@ import java.util.concurrent.RejectedExecutionException;
  * existing cleanup-only load, which pays the original Runtime identity and
  * commits {@code confirmed}. The durable debt row is the only retry state;
  * the in-memory map merely paces attempts within this process.
+ *
+ * <p>The scan walks the debt projection with an advancing keyset cursor and
+ * wraps to the start when a page comes up short, so a prefix of debts that
+ * cannot be cleared (an unsupported profile or an unreadable descriptor) never
+ * starves the recoverable debts behind it.
  */
 @Component
 public class HostedCleanupRetryCoordinator {
@@ -35,6 +41,9 @@ public class HostedCleanupRetryCoordinator {
     private static final int SCAN_LIMIT = 20;
     static final Duration INITIAL_DELAY = Duration.ofSeconds(10);
     static final Duration MAX_DELAY = Duration.ofMinutes(5);
+    /** A debt still owed is re-attempted within MAX_DELAY; idle entries older
+     *  than twice that belong to debts that have since been confirmed. */
+    private static final Duration PRUNE_AFTER = MAX_DELAY.multipliedBy(2);
 
     private final HostedCleanupDebtStore store;
     private final HarnessConnector harness;
@@ -42,8 +51,12 @@ public class HostedCleanupRetryCoordinator {
     private final Clock clock;
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final Map<String, Attempt> attempts = new ConcurrentHashMap<>();
+    // The cursor lives on the single fixed-delay scheduler thread; -1/"" is
+    // the start of the projection (gmt_create is unsigned, owner_key non-empty).
+    private long cursorCreate = -1;
+    private String cursorOwnerKey = "";
 
-    private record Attempt(long nextAt, int failures) {
+    private record Attempt(long nextAt, int failures, long lastAt) {
     }
 
     public HostedCleanupRetryCoordinator(HostedCleanupDebtStore store,
@@ -63,11 +76,12 @@ public class HostedCleanupRetryCoordinator {
             return;
         }
         long now = clock.millis();
-        Set<String> page = new HashSet<>();
+        attempts.entrySet().removeIf(
+                entry -> now - entry.getValue().lastAt() > PRUNE_AFTER.toMillis());
+        ScanPage page = store.findOwed(SCAN_LIMIT, cursorCreate, cursorOwnerKey);
         Set<String> dispatched = new HashSet<>();
-        for (CleanupDebt debt : store.findOwed(SCAN_LIMIT)) {
+        for (CleanupDebt debt : page.debts()) {
             String key = paceKey(debt);
-            page.add(key);
             String sessionKey = debt.tenantId() + "\n" + debt.sessionId();
             if (dispatched.contains(sessionKey)) {
                 continue;
@@ -79,7 +93,13 @@ public class HostedCleanupRetryCoordinator {
             dispatched.add(sessionKey);
             dispatch(debt);
         }
-        attempts.keySet().retainAll(page);
+        if (page.exhausted()) {
+            cursorCreate = -1;
+            cursorOwnerKey = "";
+        } else {
+            cursorCreate = page.nextCreate();
+            cursorOwnerKey = page.nextOwnerKey();
+        }
     }
 
     private void dispatch(CleanupDebt debt) {
@@ -107,8 +127,9 @@ public class HostedCleanupRetryCoordinator {
                 // Accepted, not yet confirmed: the projection disappears with
                 // the confirmed event. A short pace keeps a slow confirmation
                 // from re-loading the Session on every scan tick.
-                attempts.put(paceKey(debt), new Attempt(
-                        clock.millis() + INITIAL_DELAY.toMillis(), 0));
+                long now = clock.millis();
+                attempts.put(paceKey(debt),
+                        new Attempt(now + INITIAL_DELAY.toMillis(), 0, now));
                 LOG.info("Hosted cleanup retry accepted tenant={} session={} owner={}",
                         debt.tenantId(), debt.sessionId(), debt.ownerKey());
                 return;
@@ -146,7 +167,8 @@ public class HostedCleanupRetryCoordinator {
         int failures = Math.min(previous == null ? 1 : previous.failures() + 1, 8);
         long delay = Math.min(MAX_DELAY.toMillis(),
                 INITIAL_DELAY.toMillis() << Math.min(failures - 1, 5));
-        attempts.put(paceKey(debt), new Attempt(clock.millis() + delay, failures));
+        long now = clock.millis();
+        attempts.put(paceKey(debt), new Attempt(now + delay, failures, now));
         if (error == null) {
             LOG.debug("Hosted cleanup retry waits tenant={} session={} owner={}"
                             + " failures={} delayMs={}", debt.tenantId(),

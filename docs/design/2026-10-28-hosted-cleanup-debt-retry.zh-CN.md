@@ -27,7 +27,10 @@ owner，从 cleanup descriptor 解析出欠付的 Turn，再通过既有的
 `HarnessConnector.recheckRecoveryCleanup` 发出 prompt 作用域的 cleanup-only
 load。该 load 用原 Runtime 身份完成释放，并在同一 cleanup ID 下提交
 `confirmed`。这里不新增路由、协议字段、schema 列或持久重试行：欠债投影本身
-就是重试状态。
+就是重试状态。Store 通过限定符读取专用的 `managedJdbcTemplate`，因此嵌入部署
+绝不会去扫宿主的业务库。扫描采用 keyset 分页：游标跨过它读到的每一行原始
+记录（包括不可读的 descriptor），并在一页不足时回绕到起点，因此一段卡住的
+前缀不会饿死它后面可恢复的欠债。
 
 ## 范围与边界
 
@@ -44,11 +47,12 @@ load。该 load 用原 Runtime 身份完成释放，并在同一 cleanup ID 下�
 ## 重试与并发
 
 一次尝试如果没有可行动的证词或抛出异常，会在内存中退避：首次重试 10 秒，
-逐次翻倍、上限 5 分钟，欠债消失时复位。退避表以当前扫描页为界。丢失 daemon、
-代际移动或引用消失的尝试还会丢弃连接器缓存的 attachment，使下一次尝试自行
-发起冷 cleanup load，而不复用指向已死代际的引用。具名拒绝（仍有活跃工作、
-需要恢复）只退避：淘汰那个 attachment 会搅动 Turn 仍在运行的 Session。每个
-tick 对每个 Session 最多尝试一笔欠债。
+逐次翻倍、上限 5 分钟。一条退避记录在空闲达到上限两倍后才被清除，而那只会
+发生在它的欠债已确认、离开投影之后；因此轮转绝不会重置一笔仍欠付债务的
+退避。丢失 daemon、代际移动或引用消失的尝试还会丢弃连接器缓存的
+attachment，使下一次尝试自行发起冷 cleanup load，而不复用指向已死代际的
+引用。具名拒绝（仍有活跃工作、需要恢复）只退避：淘汰那个 attachment 会搅动
+Turn 仍在运行的 Session。每个 tick 对每个 Session 最多尝试一笔欠债。
 
 两个控制面可能扫到同一笔欠债。cleanup load 是幂等的：存在活跃工作时 Harness
 会拒绝并发 attachment，失败方退避；一旦确认清理删除投影，另一侧扫描就看不到
@@ -59,9 +63,14 @@ tick 对每个 Session 最多尝试一笔欠债。
 
 - `HostedCleanupDebtStoreTest` 在 H2 的真实 schema 上钉住列出规则：本
   Session、无活跃 Turn、内联 descriptor、存在 Workspace；外来与不可读
-  descriptor 不会被返回。
+  descriptor 不会被返回。它还钉住游标：一页二十条不可读 descriptor 不返回
+  任何欠债、但也不算到底，推进游标即可读到它们后面的有效欠债。
 - `HostedCleanupRetryCoordinatorTest` 钉住重试路径、按 Session 退避、每 tick
-  一笔、失效 attachment 淘汰，以及 Harness 不可用时不扫描。
+  一笔、满页推进游标与短页回绕、失效 attachment 淘汰（以及具名拒绝时保留
+  attachment），还有 Harness 不可用时不扫描。
+- `ManagedAgentEmbeddingTest` 钉住 Store 绑定专用的 `managedJdbcTemplate`：
+  在宿主业务库存在时，扫描读取的是 managed schema，而不是以
+  `ma_resource_ref` not found 失败。去掉限定符即可复现该失败。
 - 打包 C3 支路（`--g3-fault cleanup-failed`）拒绝第一次释放，等待控制面投影
   终态后杀死该代际，启动替换方，并要求替换方通过扫描释放原身份：
   `releaseFailures=1`、`releaseSuccesses=1`、一次 `confirmed`、不再有
