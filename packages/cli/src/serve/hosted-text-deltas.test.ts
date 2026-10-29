@@ -76,15 +76,17 @@ describe('HostedTextDeltaStream', () => {
       const messageId = stream.takeMessageId();
       expect(messageId).toBeDefined();
       expect(stream.takeMessageId()).toBeUndefined();
-      const events = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.delta');
+      const events = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.delta');
       expect(events).toHaveLength(2);
       expect(events.map((event) => event.payload['text'])).toEqual([
         'Hello, ',
         'world',
       ]);
-      for (const event of events) {
+      for await (const event of events) {
         expect(event.payload['messageId']).toBe(messageId);
         expect(event.payload['turnId']).toBe('turn-1');
         expect(event.subject?.type).toBe('activation');
@@ -104,9 +106,11 @@ describe('HostedTextDeltaStream', () => {
     try {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
       await stream.delta('x'.repeat(3072 + 100));
-      const events = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.delta');
+      const events = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.delta');
       expect(events).toHaveLength(2);
       expect(
         Buffer.byteLength(String(events[0]!.payload['text']), 'utf8'),
@@ -125,11 +129,13 @@ describe('HostedTextDeltaStream', () => {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
       const input = '好'.repeat(2000);
       await stream.delta(input);
-      const events = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.delta');
+      const events = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.delta');
       expect(events.length).toBeGreaterThan(1);
-      for (const event of events) {
+      for await (const event of events) {
         expect(
           Buffer.byteLength(String(event.payload['text']), 'utf8'),
         ).toBeLessThanOrEqual(3072);
@@ -146,9 +152,11 @@ describe('HostedTextDeltaStream', () => {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
       await stream.delta('line one\nline two');
       await stream.delta('\tindented\r\n');
-      const events = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.delta');
+      const events = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.delta');
       expect(events.map((event) => event.payload['text']).join('')).toBe(
         'line one\nline two\tindented\r\n',
       );
@@ -168,8 +176,11 @@ describe('HostedTextDeltaStream', () => {
       expect(first).toBeDefined();
       expect(second).toBeDefined();
       expect(first).not.toBe(second);
-      const ids = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
+      const ids = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      )
         .filter((event) => event.kind === 'message.delta')
         .map((event) => event.payload['messageId']);
       expect(ids).toEqual([first, second]);
@@ -184,16 +195,20 @@ describe('HostedTextDeltaStream', () => {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
       await stream.delta('orphaned ');
       await stream.delta('prefix');
-      const deltas = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.delta');
+      const deltas = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.delta');
       expect(deltas).toHaveLength(2);
 
       await stream.retract();
 
-      const retractions = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.retracted');
+      const retractions = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.retracted');
       expect(retractions).toHaveLength(1);
       expect(retractions[0]!.payload['messageId']).toBe(
         deltas[0]!.payload['messageId'],
@@ -218,9 +233,11 @@ describe('HostedTextDeltaStream', () => {
     try {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
       await stream.retract();
-      const retractions = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.retracted');
+      const retractions = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.retracted');
       expect(retractions).toHaveLength(0);
     } finally {
       await session.close();
@@ -243,11 +260,13 @@ describe('HostedTextDeltaStream surrogate safety', () => {
       const stream = new HostedTextDeltaStream(session, 'turn-1');
       const input = 'a'.repeat(3069) + '😀' + 'b'.repeat(4000);
       await stream.delta(input);
-      const events = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'message.delta');
+      const events = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'message.delta');
       expect(events.length).toBeGreaterThan(1);
-      for (const event of events) {
+      for await (const event of events) {
         const text = event.payload['text'] as string;
         expect(
           text.charCodeAt(text.length - 1) >= 0xd800 &&

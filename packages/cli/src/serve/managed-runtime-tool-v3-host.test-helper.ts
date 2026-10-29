@@ -275,8 +275,8 @@ async function run(root: string, crashBeforeReceipt: boolean) {
   const manifest = parseToolResultManifestBytes(
     await resources.read(manifestRef as Parameters<typeof resources.read>[0]),
   );
-  const receipt = session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
+  const receipt = await session.authority
+    .iterateEvents(1, session.authority.committedSequence)
     .find((event) => event.kind === 'tool.receipt');
   if (!receipt) throw new Error('child host committed no receipt');
   await executor.close();

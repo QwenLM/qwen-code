@@ -48,7 +48,6 @@ import {
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
   getLastApiHistoryPromptId,
-  getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
@@ -508,7 +507,12 @@ import type {
   SessionContext,
   ToolCallStartParams,
 } from './types.js';
-import { HistoryReplayer } from './history-replayer.js';
+import { SessionTranscriptReader } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import { ManagedHistoryCache } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
+import {
+  HistoryReplayer,
+  type HistoryReplayRecords,
+} from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
@@ -526,6 +530,7 @@ import {
   goalPublicationKey,
   legacyGoalSupersession,
   renderPreparedGoalUpdate,
+  summarizeLegacyGoalReplay,
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
@@ -2700,6 +2705,9 @@ export class Session implements SessionContext {
   private currentNotificationWorkChainId?: string;
   private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
+  private readonly managedPersistedBackgroundNotificationTaskIds =
+    new ManagedHistoryCache<boolean>();
+  private restoredBackgroundNotification?: (taskId: string) => Promise<boolean>;
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
@@ -3178,6 +3186,14 @@ export class Session implements SessionContext {
       replayedRecords,
     );
     return status ? [buildGoalStatusUpdate(status)] : [];
+  }
+
+  async renderLegacyGoalSupersessionHistory(
+    records: AsyncIterable<ChatRecord>,
+  ): Promise<SessionUpdate[]> {
+    return this.renderLegacyGoalSupersession(
+      await summarizeLegacyGoalReplay(records),
+    );
   }
 
   async renderRecoveredGoalUpdates(
@@ -5294,19 +5310,32 @@ export class Session implements SessionContext {
   primeTurnState(
     initialTurn: number,
     backgroundNotificationTaskIds: readonly string[],
+    hasBackgroundNotification?: (taskId: string) => Promise<boolean>,
   ): void {
+    const managed = this.config.getSessionExecutionEngine?.() === 'managed';
     for (const taskId of backgroundNotificationTaskIds) {
-      this.persistedBackgroundNotificationTaskIds.add(taskId);
+      if (managed) {
+        this.managedPersistedBackgroundNotificationTaskIds.set(
+          taskId,
+          true,
+          Buffer.byteLength(taskId) + 4,
+        );
+      } else {
+        this.persistedBackgroundNotificationTaskIds.add(taskId);
+      }
     }
+    if (managed && hasBackgroundNotification)
+      this.restoredBackgroundNotification = hasBackgroundNotification;
     this.turn = Math.max(this.turn, initialTurn);
   }
 
   async replayHistory(
-    records: ChatRecord[],
+    records: HistoryReplayRecords,
     gaps?: HistoryGap[],
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
-    this.primeTurnFromHistory(records);
+    // Managed streams are primed from the verified restore projection.
+    if (Array.isArray(records)) this.primeTurnFromHistory(records);
     const skipFinalizeCallIds =
       this.config.getRestoreAskUserQuestion?.() === true
         ? restorableAskUserQuestionCallIds(
@@ -6446,9 +6475,8 @@ export class Session implements SessionContext {
   async #getTurnCancellation() {
     const recorder = this.config.getChatRecordingService();
     if (!recorder) throw new Error('Recovery requires a session transcript');
-    return getLastApiPromptCancellation(
+    return recorder.readLastApiPromptCancellation(
       this.#getCurrentChat().getHistoryShallow(),
-      await recorder.readActiveTranscriptChain(),
     );
   }
 
@@ -12861,12 +12889,42 @@ export class Session implements SessionContext {
   async enqueueBackgroundNotification(
     item: BackgroundNotificationQueueItem,
   ): Promise<{ accepted: boolean }> {
-    if (this.persistedBackgroundNotificationTaskIds.has(item.taskId)) {
+    const managed = this.config.getSessionExecutionEngine?.() === 'managed';
+    if (
+      managed
+        ? this.managedPersistedBackgroundNotificationTaskIds.get(
+            item.taskId,
+          ) === true
+        : this.persistedBackgroundNotificationTaskIds.has(item.taskId)
+    ) {
       return { accepted: true };
     }
     const existing = this.backgroundNotificationAcceptances.get(item.taskId);
     if (existing) return { accepted: await existing };
 
+    if (managed) {
+      const recorded =
+        (await this.restoredBackgroundNotification?.(item.taskId)) ?? false;
+      if (
+        recorded ||
+        (await new SessionTranscriptReader(
+          this.config.storage.getProjectRoot(),
+          undefined,
+          this.runtimeBaseDir,
+        ).hasBackgroundNotification(this.sessionId, item.taskId))
+      ) {
+        this.managedPersistedBackgroundNotificationTaskIds.set(
+          item.taskId,
+          true,
+          Buffer.byteLength(item.taskId) + 4,
+        );
+        return { accepted: true };
+      }
+      const concurrent = this.backgroundNotificationAcceptances.get(
+        item.taskId,
+      );
+      if (concurrent) return { accepted: await concurrent };
+    }
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
     if (item.kind === 'agent' || item.kind === 'workflow') {
@@ -13141,7 +13199,15 @@ export class Session implements SessionContext {
       return false;
     }
 
-    this.persistedBackgroundNotificationTaskIds.add(item.taskId);
+    if (this.config.getSessionExecutionEngine?.() === 'managed') {
+      this.managedPersistedBackgroundNotificationTaskIds.set(
+        item.taskId,
+        true,
+        Buffer.byteLength(item.taskId) + 4,
+      );
+    } else {
+      this.persistedBackgroundNotificationTaskIds.add(item.taskId);
+    }
     if (!this.disposed && !this.closing) {
       this.#enqueueBackgroundNotification({
         ...item,

@@ -5,13 +5,21 @@
  */
 
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
+import { writeFile, unlink } from 'node:fs/promises';
+import {
+  FileManagedSessionHistory,
+  MANAGED_HISTORY_LIMITS,
+} from './managed-session-history.js';
 import {
   CHECKPOINT_HISTORY_KIND,
   CHECKPOINT_HISTORY_PAGE_BYTES,
   ManagedCheckpointHistory,
   checkpointHistoryPage,
   readHarnessCheckpoint,
+  readHarnessCheckpointView,
 } from './managed-checkpoint-history.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
 import {
@@ -31,6 +39,10 @@ const key = {
   sessionId: 'session',
 };
 const digest = 'a'.repeat(64);
+const owners: FileManagedSessionHistory[] = [];
+afterEach(async () => {
+  for (const owner of owners.splice(0)) await owner.close();
+});
 
 async function fixture() {
   const stores = createHttpManagedSessionStores({
@@ -75,7 +87,15 @@ async function fixture() {
   });
   const items: HarnessToolItem[] = [];
   const bindings: HarnessRuntimeBinding[] = [];
-  const codec = new ManagedCheckpointHistory(resources);
+  const scratch = await FileManagedSessionHistory.create(
+    path.join(os.tmpdir(), 'qwen-checkpoint-view-tests'),
+  );
+  owners.push(scratch);
+  const codec = new ManagedCheckpointHistory(resources, () =>
+    scratch.emptyView(),
+  );
+  let archivedTools = 0;
+  let archivedBindings = 0;
   let currentRef: ManagedSessionDurableRef | undefined;
   let current = initial;
   let maximumCensus = 0;
@@ -132,7 +152,17 @@ async function fixture() {
       tools: { batchId: 'batch', items: [...items] },
       runtime: { bindings: [...bindings] },
     };
-    const prepared = await codec.prepare(current, currentRef);
+    const prepared = await codec.prepare(
+      {
+        ...current,
+        tools: { ...current.tools!, items: items.slice(archivedTools) },
+        runtime: {
+          ...current.runtime!,
+          bindings: bindings.slice(archivedBindings),
+        },
+      },
+      currentRef,
+    );
     const ref = await resources.publish('managed-checkpoint', prepared.bytes);
     const census = await http.commitResources([ref]);
     maximumCensus = Math.max(maximumCensus, census.length);
@@ -140,12 +170,15 @@ async function fixture() {
     http.releaseCommitted(census);
     codec.remember(ref, prepared);
     currentRef = ref;
+    archivedTools = prepared.history?.toolCount ?? 0;
+    archivedBindings = prepared.history?.bindingCount ?? 0;
     return { ref, prepared, census };
   }
   return {
     resources,
     saved,
     codec,
+    scratch,
     grow,
     items,
     bindings,
@@ -182,16 +215,28 @@ describe('Managed checkpoint history', () => {
     expect(
       pages.every((bytes) => bytes.length <= CHECKPOINT_HISTORY_PAGE_BYTES),
     ).toBe(true);
-    const cold = new ManagedCheckpointHistory(f.resources);
+    const cold = new ManagedCheckpointHistory(f.resources, () =>
+      f.scratch.emptyView(),
+    );
     const restored = await cold.read(f.currentRef());
-    expect(restored.checkpoint).toEqual(logical);
-    expect(restored.checkpoint.tools?.items[0]).toEqual(f.items[0]);
-    for (const tool of restored.checkpoint.tools!.items) {
+    expect(restored.checkpoint.tools!.items).toHaveLength(32);
+    expect(restored.view.toolCount).toBe(2560);
+    expect(await restored.view.tools.collect(2560)).toEqual(
+      logical.tools!.items,
+    );
+    expect(await restored.view.tool(f.items[0].executionCallId)).toEqual(
+      f.items[0],
+    );
+    expect(f.scratch.cacheUsage.bytes).toBeLessThanOrEqual(
+      MANAGED_HISTORY_LIMITS.cacheBytes,
+    );
+    for await (const tool of restored.view.tools) {
       expect(await f.resources.read(tool.outcomeRef!)).toEqual(
         f.saved.get(tool.outcomeRef!.resourceId),
       );
     }
-  }, 30_000);
+    // Builds and cold-validates real disk indexes for 2,560 completed calls.
+  }, 180_000);
 
   it('keeps pending and unconsumed calls inline and restores their original execution mapping', async () => {
     const f = await fixture();
@@ -354,5 +399,209 @@ describe('Managed checkpoint history', () => {
     expect(createHash('sha256').update(original).digest('hex')).toBe(
       pageRef.digest,
     );
+  });
+  it('keeps old prefix queries fixed and the committed cache compact across batches', async () => {
+    const f = await fixture();
+    await f.grow(64);
+    const old = await readHarnessCheckpointView(
+      f.resources,
+      f.currentRef(),
+      f.scratch,
+    );
+    const first = await old.tool('execution-0');
+    expect(old.toolCount).toBe(64);
+    expect(await old.tool('call-0')).toBeUndefined();
+    expect(
+      await old.tools.find((item) => item.functionCallId === 'call-0'),
+    ).toEqual(first);
+    expect(old.checkpoint.tools!.items.length).toBeLessThanOrEqual(63);
+    expect(old.allToolsConsumed).toBe(true);
+    await f.grow(128);
+    const current = await f.codec.tryRead(f.currentRef());
+    if (!current.ok) throw new Error(current.message);
+    expect(current.history.toolCount).toBe(128);
+    expect(current.checkpoint.tools!.items.length).toBeLessThanOrEqual(63);
+    expect(current.history.maxOrdinal).toBe(127);
+    expect(await current.history.tool('execution-0')).toEqual(first);
+    expect(await old.tool('execution-127')).toBeUndefined();
+    expect(await old.binding('execution-127')).toBeUndefined();
+    expect(await old.tools.reduce((count) => count + 1, 0)).toBe(64);
+    const resident = Reflect.get(f.codec, 'committed');
+    expect(resident.bytes).toBeUndefined();
+    expect(resident.checkpoint.tools.items.length).toBeLessThanOrEqual(63);
+    expect(f.scratch.cacheUsage.bytes).toBeLessThanOrEqual(
+      MANAGED_HISTORY_LIMITS.cacheBytes,
+    );
+    await old.close();
+  });
+
+  it('reuses verified archive pages instead of reading the complete prefix for each batch', async () => {
+    const f = await fixture();
+    await f.grow(64);
+    const oldRef = JSON.parse(
+      f.saved.get(f.currentRef().resourceId)!.toString(),
+    ).history.ref;
+    const read = vi.spyOn(f.resources, 'read');
+    await f.grow(96);
+    expect(
+      read.mock.calls.filter(([ref]) => ref.resourceId === oldRef.resourceId),
+    ).toHaveLength(0);
+    const current = await f.codec.tryRead(f.currentRef());
+    if (!current.ok) throw new Error(current.message);
+    expect(await current.history.tool('execution-0')).toEqual(f.items[0]);
+    expect(current.history.toolCount).toBe(96);
+  });
+
+  it.each(['missing', 'corrupt'] as const)(
+    'rebuilds a %s query index from the same immutable checkpoint',
+    async (damage) => {
+      const f = await fixture();
+      await f.grow(64);
+      const view = await readHarnessCheckpointView(
+        f.resources,
+        f.currentRef(),
+        f.scratch,
+      );
+      const index = Reflect.get(view, 'index') as FileManagedSessionHistory;
+      Reflect.get(index, 'owner').cache.clear();
+      const file = path.join(index.directory, index.rootDigest!);
+      if (damage === 'missing') await unlink(file);
+      else await writeFile(file, 'damaged');
+      expect(await view.tool('execution-0')).toEqual(f.items[0]);
+      expect(await view.tool('not-present')).toBeUndefined();
+      expect(view.toolCount).toBe(64);
+      await view.close();
+    },
+  );
+
+  it('rejects canonical page damage during index repair instead of proving absence', async () => {
+    const f = await fixture();
+    await f.grow(64);
+    const view = await readHarnessCheckpointView(
+      f.resources,
+      f.currentRef(),
+      f.scratch,
+    );
+    const root = JSON.parse(f.saved.get(f.currentRef().resourceId)!.toString());
+    f.saved.set(root.history.ref.resourceId, Buffer.from('damaged'));
+    const index = Reflect.get(view, 'index') as FileManagedSessionHistory;
+    Reflect.get(index, 'owner').cache.clear();
+    await unlink(path.join(index.directory, index.rootDigest!));
+    await expect(view.tool('not-present')).rejects.toThrow('digest');
+    await view.close();
+  });
+
+  it('keeps archive-only roots valid and refuses an archive hidden behind before_model', async () => {
+    const f = await fixture();
+    await f.grow(64);
+    const root = JSON.parse(f.saved.get(f.currentRef().resourceId)!.toString());
+    root.tools.items = [];
+    root.runtime.bindings = [];
+    const ref = await f.resources.publish(
+      'managed-checkpoint',
+      Buffer.from(JSON.stringify(root)),
+    );
+    const view = await readHarnessCheckpointView(f.resources, ref, f.scratch);
+    expect(view.toolCount).toBe(32);
+    expect(view.checkpoint.tools!.items).toHaveLength(0);
+    expect(view.allToolsConsumed).toBe(true);
+    const next = await f.codec.prepare(view.checkpoint, ref);
+    expect(next.checkpoint.tools!.items).toHaveLength(0);
+    expect(next.view.toolCount).toBe(32);
+    expect(await next.view.tool('execution-0')).toEqual(f.items[0]);
+    await view.close();
+    root.continuation.phase = 'before_model';
+    root.attempt = null;
+    const invalid = await f.resources.publish(
+      'managed-checkpoint',
+      Buffer.from(JSON.stringify(root)),
+    );
+    await expect(
+      readHarnessCheckpointView(f.resources, invalid, f.scratch),
+    ).rejects.toThrow('before_model');
+  });
+  it.each(['archive', 'inline'] as const)(
+    'rejects a repeated invocation identity across %s boundaries',
+    async (location) => {
+      const f = await fixture();
+      await f.grow(64);
+      const root = JSON.parse(
+        f.saved.get(f.currentRef().resourceId)!.toString(),
+      );
+      if (location === 'inline') {
+        root.runtime.bindings[0].invocationBindingId = 'binding-0';
+      } else {
+        const page = JSON.parse(
+          f.saved.get(root.history.ref.resourceId)!.toString(),
+        );
+        page.bindings[1].invocationBindingId =
+          page.bindings[0].invocationBindingId;
+        root.history.ref = await f.resources.publish(
+          CHECKPOINT_HISTORY_KIND,
+          Buffer.from(JSON.stringify(page)),
+        );
+      }
+      const forged = await f.resources.publish(
+        'managed-checkpoint',
+        Buffer.from(JSON.stringify(root)),
+      );
+      await expect(
+        readHarnessCheckpointView(f.resources, forged),
+      ).rejects.toThrow(/binding identity|binding repeats/);
+    },
+  );
+  it.each(['tools', 'runtime'] as const)(
+    'rejects a paged root that loses its %s group',
+    async (group) => {
+      const f = await fixture();
+      await f.grow(64);
+      const root = JSON.parse(
+        f.saved.get(f.currentRef().resourceId)!.toString(),
+      );
+      root[group] = null;
+      const forged = await f.resources.publish(
+        'managed-checkpoint',
+        Buffer.from(JSON.stringify(root)),
+      );
+      await expect(
+        readHarnessCheckpointView(f.resources, forged),
+      ).rejects.toThrow('group is missing');
+    },
+  );
+  it('captures the source reference before awaiting an advancing head', async () => {
+    const f = await fixture();
+    await f.grow(64);
+    const ref = structuredClone(f.currentRef());
+    const originalId = ref.resourceId;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reading = readHarnessCheckpointView(
+      {
+        read: async (source) => {
+          if (source.resourceId === originalId) {
+            entered();
+            await blocked;
+          }
+          return f.resources.read(source);
+        },
+      },
+      ref,
+      f.scratch,
+    );
+    await started;
+    await f.grow(128);
+    Object.assign(ref, f.currentRef());
+    release();
+    const view = await reading;
+    expect(view.toolCount).toBe(64);
+    expect(await view.tool('execution-127')).toBeUndefined();
+    expect(await view.tool('execution-0')).toEqual(f.items[0]);
+    await view.close();
   });
 });

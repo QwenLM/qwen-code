@@ -92,12 +92,11 @@ describe('durable wake continuation', () => {
     );
   }
 
-  function pending() {
+  async function pending() {
     return pendingSessionInputs(
-      managed.authority.eventsInSequenceRange(
-        1,
-        managed.authority.committedSequence,
-      ),
+      await managed.authority
+        .iterateEvents(1, managed.authority.committedSequence)
+        .collect(1_000_000),
     ).map((input) => input.turnId);
   }
 
@@ -139,7 +138,7 @@ describe('durable wake continuation', () => {
       await admit(source);
       const continuation = hostedWakeContinuationId(notification);
       await enqueueHostedWakeContinuation(managed, notification);
-      expect(pending()).toEqual([notification, continuation]);
+      expect(await pending()).toEqual([notification, continuation]);
       await managed.close();
       managed = await open();
       const before = managed.authority.committedSequence;
@@ -148,7 +147,7 @@ describe('durable wake continuation', () => {
       );
       expect(managed.authority.committedSequence).toBe(before);
       await settle(notification);
-      expect(pending()).toEqual([continuation]);
+      expect(await pending()).toEqual([continuation]);
       const turn = await readHostedWakeContinuation(managed, continuation);
       expect(turn.notificationTurnId).toBe(notification);
       expect(turn.text).toContain('alice finished the review');
@@ -156,7 +155,7 @@ describe('durable wake continuation', () => {
       await settle(continuation, 'completed');
       await managed.close();
       managed = await open();
-      expect(pending()).toEqual([]);
+      expect(await pending()).toEqual([]);
       expect(await managed.sink.project()).toEqual([]);
     },
   );
@@ -169,9 +168,9 @@ describe('durable wake continuation', () => {
     await expect(
       enqueueHostedWakeContinuation(managed, notification),
     ).rejects.toThrow('store unavailable');
-    expect(pending()).toEqual([notification]);
+    expect(await pending()).toEqual([notification]);
     await enqueueHostedWakeContinuation(managed, notification);
-    expect(pending()).toEqual([
+    expect(await pending()).toEqual([
       notification,
       hostedWakeContinuationId(notification),
     ]);
@@ -188,7 +187,7 @@ describe('durable wake continuation', () => {
     expect(await readHostedWakeContinuation(managed, second)).toEqual(
       await readHostedWakeContinuation(managed, first),
     );
-    expect(pending()).toEqual([second]);
+    expect(await pending()).toEqual([second]);
   });
 
   it.each(['channel', 'automation', 'session_message', 'hosted-harness'])(
@@ -198,7 +197,7 @@ describe('durable wake continuation', () => {
       expect(
         await enqueueHostedWakeContinuation(managed, notification),
       ).toBeUndefined();
-      expect(pending()).toEqual([notification]);
+      expect(await pending()).toEqual([notification]);
     },
   );
 
@@ -217,7 +216,7 @@ describe('durable wake continuation', () => {
     await expect(
       readHostedWakeContinuation(managed, turnId),
     ).rejects.toBeInstanceOf(MonitorWakeTransientReadError);
-    expect(pending()).toEqual([notification, turnId]);
+    expect(await pending()).toEqual([notification, turnId]);
   });
 
   it('cancels queued continuations model-free on close', async () => {
@@ -232,6 +231,6 @@ describe('durable wake continuation', () => {
         cwd: root,
       }),
     ).toBe(1);
-    expect(pending()).toEqual([]);
+    expect(await pending()).toEqual([]);
   });
 });

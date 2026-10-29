@@ -273,14 +273,16 @@ async function fixture(
     );
   const freshStore = new ResourceToolResultSegmentStore(durable);
   const admission = createAdmission(freshStore);
-  const receipts = () =>
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .filter(
-        (e) =>
-          e.kind === 'tool.receipt' &&
-          e.payload['executionCallId'] === executionCallId,
-      );
+  const receipts = async () =>
+    (
+      await session.authority
+        .iterateEvents(1, session.authority.committedSequence)
+        .collect(1_000_000)
+    ).filter(
+      (e) =>
+        e.kind === 'tool.receipt' &&
+        e.payload['executionCallId'] === executionCallId,
+    );
   return {
     root,
     session,
@@ -348,7 +350,9 @@ it('recovers a null-manifest cancellation under a new activation without relaxin
   expect(journal.events.filter((e) => e.kind === 'tool.receipt')).toHaveLength(
     1,
   );
-  expect(f.receipts()[0].payload['toolOutcomeRef']).toEqual(receipt.outcomeRef);
+  expect((await f.receipts())[0].payload['toolOutcomeRef']).toEqual(
+    receipt.outcomeRef,
+  );
   await f.freshStore.close();
 });
 
@@ -376,7 +380,7 @@ it('admits a real complete manifest through a fresh store, verifying nonempty st
     length: 5,
   });
   expect(read).toEqual({ status: 'ok', result: Buffer.from('hello') });
-  expect(f.receipts()).toHaveLength(1);
+  expect(await f.receipts()).toHaveLength(1);
   await f.freshStore.close();
 });
 
@@ -409,7 +413,7 @@ it.each([
   await expect(
     f.admission.acceptRecoveredCancelled(f.request, f.modelCallId, f.candidate),
   ).rejects.toThrow();
-  expect(f.receipts()).toHaveLength(0);
+  expect(await f.receipts()).toHaveLength(0);
   await f.freshStore.close();
 });
 
@@ -428,7 +432,7 @@ it('refuses a correctly stored manifest naming a foreign Turn', async () => {
       capture: { ...f.candidate.capture!, manifest: foreign },
     }),
   ).rejects.toThrow(/bind the original/);
-  expect(f.receipts()).toHaveLength(0);
+  expect(await f.receipts()).toHaveLength(0);
   await f.freshStore.close();
 });
 
@@ -437,7 +441,7 @@ it('refuses an intent belonging to a different execution', async () => {
   await expect(
     f.admission.acceptRecoveredCancelled(f.request, f.modelCallId, f.candidate),
   ).rejects.toThrow(/intent is missing/);
-  expect(f.receipts()).toHaveLength(0);
+  expect(await f.receipts()).toHaveLength(0);
   await f.freshStore.close();
 });
 
@@ -448,7 +452,7 @@ it('refuses after the actual current writer lease is released', async () => {
   await expect(
     f.admission.acceptRecoveredCancelled(f.request, f.modelCallId, f.candidate),
   ).rejects.toThrow();
-  expect(f.receipts()).toHaveLength(0);
+  expect(await f.receipts()).toHaveLength(0);
   await f.freshStore.close();
 });
 
@@ -458,7 +462,7 @@ it('refuses a released current activation even when the original intent is valid
   await expect(
     f.admission.acceptRecoveredCancelled(f.request, f.modelCallId, f.candidate),
   ).rejects.toThrow(/no longer writable/);
-  expect(f.receipts()).toHaveLength(0);
+  expect(await f.receipts()).toHaveLength(0);
   await f.freshStore.close();
 });
 
@@ -484,7 +488,7 @@ it('returns the original durable receipt on a lost-reply retry without rewriting
     ),
   ).toEqual(receipt);
   expect(f.session.authority.committedSequence).toBe(committed);
-  expect(f.receipts()).toHaveLength(1);
+  expect(await f.receipts()).toHaveLength(1);
   expect(await f.session.resources.read(receipt.outcomeRef)).toEqual(saved);
   expect(publish).not.toHaveBeenCalled();
   expect(publishCapture).not.toHaveBeenCalled();
@@ -501,7 +505,7 @@ it.each(['success', 'error'] as const)(
         executionStatus,
       }),
     ).rejects.toThrow('not a blocked cancellation');
-    expect(f.receipts()).toHaveLength(0);
+    expect(await f.receipts()).toHaveLength(0);
     await f.freshStore.close();
   },
 );
@@ -514,6 +518,6 @@ it('refuses an unacknowledged recovered result without producing a cancellation 
       capture: { ...f.candidate.capture!, deliveryStatus: 'pending' },
     }),
   ).rejects.toThrow('not a blocked cancellation');
-  expect(f.receipts()).toHaveLength(0);
+  expect(await f.receipts()).toHaveLength(0);
   await f.freshStore.close();
 });

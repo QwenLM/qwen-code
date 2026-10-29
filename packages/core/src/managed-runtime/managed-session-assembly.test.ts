@@ -139,11 +139,13 @@ describe('managed session assembly', () => {
     expect(proof).toEqual(session.authority.commitProof);
     expect(proof.lastCommitSequence).toBeGreaterThan(before);
     expect(
-      session.authority
-        .eventsInSequenceRange(1, proof.lastCommitSequence)
-        .filter((event) =>
-          ['turn.settled', 'domain.committed'].includes(event.kind),
-        ),
+      (
+        await session.authority
+          .iterateEvents(1, proof.lastCommitSequence)
+          .collect(1_000_000)
+      ).filter((event) =>
+        ['turn.settled', 'domain.committed'].includes(event.kind),
+      ),
     ).toEqual([]);
     const prepared = session.authority.committedSequence;
     await expect(session.prepareOwnershipRelease()).resolves.toEqual(proof);
@@ -176,9 +178,9 @@ describe('managed session assembly', () => {
     // Opening installed the activation, so every record names it as its harness
     // without the caller arranging anything.
     expect(session.activation.epoch).toBe(1);
-    const installed = session.authority
-      .readEvents()
-      .filter((event) => event.kind === 'activation.changed');
+    const installed = (await session.authority.readEvents()).filter(
+      (event) => event.kind === 'activation.changed',
+    );
     expect(installed).toHaveLength(1);
     expect(installed[0].payload['workerId']).toBe('worker-1');
     expect(installed[0].payload['phase']).toBe('active');
@@ -221,9 +223,9 @@ describe('managed session assembly', () => {
       }),
     );
 
-    const settled = session.authority
-      .readEvents()
-      .filter((event) => event.kind === 'turn.settled');
+    const settled = (await session.authority.readEvents()).filter(
+      (event) => event.kind === 'turn.settled',
+    );
     expect(settled).toHaveLength(1);
     expect(settled[0].payload['outcome']).toBe('completed');
 
@@ -680,9 +682,9 @@ describe('managed session assembly', () => {
     expect(session.activation.activationId).toBe(replaced.activationId);
 
     await session.sink.write(record({ uuid: 'rec-user-2' }));
-    const messages = session.authority
-      .readEvents()
-      .filter((event) => event.kind === 'message.committed');
+    const messages = (await session.authority.readEvents()).filter(
+      (event) => event.kind === 'message.committed',
+    );
     expect(messages).toHaveLength(2);
     expect(messages[0]?.subject).toMatchObject({
       type: 'activation',

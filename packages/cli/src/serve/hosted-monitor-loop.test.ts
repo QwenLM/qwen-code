@@ -259,7 +259,7 @@ async function closeLoop(rig: Rig): Promise<void> {
   rig.executor.releaseStops();
   await Promise.allSettled(rig.clock.executions);
   await rig.loop.done.catch(() => undefined);
-  if (rig.session.record('monitor-1')?.stopReason === null) {
+  if ((await rig.session.record('monitor-1'))?.stopReason === null) {
     await rig.loop.stop();
   }
   await rig.lease.release().catch(() => undefined);
@@ -279,10 +279,10 @@ function params(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function committed(
+async function committed(
   authority: LocalManagedSessionAuthority,
-): ReturnType<typeof parseMonitorRun> {
-  const existing = authority.extensionRecord('monitor_run', 'monitor-1');
+): Promise<ReturnType<typeof parseMonitorRun>> {
+  const existing = await authority.extensionRecord('monitor_run', 'monitor-1');
   if (!existing) throw new Error('No monitor_run record.');
   return parseMonitorRun(existing.record);
 }
@@ -314,20 +314,22 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('output during stop');
     await rig.clock.advance(3_000);
     expect(rig.executor.terminateCalls).toBe(0);
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       observationSequence: 1,
       notifiedThrough: 0,
       stopReason: null,
       run: { state: 'running' },
     });
     expect(
-      rig.authority
-        .eventsInSequenceRange(1, rig.authority.committedSequence)
-        .filter((event) => event.kind === 'input.accepted'),
+      (
+        await rig.authority
+          .iterateEvents(1, rig.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'input.accepted'),
     ).toHaveLength(0);
     await rig.executor.exitStopped();
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
     });
@@ -385,7 +387,7 @@ describe('HostedMonitorLoop', () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
     await rig.loop.start(params({ debounceMs: 0 }));
-    expect(committed(rig.authority).run).toMatchObject({
+    expect((await committed(rig.authority)).run).toMatchObject({
       state: 'running',
       execution: 'running_attached',
     });
@@ -393,13 +395,13 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('built');
     rig.executor.onLine?.('tested');
     await rig.clock.advance(999);
-    expect(committed(rig.authority).observationSequence).toBe(0);
+    expect((await committed(rig.authority)).observationSequence).toBe(0);
     await rig.clock.advance(1);
-    expect(committed(rig.authority).observationSequence).toBe(1);
+    expect((await committed(rig.authority)).observationSequence).toBe(1);
 
     await rig.clock.advance(1_000);
-    expect(committed(rig.authority).observationSequence).toBe(1);
-    const body = committed(rig.authority);
+    expect((await committed(rig.authority)).observationSequence).toBe(1);
+    const body = await committed(rig.authority);
     expect(body.notifiedThrough).toBe(1);
     expect(
       JSON.parse(
@@ -409,7 +411,7 @@ describe('HostedMonitorLoop', () => {
 
     // The observation, its notification input and its wake landed in one
     // transaction: the turn the wake raises reads exactly these lines.
-    const events = rig.authority.readEvents().slice(-3);
+    const events = (await rig.authority.readEvents()).slice(-3);
     expect(events.map((event) => event.kind)).toEqual([
       'domain.committed',
       'input.accepted',
@@ -450,7 +452,7 @@ describe('HostedMonitorLoop', () => {
     await rig.clock.advance(1_000);
     rig.executor.onLine?.('two');
     await rig.clock.advance(1_000);
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       observationSequence: 2,
       notifiedThrough: 2,
       stopReason: 'max_events',
@@ -460,7 +462,7 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('late');
     await rig.clock.advance(5_000);
-    expect(committed(rig.authority).observationSequence).toBe(2);
+    expect((await committed(rig.authority)).observationSequence).toBe(2);
     await closeLoop(rig);
   });
 
@@ -471,12 +473,12 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('kept-alive');
     await rig.clock.advance(1_000);
-    expect(committed(rig.authority).observationSequence).toBe(1);
+    expect((await committed(rig.authority)).observationSequence).toBe(1);
     await rig.clock.advance(59_000);
-    expect(committed(rig.authority).stopReason).toBeNull();
+    expect((await committed(rig.authority)).stopReason).toBeNull();
     await rig.clock.advance(1_000);
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'idle_timeout',
       run: { state: 'settled', execution: 'settled' },
     });
@@ -495,7 +497,7 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('one');
     await rig.clock.advance(1_000);
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       observationSequence: 1,
       stopReason: null,
       run: {
@@ -510,7 +512,7 @@ describe('HostedMonitorLoop', () => {
     // re-settles the parked record.
     rig.executor.onLine?.('late');
     await rig.clock.advance(5_000);
-    expect(committed(rig.authority).observationSequence).toBe(1);
+    expect((await committed(rig.authority)).observationSequence).toBe(1);
     await closeLoop(rig);
   });
 
@@ -523,13 +525,13 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('one');
     await rig.clock.advance(1_000);
     await rig.loop.done;
-    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+    expect((await committed(rig.authority)).run.state).toBe('recovery_blocked');
 
     // The park left the record open: the watch kept running, so its own
     // physical end is still the evidence that settles it.
     await rig.executor.exitNaturally();
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
     });
@@ -546,13 +548,13 @@ describe('HostedMonitorLoop', () => {
     await rig.clock.advance(1_000);
     await rig.clock.advance(60_000);
     await rig.loop.done;
-    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+    expect((await committed(rig.authority)).run.state).toBe('recovery_blocked');
 
     // A8 still holds after a park: a requested stop projects as
     // stop_requested, never as a bare exit.
     await rig.executor.exitStopped();
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
     });
@@ -568,12 +570,12 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('one');
     await rig.clock.advance(1_000);
     await rig.loop.done;
-    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+    expect((await committed(rig.authority)).run.state).toBe('recovery_blocked');
 
     // The Session close drained, so its stop call is proven and must not be
     // skipped over the park.
     await rig.loop.stop('stop_requested');
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
     });
@@ -591,7 +593,7 @@ describe('HostedMonitorLoop', () => {
     // this loop and fails: the Session and its publisher stay alive.
     rig.executor.provesStop = false;
     await rig.loop.stop('runtime_lost');
-    expect(committed(rig.authority).run).toMatchObject({
+    expect((await committed(rig.authority)).run).toMatchObject({
       state: 'recovery_blocked',
       execution: 'outcome_unknown',
     });
@@ -600,7 +602,7 @@ describe('HostedMonitorLoop', () => {
     // still settles the record the park left open.
     await rig.executor.exitNaturally();
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
     });
@@ -616,13 +618,13 @@ describe('HostedMonitorLoop', () => {
     await rig.clock.advance(1_000);
     rig.executor.provesStop = false;
     await rig.loop.stop('runtime_lost');
-    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+    expect((await committed(rig.authority)).run.state).toBe('recovery_blocked');
 
     // The retried close drained, so its stop call is proven and must not be
     // skipped over the earlier park.
     rig.executor.provesStop = true;
     await rig.loop.stop('stop_requested');
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
     });
@@ -644,7 +646,7 @@ describe('HostedMonitorLoop', () => {
     await rig.executor.exitNaturally();
     await rig.loop.done;
 
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
     });
@@ -670,7 +672,7 @@ describe('HostedMonitorLoop', () => {
       // The worker finalizes before it answers, so the exit is this stop's
       // own evidence: its stop marker does not override the loop's reason.
       await rig.executor.exitStopped();
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: reason,
         run: { state: 'settled', execution: 'settled' },
       });
@@ -679,7 +681,7 @@ describe('HostedMonitorLoop', () => {
       rig.executor.answerStop(proven);
       await fired;
       await rig.loop.done;
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: reason,
         run: { state: 'settled', execution: 'settled' },
       });
@@ -718,7 +720,7 @@ describe('HostedMonitorLoop', () => {
         rig.executor.answerStop(true);
       }
       await stopped;
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: reason,
         run: { state: proven ? 'settled' : 'cancelled', execution: 'settled' },
       });
@@ -749,7 +751,7 @@ describe('HostedMonitorLoop', () => {
       rig.executor.answerStop(true);
       await fired;
       await rig.loop.done;
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: null,
         run: { state: 'running' },
       });
@@ -758,7 +760,7 @@ describe('HostedMonitorLoop', () => {
       // The finalize's redrive delivers the exit, which settles at the
       // stop's reason, not at its stop marker.
       await rig.executor.exitStopped();
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: reason,
         run: { state: 'settled', execution: 'settled' },
       });
@@ -780,7 +782,7 @@ describe('HostedMonitorLoop', () => {
     // An end without evidence proves no stop: it reports the failed watch,
     // never the stop's reason, and the answer that follows changes nothing.
     await rig.executor.fail();
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'watch_failed',
       run: { state: 'failed', execution: 'settled' },
     });
@@ -788,7 +790,7 @@ describe('HostedMonitorLoop', () => {
     rig.executor.answerStop(true);
     await fired;
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'watch_failed',
       run: { state: 'failed', execution: 'settled' },
     });
@@ -810,7 +812,7 @@ describe('HostedMonitorLoop', () => {
       await rig.clock.advance(1_000);
       const stopped = rig.loop.stop(settle);
       await rig.executor[exit]();
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: reason,
         run: { state, execution: 'settled' },
       });
@@ -818,7 +820,7 @@ describe('HostedMonitorLoop', () => {
       // The stop's own answer arrives after the exit settled the record.
       rig.executor.answerStop(false);
       await stopped;
-      expect(committed(rig.authority)).toMatchObject({
+      expect(await committed(rig.authority)).toMatchObject({
         stopReason: reason,
         run: { state, execution: 'settled' },
       });
@@ -846,14 +848,14 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('one');
     const fired = rig.clock.fireTogether(1_000);
     await observed;
-    expect(committed(rig.authority).observationSequence).toBe(1);
+    expect((await committed(rig.authority)).observationSequence).toBe(1);
     expect(rig.executor.terminateCalls).toBe(1);
 
     await rig.executor.exitStopped();
     rig.executor.answerStop(true);
     await fired;
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'idle_timeout',
       run: { state: 'settled', execution: 'settled' },
     });
@@ -868,7 +870,7 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('tail line');
     rig.executor.exitNaturally();
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       observationSequence: 1,
       stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
@@ -886,7 +888,7 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('tail line');
     await rig.executor.exitStopped();
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       observationSequence: 1,
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
@@ -907,7 +909,7 @@ describe('HostedMonitorLoop', () => {
     rig.executor.onLine?.('lost tail');
     await rig.session.settleQuiet('monitor-1', 'exited');
     await expect(rig.executor.exitNaturally()).rejects.toThrow();
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       observationSequence: 0,
       notifiedThrough: 0,
       stopReason: 'exited',
@@ -921,7 +923,7 @@ describe('HostedMonitorLoop', () => {
     const rig = await openLoop(harness);
     rig.executor.failStart = new Error('no cgroup');
     await expect(rig.loop.start(params({}))).rejects.toThrow('no cgroup');
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       startReceiptRef: null,
       stopReason: 'start_failed',
       run: { state: 'failed', execution: 'not_started_proven' },
@@ -936,7 +938,7 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.fail();
     await rig.loop.done;
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'watch_failed',
       run: { state: 'failed', execution: 'settled' },
     });
@@ -950,14 +952,14 @@ describe('HostedMonitorLoop', () => {
 
     await rig.loop.stop();
     expect(rig.executor.terminateCalls).toBe(1);
-    expect(committed(rig.authority)).toMatchObject({
+    expect(await committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
     });
 
     rig.executor.onLine?.('too late');
     await rig.clock.advance(5_000);
-    expect(committed(rig.authority).observationSequence).toBe(0);
+    expect((await committed(rig.authority)).observationSequence).toBe(0);
     await closeLoop(rig);
   });
 });

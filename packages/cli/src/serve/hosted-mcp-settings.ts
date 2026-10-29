@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   assertManagedSessionDurableRef,
-  type ManagedSessionJsonValue,
+  type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   parseHostedMcpServers,
@@ -108,15 +110,15 @@ export function selectedMcpServers(
   return servers;
 }
 
-export function validateHostedMcpHistory(
+export async function validateHostedMcpHistory(
   admission: readonly HostedMcpServerPin[],
-  history: readonly HostedMcpSettings[],
-): void {
+  history: AsyncIterable<HostedMcpSettings> | readonly HostedMcpSettings[],
+): Promise<void> {
   let previous: readonly HostedMcpSelection[] = admission.map((pin) => ({
     ...pin,
     state: 'enabled',
   }));
-  for (const settings of history) {
+  for await (const settings of history) {
     if (
       JSON.stringify(selectedMcpServers(previous, settings.command)) !==
       JSON.stringify(settings.servers)
@@ -184,85 +186,70 @@ export function parseHostedMcpCommand(value: unknown): HostedMcpCommand {
   };
 }
 
-export async function readHostedMcpSettings(
+export function readHostedMcpSettings(
   session: ManagedSession,
-): Promise<readonly HostedMcpSettings[]> {
+): ManagedHistoryQuery<HostedMcpSettings> {
   const latest = session.authority.domainRecord('config_install');
-  if (!latest) return [];
-  let ref: typeof latest.recordRef | undefined = latest.recordRef;
-  let revision = latest.revision;
-  const history: HostedMcpSettings[] = [];
-  const seen = new Set<string>();
-  const sequences = new Map(
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .filter(
-        (event) =>
-          event.kind === 'domain.committed' &&
-          event.payload['domain'] === 'config_install',
+  const through = session.authority.committedSequence;
+  return new ManagedHistoryQuery(async function* () {
+    let revision = 0;
+    let previousRef: ManagedSessionDurableRef | null = null;
+    for await (const event of session.authority.iterateEvents(1, through)) {
+      if (
+        event.kind !== 'domain.committed' ||
+        event.payload['domain'] !== 'config_install'
       )
-      .map((event) => [
-        (event.payload['recordRef'] as { resourceId: string }).resourceId,
-        event.sequence,
-      ]),
-  );
-  while (ref) {
-    if (
-      ref.kind !== 'managed-config_install' ||
-      ref.schemaVersion !== 1 ||
-      seen.has(ref.resourceId)
-    )
-      throw new Error('Invalid MCP settings history.');
-    seen.add(ref.resourceId);
-    const body = object(
-      JSON.parse((await session.resources.read(ref)).toString('utf8')),
-    );
-    if (
-      Object.keys(body).sort().join(',') !==
-        'command,kind,operationId,previousRecordRef,revision,schemaVersion,servers' ||
-      body['kind'] !== 'hosted-mcp-settings' ||
-      body['schemaVersion'] !== 1 ||
-      body['revision'] !== revision ||
-      !Array.isArray(body['servers']) ||
-      body['servers'].length > 32
-    )
-      throw new Error('Invalid MCP settings.');
-    const command = parseHostedMcpCommand(body['command']);
-    if (
-      command.operationId !== body['operationId'] ||
-      command.expectedRevision + 1 !== revision
-    )
-      throw new Error('MCP settings command revision conflicts.');
-    const ids = new Set<string>();
-    const servers = body['servers'].map(
-      (value: unknown): HostedMcpSelection => {
-        const { state, ...pin } = object(value);
-        const [parsed] = parseHostedMcpServers([pin]);
-        if (
-          !['enabled', 'disabled', 'removed'].includes(String(state)) ||
-          ids.has(parsed.serverId)
-        )
-          throw new Error('Invalid MCP selection.');
-        ids.add(parsed.serverId);
-        return { ...parsed, state: state as HostedMcpSelection['state'] };
-      },
-    );
-    const sequence = sequences.get(ref.resourceId);
-    if (sequence === undefined)
-      throw new Error('MCP settings intent is missing.');
-    history.push({ revision, sequence, command, servers });
-    if (body['previousRecordRef'] === null) {
-      if (revision !== 1) throw new Error('Missing MCP settings predecessor.');
-      ref = undefined;
-    } else {
-      ref = assertManagedSessionDurableRef(
-        body['previousRecordRef'] as ManagedSessionJsonValue,
-        'MCP settings predecessor',
+        continue;
+      const ref = assertManagedSessionDurableRef(
+        event.payload['recordRef'],
+        'MCP settings',
       );
-      revision--;
+      if (ref.kind !== 'managed-config_install' || ref.schemaVersion !== 1)
+        throw new Error('Invalid MCP settings history.');
+      revision++;
+      const body = object(
+        JSON.parse((await session.resources.read(ref)).toString('utf8')),
+      );
+      if (
+        Object.keys(body).sort().join(',') !==
+          'command,kind,operationId,previousRecordRef,revision,schemaVersion,servers' ||
+        body['kind'] !== 'hosted-mcp-settings' ||
+        body['schemaVersion'] !== 1 ||
+        body['revision'] !== revision ||
+        !isDeepStrictEqual(body['previousRecordRef'], previousRef) ||
+        !Array.isArray(body['servers']) ||
+        body['servers'].length > 32
+      )
+        throw new Error('Invalid MCP settings.');
+      const command = parseHostedMcpCommand(body['command']);
+      if (
+        command.operationId !== body['operationId'] ||
+        command.expectedRevision + 1 !== revision
+      )
+        throw new Error('MCP settings command revision conflicts.');
+      const ids = new Set<string>();
+      const servers = body['servers'].map(
+        (value: unknown): HostedMcpSelection => {
+          const { state, ...pin } = object(value);
+          const [parsed] = parseHostedMcpServers([pin]);
+          if (
+            !['enabled', 'disabled', 'removed'].includes(String(state)) ||
+            ids.has(parsed.serverId)
+          )
+            throw new Error('Invalid MCP selection.');
+          ids.add(parsed.serverId);
+          return { ...parsed, state: state as HostedMcpSelection['state'] };
+        },
+      );
+      yield { revision, sequence: event.sequence, command, servers };
+      previousRef = ref;
     }
-  }
-  return history.reverse();
+    if (
+      revision !== (latest?.revision ?? 0) ||
+      !isDeepStrictEqual(previousRef, latest?.recordRef ?? null)
+    )
+      throw new Error('Missing MCP settings predecessor.');
+  });
 }
 
 export async function commitHostedMcpSettings(
@@ -299,7 +286,7 @@ export async function commitHostedMcpSettings(
 }
 
 export class HostedMcpManager {
-  private history: readonly HostedMcpSettings[] = [];
+  private latest?: HostedMcpSettings;
 
   constructor(
     private readonly session: ManagedSession,
@@ -309,10 +296,10 @@ export class HostedMcpManager {
     private readonly hookBroker?: () => HostedWorkspaceBroker | undefined,
   ) {}
 
-  private inventoryBroker(): {
+  private async inventoryBroker(): Promise<{
     broker: HostedWorkspaceBroker;
     originalOwner: boolean;
-  } {
+  }> {
     const configurations =
       this.session.authority.extensionRecordsInDomain('mcp_configuration');
     const hooks =
@@ -325,27 +312,33 @@ export class HostedMcpManager {
         this.session.authority.sessionHeader.sessionKey,
         'mcp-management-inventory',
       );
-    const originalOwner = [...configurations, ...hooks].some(
-      (entry) =>
-        object(entry.record)['runtimeSessionId'] === broker.runtimeSessionId &&
-        entry.run.runtime !== null,
-    );
+    const isOwner = (entry: {
+      readonly record: unknown;
+      readonly run: { readonly runtime: unknown };
+    }) =>
+      object(entry.record)['runtimeSessionId'] === broker.runtimeSessionId &&
+      entry.run.runtime !== null;
+    const originalOwner =
+      (await configurations.some(isOwner)) || (await hooks.some(isOwner));
     return { broker, originalOwner };
   }
 
   async open(): Promise<void> {
     await this.session.authority.settlePendingAppend();
-    this.history = await readHostedMcpSettings(this.session);
-    validateHostedMcpHistory(this.admission, this.history);
+    const history = readHostedMcpSettings(this.session);
+    await validateHostedMcpHistory(this.admission, history);
+    this.latest = await history.at(-1);
   }
 
-  status(operationId: string): HostedMcpCommandStatus | undefined {
-    const settings = this.history.find(
+  async status(
+    operationId: string,
+  ): Promise<HostedMcpCommandStatus | undefined> {
+    const settings = await readHostedMcpSettings(this.session).find(
       (entry) => entry.command.operationId === operationId,
     );
     if (!settings) return undefined;
     return (
-      this.mcp?.managementStatus(settings) ?? {
+      (await this.mcp?.managementStatus(settings)) ?? {
         operationId,
         action: settings.command.action,
         serverId: settings.command.serverId,
@@ -357,10 +350,10 @@ export class HostedMcpManager {
 
   async snapshot(
     inventory = true,
-    operationId = this.history.at(-1)?.command.operationId,
+    operationId = this.latest?.command.operationId,
   ) {
-    const settings = this.history.at(-1);
-    const { broker, originalOwner } = this.inventoryBroker();
+    const settings = this.latest;
+    const { broker, originalOwner } = await this.inventoryBroker();
     return {
       sessionId: this.session.authority.sessionHeader.sessionKey.sessionId,
       revision: settings?.revision ?? 0,
@@ -371,22 +364,22 @@ export class HostedMcpManager {
       servers:
         settings?.servers ??
         this.admission.map((pin) => ({ ...pin, state: 'enabled' as const })),
-      ...(operationId ? { operation: this.status(operationId)! } : {}),
+      ...(operationId ? { operation: (await this.status(operationId))! } : {}),
     };
   }
 
   async submit(command: HostedMcpCommand): Promise<void> {
-    const replay = this.history.find(
+    const replay = await readHostedMcpSettings(this.session).find(
       (entry) => entry.command.operationId === command.operationId,
     );
     if (replay) {
       if (JSON.stringify(replay.command) !== JSON.stringify(command))
         throw new HostedMcpConflictError('MCP command identity conflicts.');
-      const status = this.status(command.operationId)!;
+      const status = (await this.status(command.operationId))!;
       if (status.state === 'settled' || status.state === 'failed') return;
-      if (this.history.at(-1) !== replay)
+      if (this.latest?.revision !== replay.revision)
         throw new HostedMcpRecoveryRequiredError();
-      this.mcp ??= new HostedMcpSession(
+      this.mcp ??= await HostedMcpSession.create(
         this.options,
         this.session,
         this.admission,
@@ -396,17 +389,17 @@ export class HostedMcpManager {
       await this.mcp.manage(replay);
       return;
     }
-    const previous = this.history.at(-1);
+    const previous = this.latest;
     if (command.expectedRevision !== (previous?.revision ?? 0))
       throw new HostedMcpConflictError('MCP settings revision conflicts.');
     if (
       (previous &&
         !['settled', 'failed'].includes(
-          this.status(previous.command.operationId)!.state,
+          (await this.status(previous.command.operationId))!.state,
         )) ||
-      this.mcp?.hasPendingOperations() ||
-      this.mcp?.hasUnsettledConfigurations ||
-      (!previous && this.mcp?.recoveryBlocked)
+      (await this.mcp?.hasPendingOperations()) ||
+      (await this.mcp?.hasUnsettledConfigurations()) ||
+      (!previous && (await this.mcp?.recoveryBlocked()))
     )
       throw new HostedMcpRecoveryRequiredError();
     const servers = selectedMcpServers(
@@ -414,7 +407,7 @@ export class HostedMcpManager {
         this.admission.map((pin) => ({ ...pin, state: 'enabled' as const })),
       command,
     );
-    const { broker, originalOwner } = this.inventoryBroker();
+    const { broker, originalOwner } = await this.inventoryBroker();
     const available = await broker.mcpDefinitions(originalOwner);
     const selected = servers.find((pin) => pin.serverId === command.serverId)!;
     if (
@@ -434,8 +427,8 @@ export class HostedMcpManager {
       command,
       servers,
     );
-    this.history = [...this.history, settings];
-    this.mcp ??= new HostedMcpSession(
+    this.latest = settings;
+    this.mcp ??= await HostedMcpSession.create(
       this.options,
       this.session,
       this.admission,

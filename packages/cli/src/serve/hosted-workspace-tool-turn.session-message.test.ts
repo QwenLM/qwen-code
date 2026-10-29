@@ -241,10 +241,12 @@ async function launchChild(childRunId = 'prompt:call-0'): Promise<string> {
   return children.taskIdOf(childRunId);
 }
 
-function messages() {
-  return session.authority
-    .extensionRecordsInDomain('session_message')
-    .map((entry) => entry.record as Record<string, unknown>);
+async function messages() {
+  return (
+    await session.authority
+      .extensionRecordsInDomain('session_message')
+      .collect(1_000_000)
+  ).map((entry) => entry.record as Record<string, unknown>);
 }
 
 it('declares the task form at the root and the parent form in a child', async () => {
@@ -285,7 +287,7 @@ it('refuses arguments outside each form, committing nothing', async () => {
     const responses = await execute(child, call(args));
     expect(JSON.stringify(responses)).toContain('Hosted send_message');
   }
-  expect(messages()).toHaveLength(0);
+  expect(await messages()).toHaveLength(0);
 });
 
 it('queues a message to a running child without taking the mount', async () => {
@@ -298,7 +300,7 @@ it('queues a message to a running child without taking the mount', async () => {
   expect(JSON.stringify(responses)).toContain('Message queued for delivery');
   expect(JSON.stringify(responses)).toContain(taskId);
   expect(broker.acquire).not.toHaveBeenCalled();
-  expect(messages()).toEqual([
+  expect(await messages()).toEqual([
     expect.objectContaining({
       direction: 'outbound',
       route: 'to_child',
@@ -311,7 +313,7 @@ it('queues a message to a running child without taking the mount', async () => {
     createTurn(),
     call({ task_id: taskId, message: 'also check the tests' }),
   );
-  expect(messages()).toHaveLength(1);
+  expect(await messages()).toHaveLength(1);
 });
 
 it('continues a completed child and answers the new task id', async () => {
@@ -331,11 +333,11 @@ it('continues a completed child and answers the new task id', async () => {
   );
   const continued = children.taskIdOf('prompt:call-1');
   expect(JSON.stringify(responses)).toContain(`continued it as ${continued}`);
-  expect(children.record('prompt:call-1')).toMatchObject({
+  expect(await children.record('prompt:call-1')).toMatchObject({
     predecessorChildRunId: 'prompt:call-0',
     completion: 'sent',
   });
-  expect(messages()).toHaveLength(0);
+  expect(await messages()).toHaveLength(0);
 });
 
 it('answers an unknown task with an error and commits nothing', async () => {
@@ -344,7 +346,7 @@ it('answers an unknown task with an error and commits nothing', async () => {
     call({ task_id: 'task_missing', message: 'hello' }),
   );
   expect(JSON.stringify(responses)).toContain('No child agent task');
-  expect(messages()).toHaveLength(0);
+  expect(await messages()).toHaveLength(0);
 });
 
 it('queues a child message to its parent', async () => {
@@ -356,7 +358,7 @@ it('queues a child message to its parent', async () => {
   expect(JSON.stringify(responses)).toContain(
     'Message queued for delivery to the parent agent',
   );
-  expect(messages()).toEqual([
+  expect(await messages()).toEqual([
     expect.objectContaining({
       direction: 'outbound',
       route: 'to_parent',
@@ -398,9 +400,11 @@ it.each(['child', 'task', 'member', 'broadcast'] as const)(
     expect(JSON.stringify(responses)).toContain(
       'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
     );
-    expect(messages()).toHaveLength(0);
+    expect(await messages()).toHaveLength(0);
     expect(
-      session.authority.extensionRecordsInDomain('child_run'),
+      await session.authority
+        .extensionRecordsInDomain('child_run')
+        .collect(1_000_000),
     ).toHaveLength(lane === 'task' ? 1 : 0);
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
@@ -410,7 +414,7 @@ it.each(['child', 'task', 'member', 'broadcast'] as const)(
         call({ to: 'parent', message: 'shorter' }, 'retry'),
       );
       expect(JSON.stringify(retry)).toContain('queued for delivery');
-      expect(messages()).toHaveLength(1);
+      expect(await messages()).toHaveLength(1);
     }
   },
 );
@@ -453,11 +457,11 @@ it.each([65_536, 65_537])(
     if (bytes === 65_536) {
       expect(encode.mock.results[0].value.inputBytes).toHaveLength(bytes);
       expect(JSON.stringify(responses)).toContain('queued for delivery');
-      expect(messages()).toHaveLength(1);
+      expect(await messages()).toHaveLength(1);
     } else {
       expect(encode.mock.results[0].type).toBe('throw');
       expect(JSON.stringify(responses)).toContain('once encoded (byte_limit)');
-      expect(messages()).toHaveLength(0);
+      expect(await messages()).toHaveLength(0);
     }
   },
 );
@@ -484,7 +488,7 @@ it.each(['assistant', 'tool_result'] as const)(
     expect((await session.sink.project()).map((record) => record.type)).toEqual(
       failedType === 'assistant' ? [] : ['assistant'],
     );
-    expect(messages()).toHaveLength(0);
+    expect(await messages()).toHaveLength(0);
   },
 );
 
@@ -514,7 +518,7 @@ it.each(['to', 'task_id'] as const)(
         ),
       },
     });
-    expect(messages()).toHaveLength(0);
+    expect(await messages()).toHaveLength(0);
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
   },

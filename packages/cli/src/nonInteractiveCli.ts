@@ -5,7 +5,6 @@
  */
 
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
-import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   runAgentLoop,
@@ -1195,10 +1194,11 @@ export async function runNonInteractive(
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
         const history = llmClient.getChat().getHistory();
-        const cancellation = getLastApiPromptCancellation(
-          llmClient.getChat().getHistoryShallow(),
-          await config.getChatRecordingService()!.readActiveTranscriptChain(),
-        );
+        const cancellation = await config
+          .getChatRecordingService()!
+          .readLastApiPromptCancellation(
+            llmClient.getChat().getHistoryShallow(),
+          );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
           apiHistory: cancellation ? [] : history,

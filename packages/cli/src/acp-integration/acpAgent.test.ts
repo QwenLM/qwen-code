@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   describe,
   it,
@@ -23145,6 +23146,33 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(SessionService).mockImplementation(
       () =>
         ({
+          readLiveRestoreProjection: vi.fn().mockImplementation(async () => {
+            onRead?.();
+            const data = result as
+              | {
+                  replay?: unknown;
+                  conversation?: {
+                    messages?: ChatRecord[];
+                    startTime?: string;
+                    lastUpdated?: string;
+                  };
+                  historyGaps?: unknown[];
+                }
+              | undefined;
+            if (data?.replay) return result;
+            return data?.conversation
+              ? {
+                  sessionId: VALID_SESSION_ID,
+                  startTime: data.conversation.startTime,
+                  lastUpdated: data.conversation.lastUpdated,
+                  replay: {
+                    records: data.conversation.messages ?? [],
+                    gaps: data.historyGaps,
+                    hasMore: false,
+                  },
+                }
+              : undefined;
+          }),
           loadSession: vi.fn().mockImplementation(async () => {
             onRead?.();
             return result;
@@ -23209,6 +23237,44 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates consumes the Managed history stream and refuses an oversized envelope', async () => {
+    const records = {
+      [Symbol.asyncIterator]() {
+        throw new Error('the replay mock owns consumption');
+      },
+    };
+    const settings = makeCoreSettings();
+    mockSessionServiceLoad({
+      startTime: 'start',
+      lastUpdated: 'end',
+      replay: { records: [], recordHistory: records, gaps: [], hasMore: false },
+    });
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (u: unknown) => Promise<void> }) => {
+        for (let index = 0; index <= LOAD_REPLAY_MAX_UPDATES; index++)
+          await context.sendUpdate({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'x' },
+          });
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      await expect(
+        agent.extMethod('qwen/session/loadUpdates', {
+          sessionId: VALID_SESSION_ID,
+        }),
+      ).rejects.toMatchObject({
+        code: -32012,
+        data: expect.objectContaining({ reason: 'updates' }),
+      });
+      expect(mockHistoryReplay.mock.calls[0]?.[1]).toBe(records);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/session/loadUpdates threads detected historyGaps to the replayer', async () => {
@@ -28278,17 +28344,15 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     innerConfig.getSessionRuntimeBaseDir.mockReturnValue(
       '/tmp/qwen-runtime-test',
     );
-    const loadSession = vi.fn().mockResolvedValue({
-      conversation: {
-        messages: [],
-        startTime: 'start',
-        lastUpdated: 'end',
-      },
+    const readLiveRestoreProjection = vi.fn().mockResolvedValue({
+      startTime: 'start',
+      lastUpdated: 'end',
+      replay: { records: [], gaps: [], hasMore: false },
     });
     innerConfig.getSessionService = vi.fn(
       () =>
         ({
-          loadSession,
+          readLiveRestoreProjection,
         }) as unknown as InstanceType<typeof SessionService>,
     );
     const { agent, agentPromise } = await bootAgent(innerConfig);
@@ -28303,7 +28367,9 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
 
     expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
     expect(innerConfig.getSessionService).toHaveBeenCalledOnce();
-    expect(loadSession).toHaveBeenCalledWith(liveSessionId);
+    expect(readLiveRestoreProjection).toHaveBeenCalledWith(liveSessionId, {
+      replay: { kind: 'all', hideInheritedHistory: false },
+    });
     expect(SessionService).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
@@ -28570,9 +28636,12 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     // settings must pin the read.
     const perRequestSettings = makeAcpSettings();
     vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
-    const loadSession = vi.fn().mockResolvedValue(null);
+    const readLiveRestoreProjection = vi.fn().mockResolvedValue(null);
     vi.mocked(SessionService).mockImplementation(
-      () => ({ loadSession }) as unknown as InstanceType<typeof SessionService>,
+      () =>
+        ({ readLiveRestoreProjection }) as unknown as InstanceType<
+          typeof SessionService
+        >,
     );
     vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
 
@@ -28584,8 +28653,9 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     ).resolves.toEqual({ updates: [] });
 
     expect(SessionService).toHaveBeenCalledWith('/tmp/workspace-a');
-    expect(loadSession).toHaveBeenCalledWith(
+    expect(readLiveRestoreProjection).toHaveBeenCalledWith(
       '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      { replay: { kind: 'all', hideInheritedHistory: false } },
     );
     expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
     expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
@@ -33490,6 +33560,60 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['stream', 'bulk'] as const)(
+    'live load forwards certified branch lookup to %s replay',
+    async (mode) => {
+      bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [{ role: 'user', parts: [{ text: 'first' }] }],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      await agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      });
+      const live = lastSessionMock!;
+      const records = [{ role: 'model', parts: [{ text: 'answer' }] }];
+      const lookup = vi.fn(() => 'checkpoint');
+      live
+        .getConfig()
+        .getSessionService()
+        .readLiveRestoreProjection.mockResolvedValue({
+          sessionId: 'persisted-1',
+          startTime: '2026-10-29T00:00:00.000Z',
+          lastUpdated: '2026-10-29T00:00:01.000Z',
+          replay: {
+            records,
+            gaps: [],
+            hasMore: false,
+            branchPointForRecord: lookup,
+          },
+          goalRecords: [],
+        });
+      mockHistoryReplay.mockClear();
+      mockHistoryReplay.mockImplementation(async () => undefined);
+      await agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        ...(mode === 'bulk'
+          ? { _meta: { 'qwen.session.loadReplayMode': 'bulk' } }
+          : {}),
+      });
+      expect(mockHistoryReplay).toHaveBeenCalledWith(
+        expect.anything(),
+        records,
+        [],
+        expect.objectContaining({ branchPointForRecord: lookup }),
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('live load returns authoritative bulk replay and artifacts without mutating usage', async () => {
     const initialMessages = [{ role: 'user', parts: [{ text: 'first' }] }];

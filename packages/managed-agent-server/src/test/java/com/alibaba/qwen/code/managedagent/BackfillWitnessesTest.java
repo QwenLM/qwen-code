@@ -30,7 +30,7 @@ class BackfillWitnessesTest {
                                             + " table_schema = 'public' AND table_type='BASE"
                                             + " TABLE'",
                                         Integer.class))
-                .isEqualTo(40);
+                .isEqualTo(42);
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(

@@ -5,11 +5,19 @@
  */
 
 import type { Part } from '@google/genai';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import {
+  FileManagedSessionHistory,
+  MANAGED_HISTORY_LIMITS,
+} from '../managed-runtime/managed-session-history.js';
 import { describe, expect, it } from 'vitest';
 import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import type { EvidenceSourceUnavailableError } from './goal-evidence.js';
 import {
   buildGoalVerifierEvidenceWindow,
+  buildGoalVerifierEvidenceWindowFromHistory,
   type GoalEvidenceProvenance,
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
@@ -470,5 +478,164 @@ describe('Goal verifier evidence window', () => {
     );
 
     expect(window.evidence.map((entry) => entry.uuid)).toEqual(['previous']);
+  });
+});
+
+describe('Goal evidence from a fixed streamed history', () => {
+  async function build(
+    records: AsyncIterable<GoalEvidenceRecord> | readonly GoalEvidenceRecord[],
+    budgetBytes: number,
+    currentGoal = goal(),
+    currentPermit = permit(),
+  ) {
+    const root = await mkdtemp(path.join(tmpdir(), 'goal-evidence-history-'));
+    const owner = await FileManagedSessionHistory.create(root);
+    const history = owner.emptyView();
+    try {
+      const window = await buildGoalVerifierEvidenceWindowFromHistory(
+        {
+          records: (async function* () {
+            yield* records;
+          })(),
+          history,
+          goal: currentGoal,
+          permit: currentPermit,
+        },
+        { budgetBytes },
+      );
+      expect(history.cacheUsage).toEqual(owner.cacheUsage);
+      expect(history.cacheUsage.bytes).toBeLessThanOrEqual(
+        MANAGED_HISTORY_LIMITS.cacheBytes,
+      );
+      expect(history.cacheUsage.entries).toBeLessThanOrEqual(
+        MANAGED_HISTORY_LIMITS.cacheEntries,
+      );
+      return window;
+    } finally {
+      await history.close();
+      await owner.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it.each([0, 180, 256_000])(
+    'matches the array tail, turn order and omitted count at budget %i',
+    async (budgetBytes) => {
+      const records = [
+        record('cursor', 'system'),
+        record('old', 'tool_result', {
+          turnId: 'turn-1',
+          toolResponse: { output: 'x'.repeat(12_000) },
+        }),
+        record('empty', 'tool_result', { turnId: 'turn-1' }),
+        record('other-goal', 'assistant', {
+          turnId: 'turn-2',
+          goalId: 'other',
+          text: 'ignore',
+        }),
+        record('user', 'user', { turnId: 'turn-2', text: 'decision' }),
+        record('new', 'assistant', {
+          turnId: 'turn-3',
+          text: '测试😀'.repeat(4000),
+        }),
+      ];
+      expect(await build(records, budgetBytes)).toEqual(
+        buildGoalVerifierEvidenceWindow(
+          { records, goal: goal(), permit: permit() },
+          { budgetBytes },
+        ),
+      );
+    },
+  );
+
+  it('keeps execution proof across the cursor while isolating equal call ids in another turn', async () => {
+    const call = record('old-call', 'assistant', { turnId: 'turn-3' });
+    call.message = {
+      parts: [
+        {
+          functionCall: {
+            id: 'wrapped',
+            name: 'tool_call',
+            args: { name: 'EXEC', arguments: { source: 'text(42)' } },
+          },
+        },
+      ],
+    };
+    const result = record('result', 'tool_result', { turnId: 'turn-3' });
+    result.message = {
+      parts: [
+        {
+          functionResponse: {
+            id: 'wrapped',
+            name: 'tool_call',
+            response: { output: '42' },
+          },
+        },
+      ],
+    };
+    const other = {
+      ...result,
+      uuid: 'other-result',
+      goalContext: { goalId: GOAL_ID, revision: REVISION, turnId: 'turn-2' },
+    };
+    const records = [call, record('cursor', 'system'), other, result];
+    const window = await build(records, 256_000);
+    expect(window.evidence.map((item) => [item.uuid, item.proofKind])).toEqual([
+      ['result', 'execution_output'],
+      ['other-result', 'external_fact'],
+    ]);
+    expect(window).toEqual(
+      buildGoalVerifierEvidenceWindow(
+        { records, goal: goal(), permit: permit() },
+        { budgetBytes: 256_000 },
+      ),
+    );
+  });
+
+  it('counts an older omitted candidate without surfacing its deferred render failure', async () => {
+    const exploding = record('oldest', 'tool_result', { turnId: 'turn-1' });
+    exploding.message = {
+      get parts(): never {
+        throw new Error('an omitted record was rendered');
+      },
+    };
+    const records = [
+      record('cursor', 'system'),
+      exploding,
+      record('does-not-fit', 'assistant', {
+        turnId: 'turn-2',
+        text: 'x'.repeat(1000),
+      }),
+      record('newest', 'assistant', { turnId: 'turn-3', text: 'ok' }),
+    ];
+    const budgetBytes = 180;
+    expect(await build(records, budgetBytes)).toEqual(
+      buildGoalVerifierEvidenceWindow(
+        { records, goal: goal(), permit: permit() },
+        { budgetBytes },
+      ),
+    );
+  });
+
+  it('rejects UUID reuse anywhere and a missing old cursor', async () => {
+    const duplicate = [
+      record('cursor', 'system'),
+      record('same', 'user'),
+      record('same', 'system'),
+    ];
+    await expect(build(duplicate, 1000)).rejects.toMatchObject({
+      code: 'duplicate_record_uuid',
+    });
+    await expect(
+      build([record('later', 'system')], 1000),
+    ).rejects.toMatchObject({ code: 'cursor_not_found' });
+  });
+
+  it('propagates a stream failure instead of treating incomplete coverage as absence', async () => {
+    const records = (async function* () {
+      yield record('cursor', 'system');
+      throw new Error('source unavailable');
+    })();
+    await expect(build(records, 1000)).rejects.toThrow('source unavailable');
   });
 });

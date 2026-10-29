@@ -9,6 +9,7 @@ import {
   GoalPersistenceUnavailableError,
   type ChatRecord,
   type GoalRecord,
+  type GoalRecoveryRecord,
   type GoalRuntime,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -31,6 +32,7 @@ export async function renderPreparedGoalUpdate(
   getRuntime: () => Promise<GoalRuntime>,
   options: {
     replayedRecords?: readonly ChatRecord[];
+    replayedHistory?: AsyncIterable<ChatRecord>;
     hideRuntimeGoal?: boolean;
     bootstrap?: HistoryReplayGoalBootstrap;
     previousGoal?: GoalRecord | null;
@@ -48,7 +50,9 @@ export async function renderPreparedGoalUpdate(
   } catch (error) {
     if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
     const status = unrestorableGoalStatus(
-      options.replayedRecords,
+      options.replayedHistory
+        ? await summarizeLegacyGoalReplay(options.replayedHistory, true)
+        : options.replayedRecords,
       options.bootstrap,
     );
     return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
@@ -58,7 +62,12 @@ export async function renderPreparedGoalUpdate(
   if (!cause) {
     const status = options.partialReplay
       ? undefined
-      : legacyGoalSupersession(snapshot, options.replayedRecords);
+      : legacyGoalSupersession(
+          snapshot,
+          options.replayedHistory
+            ? await summarizeLegacyGoalReplay(options.replayedHistory)
+            : options.replayedRecords,
+        );
     return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
   }
   const publicationKey = goalPublicationKey(snapshot, cause);
@@ -85,6 +94,38 @@ export async function renderPreparedGoalUpdate(
         ? []
         : [buildGoalStateUpdate(snapshot, cause, options.previousGoal ?? null)],
   };
+}
+
+export async function summarizeLegacyGoalReplay(
+  records: AsyncIterable<ChatRecord>,
+  ignoreGoalState = false,
+): Promise<ChatRecord[]> {
+  let carry: ChatRecord | undefined;
+  for await (const record of records) {
+    if (ignoreGoalState && record.subtype === 'goal_state') continue;
+    const card = findRunningLegacyGoalCard([
+      ...(carry ? [carry] : []),
+      record,
+    ] as GoalRecoveryRecord[]);
+    carry = card
+      ? {
+          uuid: 'replay-goal-summary',
+          parentUuid: null,
+          sessionId: record.sessionId,
+          timestamp: record.timestamp,
+          type: 'system',
+          subtype: 'slash_command',
+          cwd: record.cwd,
+          version: record.version,
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/goal',
+            outputHistoryItems: [{ type: 'goal_status', kind: 'set', ...card }],
+          },
+        }
+      : undefined;
+  }
+  return carry ? [carry] : [];
 }
 
 /** Why a Goal was not restored, as the trailing card tells the user. */

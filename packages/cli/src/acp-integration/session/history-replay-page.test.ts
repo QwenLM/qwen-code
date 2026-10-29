@@ -21,6 +21,8 @@ import {
   MISSING_TOOL_RESULT_MESSAGE,
 } from './history-replayer.js';
 import {
+  HistoryReplayLimitError,
+  streamHistoryReplayUpdates,
   blankReplayedMcpAppHtml,
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
@@ -1452,5 +1454,213 @@ describe('history replay page', () => {
       );
       expect(withoutTimingFrames).toEqual(withoutTelemetry.updates);
     });
+  });
+});
+
+describe('Managed streaming replay', () => {
+  it('counts branch metadata inside the existing bulk byte budget', async () => {
+    const original = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [assistantRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [assistantRecord()],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: {
+          maxBytes: Buffer.byteLength(JSON.stringify(original.updates), 'utf8'),
+          maxUpdates: 10,
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: HistoryReplayLimitError.name,
+      reason: 'bytes',
+    });
+  });
+
+  it('stamps the last visible streamed chunk before reading the next record', async () => {
+    const updates: SessionUpdate[] = [];
+    const records = {
+      async *[Symbol.asyncIterator]() {
+        yield {
+          ...assistantRecord(),
+          message: {
+            role: 'model' as const,
+            parts: [
+              { text: 'first' },
+              { text: 'thought', thought: true },
+              { text: 'last' },
+            ],
+          },
+        };
+        const decorated = updates.filter(
+          (update) => readBranchRecordId(update) !== undefined,
+        );
+        expect(decorated).toHaveLength(1);
+        expect(decorated[0]).toMatchObject({
+          content: { type: 'text', text: 'last' },
+          _meta: { 'qwen.session.recordId': 'assistant-record' },
+        });
+        expect(readBranchRecordId(decorated[0]!)).toBe('checkpoint-record');
+        yield { ...assistantRecord(), uuid: 'next-record' };
+      },
+    };
+    await streamHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records,
+      branchPointsByAssistantUuid: {
+        'assistant-record': 'checkpoint-record',
+      },
+      cumulativeUsage: createReplayCumulativeUsage(),
+      sendUpdate: async (update) => {
+        updates.push(update);
+      },
+    });
+    expect(updates.filter((update) => readBranchRecordId(update))).toHaveLength(
+      1,
+    );
+    expect(updates.at(-1)).toMatchObject({
+      _meta: { 'qwen.session.recordId': 'next-record' },
+    });
+  });
+
+  it('delivers each record before reading the next without accumulating a replay array', async () => {
+    let sent = 0;
+    let opened = 0;
+    const records = {
+      async *[Symbol.asyncIterator]() {
+        expect(++opened).toBe(1);
+        for (let index = 0; index < 1200; index++) {
+          expect(sent).toBe(index);
+          yield { ...assistantRecord(), uuid: `stream-${index}` };
+        }
+      },
+    };
+    await streamHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records,
+      cumulativeUsage: createReplayCumulativeUsage(),
+      sendUpdate: async (update) => {
+        expect(update).toMatchObject({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { 'qwen.session.recordId': `stream-${sent}` },
+        });
+        sent++;
+      },
+    });
+    expect(sent).toBe(1200);
+  });
+
+  it.each(['bytes', 'updates'] as const)(
+    'refuses an oversized bulk %s stream and closes its source',
+    async (reason) => {
+      let closed = false;
+      let read = 0;
+      const records = {
+        async *[Symbol.asyncIterator]() {
+          try {
+            for (let index = 0; index < 100; index++) {
+              read++;
+              yield { ...assistantRecord(), uuid: `bulk-${index}` };
+            }
+          } finally {
+            closed = true;
+          }
+        },
+      };
+      await expect(
+        collectHistoryReplayUpdates({
+          sessionId: SESSION_ID,
+          records,
+          cumulativeUsage: createReplayCumulativeUsage(),
+          limits:
+            reason === 'bytes'
+              ? { maxBytes: 2, maxUpdates: 100 }
+              : { maxBytes: 100000, maxUpdates: 1 },
+        }),
+      ).rejects.toMatchObject({ name: HistoryReplayLimitError.name, reason });
+      expect(read).toBe(reason === 'bytes' ? 1 : 2);
+      expect(closed).toBe(true);
+    },
+  );
+
+  it('preserves a one-shot stream trailing question until it can be restored', async () => {
+    const auq: ChatRecord = {
+      ...toolCallRecord(),
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-auq',
+              name: 'ask_user_question',
+              args: {
+                questions: [
+                  {
+                    question: 'Pick?',
+                    header: 'H',
+                    options: [
+                      { label: 'A', description: 'a' },
+                      { label: 'B', description: 'b' },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    };
+    const records = (async function* () {
+      yield userRecord();
+      yield auq;
+    })();
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records,
+      cumulativeUsage: createReplayCumulativeUsage(),
+      config: {
+        getRestoreAskUserQuestion: () => true,
+        getLlmClient: () => ({ isInitialized: () => false }),
+      } as unknown as Config,
+    });
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.filter((update) => update.sessionUpdate === 'tool_call'),
+    ).toHaveLength(1);
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps file-backed collision allocation identical to array replay', async () => {
+    const records = [
+      toolCallRecord(),
+      toolResultRecord(),
+      { ...toolCallRecord(), uuid: 'call-2' },
+      { ...toolResultRecord(), uuid: 'result-2' },
+      { ...toolCallRecord(), uuid: 'call-3' },
+    ];
+    const options = {
+      sessionId: SESSION_ID,
+      cumulativeUsage: createReplayCumulativeUsage(),
+    };
+    const expected = await collectHistoryReplayUpdates({ ...options, records });
+    const actual = await collectHistoryReplayUpdates({
+      ...options,
+      records: {
+        async *[Symbol.asyncIterator]() {
+          yield* records;
+        },
+      },
+    });
+    expect(actual).toEqual(expected);
   });
 });

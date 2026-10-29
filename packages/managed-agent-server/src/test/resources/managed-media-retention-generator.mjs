@@ -12,10 +12,8 @@ const { LocalManagedSessionAuthority } = await load(
   'core',
   'managed-runtime/managed-session-authority',
 );
-const { scanManagedSessionJournal } = await load(
-  'core',
-  'managed-runtime/managed-session-storage',
-);
+const { scanManagedSessionJournal, scanManagedSessionJournalStream } =
+  await load('core', 'managed-runtime/managed-session-storage');
 const { describeTransaction, collectNestedResourceRefs } = await load(
   'core',
   'managed-runtime/http-managed-session-store',
@@ -71,6 +69,17 @@ const journal = {
   sessionKey,
   async read() {
     return scanManagedSessionJournal(journalBytes, sessionKey);
+  },
+  async scan(consume) {
+    const bytes = journalBytes;
+    return scanManagedSessionJournalStream(
+      (async function* () {
+        for (let offset = 0; offset < bytes.length; offset += 64 * 1024)
+          yield bytes.subarray(offset, offset + 64 * 1024);
+      })(),
+      sessionKey,
+      consume,
+    );
   },
   async appendTransaction(records) {
     const before = await this.read();

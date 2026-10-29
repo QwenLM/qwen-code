@@ -25,7 +25,19 @@ vi.mock(
     };
   },
 );
-import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import {
+  outboundMessageBody,
+  sessionMessageId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import {
+  childAttachBody,
+  childContinuationBody,
+  childDispatchBody,
+  childFailBody,
+  childLaunchBody,
+  childSettleCompletedBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import type { ChildSessionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import type { SessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
@@ -35,20 +47,33 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
 import {
   MEMBER_MESSAGE_ID_PREFIX,
+  HostedChildChains,
   broadcastMessageId,
   broadcastRunId,
   firstInputOpensWithMemberPreamble,
+  givenWorkThisTurn,
+  hasCompletedRun,
   hasPlanModeBlock,
   hostedCallKey,
+  hostedFirstInputText,
+  hostedMemberView,
   hostedNeverStarted,
   hostedPromptKey,
+  hostedRouteDetails,
   inputBodyText,
   isSentInstruction,
   memberMessageId,
   memberPlanModeRequired,
   memberPreambleIdentity,
   teamMemberPreamble,
+  type HostedChildChainAuthority,
 } from './hosted-member-chain.js';
+
+function historyOf<T>(values: readonly T[]): ManagedHistoryQuery<T> {
+  return new ManagedHistoryQuery(async function* () {
+    yield* values;
+  });
+}
 
 describe('the member preamble (H4e-b2 decision 5)', () => {
   const alice = { name: 'alice', teamName: 'review' };
@@ -142,7 +167,7 @@ describe('plan mode (H4e-b3a, decisions 5 and 9)', () => {
     ).toBe(false);
   });
 
-  it('holds plan mode until an approved plan of the member exists', () => {
+  it('holds plan mode until an approved plan of the member exists', async () => {
     const team = teamJoinBody(
       teamOpenBody({
         teamId: 'prompt:team',
@@ -188,33 +213,43 @@ describe('plan mode (H4e-b3a, decisions 5 and 9)', () => {
       },
     });
     // No roster flag, nothing to read.
-    expect(memberPlanModeRequired(team, [], 'bob')).toBe(false);
-    expect(memberPlanModeRequired(team, [], 'alice')).toBe(true);
+    expect(await memberPlanModeRequired(team, historyOf([]), 'bob')).toBe(
+      false,
+    );
+    expect(await memberPlanModeRequired(team, historyOf([]), 'alice')).toBe(
+      true,
+    );
     // Waiting and rejected plans keep the mode; approval lifts it.
-    expect(memberPlanModeRequired(team, [planOf()], 'alice')).toBe(true);
     expect(
-      memberPlanModeRequired(
+      await memberPlanModeRequired(team, historyOf([planOf()]), 'alice'),
+    ).toBe(true);
+    expect(
+      await memberPlanModeRequired(
         team,
-        [planOf({ decision: 'rejected', run: runOf('settled') })],
+        historyOf([planOf({ decision: 'rejected', run: runOf('settled') })]),
         'alice',
       ),
     ).toBe(true);
     expect(
-      memberPlanModeRequired(
+      await memberPlanModeRequired(
         team,
-        [
+        historyOf([
           planOf({
             decision: 'approved',
             feedbackRef: refOf,
             run: runOf('settled'),
           }),
-        ],
+        ]),
         'alice',
       ),
     ).toBe(false);
     // Plan mode is a rule of an open team only.
     expect(
-      memberPlanModeRequired(teamLifecycleBody(team, 'deleted'), [], 'alice'),
+      await memberPlanModeRequired(
+        teamLifecycleBody(team, 'deleted'),
+        historyOf([]),
+        'alice',
+      ),
     ).toBe(false);
   });
 });
@@ -430,7 +465,7 @@ describe('the member preamble identity (b3c decision 5)', () => {
 });
 
 describe('never-started notes (b3c decision 8)', () => {
-  it('leave member messages out of the lost-messages count', () => {
+  it('leave member messages out of the lost-messages count', async () => {
     const run = {
       childRunId: 'run-1',
       predecessorChildRunId: 'run-0',
@@ -449,7 +484,338 @@ describe('never-started notes (b3c decision 8)', () => {
       messageId: 'msg_z',
       childRunId: 'run-2',
     } as unknown as SessionMessage;
-    expect(hostedNeverStarted(run, [msgc, lead, other]).lostMessages).toBe(1);
-    expect(hostedNeverStarted(run, [msgc]).lostMessages).toBe(0);
+    expect(
+      (await hostedNeverStarted(run, historyOf([msgc, lead, other])))
+        .lostMessages,
+    ).toBe(1);
+    expect(
+      (await hostedNeverStarted(run, historyOf([msgc]))).lostMessages,
+    ).toBe(0);
+  });
+});
+
+describe('child chains over committed history', () => {
+  const ref = {
+    resourceId: 'input',
+    kind: 'managed-input',
+    schemaVersion: 1,
+    byteLength: 2,
+    digest: 'a'.repeat(64),
+  };
+  function launch(id: string): ChildSessionRun {
+    return childLaunchBody({
+      childRunId: id,
+      ownerScopeId: 'owner',
+      rootSessionId: 'lead',
+      completion: 'sent',
+      inputRef: ref,
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      executionCallId: `old:${id}`,
+      definition: {
+        definitionId: 'agent',
+        definitionRevision: 1,
+        definitionDigest: 'b'.repeat(64),
+      },
+    });
+  }
+  function complete(run: ChildSessionRun): ChildSessionRun {
+    return childSettleCompletedBody(
+      childAttachBody(
+        childDispatchBody(run, {
+          dispatchId: `dispatch:${run.childRunId}`,
+          runtime: { runtimeBindingId: 'binding', generation: '1' },
+        }),
+        { childSessionId: `session:${run.childRunId}` },
+      ),
+      { resultRef: ref, terminalReceiptRef: ref },
+    );
+  }
+  function continuation(
+    predecessor: ChildSessionRun,
+    id: string,
+  ): ChildSessionRun {
+    return childContinuationBody(predecessor, {
+      childRunId: id,
+      completion: 'sent',
+      inputRef: ref,
+      executionCallId: `old:${id}`,
+    });
+  }
+  function neverStarted(run: ChildSessionRun): ChildSessionRun {
+    return childFailBody(run, {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+  }
+  function authorityOf(
+    runs: ChildSessionRun[],
+    messages: SessionMessage[] = [],
+  ): HostedChildChainAuthority {
+    return {
+      get committedSequence() {
+        return runs.length;
+      },
+      async extensionRecord(domain, id, options) {
+        const record =
+          domain === 'child_run'
+            ? runs
+                .slice(0, options?.throughSequence)
+                .find((run) => run.childRunId === id)
+            : domain === 'session_message'
+              ? messages.find((message) => message.messageId === id)
+              : undefined;
+        return record === undefined ? undefined : { record };
+      },
+      extensionRecordsInDomain(domain, options) {
+        return new ManagedHistoryQuery(async function* () {
+          if (domain === 'child_run') {
+            for (const record of runs.slice(0, options?.throughSequence))
+              yield { record };
+          } else if (domain === 'session_message') {
+            for (const record of messages) yield { record };
+          }
+        });
+      },
+    };
+  }
+  function message(childRunId: string, messageId: string): SessionMessage {
+    return outboundMessageBody({
+      childRunId,
+      messageId,
+      route: 'to_child',
+      senderSessionId: 'lead',
+      contentRef: ref,
+      executionCallId: 'turn:send',
+    });
+  }
+
+  it('preserves roots, head and sibling order through failed attempts', async () => {
+    const root = complete(launch('root'));
+    const first = neverStarted(continuation(root, 'first'));
+    const second = neverStarted(continuation(root, 'second'));
+    const resumed = complete(continuation(root, 'resumed'));
+    const latest = neverStarted(continuation(resumed, 'latest'));
+    const chains = new HostedChildChains(
+      authorityOf([root, first, second, resumed, latest]),
+    );
+    expect(await chains.root('latest')).toBe('root');
+    expect((await chains.head('root'))?.childRunId).toBe('resumed');
+    expect((await chains.newestContinuation('root'))?.childRunId).toBe(
+      'resumed',
+    );
+    expect((await chains.previousContinuation('resumed'))?.childRunId).toBe(
+      'second',
+    );
+    expect(await chains.previousContinuation('first')).toBeUndefined();
+    expect(await chains.head('missing')).toBeUndefined();
+    expect(await chains.root('missing')).toBe('missing');
+    expect(
+      await chains
+        .chain('root')
+        .map((run) => run.childRunId)
+        .collect(5),
+    ).toEqual(['root', 'first', 'second', 'resumed', 'latest']);
+    expect(
+      await chains
+        .chain('resumed')
+        .map((run) => run.childRunId)
+        .collect(2),
+    ).toEqual(['resumed', 'latest']);
+    expect(await hostedMemberView(chains, 'root')).toMatchObject({
+      head: { childRunId: 'resumed' },
+      state: 'completed',
+      continuable: true,
+      neverStarted: { childRunId: 'latest' },
+    });
+    expect(await hasCompletedRun(chains, 'root')).toBe(true);
+  });
+
+  it('observes a committed continuation without retaining an overlay', async () => {
+    const root = complete(launch('root'));
+    const records = [root];
+    const chains = new HostedChildChains(authorityOf(records));
+    expect((await chains.head('root'))?.childRunId).toBe('root');
+    records.push(continuation(root, 'next'));
+    expect((await chains.head('root'))?.childRunId).toBe('next');
+  });
+
+  it('reopens lazy runs and chain queries against their original prefix', async () => {
+    const root = complete(launch('root'));
+    const records = [root];
+    const chains = new HostedChildChains(authorityOf(records));
+    const runs = chains.runs();
+    const chain = chains.chain('root');
+    const next = complete(continuation(root, 'next'));
+    records.push(next);
+    expect(await runs.map((run) => run.childRunId).collect(3)).toEqual([
+      'root',
+    ]);
+    expect(await chain.map((run) => run.childRunId).collect(3)).toEqual([
+      'root',
+    ]);
+    records.push(continuation(next, 'last'));
+    expect(await runs.map((run) => run.childRunId).collect(3)).toEqual([
+      'root',
+    ]);
+    expect(await chain.map((run) => run.childRunId).collect(3)).toEqual([
+      'root',
+    ]);
+    expect(await chains.runs().count()).toBe(3);
+    expect(
+      await chains
+        .chain('root')
+        .map((run) => run.childRunId)
+        .collect(3),
+    ).toEqual(['root', 'next', 'last']);
+  });
+
+  it('keeps one head prefix while an awaited point read admits a newer continuation', async () => {
+    const root = complete(launch('root'));
+    const records = [root];
+    const authority = authorityOf(records);
+    const point = authority.extensionRecord.bind(authority);
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reading = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let held = false;
+    vi.spyOn(authority, 'extensionRecord').mockImplementation(
+      async (...args) => {
+        const result = await point(...args);
+        if (!held) {
+          held = true;
+          reached();
+          await gate;
+        }
+        return result;
+      },
+    );
+    const enumerate = vi.spyOn(authority, 'extensionRecordsInDomain');
+    const chains = new HostedChildChains(authority);
+    const original = chains.head('root');
+    await reading;
+    records.push(continuation(root, 'next'));
+    release();
+    expect((await original)?.childRunId).toBe('root');
+    expect(enumerate).toHaveBeenCalledWith('child_run', { throughSequence: 1 });
+    expect((await chains.head('root'))?.childRunId).toBe('next');
+  });
+
+  it('does not enumerate a 100k history for construction or point reads', async () => {
+    let yielded = 0;
+    const point = vi.fn(async (_domain: string, id: string) => ({
+      record: launch(id),
+    }));
+    const chains = new HostedChildChains({
+      committedSequence: 100_000,
+      extensionRecord: point,
+      extensionRecordsInDomain() {
+        return new ManagedHistoryQuery(async function* () {
+          for (let index = 0; index < 100_000; index++) {
+            yielded++;
+            yield { record: launch(`run-${index}`) };
+          }
+        });
+      },
+    });
+    expect(yielded).toBe(0);
+    expect((await chains.run('run-99999'))?.childRunId).toBe('run-99999');
+    expect(await chains.root('run-99999')).toBe('run-99999');
+    expect(point).toHaveBeenCalledTimes(2);
+    expect(yielded).toBe(0);
+    expect(await chains.runs().slice(0, 2).count()).toBe(2);
+    expect(yielded).toBeLessThanOrEqual(3);
+  });
+
+  it('checks message ancestry without keeping all chain identities', async () => {
+    const root = complete(launch('root'));
+    const failed = neverStarted(continuation(root, 'failed'));
+    const next = continuation(root, 'next');
+    const chains = new HostedChildChains(
+      authorityOf([root, failed, next, launch('other')]),
+    );
+    expect(
+      await givenWorkThisTurn(
+        chains,
+        'root',
+        historyOf([message('failed', 'failed-send')]),
+        'turn:',
+      ),
+    ).toBe(false);
+    expect(
+      await givenWorkThisTurn(
+        chains,
+        'root',
+        historyOf([message('other', 'other-send')]),
+        'turn:',
+      ),
+    ).toBe(false);
+    expect(
+      await givenWorkThisTurn(
+        chains,
+        'root',
+        historyOf([message('next', 'next-send')]),
+        'turn:',
+      ),
+    ).toBe(true);
+    expect(
+      await givenWorkThisTurn(
+        chains,
+        'root',
+        historyOf([message('root', 'root-send')]),
+        'turn:',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps never-started and delivery-failed route evidence lazy', async () => {
+    const root = complete(launch('root'));
+    const failed = neverStarted(continuation(root, 'failed'));
+    const messages = [message('failed', 'msg_a'), message('failed', 'msgc_a')];
+    const authority = authorityOf([root, failed], messages);
+    expect(
+      await hostedRouteDetails(authority, {
+        kind: 'continuation',
+        childRunId: 'failed',
+      }),
+    ).toMatchObject({
+      ownNeverStarted: { childRunId: 'failed', lostMessages: 1 },
+    });
+    messages.push(message('root', 'root-send'));
+    expect(
+      await hostedRouteDetails(
+        authority,
+        { kind: 'message', childRunId: 'root' },
+        'root-send',
+      ),
+    ).toMatchObject({ deliveryFailed: { state: 'cancelled', chain: 'open' } });
+  });
+
+  it('point-reads the first input while resource failures still propagate', async () => {
+    const resources = {
+      read: vi.fn(async () => Buffer.from('{"text":"first"}')),
+    };
+    const authority = {
+      findEvent: vi.fn(async () => ({
+        kind: 'input.accepted',
+        payload: { contentRef: ref },
+      })),
+    };
+    expect(await hostedFirstInputText({ authority, resources })).toBe('first');
+    expect(authority.findEvent).toHaveBeenCalledWith(
+      'input.accepted',
+      'kind',
+      'input.accepted',
+    );
+    resources.read.mockRejectedValueOnce(new Error('damaged input'));
+    await expect(
+      hostedFirstInputText({ authority, resources }),
+    ).rejects.toThrow('damaged input');
   });
 });

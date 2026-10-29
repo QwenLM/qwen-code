@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
+
 import { MonitorWakeTransientReadError } from './hosted-monitor-wake.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -102,14 +104,19 @@ import {
 /** The narrow authority/resource pair a HostedChildAgentSession commits through. */
 export interface HostedChildAgentStore {
   readonly authority: {
+    readonly committedSequence: number;
+    iterateEvents: import('@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js').LocalManagedSessionAuthority['iterateEvents'];
     settlePendingAppend(): Promise<void>;
+    findEvent: import('@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js').LocalManagedSessionAuthority['findEvent'];
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
-    ): { readonly record: unknown; readonly revision: number } | undefined;
+    ): Promise<
+      { readonly record: unknown; readonly revision: number } | undefined
+    >;
     extensionRecordsInDomain(
       domain: ManagedSessionDomain,
-    ): ReadonlyArray<{ readonly record: unknown }>;
+    ): ManagedHistoryQuery<{ readonly record: unknown }>;
     commitExtensionRecord(
       command: ManagedSessionCommand,
       request: {
@@ -507,18 +514,19 @@ export class HostedChildAgentSession {
   constructor(
     private readonly store: HostedChildAgentStore,
     private readonly key: ManagedSessionKey,
-    private readonly sourceCancelled: (promptId: string) => boolean = () =>
-      false,
+    private readonly sourceCancelled: (
+      promptId: string,
+    ) => boolean | Promise<boolean> = () => false,
     private readonly launchEnabled: () => boolean = () => true,
   ) {}
 
   async cancelledNotification(turnId: string): Promise<boolean> {
-    if (this.sourceCancelled(turnId)) return true;
+    if (await this.sourceCancelled(turnId)) return true;
     const suffix = [':accept:notify', ':blocked:notify'].find((value) =>
       turnId.endsWith(value),
     );
     if (!suffix) return false;
-    const record = this.record(turnId.slice(0, -suffix.length));
+    const record = await this.record(turnId.slice(0, -suffix.length));
     return record !== undefined && this.cancelledLaunch(record);
   }
 
@@ -533,14 +541,14 @@ export class HostedChildAgentSession {
     const launch = decodeChildLaunchEnvelope(bytes);
     return (
       launch.publicLaunch !== undefined &&
-      this.sourceCancelled(launch.publicLaunch.sourcePromptId)
+      (await this.sourceCancelled(launch.publicLaunch.sourcePromptId))
     );
   }
 
   async publicLaunchSnapshot(
     childRunId: string,
   ): Promise<PublicChildLaunchSnapshot | undefined> {
-    const record = this.record(childRunId);
+    const record = await this.record(childRunId);
     return record?.kind === 'child_agent'
       ? decodeChildLaunchEnvelope(
           await this.store.resources.read(record.inputRef),
@@ -558,7 +566,7 @@ export class HostedChildAgentSession {
   ): Promise<void> {
     return this.inWrites(async () => {
       await fence?.();
-      for (const entry of this.store.authority.extensionRecordsInDomain(
+      for await (const entry of this.store.authority.extensionRecordsInDomain(
         'child_run',
       )) {
         const record = parseChildRun(entry.record);
@@ -575,7 +583,7 @@ export class HostedChildAgentSession {
         if (
           source === undefined ||
           (promptId !== undefined && source !== promptId) ||
-          !this.sourceCancelled(source)
+          !(await this.sourceCancelled(source))
         )
           continue;
         const next = childStopRequestedBody(record);
@@ -595,8 +603,8 @@ export class HostedChildAgentSession {
 
   /** The last committed body of one child run, parsed. Both child Session
    * kinds answer: the relay and cascade verbs are kind-blind (#13803 K2). */
-  record(childRunId: string): ChildSessionRun | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async record(childRunId: string): Promise<ChildSessionRun | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'child_run',
       childRunId,
     );
@@ -606,8 +614,8 @@ export class HostedChildAgentSession {
   }
 
   /** The last committed acceptance of one child run, parsed. */
-  acceptance(childRunId: string): ChildAcceptance | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async acceptance(childRunId: string): Promise<ChildAcceptance | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'child_acceptance',
       childRunId,
     );
@@ -621,7 +629,7 @@ export class HostedChildAgentSession {
   launchedChildRunsOf(
     ownerScopeId: string,
     chains?: HostedChildChains,
-  ): readonly ChildSessionRun[] {
+  ): ManagedHistoryQuery<ChildSessionRun> {
     const runs =
       chains?.runs() ??
       this.store.authority
@@ -635,7 +643,7 @@ export class HostedChildAgentSession {
   activeChildRunsOf(
     ownerScopeId: string,
     chains?: HostedChildChains,
-  ): readonly ChildSessionRun[] {
+  ): ManagedHistoryQuery<ChildSessionRun> {
     return this.launchedChildRunsOf(ownerScopeId, chains).filter(
       (record) =>
         !isTerminalRunState(record.run.state) &&
@@ -652,16 +660,16 @@ export class HostedChildAgentSession {
   }
 
   /** The child agent run one task id names, of any chain generation. */
-  runForTask(
+  async runForTask(
     taskId: string,
     chains?: HostedChildChains,
-  ): ChildAgentRun | undefined {
+  ): Promise<ChildAgentRun | undefined> {
     const runs =
       chains?.runs() ??
       this.store.authority
         .extensionRecordsInDomain('child_run')
         .map((entry) => parseChildRun(entry.record));
-    for (const record of runs) {
+    for await (const record of runs) {
       if (
         record.kind === 'child_agent' &&
         this.taskIdOf(record.childRunId) === taskId
@@ -677,17 +685,15 @@ export class HostedChildAgentSession {
    * have started left its predecessor untouched (H4d-a decision 9), so the
    * chain's head stays at the predecessor until another one starts.
    */
-  chainHead(
+  async chainHead(
     run: ChildAgentRun,
-    chains: HostedChildChains = new HostedChildChains(
-      this.store.authority.extensionRecordsInDomain('child_run'),
-    ),
-  ): ChildAgentRun {
+    chains: HostedChildChains = new HostedChildChains(this.store.authority),
+  ): Promise<ChildAgentRun> {
     // One definition of the head serves this routing and H4e-b2's member
     // views alike. A chain starts at a committed run and the authority
     // keeps a continuation's kind, so its head is a child agent run.
-    const head = chains.head(run.childRunId);
-    const record = head && this.record(head.childRunId);
+    const head = await chains.head(run.childRunId);
+    const record = head && (await this.record(head.childRunId));
     if (record === undefined)
       throw new Error(`Child run ${run.childRunId} has no chain head.`);
     if (record.kind !== 'child_agent')
@@ -698,7 +704,7 @@ export class HostedChildAgentSession {
   }
 
   /** Every message this Session sent to one child run, in any state. */
-  messagesTo(childRunId: string): readonly SessionMessage[] {
+  messagesTo(childRunId: string): ManagedHistoryQuery<SessionMessage> {
     return this.store.authority
       .extensionRecordsInDomain('session_message')
       .map((entry) => parseSessionMessage(entry.record))
@@ -711,8 +717,10 @@ export class HostedChildAgentSession {
   }
 
   /** The parent's messages to one child run that still owe their handover. */
-  undeliveredMessagesTo(childRunId: string): number {
-    return this.messagesTo(childRunId).filter(isUndeliveredMessage).length;
+  async undeliveredMessagesTo(childRunId: string): Promise<number> {
+    return await this.messagesTo(childRunId)
+      .filter(isUndeliveredMessage)
+      .count();
   }
 
   /**
@@ -758,7 +766,7 @@ export class HostedChildAgentSession {
   }): Promise<ChildMessageRoute> {
     return this.inWrites(async () => {
       const content = Buffer.from(params.text, 'utf8');
-      const sent = this.store.authority.extensionRecord(
+      const sent = await this.store.authority.extensionRecord(
         'session_message',
         params.messageId,
       );
@@ -778,7 +786,7 @@ export class HostedChildAgentSession {
           params.messageId,
         );
       }
-      const continued = this.record(params.continuationRunId);
+      const continued = await this.record(params.continuationRunId);
       if (continued !== undefined) {
         const envelope = decodeChildLaunchEnvelope(
           await this.store.resources.read(continued.inputRef),
@@ -800,14 +808,12 @@ export class HostedChildAgentSession {
           predecessorChildRunId: continued.predecessorChildRunId,
         });
       }
-      const chains = new HostedChildChains(
-        this.store.authority.extensionRecordsInDomain('child_run'),
-      );
-      const run = this.runForTask(params.taskId, chains);
+      const chains = new HostedChildChains(this.store.authority);
+      const run = await this.runForTask(params.taskId, chains);
       if (run === undefined) {
         // A workflow child's task id is a real task — the refusal says why
         // it takes no message instead of denying it exists.
-        const workflow = this.store.authority
+        const workflow = await this.store.authority
           .extensionRecordsInDomain('child_run')
           .map((entry) => parseChildRun(entry.record))
           .some(
@@ -831,7 +837,7 @@ export class HostedChildAgentSession {
         from.run.execution === 'not_started_proven' &&
         from.predecessorChildRunId !== null
       ) {
-        const predecessor = this.record(from.predecessorChildRunId);
+        const predecessor = await this.record(from.predecessorChildRunId);
         if (predecessor === undefined || predecessor.kind !== 'child_agent')
           break;
         from = predecessor;
@@ -839,14 +845,14 @@ export class HostedChildAgentSession {
       // H4e-b2 decision 2: a run of an open team member's chain is that
       // member, and every continuation of it opens its instruction with
       // the member preamble (decision 5).
-      const member = hostedOpenTeamChainMember(
+      const member = await hostedOpenTeamChainMember(
         this.store.authority.extensionRecordsInDomain('team_state'),
         chains,
         from.childRunId,
       );
       const planDecision = params.planDecision;
       if (planDecision !== undefined) {
-        const stored = this.store.authority.extensionRecord(
+        const stored = await this.store.authority.extensionRecord(
           'team_plan',
           planDecision.requestId,
         );
@@ -868,7 +874,7 @@ export class HostedChildAgentSession {
           };
         }
         if (
-          this.store.authority
+          await this.store.authority
             .extensionRecordsInDomain('team_plan')
             .some((entry) => {
               const other = parseTeamPlan(entry.record);
@@ -896,11 +902,11 @@ export class HostedChildAgentSession {
                 teamName: member.team.name,
               },
               !(params.preflight && planDecision?.decision === 'approved') &&
-                memberPlanModeRequired(
+                (await memberPlanModeRequired(
                   member.team,
                   this.store.authority.extensionRecordsInDomain('team_plan'),
                   member.name,
-                ),
+                )),
             ) + params.text;
       // The bound is the smaller carrier: the continuation's launch
       // envelope, built from the chain's own description and definition,
@@ -926,7 +932,7 @@ export class HostedChildAgentSession {
               : `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes together with its launch description and the member preamble every continuation of "${member.name}" carries.`,
         };
       }
-      const head = this.chainHead(from, chains);
+      const head = await this.chainHead(from, chains);
       if (
         planDecision !== undefined &&
         head.childRunId !== planDecision.childRunId
@@ -983,14 +989,14 @@ export class HostedChildAgentSession {
         }
         const sentBefore = this.messagesTo(head.childRunId);
         const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
-        if (sentBefore.length >= limits.maxPerRun) {
+        if ((await sentBefore.count()) >= limits.maxPerRun) {
           return {
             kind: 'refused',
             reason: `${subject} has received its ${limits.maxPerRun} messages (budget_exhausted).`,
           };
         }
         if (
-          sentBefore.filter(isUndeliveredMessage).length >=
+          (await sentBefore.filter(isUndeliveredMessage).count()) >=
           limits.maxInFlightPerRun
         ) {
           return {
@@ -1057,9 +1063,14 @@ export class HostedChildAgentSession {
         childSnapshots: params.childSnapshots === true,
         sameDefinition: true,
         closing: params.closing,
-        activeInScope: this.activeChildRunsOf(head.ownerScopeId, chains).length,
-        launchedInScope: this.launchedChildRunsOf(head.ownerScopeId, chains)
-          .length,
+        activeInScope: await this.activeChildRunsOf(
+          head.ownerScopeId,
+          chains,
+        ).count(),
+        launchedInScope: await this.launchedChildRunsOf(
+          head.ownerScopeId,
+          chains,
+        ).count(),
         envelopeBytes: envelope.byteLength,
       });
       if (!admission.admitted) {
@@ -1102,7 +1113,7 @@ export class HostedChildAgentSession {
         { domain: 'child_run', record: body },
         TRUSTED,
       );
-      chains.add(body);
+
       return this.routed(
         {
           kind: 'continuation',
@@ -1116,7 +1127,7 @@ export class HostedChildAgentSession {
   }
 
   /** A committed route with what its answer must tell (H4e-b2). */
-  private routed<
+  private async routed<
     Route extends {
       readonly kind: 'message' | 'continuation';
       readonly childRunId: string;
@@ -1125,10 +1136,15 @@ export class HostedChildAgentSession {
     route: Route,
     messageId?: string,
     chains?: HostedChildChains,
-  ): Route & HostedRouteDetails {
+  ): Promise<Route & HostedRouteDetails> {
     return {
       ...route,
-      ...hostedRouteDetails(this.store.authority, route, messageId, chains),
+      ...(await hostedRouteDetails(
+        this.store.authority,
+        route,
+        messageId,
+        chains,
+      )),
     };
   }
 
@@ -1167,7 +1183,7 @@ export class HostedChildAgentSession {
       }
   > {
     return this.inWrites(async () => {
-      const sent = this.store.authority.extensionRecord(
+      const sent = await this.store.authority.extensionRecord(
         'session_message',
         params.messageId,
       );
@@ -1184,10 +1200,8 @@ export class HostedChildAgentSession {
           `Session message ${params.messageId} was sent with different evidence.`,
         );
       }
-      const chains = new HostedChildChains(
-        this.store.authority.extensionRecordsInDomain('child_run'),
-      );
-      const view = hostedMemberView(chains, params.rootChildRunId);
+      const chains = new HostedChildChains(this.store.authority);
+      const view = await hostedMemberView(chains, params.rootChildRunId);
       const head = view.head;
       if (
         head === undefined ||
@@ -1209,11 +1223,11 @@ export class HostedChildAgentSession {
       }
       const sentBefore = this.messagesTo(head.childRunId);
       const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
-      if (sentBefore.length >= limits.maxPerRun) {
+      if ((await sentBefore.count()) >= limits.maxPerRun) {
         return { kind: 'notReached', reason: 'budget_exhausted' };
       }
       if (
-        sentBefore.filter(isUndeliveredMessage).length >=
+        (await sentBefore.filter(isUndeliveredMessage).count()) >=
         limits.maxInFlightPerRun
       ) {
         return { kind: 'notReached', reason: 'count_limit' };
@@ -1221,11 +1235,11 @@ export class HostedChildAgentSession {
       const memberSent = sentBefore.filter((message) =>
         message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
       );
-      if (memberSent.length >= HOSTED_MEMBER_MESSAGE_PER_RUN) {
+      if ((await memberSent.count()) >= HOSTED_MEMBER_MESSAGE_PER_RUN) {
         return { kind: 'notReached', reason: 'member_budget' };
       }
       if (
-        memberSent.filter(isUndeliveredMessage).length >=
+        (await memberSent.filter(isUndeliveredMessage).count()) >=
         HOSTED_MEMBER_MESSAGE_IN_FLIGHT
       ) {
         return { kind: 'notReached', reason: 'member_count_limit' };
@@ -1379,7 +1393,7 @@ export class HostedChildAgentSession {
     readonly inputRef: ManagedSessionDurableRef;
     readonly committedBytes?: Buffer;
   }> {
-    const existing = this.record(params.childRunId);
+    const existing = await this.record(params.childRunId);
     if (existing !== undefined) {
       const committedBytes = await this.store.resources.read(existing.inputRef);
       const matches =
@@ -1485,7 +1499,7 @@ export class HostedChildAgentSession {
     // publications and the commit all queue into the one writes chain,
     // so a racing settle can never scan a half-committed chain.
     const write = this.writes.then(async () => {
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'child_run',
         childRunId,
       );
@@ -1510,7 +1524,7 @@ export class HostedChildAgentSession {
           `Child run ${childRunId} was already settled with a different result.`,
         );
       }
-      this.assertSettlementSawEveryMessage(
+      await this.assertSettlementSawEveryMessage(
         childRunId,
         params.messageCount ?? 0,
       );
@@ -1561,12 +1575,15 @@ export class HostedChildAgentSession {
       readonly messageCount?: number;
     },
   ): Promise<void> {
-    return this.revise(childRunId, (previous) => {
+    return this.revise(childRunId, async (previous) => {
       if (
         params.messageCount !== undefined &&
         !isTerminalRunState(previous.run.state)
       ) {
-        this.assertSettlementSawEveryMessage(childRunId, params.messageCount);
+        await this.assertSettlementSawEveryMessage(
+          childRunId,
+          params.messageCount,
+        );
       }
       return childFailBody(previous, params);
     });
@@ -1588,7 +1605,7 @@ export class HostedChildAgentSession {
     },
   ): Promise<void> {
     return this.inWrites(async () => {
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'child_run',
         childRunId,
       );
@@ -1699,12 +1716,12 @@ export class HostedChildAgentSession {
     // resources, and the acceptance commit — a re-driven acceptance mints
     // nothing twice.
     return this.inWrites(async () => {
-      const child = this.mustRecord(childRunId);
+      const child = await this.mustRecord(childRunId);
       const acceptance = childAcceptanceBody(child, {
         contentRef: child.resultRef!,
         terminalReceiptRef: child.terminalReceiptRef!,
       });
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'child_acceptance',
         childRunId,
       );
@@ -1767,7 +1784,7 @@ export class HostedChildAgentSession {
    * relay's later accepted is a no-op by the check above it.
    */
   async markConsumed(childRunId: string): Promise<void> {
-    const acceptance = this.acceptance(childRunId);
+    const acceptance = await this.acceptance(childRunId);
     if (
       acceptance !== undefined &&
       acceptance.run.delivery?.state !== 'consumed'
@@ -1793,7 +1810,7 @@ export class HostedChildAgentSession {
         `Child run ${childRunId} cannot be consumed from ${delivery}.`,
       );
     });
-    const after = this.mustRecord(childRunId);
+    const after = await this.mustRecord(childRunId);
     if (after.run.delivery?.state === 'accepted') {
       await this.revise(childRunId, (previous) =>
         childDeliveryBody(previous, 'consumed'),
@@ -1811,24 +1828,23 @@ export class HostedChildAgentSession {
       throw new Error(`Child run ${childRunId} has no result to notify.`);
     }
     const inputId = `${childRunId}:accept:notify`;
-    const submitted = new Set(
-      this.store.authority
-        .extensionRecordsInDomain('session_command')
-        .map((entry) => parseSessionCommand(entry.record))
-        .filter(
-          (command) =>
-            command.direction === 'inbound' &&
-            command.childRunId === childRunId &&
-            command.kind === 'plan_submit',
-        )
-        .map((command) => command.commandId),
-    );
-    const waiting = this.store.authority
+    const waiting = await this.store.authority
       .extensionRecordsInDomain('team_plan')
       .map((entry) => parseTeamPlan(entry.record))
-      .find(
-        (plan) => submitted.has(plan.requestId) && plan.run.state === 'waiting',
-      );
+      .find(async (plan) => {
+        if (plan.run.state !== 'waiting') return false;
+        const entry = await this.store.authority.extensionRecord(
+          'session_command',
+          plan.requestId,
+        );
+        if (!entry) return false;
+        const command = parseSessionCommand(entry.record);
+        return (
+          command.direction === 'inbound' &&
+          command.childRunId === childRunId &&
+          command.kind === 'plan_submit'
+        );
+      });
     const plan =
       waiting === undefined
         ? undefined
@@ -1871,16 +1887,18 @@ export class HostedChildAgentSession {
               // H4e-b2 decision 6: a continuation is labeled through its
               // chain root while that root is on the open team's roster.
               teammate:
-                hostedTeamMembership(
-                  this.store.authority.extensionRecordsInDomain('team_state'),
-                  childRunId,
+                (
+                  await hostedTeamMembership(
+                    this.store.authority.extensionRecordsInDomain('team_state'),
+                    childRunId,
+                  )
                 )?.name ??
-                hostedOpenTeamChainMember(
-                  this.store.authority.extensionRecordsInDomain('team_state'),
-                  new HostedChildChains(
-                    this.store.authority.extensionRecordsInDomain('child_run'),
-                  ),
-                  childRunId,
+                (
+                  await hostedOpenTeamChainMember(
+                    this.store.authority.extensionRecordsInDomain('team_state'),
+                    new HostedChildChains(this.store.authority),
+                    childRunId,
+                  )
                 )?.name,
               ...(workspace === undefined ? {} : { workspace }),
               ...(plan === undefined ? {} : { plan }),
@@ -1904,21 +1922,21 @@ export class HostedChildAgentSession {
    * them: messages are never deleted, so a count above what the caller saw
    * is a message its choice of result could not have accounted for.
    */
-  private assertSettlementSawEveryMessage(
+  private async assertSettlementSawEveryMessage(
     childRunId: string,
     messageCount: number,
-  ): void {
+  ): Promise<void> {
     const messages = this.messagesTo(childRunId);
-    const pending = messages.filter(isUndeliveredMessage).length;
-    if (pending > 0 || messages.length > messageCount) {
+    const pending = await messages.filter(isUndeliveredMessage).count();
+    if (pending > 0 || (await messages.count()) > messageCount) {
       throw new ChildMessagesPendingError(
-        `Child run ${childRunId} has ${messages.length} message(s), ${pending} still owing their handover; the settlement saw ${messageCount}.`,
+        `Child run ${childRunId} has ${await messages.count()} message(s), ${pending} still owing their handover; the settlement saw ${messageCount}.`,
       );
     }
   }
 
-  private mustRecord(childRunId: string): ChildSessionRun {
-    const record = this.record(childRunId);
+  private async mustRecord(childRunId: string): Promise<ChildSessionRun> {
+    const record = await this.record(childRunId);
     if (record === undefined) {
       throw new Error(`Child run ${childRunId} has no record to revise.`);
     }
@@ -1938,14 +1956,16 @@ export class HostedChildAgentSession {
 
   private revise(
     childRunId: string,
-    step: (previous: ChildSessionRun) => ChildSessionRun,
+    step: (
+      previous: ChildSessionRun,
+    ) => ChildSessionRun | Promise<ChildSessionRun>,
     evidence?: {
       readonly operation?: string;
       readonly commandId?: string;
     },
   ): Promise<void> {
     const write = this.writes.then(async () => {
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'child_run',
         childRunId,
       );
@@ -1956,7 +1976,7 @@ export class HostedChildAgentSession {
       if (previousParsed === undefined) {
         throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
-      const next = step(previousParsed);
+      const next = await step(previousParsed);
       if (isDeepStrictEqual(previousParsed, next)) return;
       await this.store.authority.commitExtensionRecord(
         {
@@ -2009,7 +2029,10 @@ export class HostedChildAgentSession {
     input?: ManagedSessionInputRequest,
   ): Promise<void> {
     const write = this.writes.then(async () => {
-      const existing = this.store.authority.extensionRecord(domain, recordId);
+      const existing = await this.store.authority.extensionRecord(
+        domain,
+        recordId,
+      );
       if (
         operation === 'startChildRun' &&
         existing === undefined &&

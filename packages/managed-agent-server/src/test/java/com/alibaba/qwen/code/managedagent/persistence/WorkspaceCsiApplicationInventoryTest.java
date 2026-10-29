@@ -583,62 +583,68 @@ class WorkspaceCsiApplicationInventoryTest {
                 key.path("sessionId").textValue());
         var baseline = preparedNativeFixture(WorkspaceCsiApplicationInventory.expectedImage(inspect().tables()), fixture);
         byte[] body = json.writeValueAsBytes(fixture.path("requests").get(32));
-        var proof = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body);
-        var owner = new JdbcCsiFilesRetirementGuard.Original(original, "binding", 1,
-                RuntimeBindingRecord.State.DRAINING, true, 3, 2L);
-        WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof, List.of(), 2, Map.of());
-        assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof,
-                List.of(), 0, Map.of())).isInstanceOf(IllegalArgumentException.class);
-        assertThat(proof.predecessorSequence()).isEqualTo(41);
-        assertThat(proof.terminalSequence()).isEqualTo(42);
-        assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
-        var journal = baseline.table("ma_session_journal_tx");
-        var activationRow = journal.rows().stream().filter(row -> List.of("installActivation", "renewActivation")
-                .contains(row.text("operation"))).max(java.util.Comparator.comparingLong(row -> row.number("journal_revision"))).orElseThrow();
-        Map<String, byte[]> renewedFields = new java.util.LinkedHashMap<>();
-        activationRow.fields().forEach((field, cell) -> renewedFields.put(field, cell.bytes()));
-        renewedFields.put("activation_lease_until", Long.toString(proof.predecessorActivation().expiresAt()).getBytes(StandardCharsets.UTF_8));
-        renewedFields.put("activation_renewal_seq", Long.toString(proof.predecessorActivation().renewalSequence() + 100).getBytes(StandardCharsets.UTF_8));
-        var renewedRow = WorkspaceCsiApplicationInventory.expectedRow(journal.name(), renewedFields, activationRow.membership());
-        var compactTables = baseline.tables().stream().map(table -> table != journal ? table
-                : new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(),
-                        table.rows().stream().map(row -> row == activationRow ? renewedRow : row).toList())).toList();
-        var compactProof = WorkspaceCsiApplicationHistory.preparedTerminal(WorkspaceCsiApplicationInventory.expectedImage(compactTables), original, body);
-        assertThat(compactProof.predecessorActivation().renewalSequence()).isEqualTo(proof.predecessorActivation().renewalSequence() + 100);
-        assertThat(compactProof.terminalSequence()).isEqualTo(proof.terminalSequence());
-        for (var fault : List.of(
-                List.of("ma_resource", "workspace_id", "other"),
-                List.of("ma_resource", "session_scope_key", "b".repeat(64)),
-                List.of("ma_resource", "sha256", "b".repeat(64)),
-                List.of("ma_resource", "storage_kind", "OBJECT_STORAGE"),
-                List.of("ma_resource_ref", "workspace_id", "other"),
-                List.of("ma_resource_ref", "journal_revision", "32"),
-                List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
-                List.of("ma_session_journal_tx", "activation_lease_until", "1"),
-                List.of("ma_session_head", "activation_head_revision", "2"),
-                List.of("ma_session_head", "activation_head_revision", "3"),
-                List.of("ma_session_head", "activation_head_revision", "33"),
-                List.of("ma_session_head", "activation_expires_at", "1"),
-                List.of("ma_session_head", "activation_id", "other"),
-                List.of("ma_session_head", "writer_id", UUID.randomUUID().toString()),
-                List.of("ma_session_head", "activation_phase", "released"))) {
-            var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
-            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body))
+        try (var proof = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body)) {
+            var owner = new JdbcCsiFilesRetirementGuard.Original(original, "binding", 1,
+                    RuntimeBindingRecord.State.DRAINING, true, 3, 2L);
+            WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof, List.of(), 2, Map.of());
+            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof,
+                    List.of(), 0, Map.of())).isInstanceOf(IllegalArgumentException.class);
+            assertThat(proof.predecessorSequence()).isEqualTo(41);
+            assertThat(proof.terminalSequence()).isEqualTo(42);
+            assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
+            var journal = baseline.table("ma_session_journal_tx");
+            var activationRow = journal.rows().stream().filter(row -> List.of("installActivation", "renewActivation")
+                    .contains(row.text("operation"))).max(java.util.Comparator.comparingLong(row -> row.number("journal_revision"))).orElseThrow();
+            Map<String, byte[]> renewedFields = new java.util.LinkedHashMap<>();
+            activationRow.fields().forEach((field, cell) -> renewedFields.put(field, cell.bytes()));
+            renewedFields.put("activation_lease_until", Long.toString(proof.predecessorActivation().expiresAt()).getBytes(StandardCharsets.UTF_8));
+            renewedFields.put("activation_renewal_seq", Long.toString(proof.predecessorActivation().renewalSequence() + 100).getBytes(StandardCharsets.UTF_8));
+            var renewedRow = WorkspaceCsiApplicationInventory.expectedRow(journal.name(), renewedFields, activationRow.membership());
+            var compactTables = baseline.tables().stream().map(table -> table != journal ? table
+                    : new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(),
+                            table.rows().stream().map(row -> row == activationRow ? renewedRow : row).toList())).toList();
+            try (var compactProof = WorkspaceCsiApplicationHistory.preparedTerminal(
+                    WorkspaceCsiApplicationInventory.expectedImage(compactTables), original, body)) {
+                assertThat(compactProof.predecessorActivation().renewalSequence())
+                        .isEqualTo(proof.predecessorActivation().renewalSequence() + 100);
+                assertThat(compactProof.terminalSequence()).isEqualTo(proof.terminalSequence());
+            }
+            for (var fault : List.of(
+                    List.of("ma_resource", "workspace_id", "other"),
+                    List.of("ma_resource", "session_scope_key", "b".repeat(64)),
+                    List.of("ma_resource", "sha256", "b".repeat(64)),
+                    List.of("ma_resource", "storage_kind", "OBJECT_STORAGE"),
+                    List.of("ma_resource_ref", "workspace_id", "other"),
+                    List.of("ma_resource_ref", "journal_revision", "32"),
+                    List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
+                    List.of("ma_session_journal_tx", "activation_lease_until", "1"),
+                    List.of("ma_session_head", "activation_head_revision", "2"),
+                    List.of("ma_session_head", "activation_head_revision", "3"),
+                    List.of("ma_session_head", "activation_head_revision", "33"),
+                    List.of("ma_session_head", "activation_expires_at", "1"),
+                    List.of("ma_session_head", "activation_id", "other"),
+                    List.of("ma_session_head", "writer_id", UUID.randomUUID().toString()),
+                    List.of("ma_session_head", "activation_phase", "released"))) {
+                var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
+                assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body))
+                        .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            }
+            var tables = new java.util.ArrayList<>(baseline.tables());
+            var references = baseline.table("ma_resource_ref");
+            tables.set(tables.indexOf(references), new WorkspaceCsiApplicationInventory.Table(references.name(),
+                    references.columns(), references.primaryKey(), references.rows().subList(1, references.rows().size())));
+            var missing = WorkspaceCsiApplicationInventory.expectedImage(tables);
+            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(missing, original, body))
                     .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            var candidate = fixture.path("requests").get(32).deepCopy();
+            ((com.fasterxml.jackson.databind.node.ObjectNode) candidate.path("resources").get(0)).put("digest", "c".repeat(64));
+            byte[] badCandidate = json.writeValueAsBytes(candidate);
+            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, badCandidate))
+                    .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            try (var repeated = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body)) {
+                assertThat(repeated).isEqualTo(proof);
+            }
         }
-        var tables = new java.util.ArrayList<>(baseline.tables());
-        var references = baseline.table("ma_resource_ref");
-        tables.set(tables.indexOf(references), new WorkspaceCsiApplicationInventory.Table(references.name(),
-                references.columns(), references.primaryKey(), references.rows().subList(1, references.rows().size())));
-        var missing = WorkspaceCsiApplicationInventory.expectedImage(tables);
-        assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(missing, original, body))
-                .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
-        var candidate = fixture.path("requests").get(32).deepCopy();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) candidate.path("resources").get(0)).put("digest", "c".repeat(64));
-        byte[] badCandidate = json.writeValueAsBytes(candidate);
-        assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, badCandidate))
-                .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
-        assertThat(WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body)).isEqualTo(proof);
     }
 
     private static WorkspaceCsiApplicationInventory.Snapshot preparedNativeFixture(
@@ -785,7 +791,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(824);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(844);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1350,6 +1356,17 @@ class WorkspaceCsiApplicationInventoryTest {
                 .put("preparedCommitSha256", sha(body)).put("writtenAt", writtenAt);
         var image = WorkspaceCsiApplicationImage.expected(baseline,
                 com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null);
+        assertThat(baseline.table("ma_session_history_state").rows()).isEmpty();
+        assertThat(image.table("ma_session_history_fact").rows()).hasSize(5);
+        assertThat(image.table("ma_session_history_fact").rows().stream().map(row -> row.text("family")))
+                .containsExactlyInAnyOrder("command", "event", "event-id", "event-kind", "event-correlation");
+        var historyState = WorkspaceCsiApplicationImage.sole(image, "ma_session_history_state");
+        assertThat(historyState.number("index_generation")).isEqualTo(1);
+        assertThat(historyState.number("indexed_revision")).isZero();
+        assertThat(historyState.number("indexed_sequence")).isZero();
+        assertThat(historyState.text("last_commit_digest")).isNull();
+        assertThat(ManagedSessionHistoryStore.counts(WorkspaceCsiApplicationInventory.parse(historyState.text("bucket_counts_json"))))
+                .containsOnly(0L);
         long millis = Instant.parse(writtenAt).toEpochMilli();
         assertThat(image.table("ma_session_head").rows().getFirst().number("gmt_modified")).isEqualTo(millis);
         for (String table : List.of("ma_resource", "ma_resource_ref", "ma_session_journal_tx")) {
@@ -1482,6 +1499,27 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(queries).noneMatch(sql -> sql.contains("physical_key = ?"));
         assertThat(result.table("ma_request_receipt").rows().getFirst().binary("actor_id"))
                 .isEqualTo(expected.table("ma_request_receipt").rows().getFirst().binary("actor_id"));
+    }
+
+    @Test
+    void derivedHistoryDoesNotBecomeAForeignAuthorityCarrier() throws Exception {
+        var expected = historicalKeys();
+        String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
+        String identity = ManagedSessionHistoryStore.key("event", "1");
+        String metadata = new ObjectMapper().createObjectNode().put("sessionId", session).toString();
+        jdbc.update("INSERT INTO ma_session_history_fact (session_scope_key, index_generation, family, identity_hash,"
+                        + " identity_bucket, identity_value, source_revision, source_sequence, event_ordinal, record_digest, metadata_json)"
+                        + " VALUES (?, 1, 'event', ?, ?, '1', 2, 1, 0, ?, ?)",
+                foreignScope, identity, ManagedSessionHistoryStore.bucket(identity), "a".repeat(64), metadata);
+        var queries = new java.util.ArrayList<String>();
+        var foreign = readHistory(expected, queries, true);
+        assertThat(foreign.blockers()).isEmpty();
+        assertThat(foreign.bytes()).isEqualTo(expected.bytes());
+        assertThat(queries).noneMatch(sql -> sql.startsWith("SELECT t.* FROM ma_session_history_") && sql.contains("IS NOT NULL"));
+        jdbc.update("UPDATE ma_session_history_fact SET session_scope_key = ? WHERE session_scope_key = ?",
+                ManagedSessionStore.sessionScopeKey("tenant", session), foreignScope);
+        assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).anyMatch(blocker ->
+                blocker.table().equals("ma_session_history_fact") && blocker.code().equals("extra_historical_reference"));
     }
 
     @Test

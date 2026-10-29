@@ -192,22 +192,21 @@ describe('Hosted context compression', () => {
       sessionIdGenerated: true,
       chatRecording: false,
     });
-    const result = compression.status(request.operationId)!;
+    const result = (await compression.status(request.operationId))!;
     expect(result).toMatchObject({
       status: 'completed',
       outcome: 'compressed',
     });
     expect(result.compactionRevision).toBeGreaterThan(before);
     expect(compression.busy).toBe(false);
-    const events = session.authority.eventsInSequenceRange(
-      before + 1,
-      session.authority.committedSequence,
-    );
+    const events = await session.authority
+      .iterateEvents(before + 1, session.authority.committedSequence)
+      .collect(1_000_000);
     expect(
       events.filter((event) => event.kind === 'context.compacted'),
     ).toHaveLength(1);
     expect(
-      events.some(
+      await events.some(
         (event) =>
           event.kind === 'input.accepted' || event.kind === 'turn.settled',
       ),
@@ -254,7 +253,7 @@ describe('Hosted context compression', () => {
     const request = intent();
     await compression.admit(request);
     await compression.wait();
-    expect(compression.status(request.operationId)?.status).toBe(
+    expect((await compression.status(request.operationId))?.status).toBe(
       'recovery_blocked',
     );
     expect(session.authority.activeHistoryMaintenance).toMatchObject({
@@ -280,13 +279,17 @@ describe('Hosted context compression', () => {
     const request = intent();
     await compression.admit(request);
     await compression.wait();
-    expect(compression.status(request.operationId)?.outcome).toBe('compressed');
+    expect((await compression.status(request.operationId))?.outcome).toBe(
+      'compressed',
+    );
     await compression.admit(request);
     expect(summarize).toHaveBeenCalledOnce();
     expect(
-      session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'context.compacted'),
+      (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'context.compacted'),
     ).toHaveLength(1);
   });
 
@@ -393,7 +396,7 @@ describe('Hosted context compression', () => {
     const request = intent();
     await compression.admit(request);
     await compression.wait();
-    expect(compression.status(request.operationId)).toMatchObject({
+    expect(await compression.status(request.operationId)).toMatchObject({
       status: 'completed',
       outcome: 'noop',
       compactionRevision: 0,
@@ -402,7 +405,7 @@ describe('Hosted context compression', () => {
     const failed = intent();
     await compression.admit(failed);
     await compression.wait();
-    expect(compression.status(failed.operationId)).toMatchObject({
+    expect(await compression.status(failed.operationId)).toMatchObject({
       status: 'failed',
       failureCode: 'context_compression_failed',
     });
@@ -417,10 +420,14 @@ describe('Hosted context compression', () => {
     const request = intent();
     await compression.admit(request);
     await compression.wait();
-    expect(compression.status(request.operationId)?.status).toBe('completed');
-    const event = session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .findLast((event) => event.kind === 'context.compacted')!;
+    expect((await compression.status(request.operationId))?.status).toBe(
+      'completed',
+    );
+    const event = (await (
+      await session.authority
+        .iterateEvents(1, session.authority.committedSequence)
+        .collect(1_000_000)
+    ).findLast((event) => event.kind === 'context.compacted'))!;
     expect(event.payload['summaryRef']).toMatchObject({
       kind: 'managed-message-chunks',
     });
@@ -441,7 +448,7 @@ describe('Hosted context compression', () => {
     await compression.admit(request);
     await compression.wait();
     for (const result of commits.mock.results) await result.value;
-    expect(compression.status(request.operationId)?.status).toBe(
+    expect((await compression.status(request.operationId))?.status).toBe(
       'recovery_blocked',
     );
     expect(compression.busy).toBe(true);
@@ -449,7 +456,9 @@ describe('Hosted context compression', () => {
     await reopen();
     compression.resume();
     await compression.wait();
-    expect(compression.status(request.operationId)?.outcome).toBe('compressed');
+    expect((await compression.status(request.operationId))?.outcome).toBe(
+      'compressed',
+    );
     expect(summarize).toHaveBeenCalledOnce();
   });
 
@@ -475,7 +484,7 @@ describe('Hosted context compression', () => {
       await reopen();
       compression.resume();
       await compression.wait();
-      expect(compression.status(request.operationId)?.outcome).toBe(
+      expect((await compression.status(request.operationId))?.outcome).toBe(
         'compressed',
       );
     } finally {
@@ -485,9 +494,11 @@ describe('Hosted context compression', () => {
     expect(summarize).toHaveBeenCalledTimes(2);
     expect(oldPostCompact).toBe(false);
     expect(
-      session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'context.compacted'),
+      (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'context.compacted'),
     ).toHaveLength(1);
     expect((await session.sink.projectModelHistory()).apiHistory).toEqual(
       candidate.newHistory,

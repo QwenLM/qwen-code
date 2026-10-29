@@ -245,6 +245,11 @@ describe('Managed local startup supervision', () => {
             }),
           }),
         );
+        expect(mocks.spawn.mock.calls[1]![1]).toEqual([
+          '-Djdk.nio.maxCachedBufferSize=1048576',
+          '-jar',
+          '/package/server.jar',
+        ]);
         expect(
           JSON.parse(mocks.spawn.mock.calls[1]![2].env.SPRING_APPLICATION_JSON)[
             'qwen.managed-agent.model-catalog'

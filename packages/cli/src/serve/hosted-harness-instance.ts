@@ -60,7 +60,9 @@ export class HostedHarnessInstance {
 
   constructor(
     readonly contract: HostedHarnessContract & { instanceId: string },
-    private readonly counters: () => HostedHarnessCounters,
+    private readonly counters: () =>
+      | HostedHarnessCounters
+      | Promise<HostedHarnessCounters>,
     private readonly onDrain?: () => void,
   ) {}
 
@@ -84,8 +86,11 @@ export class HostedHarnessInstance {
     next();
   };
 
-  snapshot() {
-    const counters = { ...this.counters(), inFlightMutations: this.operations };
+  async snapshot() {
+    const counters = {
+      ...(await this.counters()),
+      inFlightMutations: this.operations,
+    };
     const state = this.accepting
       ? 'ACCEPTING'
       : counters.attachedSessions === 0 &&
@@ -112,8 +117,10 @@ export class HostedHarnessInstance {
       res.setHeader('Cache-Control', 'no-store');
       hostedHarnessContractMiddleware(this.contract)(req, res, next);
     });
-    app.get(`${prefix}/instance`, (_req, res) => res.json(this.snapshot()));
-    app.post(`${prefix}/instance:drain`, (req, res) => {
+    app.get(`${prefix}/instance`, async (_req, res) =>
+      res.json(await this.snapshot()),
+    );
+    app.post(`${prefix}/instance:drain`, async (req, res) => {
       const body = req.body as Record<string, unknown> | undefined;
       if (
         !body ||
@@ -133,12 +140,12 @@ export class HostedHarnessInstance {
       this.onDrain?.();
       res
         .status(202)
-        .json({ ...this.snapshot(), operationId: this.drainOperation });
+        .json({ ...(await this.snapshot()), operationId: this.drainOperation });
     });
-    app.get(`${prefix}/metrics`, (_req, res) => {
+    app.get(`${prefix}/metrics`, async (_req, res) => {
       const memory = process.memoryUsage();
       res.json({
-        ...this.snapshot(),
+        ...(await this.snapshot()),
         process: {
           rssBytes: memory.rss,
           heapUsedBytes: memory.heapUsed,

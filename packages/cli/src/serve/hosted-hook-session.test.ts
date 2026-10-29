@@ -190,9 +190,11 @@ beforeEach(async () => {
           }
         );
       expect(
-        session.authority.extensionRecord(
-          'hook_execution',
-          operation.operationId,
+        (
+          await session.authority.extensionRecord(
+            'hook_execution',
+            operation.operationId,
+          )
         )?.run.execution,
       ).toBe('dispatch_started');
       if (operation.kind !== 'hook-execute')
@@ -207,7 +209,7 @@ beforeEach(async () => {
       return view;
     },
   );
-  hooks = new HostedHookSession(options, session, pin);
+  hooks = await HostedHookSession.create(options, session, pin);
 });
 
 async function reopenSession(): Promise<void> {
@@ -236,7 +238,7 @@ it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
   async (eventName) => {
     let lifecycle = false;
     let ownerPresent = true;
-    hooks = new HostedHookSession(
+    hooks = await HostedHookSession.create(
       {
         ...options,
         lifecycleAuthority: () =>
@@ -259,7 +261,7 @@ it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
           runtimeBindingId: 'binding',
           generation: '1',
         });
-        expect(hooks.hasPendingOperations).toBe(true);
+        expect(await hooks.hasPendingOperations()).toBe(true);
       }
       await originalAcquire.call(this, expected);
       ownerPresent = true;
@@ -312,13 +314,13 @@ it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
-    expect(hooks.hasPendingOperations).toBe(false);
+    expect(await hooks.hasPendingOperations()).toBe(false);
   },
 );
 
 it('keeps a lifecycle Hook intent retryable when its original owner cannot be restored', async () => {
   let lifecycle = false;
-  hooks = new HostedHookSession(
+  hooks = await HostedHookSession.create(
     {
       ...options,
       lifecycleAuthority: () =>
@@ -349,8 +351,11 @@ it('keeps a lifecycle Hook intent retryable when its original owner cannot be re
   await expect(
     hooks.fire(HookEventName.SessionEnd, 'owner-refused', {}, signal()),
   ).rejects.toBe(refusal);
-  const children = session.authority
-    .extensionRecordsInDomain('hook_execution')
+  const children = (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  )
     .map((entry) => parseHookExecution(entry.record))
     .filter((record) => record.hookId !== '__plan__');
   expect(children).toHaveLength(1);
@@ -371,7 +376,7 @@ it('keeps a lifecycle Hook intent retryable when its original owner cannot be re
 
 it('preserves an uncertain lifecycle Hook outcome after original-owner restoration', async () => {
   let lifecycle = false;
-  hooks = new HostedHookSession(
+  hooks = await HostedHookSession.create(
     {
       ...options,
       lifecycleAuthority: () =>
@@ -411,10 +416,13 @@ it('preserves an uncertain lifecycle Hook outcome after original-owner restorati
   await expect(
     hooks.fire(HookEventName.SessionEnd, 'unknown-original', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  const child = session.authority
-    .extensionRecordsInDomain('hook_execution')
+  const child = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  )
     .map((entry) => parseHookExecution(entry.record))
-    .find((record) => record.hookId !== '__plan__')!;
+    .find((record) => record.hookId !== '__plan__'))!;
   expect(child.run).toMatchObject({
     state: 'recovery_blocked',
     execution: 'outcome_unknown',
@@ -431,7 +439,7 @@ it('commits a pinned plan before dispatch and replays the original occurrence af
     signal(),
   );
   expect(output?.hookSpecificOutput?.['additionalContext']).toBe('checked');
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   expect(
     await replacement.fire(
       HookEventName.PreToolUse,
@@ -451,15 +459,15 @@ it('commits a pinned plan before dispatch and replays the original occurrence af
       signal(),
     ),
   ).rejects.toThrow('input conflict');
-  expect(session.authority.taskViews()).toEqual([]);
+  expect(await session.authority.taskViews()).toEqual([]);
 });
 
 async function savedPlan(occurrenceId: string) {
   const marker = parseHookExecution(
-    session.authority.extensionRecord(
+    (await session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(HookEventName.PreToolUse, occurrenceId),
-    )!.record,
+    ))!.record,
   );
   return JSON.parse(
     (await session.resources.read(marker.planRef)).toString(),
@@ -475,7 +483,7 @@ it('resumes a saved occurrence on the fields an earlier release built, and plans
     earlier,
     signal(),
   );
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   expect(
     await replacement.fire(
       HookEventName.PreToolUse,
@@ -530,7 +538,7 @@ it('resumes an oversized saved occurrence only on the digest of the fields it wa
   const saved = await savedPlan('call-1');
   expect(saved.refusedInputDigest).toBe(semanticInputDigest(earlier));
   expect(saved.input).not.toHaveProperty('tool_input');
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   const current = { ...earlier, tool_input: { file_path: 'b' } };
   expect(
     await replacement.fire(
@@ -587,7 +595,7 @@ it.each([false, true])(
     expect(saved).toMatchObject({ toolInputOrder: HOSTED_TOOL_INPUT_ORDER });
     if (oversized)
       expect(saved.refusedInputDigest).toBe(semanticInputDigest(fields));
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     expect(await fire(replacement, HOSTED_TOOL_INPUT_ORDER)).toEqual(output);
     for (const order of [undefined, 'pre-permission/1'])
       await expect(fire(replacement, order)).rejects.toThrow(
@@ -673,7 +681,7 @@ it('keeps only the first matching hook for a shared once key in one plan', async
     (request) => request.kind === 'hook-execute',
   );
   expect(dispatched.map((request) => request.hookId)).toEqual(['first']);
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(await hooks.hasPendingOperations()).toBe(false);
   await hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal());
   expect(
     requests.filter((request) => request.kind === 'hook-execute'),
@@ -704,11 +712,13 @@ it('consumes once without stranding concurrent permission occurrences', async ()
   expect(
     requests.filter((request) => request.kind === 'hook-execute'),
   ).toHaveLength(1);
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(await hooks.hasPendingOperations()).toBe(false);
   expect(
-    session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .filter((record) => record.recordId.startsWith('hook-plan-')),
+    (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    ).filter((record) => record.recordId.startsWith('hook-plan-')),
   ).toHaveLength(2);
 });
 
@@ -751,7 +761,7 @@ it.each([false, true])(
       behavior: 'deny',
       interrupt: true,
     });
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect(
       await restored.fire(
         HookEventName.PermissionRequest,
@@ -784,7 +794,7 @@ it('refuses a queued new occurrence after its predecessor loses the outcome', as
     requests.filter((request) => request.kind === 'hook-execute'),
   ).toHaveLength(1);
   expect(
-    session.authority.extensionRecord(
+    await session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(HookEventName.PreToolUse, 'call-2'),
     ),
@@ -798,7 +808,7 @@ it('does not redispatch an unknown side effect', async () => {
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   await expect(
     replacement.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
@@ -856,12 +866,12 @@ it.each([
       }
       return originalControl.call(this, operation);
     });
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     const marker = await replacement.status('lost', cancel);
     expect(acquire).toHaveBeenCalledOnce();
     expect(lookups).toBe(matchingBinding ? 2 : 1);
     expect(marker.resultRef !== null).toBe(matchingBinding);
-    expect(replacement.hasPendingOperations).toBe(!matchingBinding);
+    expect(await replacement.hasPendingOperations()).toBe(!matchingBinding);
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -906,7 +916,7 @@ it('keeps its mount while a Hook outcome is unknown (#13800)', async () => {
   // The Broker cannot see a Hook run, so the lane's own proof gates it.
   await expect(hooks.mountHandback()!()).rejects.toThrow(/unproven/);
   expect(releaseMount).not.toHaveBeenCalled();
-  const linked = new HostedHookSession(
+  const linked = await HostedHookSession.create(
     options,
     session,
     pin,
@@ -1116,8 +1126,11 @@ it('does not compose failed Hook output into later sequential inputs', async () 
 
 it('keeps the latest catalog active when an older registration is retried', async () => {
   await hooks.ensureReady();
-  const original =
-    session.authority.extensionRecordsInDomain('hook_registration')[0];
+  const original = (
+    await session.authority
+      .extensionRecordsInDomain('hook_registration')
+      .collect(1_000_000)
+  )[0];
   const nextPin = {
     ...pin,
     catalogRevision: 2,
@@ -1129,9 +1142,11 @@ it('keeps the latest catalog active when an older registration is retried', asyn
   expect(hooks.getCatalog()).toMatchObject(nextPin);
   await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   expect(
-    session.authority.extensionRecord(
-      'hook_execution',
-      hostedHookOccurrenceId(HookEventName.PreToolUse, 'call-1'),
+    (
+      await session.authority.extensionRecord(
+        'hook_execution',
+        hostedHookOccurrenceId(HookEventName.PreToolUse, 'call-1'),
+      )
     )?.record,
   ).toMatchObject({ registrationId: 'registration-2' });
 });
@@ -1168,7 +1183,7 @@ it('dispatches a recovered intent through its original Runtime Session', async (
     return originalControl.call(this, operation);
   });
   await reopenSession();
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   expect(replacement.broker.runtimeSessionId).not.toBe(owner);
   await replacement.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   expect(recoveredOwner).toBe(owner);
@@ -1201,9 +1216,9 @@ it('cancels a saved marker by its external id and never dispatches its cancelled
   commit.mockRestore();
   const marker = await hooks.status('call-1', true);
   expect(marker.run.state).toBe('cancelled');
-  expect(hooks.hasCompletedOccurrence(HookEventName.PreToolUse, 'call-1')).toBe(
-    true,
-  );
+  expect(
+    await hooks.hasCompletedOccurrence(HookEventName.PreToolUse, 'call-1'),
+  ).toBe(true);
   expect(
     (await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()))
       ?.decision,
@@ -1211,9 +1226,11 @@ it('cancels a saved marker by its external id and never dispatches its cancelled
   expect(
     requests.filter((request) => request.kind === 'hook-execute'),
   ).toHaveLength(0);
-  const child = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find((entry) => entry.recordId !== marker.hookExecutionId)!;
+  const child = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find((entry) => entry.recordId !== marker.hookExecutionId))!;
   expect(child.run).toMatchObject({
     state: 'cancelled',
     execution: 'not_started_proven',
@@ -1271,27 +1288,29 @@ it('cancels a Hook while the dispatch acquisition is held, before dispatch_start
   // at intent and dispatch_started has never been committed. The status
   // marker itself is the plan record, not the Hook execution.
   const marker = await hooks.status('call-1');
-  const childExecution = () =>
-    session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .find((entry) => entry.recordId !== marker.hookExecutionId)!;
-  expect(childExecution().run.execution).toBe('intent');
+  const childExecution = async () =>
+    (await (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    ).find((entry) => entry.recordId !== marker.hookExecutionId))!;
+  expect((await childExecution()).run.execution).toBe('intent');
   const cancelled = await hooks.status('call-1', true);
   expect(cancelled.cancelRequested).toBe(true);
   // The in-flight perform is still held at the acquisition, so the child
   // record cannot settle until it resumes.
-  expect(childExecution().run.execution).toBe('intent');
+  expect((await childExecution()).run.execution).toBe('intent');
   release();
   expect((await firing)?.decision).toBe('block');
   expect(dispatched).toEqual([]);
-  expect(childExecution().run).toMatchObject({
+  expect((await childExecution()).run).toMatchObject({
     state: 'cancelled',
     execution: 'not_started_proven',
   });
   expect(
     requests.filter((request) => request.kind === 'hook-execute'),
   ).toHaveLength(0);
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(await hooks.hasPendingOperations()).toBe(false);
   executionBroker.mockRestore();
   commit.mockRestore();
 });
@@ -1317,7 +1336,7 @@ it('applies failClosed when a lost reply is settled through status after reconst
     },
   });
   await reopenSession();
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   const statuses = await Promise.all([
     replacement.status('call-1'),
     replacement.status('call-1'),
@@ -1326,7 +1345,7 @@ it('applies failClosed when a lost reply is settled through status after reconst
     'settled',
     'settled',
   ]);
-  expect(replacement.hasPendingOperations).toBe(false);
+  expect(await replacement.hasPendingOperations()).toBe(false);
   expect(
     (await replacement.fire(HookEventName.PreToolUse, 'call-1', {}, signal()))
       ?.decision,
@@ -1389,7 +1408,9 @@ it('rejects async prompt Hooks instead of leaving a detached model request', asy
   };
   await expect(hooks.ensureReady()).rejects.toThrow('Hook catalog unavailable');
   expect(
-    session.authority.extensionRecordsInDomain('hook_registration'),
+    await session.authority
+      .extensionRecordsInDomain('hook_registration')
+      .collect(1_000_000),
   ).toHaveLength(0);
 });
 
@@ -1417,10 +1438,10 @@ it('rejects a changed input while the same occurrence is still running', async (
         signal(),
       ),
     ).rejects.toThrow(HostedHookInputConflictError);
-    expect(hooks.hasPendingOperations).toBe(true);
+    expect(await hooks.hasPendingOperations()).toBe(true);
     finish!({ success: true, outcome: 'success', duration: 0 });
     await firing;
-    expect(hooks.hasPendingOperations).toBe(false);
+    expect(await hooks.hasPendingOperations()).toBe(false);
   } finally {
     finish?.({ success: false, outcome: 'cancelled', duration: 0 });
     await Promise.allSettled([firing]);
@@ -1482,7 +1503,7 @@ it('cancels an active occurrence and does not dispatch later sequential hooks', 
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
     expect((await hooks.status('call-1')).run.state).toBe('cancelled');
-    expect(hooks.hasPendingOperations).toBe(false);
+    expect(await hooks.hasPendingOperations()).toBe(false);
   } finally {
     finish?.({ success: false, outcome: 'cancelled', duration: 0 });
     await Promise.allSettled([firing]);
@@ -1533,7 +1554,7 @@ it('refuses a replacement binding while resuming a later intent on the original 
       };
     },
   );
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   await expect(
     replacement.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
@@ -1568,7 +1589,7 @@ it('cancels a detached child after its async marker has admitted it', async () =
     return originalControl.call(this, operation);
   });
   await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(await hooks.hasPendingOperations()).toBe(false);
   const nextPin = {
     ...pin,
     catalogRevision: 2,
@@ -1577,15 +1598,18 @@ it('cancels a detached child after its async marker has admitted it', async () =
   catalog = { ...catalog, ...nextPin };
   await hooks.configure('async-replacement', nextPin, 1);
   expect(hooks.getCatalog()).toMatchObject(nextPin);
-  expect(hooks.hasCompletedOccurrence(HookEventName.PreToolUse, 'call-1')).toBe(
-    true,
-  );
+  expect(
+    await hooks.hasCompletedOccurrence(HookEventName.PreToolUse, 'call-1'),
+  ).toBe(true);
   await hooks.status('call-1', true);
   await vi.waitFor(
-    () =>
+    async () =>
       expect(
-        session.authority
-          .extensionRecordsInDomain('hook_execution')
+        (
+          await session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .collect(1_000_000)
+        )
           .filter((record) => !record.recordId.startsWith('hook-plan-'))
           .map((record) => record.run.state),
       ).toEqual(['cancelled']),
@@ -1621,19 +1645,21 @@ it.each([
     await expect(
       hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
     ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-    const child = session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .find(
-        (entry) =>
-          entry.recordId.startsWith('hook-') &&
-          !entry.recordId.startsWith('hook-plan-'),
-      )!;
+    const child = (await (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    ).find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    ))!;
     expect(child.run).toMatchObject({
       state: 'recovery_blocked',
       execution: 'not_started_proven',
       reason: 'handler_unavailable',
     });
-    expect(hooks.hasPendingOperations).toBe(true);
+    expect(await hooks.hasPendingOperations()).toBe(true);
     await expect(
       hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
     ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
@@ -1641,7 +1667,7 @@ it.each([
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
     await hooks.status('call-1', true);
-    expect(hooks.hasPendingOperations).toBe(false);
+    expect(await hooks.hasPendingOperations()).toBe(false);
   },
 );
 
@@ -1665,19 +1691,21 @@ it('fences a module-evaluation timeout as outcome_unknown, never not_started_pro
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  const child = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!;
+  const child = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!;
   expect(child.run).toMatchObject({
     state: 'recovery_blocked',
     execution: 'outcome_unknown',
     reason: 'outcome_unknown',
   });
-  expect(hooks.hasPendingOperations).toBe(true);
+  expect(await hooks.hasPendingOperations()).toBe(true);
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
@@ -1708,19 +1736,21 @@ it('reconciles an evaluation-timeout fence once the Runtime republishes a result
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  const fenced = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!;
+  const fenced = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!;
   expect(fenced.run).toMatchObject({
     state: 'recovery_blocked',
     execution: 'outcome_unknown',
     reason: 'outcome_unknown',
   });
-  expect(hooks.hasPendingOperations).toBe(true);
+  expect(await hooks.hasPendingOperations()).toBe(true);
   // The fence is not terminal: once the evaluation definitively ends the
   // Runtime republishes the receipt with what is then provable — the
   // callback never ran — and the next status reconciles the record, so the
@@ -1732,20 +1762,22 @@ it('reconciles an evaluation-timeout fence once the Runtime republishes a result
   });
   await hooks.status('call-1', true);
   const reconciled = parseHookExecution(
-    session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .find(
-        (entry) =>
-          entry.recordId.startsWith('hook-') &&
-          !entry.recordId.startsWith('hook-plan-'),
-      )!.record,
+    (await (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    ).find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    ))!.record,
   );
   expect(reconciled.run).toMatchObject({
     state: 'settled',
     execution: 'settled',
   });
   expect(reconciled.resultRef).not.toBeNull();
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(await hooks.hasPendingOperations()).toBe(false);
   await hooks.drain();
   await hooks.close();
 });
@@ -1772,14 +1804,16 @@ it('reconciles an evaluation-timeout fence on the turn path once the Runtime rep
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  const fencedId = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!.recordId;
-  expect(hooks.hasPendingOperations).toBe(true);
+  const fencedId = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!.recordId;
+  expect(await hooks.hasPendingOperations()).toBe(true);
   // The receipt the Runtime republishes once the abandoned evaluation ends
   // reconciles on the next turn itself: the fence clears without waiting for
   // a DELETE-path drain, and the new occurrence dispatches.
@@ -1797,9 +1831,10 @@ it('reconciles an evaluation-timeout fence on the turn path once the Runtime rep
   expect(
     requests.filter((request) => request.kind === 'hook-status'),
   ).toHaveLength(1);
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(await hooks.hasPendingOperations()).toBe(false);
   const fenced = parseHookExecution(
-    session.authority.extensionRecord('hook_execution', fencedId)!.record,
+    (await session.authority.extensionRecord('hook_execution', fencedId))!
+      .record,
   );
   expect(fenced.run).toMatchObject({ state: 'settled', execution: 'settled' });
   await hooks.drain();
@@ -1826,13 +1861,15 @@ it('polls an unreconciled fenced child once per turn, through its marker', async
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  const fencedId = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!.recordId;
+  const fencedId = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!.recordId;
   // The fence never reconciles: the marker's fan-out already polls the child,
   // so the pass must not pay a second broker round-trip for the same record.
   await expect(
@@ -1865,7 +1902,7 @@ it('stops reconciling fences as soon as the firing turn aborts', async () => {
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  expect(hooks.hasPendingOperations).toBe(true);
+  expect(await hooks.hasPendingOperations()).toBe(true);
   // A broker that accepts the poll but never answers must not pin the turn:
   // the abort ends the reconcile instead of waiting out each broker timeout.
   let statusSeen!: () => void;
@@ -1884,13 +1921,15 @@ it('stops reconciling fences as soon as the firing turn aborts', async () => {
     }
     return originalControl.call(this, operation);
   });
-  const fencedId = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!.recordId;
+  const fencedId = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!.recordId;
   const abort = new AbortController();
   const fired = hooks.fire(
     HookEventName.PreToolUse,
@@ -1916,7 +1955,8 @@ it('stops reconciling fences as soon as the firing turn aborts', async () => {
   expect(outcome).toBe(abort.signal.reason);
   expect(
     parseHookExecution(
-      session.authority.extensionRecord('hook_execution', fencedId)!.record,
+      (await session.authority.extensionRecord('hook_execution', fencedId))!
+        .record,
     ).run,
   ).toMatchObject({
     state: 'recovery_blocked',
@@ -1946,14 +1986,16 @@ it('keeps the typed recovery refusal when the fence reconcile loses its settle w
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  expect(hooks.hasPendingOperations).toBe(true);
-  const fencedId = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!.recordId;
+  expect(await hooks.hasPendingOperations()).toBe(true);
+  const fencedId = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!.recordId;
   // The Runtime republished the fenced result, so the turn-path reconcile
   // settles it — but the durable write inside that settle fails transiently.
   // A generic failure must not escape fire() while the fence stands: the
@@ -1974,11 +2016,12 @@ it('keeps the typed recovery refusal when the fence reconcile loses its settle w
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
   // The fence still stands (the settle never committed), the failure was
   // reported on the daemon's default channel, and nothing dispatched.
-  expect(hooks.hasPendingOperations).toBe(true);
+  expect(await hooks.hasPendingOperations()).toBe(true);
   expect(log.mock.calls.flat().join('\n')).toContain('resource store gone');
   expect(
     parseHookExecution(
-      session.authority.extensionRecord('hook_execution', fencedId)!.record,
+      (await session.authority.extensionRecord('hook_execution', fencedId))!
+        .record,
     ).resultRef,
   ).toBeNull();
   expect(
@@ -2009,14 +2052,16 @@ it('never tombstones a healthy in-flight async Hook reconciling an unrelated fen
   // keeps running at the Runtime, so the pending gate does not count it. Its
   // own perform loop keeps polling through this Session's broker.
   await hooks.fire(HookEventName.PreToolUse, 'async-1', {}, signal());
-  expect(hooks.hasPendingOperations).toBe(false);
-  const asyncChildId = session.authority
-    .extensionRecordsInDomain('hook_execution')
-    .find(
-      (entry) =>
-        entry.recordId.startsWith('hook-') &&
-        !entry.recordId.startsWith('hook-plan-'),
-    )!.recordId;
+  expect(await hooks.hasPendingOperations()).toBe(false);
+  const asyncChildId = (await (
+    await session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .collect(1_000_000)
+  ).find(
+    (entry) =>
+      entry.recordId.startsWith('hook-') &&
+      !entry.recordId.startsWith('hook-plan-'),
+  ))!.recordId;
   const loopBroker = hooks.broker;
   control.mockImplementation(async function (
     this: HostedWorkspaceBroker,
@@ -2041,26 +2086,27 @@ it('never tombstones a healthy in-flight async Hook reconciling an unrelated fen
   await expect(
     hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
-  expect(hooks.hasPendingOperations).toBe(true);
+  expect(await hooks.hasPendingOperations()).toBe(true);
   // A reload empties this.pending — the state the tombstoning guard relied on
   // — and the reloaded Session reconciles through a different broker, whose
   // lookup of the healthy child fails transiently.
   await reopenSession();
-  const reloaded = new HostedHookSession(options, session, pin);
+  const reloaded = await HostedHookSession.create(options, session, pin);
   await expect(
     reloaded.fire(HookEventName.PreToolUse, 'call-3', {}, signal()),
   ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
   // The reconcile polled only the records the gate counts, so the transient
   // failure never reached the healthy child: its record is untouched.
   const asyncChild = parseHookExecution(
-    session.authority.extensionRecord('hook_execution', asyncChildId)!.record,
+    (await session.authority.extensionRecord('hook_execution', asyncChildId))!
+      .record,
   );
   expect(asyncChild.run).toMatchObject({
     state: 'running',
     execution: 'dispatch_started',
   });
   expect(asyncChild.resultRef).toBeNull();
-  expect(reloaded.hasPendingOperations).toBe(true);
+  expect(await reloaded.hasPendingOperations()).toBe(true);
   // Settle the abandoned child before the test ends: its detached perform
   // loop polls through the prototype broker spy the next test reinstalls,
   // so a reply left running would leak hook-status calls into it. The loop's
@@ -2137,19 +2183,21 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
     );
     abort.abort();
     expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);
-    const child = session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .find(
-        (entry) =>
-          entry.recordId.startsWith('hook-') &&
-          !entry.recordId.startsWith('hook-plan-'),
-      )!;
+    const child = (await (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    ).find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    ))!;
     expect(child.run).toMatchObject({
       state: 'recovery_blocked',
       execution: 'outcome_unknown',
       reason: 'outcome_unknown',
     });
-    expect(hooks.hasPendingOperations).toBe(true);
+    expect(await hooks.hasPendingOperations()).toBe(true);
     // The never-settling evaluation keeps its Runtime hold.
     expect(runtime.hasHolds(hooks.broker.runtimeSessionId)).toBe(true);
     await expect(
@@ -2203,9 +2251,13 @@ it('drains async execution before lifecycle hooks and retains the Runtime owner 
   await hooks.drain();
   expect(release).not.toHaveBeenCalled();
   expect(
-    session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .find((entry) => !entry.recordId.startsWith('hook-plan-'))?.run.state,
+    (
+      await (
+        await session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .collect(1_000_000)
+      ).find((entry) => !entry.recordId.startsWith('hook-plan-'))
+    )?.run.state,
   ).toBe('cancelled');
   await hooks.fire(HookEventName.SessionEnd, 'end-1', {}, signal());
   const dispatched = requests.filter(
@@ -2260,7 +2312,7 @@ it.each([
 
 it('releases its broker when a tool turn acquired it after catalog restoration', async () => {
   await hooks.ensureReady();
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   await replacement.ensureReady();
   await replacement.broker.acquire();
   const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
@@ -2322,7 +2374,7 @@ it.each(['catalog', 'settled', 'lost-ack'])(
       );
     else await firing;
     await reopenSession();
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     await replacement.ensureReady();
     if (lostAck) {
       await expect(replacement.acquire()).rejects.toThrow(
@@ -2387,7 +2439,7 @@ it.each([
     await hooks.ensureReady();
     await hooks.close();
     await reopenSession();
-    const unacquired = new HostedHookSession(options, session, pin);
+    const unacquired = await HostedHookSession.create(options, session, pin);
     await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
     expect(unacquired.broker.runtime).toBeUndefined();
     const refusal = new HostedWorkspaceBrokerRejection(status, code);
@@ -2401,7 +2453,7 @@ it.each([
           throw refusal;
       });
     await reopenSession();
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     if (allowed) await replacement.acquire();
     else await expect(replacement.acquire()).rejects.toBe(refusal);
     expect(release.mock.contexts).toContainEqual(
@@ -2463,7 +2515,7 @@ it('retries a hold-fenced earlier owner on a later turn without closing', async 
   await hooks.ensureReady();
   await hooks.close();
   await reopenSession();
-  const unacquired = new HostedHookSession(options, session, pin);
+  const unacquired = await HostedHookSession.create(options, session, pin);
   await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
   const fenced = unacquired.broker.runtimeSessionId;
   let attempts = 0;
@@ -2480,7 +2532,7 @@ it('retries a hold-fenced earlier owner on a later turn without closing', async 
     },
   );
   await reopenSession();
-  const live = new HostedHookSession(options, session, pin);
+  const live = await HostedHookSession.create(options, session, pin);
   await live.acquire();
   expect(attempts).toBe(1);
   // No close() in between: the retry has to come from the next turn's acquire,
@@ -2493,7 +2545,7 @@ it('keeps a live turn working when a fenced owner retry is refused again', async
   await hooks.ensureReady();
   await hooks.close();
   await reopenSession();
-  const unacquired = new HostedHookSession(options, session, pin);
+  const unacquired = await HostedHookSession.create(options, session, pin);
   await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
   const fenced = unacquired.broker.runtimeSessionId;
   let attempts = 0;
@@ -2515,7 +2567,7 @@ it('keeps a live turn working when a fenced owner retry is refused again', async
     },
   );
   await reopenSession();
-  const live = new HostedHookSession(options, session, pin);
+  const live = await HostedHookSession.create(options, session, pin);
   await live.acquire();
   expect(attempts).toBe(1);
   await live.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
@@ -2525,7 +2577,7 @@ it('keeps a live turn working when a fenced owner retry is refused again', async
   expect(
     requests.filter((request) => request.kind === 'hook-execute'),
   ).toHaveLength(1);
-  expect(live.hasPendingOperations).toBe(false);
+  expect(await live.hasPendingOperations()).toBe(false);
   expect(log.mock.calls.flat().join('\n')).toContain(fenced);
   // The owner stays fenced, so a later turn retries it again.
   await live.fire(HookEventName.PreToolUse, 'call-2', {}, signal());
@@ -2570,7 +2622,7 @@ it.each([true, false])(
       expect(released()).toEqual([hooks.broker.runtimeSessionId]);
     }
     await reopenSession();
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     await operate(session, replacement, 'd');
     expect(released()).toEqual([hooks.broker.runtimeSessionId]);
     await operate(session, replacement, 'e');
@@ -2629,15 +2681,19 @@ it('lands an activation renewal after its install and skips one queued behind a 
   for (const renewal of renewals) {
     await expect(renewal).resolves.toBeUndefined();
   }
-  const changes = authority
-    .eventsInSequenceRange(1, authority.committedSequence)
-    .filter((event) => event.kind === 'activation.changed');
+  const changes = (
+    await authority
+      .iterateEvents(1, authority.committedSequence)
+      .collect(1_000_000)
+  ).filter((event) => event.kind === 'activation.changed');
   // The install-time renewal commits; the late one is dropped inside the
   // serial queue rather than reviving the released activation — a renewal
   // must never record an 'active' phase after the 'released' it outlived.
-  expect(changes.some((event) => event.payload['renewalSeq'] === 1)).toBe(true);
+  expect(await changes.some((event) => event.payload['renewalSeq'] === 1)).toBe(
+    true,
+  );
   expect(
-    changes.some(
+    await changes.some(
       (event, index) =>
         event.payload['renewalSeq'] !== undefined &&
         changes[index - 1].payload['phase'] === 'released' &&
@@ -2669,14 +2725,18 @@ it.each([
         workerId: 'worker',
         leaseDurationMs: 60_000,
       });
-      crashed = new HostedHookSession(options, { ...session, activation }, pin);
+      crashed = await HostedHookSession.create(
+        options,
+        { ...session, activation },
+        pin,
+      );
     } else {
       await reopenSession();
-      crashed = new HostedHookSession(options, session, pin);
+      crashed = await HostedHookSession.create(options, session, pin);
     }
     await crashed.acquire();
     await reopenSession();
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     vi.mocked(HostedWorkspaceBroker.prototype.release).mockClear();
     await replacement.acquire();
     expect(released()).toEqual([
@@ -2689,7 +2749,7 @@ it.each([
 it('shares one acquisition between parallel callers', async () => {
   await hooks.ensureReady();
   await reopenSession();
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
   vi.mocked(HostedWorkspaceBroker.prototype.release).mockClear();
   acquire.mockClear();
@@ -2704,7 +2764,7 @@ it('leaves a shared MCP broker for its owner to release', async () => {
     session.authority.sessionHeader.sessionKey,
     'mcp-shared',
   );
-  const linked = new HostedHookSession(options, session, pin, shared);
+  const linked = await HostedHookSession.create(options, session, pin, shared);
   await linked.ensureReady();
   const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
   release.mockClear();
@@ -2743,7 +2803,7 @@ it('names a hold-fenced recovered owner on close in the shared-broker shape', as
   // A second load activation owns the next record: a fence the pending gate
   // counts, still on its own earlier owner.
   await reopenSession();
-  const second = new HostedHookSession(options, session, pin);
+  const second = await HostedHookSession.create(options, session, pin);
   control.mockImplementation(async function (
     this: HostedWorkspaceBroker,
     operation,
@@ -2772,7 +2832,7 @@ it('names a hold-fenced recovered owner on close in the shared-broker shape', as
     session.authority.sessionHeader.sessionKey,
     'mcp-shared',
   );
-  const linked = new HostedHookSession(options, session, pin, shared);
+  const linked = await HostedHookSession.create(options, session, pin, shared);
   // Both records settle when close()'s drain polls them…
   for (const id of [childA, childB])
     replies.set(id, {
@@ -2895,7 +2955,7 @@ it('preserves the original Session message snapshot when a function occurrence i
     parentUuid: user.uuid,
     message: { role: 'user', parts: [{ text: 'later context' }] },
   });
-  const restored = new HostedHookSession(options, session, pin);
+  const restored = await HostedHookSession.create(options, session, pin);
   await restored.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   expect(
     requests.filter((request) => request.kind === 'hook-execute'),
@@ -2937,7 +2997,7 @@ it.each(['decision', 'continue'] as const)(
       workerId: 'replacement',
       activationLeaseDurationMs: 60_000,
     });
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
     expect(await restored.wasStopBlocked('prompt-2')).toBe(false);
   },
@@ -2962,7 +3022,7 @@ it('reads each saved Stop plan once however many turns check it', async () => {
     expect(await hooks.wasStopBlocked(`prompt-${turn}`)).toBe(false);
   expect(plans()).toBe(12);
   // A replacement Harness reads them once again, then not per turn.
-  const restored = new HostedHookSession(options, session, pin);
+  const restored = await HostedHookSession.create(options, session, pin);
   for (let turn = 0; turn < 3; turn++)
     expect(await restored.wasStopBlocked('prompt-new')).toBe(false);
   expect(plans()).toBe(24);
@@ -2997,7 +3057,7 @@ it(
 it('settles an occurrence whose children were committed after an earlier status check', async () => {
   await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   // A replacement Harness checks one occurrence before another commits.
-  const replacement = new HostedHookSession(options, session, pin);
+  const replacement = await HostedHookSession.create(options, session, pin);
   expect((await replacement.status('call-1')).resultRef).not.toBeNull();
   execute = async () => {
     throw new Error('lost reply');
@@ -3047,7 +3107,7 @@ it.each([false, true])(
     expect(dispatched).toHaveLength(hasFunction ? 1 : 0);
     if (hasFunction) expect(dispatched[0].input).toMatchObject({ messages });
     else expect(resourceSizes.every((size) => size < 4096)).toBe(true);
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     await restored.fire(
       HookEventName.PreToolUse,
       'large-context',
@@ -3081,14 +3141,16 @@ it.each([8 * 1024 * 1024 - 256, 8 * 1024 * 1024 + 1])(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(0);
     expect(
-      session.authority.extensionRecordsInDomain('hook_execution'),
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000),
     ).toHaveLength(1);
     expect(
       publish.mock.calls.some(([kind]) => kind === 'managed-hook-message-part'),
     ).toBe(false);
     expect((await hooks.status('oversized')).run.state).toBe('settled');
-    expect(hooks.hasPendingOperations).toBe(false);
-    const restored = new HostedHookSession(options, session, pin);
+    expect(await hooks.hasPendingOperations()).toBe(false);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect(
       await restored.fire(HookEventName.PreToolUse, 'oversized', {}, signal()),
     ).toEqual(output);
@@ -3149,10 +3211,10 @@ it.each([false, true])(
         signal(),
       );
       expect(output?.decision).toBe(failClosed ? 'block' : undefined);
-      expect(hooks.hasPendingOperations).toBe(false);
+      expect(await hooks.hasPendingOperations()).toBe(false);
       expect((await hooks.status('large-output')).run.state).toBe('settled');
       expect(runtime.hasHolds(hooks.broker.runtimeSessionId)).toBe(false);
-      const restored = new HostedHookSession(options, session, pin);
+      const restored = await HostedHookSession.create(options, session, pin);
       expect(
         await restored.fire(
           HookEventName.PreToolUse,
@@ -3161,7 +3223,7 @@ it.each([false, true])(
           signal(),
         ),
       ).toEqual(output);
-      expect(restored.hasPendingOperations).toBe(false);
+      expect(await restored.hasPendingOperations()).toBe(false);
       expect(await readFile(counter, 'utf8')).toBe('x');
     } finally {
       await runtime.close();
@@ -3205,9 +3267,9 @@ it.each([
         interrupt: true,
       });
     else expect(output?.decision).toBe('block');
-    expect(hooks.hasPendingOperations).toBe(false);
+    expect(await hooks.hasPendingOperations()).toBe(false);
     expect((await hooks.status('full')).resultRef).not.toBeNull();
-    const replacement = new HostedHookSession(options, session, pin);
+    const replacement = await HostedHookSession.create(options, session, pin);
     expect(await replacement.fire(eventName, 'full', {}, signal())).toEqual(
       output,
     );
@@ -3285,17 +3347,17 @@ it.each([false, true])(
       );
       expect(output?.decision).toBe(failClosed ? 'block' : undefined);
       expect(lostReplies).toBe(1);
-      expect(hooks.hasPendingOperations).toBe(false);
+      expect(await hooks.hasPendingOperations()).toBe(false);
       expect((await hooks.status('quota')).run.state).toBe('settled');
       expect(execute).toHaveBeenCalledTimes(16);
       expect(runtime.hasHolds(hooks.broker.runtimeSessionId)).toBe(false);
-      const restored = new HostedHookSession(options, session, pin);
+      const restored = await HostedHookSession.create(options, session, pin);
       expect(
         await restored.fire(HookEventName.PreToolUse, 'quota', {}, signal()),
       ).toEqual(output);
       expect(execute).toHaveBeenCalledTimes(16);
       await restored.fire(HookEventName.PreToolUse, 'next', {}, signal());
-      expect(restored.hasPendingOperations).toBe(false);
+      expect(await restored.hasPendingOperations()).toBe(false);
       expect(execute).toHaveBeenCalledTimes(33);
     } finally {
       release();
@@ -3360,7 +3422,7 @@ it.each(['input', 'plan'] as const)(
     await expect(
       hooks.fire(HookEventName.PreToolUse, 'large-plan', fields, signal()),
     ).rejects.toThrow('lost marker result');
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect((await restored.status('large-plan')).run.state).toBe('settled');
     const output = await restored.fire(
       HookEventName.PreToolUse,
@@ -3372,7 +3434,7 @@ it.each(['input', 'plan'] as const)(
       signal(),
     );
     expect(output).toMatchObject({ continue: false, decision: 'block' });
-    expect(restored.hasPendingOperations).toBe(false);
+    expect(await restored.hasPendingOperations()).toBe(false);
     await expect(
       restored.fire(
         HookEventName.PreToolUse,
@@ -3388,9 +3450,11 @@ it.each(['input', 'plan'] as const)(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(0);
     expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .map((entry) => parseHookExecution(entry.record).onceKey),
+      (
+        await session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .collect(1_000_000)
+      ).map((entry) => parseHookExecution(entry.record).onceKey),
     ).toEqual([null]);
     catalog = {
       ...catalog,
@@ -3502,12 +3566,12 @@ it.each([
       await expect(firing).rejects.toThrow('lost final marker write');
       lost.mockRestore();
     } else await expect(firing).resolves.toMatchObject(expected);
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect((await restored.status('unicode')).run.state).toBe('settled');
     expect(
       await restored.fire(event, 'unicode', input, signal()),
     ).toMatchObject(expected);
-    expect(restored.hasPendingOperations).toBe(false);
+    expect(await restored.hasPendingOperations()).toBe(false);
     for (const [kind, bytes] of publish.mock.calls)
       if (kind === 'managed-hook-result')
         expect(bytes.length).toBeLessThanOrEqual(60 * 1024);
@@ -3517,11 +3581,13 @@ it.each([
         .map((request) => request.hookId),
     ).toEqual(['first']);
     expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .some(
-          (entry) => parseHookExecution(entry.record).onceKey === 'repair-once',
-        ),
+      await (
+        await session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .collect(1_000_000)
+      ).some(
+        (entry) => parseHookExecution(entry.record).onceKey === 'repair-once',
+      ),
     ).toBe(false);
   },
 );
@@ -3569,7 +3635,7 @@ it.each([
       await expect(firing).rejects.toThrow('lost final marker write');
       lost.mockRestore();
     } else await expect(firing).resolves.toMatchObject({ decision: 'block' });
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect((await restored.status('large-aggregate')).run.state).toBe(
       'settled',
     );
@@ -3580,13 +3646,16 @@ it.each([
       expect(output?.hookSpecificOutput?.['decision']).toMatchObject({
         behavior: 'deny',
       });
-    expect(restored.hasPendingOperations).toBe(false);
-    const children = session.authority
-      .extensionRecordsInDomain('hook_execution')
+    expect(await restored.hasPendingOperations()).toBe(false);
+    const children = (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    )
       .map((entry) => parseHookExecution(entry.record))
       .filter((entry) => entry.hookId !== '__plan__');
     expect(children).toHaveLength(2);
-    for (const child of children) {
+    for await (const child of children) {
       expect(child.run.execution).toBe('settled');
       const result = JSON.parse(
         (await session.resources.read(child.resultRef!)).toString(),
@@ -3633,7 +3702,7 @@ it.each([false, true])(
       await expect(firing).rejects.toThrow('lost final marker write');
       lost.mockRestore();
     } else await expect(firing).resolves.toMatchObject({ decision: 'block' });
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect((await restored.status('large-sequential')).run.state).toBe(
       'settled',
     );
@@ -3645,18 +3714,20 @@ it.each([false, true])(
         signal(),
       ),
     ).toMatchObject({ continue: false, decision: 'block' });
-    expect(restored.hasPendingOperations).toBe(false);
+    expect(await restored.hasPendingOperations()).toBe(false);
     expect(
       requests
         .filter((request) => request.kind === 'hook-execute')
         .map((request) => request.hookId),
     ).toEqual(['first', 'second']);
     expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .some(
-          (entry) => parseHookExecution(entry.record).onceKey === 'third-once',
-        ),
+      await (
+        await session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .collect(1_000_000)
+      ).some(
+        (entry) => parseHookExecution(entry.record).onceKey === 'third-once',
+      ),
     ).toBe(false);
     catalog = { ...catalog, catalogRevision: 2, hooks: [catalog.hooks[2]] };
     await restored.configure('only-third', { ...pin, catalogRevision: 2 }, 1);
@@ -3708,8 +3779,8 @@ it.each([false, true])(
       runner,
     );
     expect(output?.decision).toBe(failClosed ? 'block' : undefined);
-    expect(hooks.hasPendingOperations).toBe(false);
-    const restored = new HostedHookSession(options, session, pin);
+    expect(await hooks.hasPendingOperations()).toBe(false);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect(
       await restored.fire(
         HookEventName.PreToolUse,
@@ -3765,7 +3836,7 @@ it.each([false, true])(
         continue: false,
         decision: 'block',
       });
-    const restored = new HostedHookSession(options, session, pin);
+    const restored = await HostedHookSession.create(options, session, pin);
     expect((await restored.status('assembled-unicode')).run.state).toBe(
       'settled',
     );
@@ -3782,7 +3853,7 @@ it.each([false, true])(
       stopReason:
         'Hosted Shell description contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
     });
-    expect(restored.hasPendingOperations).toBe(false);
+    expect(await restored.hasPendingOperations()).toBe(false);
     expect(
       requests
         .filter((request) => request.kind === 'hook-execute')
@@ -3845,7 +3916,7 @@ it.each(['none', 'hook', 'borrowed'] as const)(
     );
     try {
       const port = (server.address() as { port: number }).port;
-      hooks = new HostedHookSession(
+      hooks = await HostedHookSession.create(
         { baseUrl: `http://127.0.0.1:${port}`, token: 'test' },
         session,
         pin,
@@ -3893,9 +3964,11 @@ it('retains historical Hook ownership for cleanup without claiming a live MCP mo
   expect(hooks.mountHeld).toBe(false);
   expect(hooks.broker.acquired).toBe(false);
   expect(
-    session.authority
-      .extensionRecordsInDomain('hook_execution')
-      .some((entry) => entry.run.runtime !== null),
+    await (
+      await session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .collect(1_000_000)
+    ).some((entry) => entry.run.runtime !== null),
   ).toBe(true);
   const mcpPin = {
     serverId: 'demo',
@@ -3914,7 +3987,7 @@ it('retains historical Hook ownership for cleanup without claiming a live MCP mo
     command,
     selectedMcpServers([{ ...mcpPin, state: 'enabled' }], command),
   );
-  const restored = new HostedMcpSession(
+  const restored = await HostedMcpSession.create(
     options,
     session,
     [mcpPin],
@@ -3924,7 +3997,9 @@ it('retains historical Hook ownership for cleanup without claiming a live MCP mo
   expect(restored.mountHeld).toBe(false);
   expect(restored.broker.runtimeSessionId).toBe(hooks.broker.runtimeSessionId);
   expect(
-    session.authority.extensionRecordsInDomain('mcp_configuration'),
+    await session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .collect(1_000_000),
   ).toHaveLength(0);
   const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
   release.mockClear();

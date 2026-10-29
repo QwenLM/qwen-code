@@ -434,6 +434,17 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 if (retirement) {
                     assertThat(result.path("retirement").path("stage").asText()).isEqualTo("DRAINED");
                     assertThat(result.path("retirement").path("progressVersion").asInt()).isEqualTo(4);
+                    String scope = ManagedSessionStore.sessionScopeKey("tenant", sessionId);
+                    var head = jdbc.queryForMap("SELECT journal_revision, committed_sequence, last_commit_digest FROM ma_session_head");
+                    var history = jdbc.queryForMap("SELECT index_generation, indexed_revision, indexed_sequence, last_commit_digest"
+                            + " FROM ma_session_history_state WHERE session_scope_key = ?", scope);
+                    assertThat(((Number) history.get("indexed_revision")).longValue()).isEqualTo(((Number) head.get("journal_revision")).longValue());
+                    assertThat(((Number) history.get("indexed_sequence")).longValue()).isEqualTo(((Number) head.get("committed_sequence")).longValue());
+                    assertThat(history.get("last_commit_digest")).isEqualTo(head.get("last_commit_digest"));
+                    assertThat(jdbc.queryForList("SELECT family FROM ma_session_history_fact WHERE session_scope_key = ?"
+                            + " AND index_generation = ? AND source_revision = ?", String.class, scope,
+                            history.get("index_generation"), history.get("indexed_revision")))
+                            .containsExactlyInAnyOrder("command", "event", "event-id", "event-kind", "event-correlation");
                     assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head", String.class)).isEqualTo("SEALED");
                     assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
                     assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding", String.class)).isEqualTo("DRAINING");
@@ -461,7 +472,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(40);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(42);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

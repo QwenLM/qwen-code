@@ -46,6 +46,7 @@ try {
   const observed = {
     sessionKey,
     read: () => journal.read(),
+    scan: (consume, options) => journal.scan(consume, options),
     async appendTransaction(records) {
       const bytes = Buffer.from(
         records.map((record) => JSON.stringify(record)).join('\n') + '\n',
@@ -129,7 +130,7 @@ try {
     version: 'hosted-harness/1',
   });
   assert.equal(reopened.committedSequence, 2);
-  assert.equal(reopened.domainRecord('session_metadata').revision, 1);
+  assert.equal((await reopened.domainRecord('session_metadata')).revision, 1);
   assert.equal((await reopened.restoreBundle()).restoreBasis, 'initial');
   process.stdout.write(JSON.stringify({ coldOpened: true, commits }));
 } finally {

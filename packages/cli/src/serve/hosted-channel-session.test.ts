@@ -117,7 +117,9 @@ async function withSession<T>(
         authority,
         resources: harness.store,
         sink: {
-          project: async () => [...harness.records],
+          async *iterateMessageRecords() {
+            yield* harness.records;
+          },
           write: async (record: ChatRecord) => {
             harness.records.push(record);
             const payload = record.systemPayload as
@@ -327,7 +329,7 @@ describe('HostedChannelSession inbound', () => {
         replayed: false,
         turnId: first.inputId,
       });
-      const route = channels.route(ROUTE_ID);
+      const route = await channels.route(ROUTE_ID);
       expect(route).toMatchObject({
         accountGeneration: 1,
         routeRevision: 1,
@@ -337,7 +339,9 @@ describe('HostedChannelSession inbound', () => {
         run: { state: 'admitted' },
       });
       const pending = pendingSessionInputs(
-        authority.eventsInSequenceRange(1, authority.committedSequence),
+        await authority
+          .iterateEvents(1, authority.committedSequence)
+          .collect(1_000_000),
       );
       expect(pending.map((input) => [input.inputId, input.source])).toEqual([
         [first.inputId, 'channel'],
@@ -361,11 +365,13 @@ describe('HostedChannelSession inbound', () => {
       expect(second.inputId).not.toBe(first.inputId);
       expect(second).toMatchObject({ routeId: ROUTE_ID, routeRevision: 1 });
       expect(
-        authority.extensionRecord('channel_route', ROUTE_ID)?.revision,
+        (await authority.extensionRecord('channel_route', ROUTE_ID))?.revision,
       ).toBe(1);
       expect(
         pendingSessionInputs(
-          authority.eventsInSequenceRange(1, authority.committedSequence),
+          await authority
+            .iterateEvents(1, authority.committedSequence)
+            .collect(1_000_000),
         ).length,
       ).toBe(2);
     });
@@ -379,12 +385,12 @@ describe('HostedChannelSession inbound', () => {
         inbound({ accountGeneration: 2, platformEventId: '1800:1' }),
       );
       expect(rolled).toMatchObject({ routeRevision: 2, replayed: false });
-      expect(channels.route(ROUTE_ID)).toMatchObject({
+      expect(await channels.route(ROUTE_ID)).toMatchObject({
         accountGeneration: 2,
         routeRevision: 2,
       });
       expect(
-        authority.extensionRecord('channel_route', ROUTE_ID)?.revision,
+        (await authority.extensionRecord('channel_route', ROUTE_ID))?.revision,
       ).toBe(2);
       const before = authority.committedSequence;
       await expect(
@@ -413,7 +419,7 @@ describe('HostedChannelSession inbound', () => {
         ),
       ).rejects.toThrow(/adapter telegram is not enabled/);
       expect(authority.committedSequence).toBe(before);
-      expect(channels.route(ROUTE_ID)).toBeUndefined();
+      expect(await channels.route(ROUTE_ID)).toBeUndefined();
     });
   });
 
@@ -513,12 +519,19 @@ describe('HostedChannelSession outbound', () => {
         const again = await channels.planReply(inputId);
         expect(again).toEqual(planned);
         expect(
-          authority.extensionRecord('channel_delivery', planned!.deliveryId)
-            ?.revision,
+          (
+            await authority.extensionRecord(
+              'channel_delivery',
+              planned!.deliveryId,
+            )
+          )?.revision,
         ).toBe(1);
-        expect(channels.pendingDeliveries().map((d) => d.deliveryId)).toEqual([
-          planned!.deliveryId,
-        ]);
+        expect(
+          await channels
+            .pendingDeliveries()
+            .map((d) => d.deliveryId)
+            .collect(1_000_000),
+        ).toEqual([planned!.deliveryId]);
         expect(await channels.reconcileReplies()).toEqual([]);
       },
       { create: false },
@@ -563,10 +576,10 @@ describe('HostedChannelSession outbound', () => {
       // simply never happens (R10 P2).
       expect(await channels.planReply(stuck)).toBeUndefined();
       expect(await channels.reconcileReplies()).toEqual([rolled]);
-      expect(channels.delivery(`${rolled}:reply`)).toMatchObject({
+      expect(await channels.delivery(`${rolled}:reply`)).toMatchObject({
         run: { delivery: { state: 'planned' } },
       });
-      expect(channels.delivery(`${stuck}:reply`)).toBeUndefined();
+      expect(await channels.delivery(`${stuck}:reply`)).toBeUndefined();
       // A second open replays nothing and aborts nothing.
       expect(await channels.reconcileReplies()).toEqual([]);
     });
@@ -649,19 +662,23 @@ describe('HostedChannelSession outbound', () => {
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       expect(claimed.segments).toHaveLength(1);
-      const revision = () =>
-        authority.extensionRecord('channel_delivery', planned.deliveryId)
-          ?.revision;
-      const before = revision();
+      const revision = async () =>
+        (
+          await authority.extensionRecord(
+            'channel_delivery',
+            planned.deliveryId,
+          )
+        )?.revision;
+      const before = await revision();
       await expect(
         channels.receipt(planned.deliveryId, 5, RECEIPT),
       ).rejects.toThrow(/has no segment 5/);
       // The refusal committed nothing: the line is still sending at the
       // revision the claim left it on.
-      expect(revision()).toBe(before);
-      expect(channels.delivery(planned.deliveryId)!.run.delivery?.state).toBe(
-        'sending',
-      );
+      expect(await revision()).toBe(before);
+      expect(
+        (await channels.delivery(planned.deliveryId))!.run.delivery?.state,
+      ).toBe('sending');
       await expect(
         channels.receipt(planned.deliveryId, 0, RECEIPT),
       ).resolves.toMatchObject({ run: { delivery: { state: 'delivered' } } });
@@ -677,12 +694,11 @@ describe('HostedChannelSession outbound', () => {
       const planned = (await channels.planReply(inputId))!;
       await channels.claim(planned.deliveryId);
       await channels.settle(planned.deliveryId, 'rejected');
-      expect(channels.delivery(planned.deliveryId)!.run.delivery?.state).toBe(
-        'rejected',
-      );
-      const before = authority.extensionRecord(
-        'channel_delivery',
-        planned.deliveryId,
+      expect(
+        (await channels.delivery(planned.deliveryId))!.run.delivery?.state,
+      ).toBe('rejected');
+      const before = (
+        await authority.extensionRecord('channel_delivery', planned.deliveryId)
       )?.revision;
       // The terminal-run line admits no further revision: answering
       // unchanged is the only idempotent cancel.
@@ -690,8 +706,12 @@ describe('HostedChannelSession outbound', () => {
       expect(cancelled.run.delivery?.state).toBe('rejected');
       expect(cancelled.cancelRequested).toBe(false);
       expect(
-        authority.extensionRecord('channel_delivery', planned.deliveryId)
-          ?.revision,
+        (
+          await authority.extensionRecord(
+            'channel_delivery',
+            planned.deliveryId,
+          )
+        )?.revision,
       ).toBe(before);
     });
   });
@@ -736,12 +756,14 @@ describe('HostedChannelSession outbound', () => {
       // a reply — and exactly once, whatever races it.
       expect(await channels.settleInterruptedWake(first)).toBe(true);
       expect(await channels.settleInterruptedWake(first)).toBe(true);
-      const settles = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
-        .filter(
-          (event) =>
-            event.kind === 'turn.settled' && event.payload['turnId'] === first,
-        );
+      const settles = (
+        await authority
+          .iterateEvents(1, authority.committedSequence)
+          .collect(1_000_000)
+      ).filter(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === first,
+      );
       expect(settles).toHaveLength(1);
       expect(settles[0]!.payload).toMatchObject({
         turnId: first,
@@ -751,7 +773,9 @@ describe('HostedChannelSession outbound', () => {
       expect(await channels.planReply(first)).toBeUndefined();
       expect(
         pendingSessionInputs(
-          authority.eventsInSequenceRange(1, authority.committedSequence),
+          await authority
+            .iterateEvents(1, authority.committedSequence)
+            .collect(1_000_000),
         ),
       ).toEqual([]);
       // The thread resumes: the next input of the same route admits, its
@@ -780,7 +804,7 @@ describe('HostedChannelSession outbound', () => {
       harness,
       async (channels) => {
         expect(await channels.reconcileReplies()).toEqual([inputId]);
-        expect(channels.delivery(`${inputId}:reply`)).toMatchObject({
+        expect(await channels.delivery(`${inputId}:reply`)).toMatchObject({
           run: { delivery: { state: 'planned' } },
         });
         expect(await channels.reconcileReplies()).toEqual([]);
@@ -812,16 +836,19 @@ describe('HostedChannelSession outbound', () => {
         { ordinal: 0, segmentId: `${planned.deliveryId}:0`, text: 'Done.' },
       ]);
       // A second claim of a sending delivery restates, never re-revises.
-      const revision = authority.extensionRecord(
-        'channel_delivery',
-        planned.deliveryId,
+      const revision = (
+        await authority.extensionRecord('channel_delivery', planned.deliveryId)
       )?.revision;
       expect((await channels.claim(planned.deliveryId)).delivery).toEqual(
         claimed.delivery,
       );
       expect(
-        authority.extensionRecord('channel_delivery', planned.deliveryId)
-          ?.revision,
+        (
+          await authority.extensionRecord(
+            'channel_delivery',
+            planned.deliveryId,
+          )
+        )?.revision,
       ).toBe(revision);
       const delivered = await channels.receipt(planned.deliveryId, 0, RECEIPT);
       expect(delivered.run).toMatchObject({
@@ -838,7 +865,7 @@ describe('HostedChannelSession outbound', () => {
           providerMessageId: '<other@example.com>',
         }),
       ).rejects.toThrow(/already has a receipt/);
-      expect(channels.pendingDeliveries()).toEqual([]);
+      expect(await channels.pendingDeliveries().collect(1_000_000)).toEqual([]);
       await expect(channels.claim(planned.deliveryId)).rejects.toThrow(
         /cannot be claimed/,
       );
@@ -873,7 +900,7 @@ describe('HostedChannelSession outbound', () => {
         unknown,
       );
       // Unknown is not pending work: no dispatcher picks it up again.
-      expect(channels.pendingDeliveries()).toEqual([]);
+      expect(await channels.pendingDeliveries().collect(1_000_000)).toEqual([]);
       await expect(channels.claim(planned.deliveryId)).rejects.toThrow(
         /cannot be claimed/,
       );
@@ -883,10 +910,13 @@ describe('HostedChannelSession outbound', () => {
       expect(resent.segments.map((segment) => segment.segmentId)).toEqual([
         `${planned.deliveryId}:0`,
       ]);
-      expect(channels.delivery(planned.deliveryId)).toEqual(unknown);
-      expect(channels.pendingDeliveries().map((d) => d.deliveryId)).toEqual([
-        resent.deliveryId,
-      ]);
+      expect(await channels.delivery(planned.deliveryId)).toEqual(unknown);
+      expect(
+        await channels
+          .pendingDeliveries()
+          .map((d) => d.deliveryId)
+          .collect(1_000_000),
+      ).toEqual([resent.deliveryId]);
       const second = await channels.resend(planned.deliveryId);
       expect(second.deliveryId).toBe(`${planned.deliveryId}:r2`);
       // A late provider proof still completes the original chain.
@@ -901,9 +931,8 @@ describe('HostedChannelSession outbound', () => {
       // The chain is terminal now: a conflicting settle is answered with
       // the committed chain, never a new revision — the caller's ledger
       // follows the authority instead of looping on a refusal.
-      const revision = authority.extensionRecord(
-        'channel_delivery',
-        planned.deliveryId,
+      const revision = (
+        await authority.extensionRecord('channel_delivery', planned.deliveryId)
       )?.revision;
       expect(
         (await channels.settle(planned.deliveryId, 'unknown')).run,
@@ -918,8 +947,12 @@ describe('HostedChannelSession outbound', () => {
         delivery: { state: 'delivered' },
       });
       expect(
-        authority.extensionRecord('channel_delivery', planned.deliveryId)
-          ?.revision,
+        (
+          await authority.extensionRecord(
+            'channel_delivery',
+            planned.deliveryId,
+          )
+        )?.revision,
       ).toBe(revision);
     });
   });
@@ -976,7 +1009,7 @@ describe('HostedChannelSession outbound', () => {
       const publishes = vi.spyOn(harness.store, 'publish');
       expect(await channels.planReply(inputId)).toBeUndefined();
       expect(publishes).not.toHaveBeenCalled();
-      expect(channels.delivery(`${inputId}:reply`)).toBeUndefined();
+      expect(await channels.delivery(`${inputId}:reply`)).toBeUndefined();
     });
   });
 });

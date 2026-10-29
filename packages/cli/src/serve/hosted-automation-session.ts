@@ -3,6 +3,11 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import {
+  hostedMessageRecords,
+  hostedSessionRecords,
+} from './hosted-session-records.js';
+import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 
 import { createHash } from 'node:crypto';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -67,7 +72,6 @@ import {
   type ManagedSessionEvent,
   type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 
 // H6b/H6c of #12827: the hosted funnel of a Session's automation
 // definitions and runs. The control plane drives it through one operation
@@ -81,23 +85,24 @@ export interface HostedAutomationStore {
   readonly authority: {
     readonly committedSequence: number;
     appendExecutionEvent: LocalManagedSessionAuthority['appendExecutionEvent'];
-    eventsInSequenceRange(
+    iterateEvents(
       from: number,
       to: number,
-    ): readonly ManagedSessionEvent[];
+    ): ManagedHistoryQuery<ManagedSessionEvent>;
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
-    ):
+    ): Promise<
       | {
           readonly record: unknown;
           readonly revision: number;
           readonly recordRef: ManagedSessionDurableRef;
         }
-      | undefined;
+      | undefined
+    >;
     extensionRecordsInDomain(
       domain: ManagedSessionDomain,
-    ): ReadonlyArray<{ readonly record: unknown }>;
+    ): ManagedHistoryQuery<{ readonly record: unknown }>;
     commitExtensionRecord(
       command: ManagedSessionCommand,
       request: {
@@ -120,20 +125,22 @@ export interface HostedAutomationStore {
     committedExtensionOperation(
       operation: string,
       commandId: string,
-    ): CommittedExtensionOperation | undefined;
-    committedExtensionOperationByCommandId(commandId: string):
+    ): Promise<CommittedExtensionOperation | undefined>;
+    committedExtensionOperationByCommandId(commandId: string): Promise<
       | {
           readonly operation: string;
           readonly result: CommittedExtensionOperation;
         }
-      | undefined;
+      | undefined
+    >;
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
     read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
   readonly sink: {
-    project(): Promise<ChatRecord[]>;
+    iterateRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
+    iterateMessageRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
   };
 }
 
@@ -358,31 +365,31 @@ export class HostedAutomationSession {
     return this.gateReleaseDebtOverflowed || this.owedGateReleases.size > 0;
   }
 
-  schedule(scheduleId: string): Schedule | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async schedule(scheduleId: string): Promise<Schedule | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'schedule',
       scheduleId,
     );
     return existing ? parseScheduleRecord(existing.record) : undefined;
   }
 
-  schedules(): Schedule[] {
+  schedules(): ManagedHistoryQuery<Schedule> {
     return this.store.authority
       .extensionRecordsInDomain('schedule')
       .map((entry) => parseScheduleRecord(entry.record));
   }
 
-  run(automationRunId: string): AutomationRun | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async run(automationRunId: string): Promise<AutomationRun | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'automation_run',
       automationRunId,
     );
     return existing ? parseAutomationRunRecord(existing.record) : undefined;
   }
 
-  cancelRequested(turnId: string): boolean {
-    return this.store.authority
-      .eventsInSequenceRange(1, this.store.authority.committedSequence)
+  async cancelRequested(turnId: string): Promise<boolean> {
+    return await this.store.authority
+      .iterateEvents(1, this.store.authority.committedSequence)
       .some(
         (event) =>
           event.kind === 'cancel.requested' &&
@@ -395,19 +402,19 @@ export class HostedAutomationSession {
     return this.serial(async () => {
       const turnId = automationInputId(runId);
       await this.settleRunUnserialized(turnId);
-      const run = this.run(runId);
+      const run = await this.run(runId);
       if (run === undefined) throw new AutomationNotFoundError(runId);
       if (isTerminalRunState(run.run.state)) return run;
       if (run.run.execution === 'intent') {
         const cancelled = automationRunSettleBody(run, 'cancelled', false);
         await this.commitRun(
           cancelled,
-          this.revisionOf(runId) + 1,
+          (await this.revisionOf(runId)) + 1,
           'settleRun',
         );
         return cancelled;
       }
-      if (!this.cancelRequested(turnId)) {
+      if (!(await this.cancelRequested(turnId))) {
         const commandId = `automation-cancel:${runId}`;
         await this.store.authority.appendExecutionEvent(
           {
@@ -437,7 +444,7 @@ export class HostedAutomationSession {
     });
   }
 
-  runs(): AutomationRun[] {
+  runs(): ManagedHistoryQuery<AutomationRun> {
     return this.store.authority
       .extensionRecordsInDomain('automation_run')
       .map((entry) => parseAutomationRunRecord(entry.record));
@@ -466,7 +473,7 @@ export class HostedAutomationSession {
         params.definition,
       );
       if (prior !== undefined) return prior;
-      const existing = this.schedule(params.scheduleId);
+      const existing = await this.schedule(params.scheduleId);
       if (existing !== undefined && isTerminalRunState(existing.run.state)) {
         throw new AutomationRetiredError(params.scheduleId);
       }
@@ -517,10 +524,10 @@ export class HostedAutomationSession {
         // Honored without a revision: the decision is committed as a
         // marker, or its lost-answer retry would replay nothing after the
         // chain moved and re-apply this content over it.
-        const committed = this.store.authority.extensionRecord(
+        const committed = (await this.store.authority.extensionRecord(
           'schedule',
           params.scheduleId,
-        )!;
+        ))!;
         await this.store.authority.commitOperationReplayed(
           {
             operation: 'defineSchedule',
@@ -544,8 +551,9 @@ export class HostedAutomationSession {
       }
       if (
         existing === undefined &&
-        this.schedules().filter((each) => !isTerminalRunState(each.run.state))
-          .length >= MANAGED_AUTOMATION_LIMITS.maxDefinitionsPerSession
+        (await this.schedules()
+          .filter((each) => !isTerminalRunState(each.run.state))
+          .count()) >= MANAGED_AUTOMATION_LIMITS.maxDefinitionsPerSession
       ) {
         throw new AutomationQuotaError(
           MANAGED_AUTOMATION_LIMITS.maxDefinitionsPerSession,
@@ -576,10 +584,10 @@ export class HostedAutomationSession {
       await this.commitSchedule(record, 'defineSchedule', params.operationId);
       return {
         schedule: record,
-        revision: this.store.authority.extensionRecord(
+        revision: (await this.store.authority.extensionRecord(
           'schedule',
           params.scheduleId,
-        )!.revision,
+        ))!.revision,
         replayed: false,
       };
     });
@@ -598,15 +606,16 @@ export class HostedAutomationSession {
         null,
       );
       if (prior !== undefined) return prior;
-      const existing = this.schedule(scheduleId);
+      const existing = await this.schedule(scheduleId);
       if (existing === undefined) throw new AutomationNotFoundError(scheduleId);
-      const revisionOf = () =>
-        this.store.authority.extensionRecord('schedule', scheduleId)!.revision;
+      const revisionOf = async () =>
+        (await this.store.authority.extensionRecord('schedule', scheduleId))!
+          .revision;
       if (isTerminalRunState(existing.run.state)) {
-        const committed = this.store.authority.extensionRecord(
+        const committed = (await this.store.authority.extensionRecord(
           'schedule',
           scheduleId,
-        )!;
+        ))!;
         await this.store.authority.commitOperationReplayed(
           {
             operation: 'retireSchedule',
@@ -622,11 +631,19 @@ export class HostedAutomationSession {
           },
           TRUSTED,
         );
-        return { schedule: existing, revision: revisionOf(), replayed: true };
+        return {
+          schedule: existing,
+          revision: await revisionOf(),
+          replayed: true,
+        };
       }
       const record = scheduleRetireBody(existing);
       await this.commitSchedule(record, 'retireSchedule', operationId);
-      return { schedule: record, revision: revisionOf(), replayed: false };
+      return {
+        schedule: record,
+        revision: await revisionOf(),
+        replayed: false,
+      };
     });
   }
 
@@ -645,7 +662,7 @@ export class HostedAutomationSession {
     return this.serial(async () => {
       const runId = automationRunId(params.scheduleId, params.occurrenceKey);
       const inputId = automationInputId(runId);
-      const existing = this.run(runId);
+      const existing = await this.run(runId);
       const gateOf = (
         run: AutomationRun,
       ): Pick<AutomationFireResult, 'gate'> =>
@@ -662,7 +679,7 @@ export class HostedAutomationSession {
             ...gateOf(existing),
           };
         }
-        const schedule = this.schedule(params.scheduleId);
+        const schedule = await this.schedule(params.scheduleId);
         if (schedule === undefined || isTerminalRunState(schedule.run.state)) {
           // The definition ended before the claim dispatched: nothing of
           // this occurrence ever reached a turn.
@@ -686,7 +703,7 @@ export class HostedAutomationSession {
           ...gateOf(existing),
         };
       }
-      const schedule = this.schedule(params.scheduleId);
+      const schedule = await this.schedule(params.scheduleId);
       const ending =
         schedule === undefined
           ? new AutomationNotFoundError(params.scheduleId)
@@ -918,7 +935,7 @@ export class HostedAutomationSession {
     return this.serial(async () => {
       const runId = automationRunIdOfInput(turnId);
       if (runId === undefined) return undefined;
-      const run = this.run(runId);
+      const run = await this.run(runId);
       if (
         run === undefined ||
         isTerminalRunState(run.run.state) ||
@@ -927,7 +944,11 @@ export class HostedAutomationSession {
         return undefined;
       }
       const settled = automationRunFailedUnknownBody(run);
-      await this.commitRun(settled, this.revisionOf(runId) + 1, 'settleRun');
+      await this.commitRun(
+        settled,
+        (await this.revisionOf(runId)) + 1,
+        'settleRun',
+      );
       return settled;
     });
   }
@@ -937,7 +958,7 @@ export class HostedAutomationSession {
   ): Promise<AutomationRun | undefined> {
     const runId = automationRunIdOfInput(turnId);
     if (runId === undefined) return undefined;
-    const run = this.run(runId);
+    const run = await this.run(runId);
     if (
       run === undefined ||
       isTerminalRunState(run.run.state) ||
@@ -945,24 +966,26 @@ export class HostedAutomationSession {
     ) {
       return undefined;
     }
-    const projected = await this.store.sink.project();
     // The journal's own settle of the turn is the authority; the sink's
     // turn result stands in only for a turn whose settle the journal does
     // not carry (the wake runner's error path writes the sink alone).
     const { authority } = this.store;
-    const journalSettle = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
+    const throughSequence = authority.committedSequence;
+    const journalSettle = await authority
+      .iterateEvents(1, throughSequence)
       .findLast(
         (event) =>
           event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
       );
-    const result = projected.findLast(
-      (entry) =>
-        entry.type === 'system' &&
-        entry.subtype === 'turn_result' &&
-        (entry.systemPayload as { promptId?: unknown } | undefined)
-          ?.promptId === turnId,
-    );
+    const result = journalSettle
+      ? undefined
+      : await hostedSessionRecords(this.store, throughSequence).findLast(
+          (entry) =>
+            entry.type === 'system' &&
+            entry.subtype === 'turn_result' &&
+            (entry.systemPayload as { promptId?: unknown } | undefined)
+              ?.promptId === turnId,
+        );
     const state =
       journalSettle?.payload['outcome'] ??
       (result?.systemPayload as { state?: unknown } | undefined)?.state;
@@ -975,13 +998,20 @@ export class HostedAutomationSession {
             ? 'cancelled'
             : 'failed';
     if (outcome === undefined) return undefined;
-    const started = wakeHasPriorAttempt(projected, turnId);
+    const started = await hostedMessageRecords(
+      this.store,
+      throughSequence,
+    ).some((entry) => entry.daemonPromptId === turnId);
     const settled = automationRunSettleBody(
       run,
       outcome === 'settled' && !started ? 'cancelled' : outcome,
       started,
     );
-    await this.commitRun(settled, this.revisionOf(runId) + 1, 'settleRun');
+    await this.commitRun(
+      settled,
+      (await this.revisionOf(runId)) + 1,
+      'settleRun',
+    );
     return settled;
   }
 
@@ -992,7 +1022,7 @@ export class HostedAutomationSession {
    */
   async reconcileRuns(): Promise<string[]> {
     const settled: string[] = [];
-    for (const run of this.runs()) {
+    for await (const run of this.runs()) {
       if (
         isTerminalRunState(run.run.state) ||
         run.run.execution !== 'dispatch_started'
@@ -1007,10 +1037,10 @@ export class HostedAutomationSession {
     return settled;
   }
 
-  private revisionOf(runId: string): number {
+  private async revisionOf(runId: string): Promise<number> {
     return (
-      this.store.authority.extensionRecord('automation_run', runId)?.revision ??
-      0
+      (await this.store.authority.extensionRecord('automation_run', runId))
+        ?.revision ?? 0
     );
   }
 
@@ -1026,13 +1056,13 @@ export class HostedAutomationSession {
     scheduleId: string,
     definition: unknown | null,
   ): Promise<AutomationDefineResult | undefined> {
-    const prior = this.store.authority.committedExtensionOperation(
+    const prior = await this.store.authority.committedExtensionOperation(
       operation,
       operationId,
     );
     if (prior === undefined) {
       const other =
-        this.store.authority.committedExtensionOperationByCommandId(
+        await this.store.authority.committedExtensionOperationByCommandId(
           operationId,
         );
       if (other !== undefined && other.operation !== operation) {

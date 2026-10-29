@@ -360,9 +360,11 @@ describe('Tool v3 local worker routes', () => {
         capture: { captureStatus: 'complete', deliveryStatus: 'committed' },
       },
     });
-    const receiptEvent = session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .find((event) => event.kind === 'tool.receipt');
+    const receiptEvent = await (
+      await session.authority
+        .iterateEvents(1, session.authority.committedSequence)
+        .collect(1_000_000)
+    ).find((event) => event.kind === 'tool.receipt');
     expect(receiptEvent).toBeDefined();
     expect(receiptEvent?.payload['resultRef']).toEqual(
       settled.result.capture.manifest,

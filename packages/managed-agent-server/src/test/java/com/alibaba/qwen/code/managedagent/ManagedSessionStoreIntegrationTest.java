@@ -97,7 +97,13 @@ class ManagedSessionStoreIntegrationTest {
         mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
-                .andExpect(jsonPath("$.head").doesNotExist()).andExpect(jsonPath("$.nativeSnapshot").doesNotExist());
+                .andExpect(jsonPath("$.head").doesNotExist()).andExpect(jsonPath("$.nativeSnapshot").doesNotExist())
+                .andExpect(jsonPath("$.nativeHistory").doesNotExist());
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE)
+                .param("includeNativeHistory", "true"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.nativeHistory.version").value(1))
+                .andExpect(jsonPath("$.nativeSnapshot").doesNotExist());
         ObjectNode request = objectMapper.createObjectNode().put("workspaceId", WORKSPACE)
                 .put("writerId", WRITER_A).put("writerGeneration", 1).put("snapshotId", "native-one")
                 .put("expectedJournalRevision", 1).put("expectedCommittedSequence", 0);

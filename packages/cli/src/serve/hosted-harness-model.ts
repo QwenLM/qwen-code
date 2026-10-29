@@ -486,7 +486,7 @@ async function runPreparedHostedHarnessTextTurn(
       const occurrenceId = `${input.promptId}:native:${key}:${ordinal}`;
       if (
         event === HookEventName.InstructionsLoaded &&
-        input.hooks?.hasCompletedOccurrence(event, occurrenceId)
+        (await input.hooks?.hasCompletedOccurrence(event, occurrenceId))
       )
         return empty;
       try {
@@ -681,10 +681,10 @@ async function runPreparedHostedHarnessTextTurn(
     let effectivePrompt = input.prompt;
     if (input.hooks && !input.resumeFromToolResults && !input.resumeModel) {
       const startupId = `session-start:${input.sessionId}`;
-      const start = input.hooks.hasCompletedOccurrence(
+      const start = (await input.hooks.hasCompletedOccurrence(
         HookEventName.SessionStart,
         startupId,
-      )
+      ))
         ? undefined
         : await fire(HookEventName.SessionStart, startupId, {
             source: 'startup',
@@ -982,7 +982,7 @@ async function runPreparedHostedHarnessTextTurn(
     ) {
       input.signal.throwIfAborted();
       input.toolTurn?.setModelRound?.(round);
-      if (input.hooks?.hasPendingOperations)
+      if (await input.hooks?.hasPendingOperations())
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {
         const text = input.toolTurn.hookStopReason;

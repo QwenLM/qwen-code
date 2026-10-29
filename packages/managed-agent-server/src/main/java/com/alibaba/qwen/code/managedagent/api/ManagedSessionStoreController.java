@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedNativeJournalSnapshots;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionHistoryStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -176,7 +177,10 @@ public class ManagedSessionStoreController {
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record RestoreResponse(@JsonUnwrapped RestoreHead head,
-            ManagedNativeJournalSnapshots.Descriptor nativeSnapshot) { }
+            ManagedNativeJournalSnapshots.Descriptor nativeSnapshot,
+            NativeHistoryCapability nativeHistory) { }
+
+    public record NativeHistoryCapability(int version) { }
 
     @GetMapping("/restore")
     public RestoreResponse restore(TenantContext tenant,
@@ -184,10 +188,12 @@ public class ManagedSessionStoreController {
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
             @RequestParam String workspaceId,
-            @RequestParam(defaultValue = "false") boolean includeNativeSnapshot) {
+            @RequestParam(defaultValue = "false") boolean includeNativeSnapshot,
+            @RequestParam(defaultValue = "false") boolean includeNativeHistory) {
         RestoreHead head = store.restore(tenant.tenantId(), workspaceId, sessionId, writerToken);
         return new RestoreResponse(head, includeNativeSnapshot
-                ? snapshots.select(tenant.tenantId(), workspaceId, sessionId, writerToken, head) : null);
+                ? snapshots.select(tenant.tenantId(), workspaceId, sessionId, writerToken, head) : null,
+                includeNativeHistory ? new NativeHistoryCapability(1) : null);
     }
 
     @PostMapping("/tool-results:publish")
@@ -208,6 +214,22 @@ public class ManagedSessionStoreController {
             @RequestParam(defaultValue = "100") int limit) {
         return store.transactions(tenant.tenantId(), workspaceId,
                 sessionId, writerToken, afterRevision, limit);
+    }
+
+    @PostMapping("/history:query")
+    public ManagedSessionHistoryStore.QueryResult historyQuery(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionHistoryStore.QueryRequest request) {
+        return store.historyQuery(tenant.tenantId(), sessionId, writerToken, request);
+    }
+
+    @PostMapping("/history:backfill")
+    public ManagedSessionHistoryStore.Coverage historyBackfill(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionHistoryStore.BackfillRequest request) {
+        return store.historyBackfill(tenant.tenantId(), sessionId, writerToken, request);
     }
 
     @PostMapping("/journal-snapshots:publish")

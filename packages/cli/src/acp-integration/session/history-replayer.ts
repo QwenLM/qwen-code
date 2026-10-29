@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { tmpdir } from 'node:os';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import { HistoryReplayLimitError } from './history-replay-limit.js';
+import { FileManagedSessionHistory } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import type {
   ChatRecord,
   GoalSnapshotV2,
@@ -20,6 +24,7 @@ import {
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
   type PendingTranscriptToolCall,
   type TranscriptReplayMachine,
+  type TranscriptReplayEmission,
   type TranscriptReplayPresentationAdapter,
   type TranscriptReplayStateV1,
 } from '@qwen-code/acp-bridge/transcriptReplay';
@@ -62,7 +67,12 @@ export interface HistoryReplayPageOptions {
    * bulk `replay()` path, which runs against a fixed update cap, does not.
    */
   includeTiming?: boolean;
+  branchPointForRecord?: (record: ChatRecord) => string | undefined;
 }
+
+export type HistoryReplayRecords =
+  | readonly ChatRecord[]
+  | AsyncIterable<ChatRecord>;
 
 export interface HistoryReplayPageState {
   pendingToolCalls: PendingReplayToolCall[];
@@ -98,7 +108,7 @@ export class HistoryReplayer {
   }
 
   async replay(
-    records: ChatRecord[],
+    records: HistoryReplayRecords,
     gaps?: HistoryGap[],
     options: {
       initialGoalState?: GoalSnapshotV2;
@@ -106,6 +116,7 @@ export class HistoryReplayer {
       goalBootstrap?: HistoryReplayGoalBootstrap;
       skipFinalizeCallIds?: ReadonlySet<string>;
       finalizeDangling?: boolean;
+      branchPointForRecord?: (record: ChatRecord) => string | undefined;
     } = {},
   ): Promise<void> {
     try {
@@ -125,6 +136,9 @@ export class HistoryReplayer {
       await this.replayPage(records, {
         finalizeDangling: options.finalizeDangling ?? true,
         gaps,
+        ...(options.branchPointForRecord
+          ? { branchPointForRecord: options.branchPointForRecord }
+          : {}),
         ...(options.skipFinalizeCallIds
           ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
           : {}),
@@ -161,57 +175,99 @@ export class HistoryReplayer {
   }
 
   async replayPage(
-    records: ChatRecord[],
+    records: HistoryReplayRecords,
     options: HistoryReplayPageOptions = {},
   ): Promise<HistoryReplayPageState> {
     this.machine = this.createMachine(options);
-    let replayError: unknown;
+    const scratch =
+      Symbol.asyncIterator in records
+        ? await FileManagedSessionHistory.create(tmpdir())
+        : undefined;
     try {
-      for (const record of records) {
-        for (const emission of this.machine.project(record)) {
+      const used = scratch?.map<boolean>('resource');
+      const suffixes = scratch?.map<number>('resource');
+      for (const pending of options.pendingToolCalls ?? [])
+        await used?.set(`used:${pending.callId}`, true);
+      const claim = async (candidate: string): Promise<string> => {
+        if (!used || !suffixes)
+          throw new Error('Streaming replay identity view is unavailable.');
+        if (!(await used.has(`used:${candidate}`))) {
+          await used.set(`used:${candidate}`, true);
+          return candidate;
+        }
+        let suffix = (await suffixes.get(`suffix:${candidate}`)) ?? 2;
+        while (await used.has(`used:${candidate}:${suffix}`)) suffix++;
+        const id = `${candidate}:${suffix}`;
+        await used.set(`used:${id}`, true);
+        await suffixes.set(`suffix:${candidate}`, suffix + 1);
+        return id;
+      };
+      let replayError: unknown;
+      try {
+        for await (const record of records) {
+          const emissions = scratch
+            ? this.machine.projectAsync(record, claim)
+            : this.machine.project(record);
+          const branchPoint =
+            record.type === 'assistant'
+              ? options.branchPointForRecord?.(record)
+              : undefined;
+          const buffered: TranscriptReplayEmission[] | undefined =
+            branchPoint === undefined ? undefined : [];
+          for await (const emission of emissions) {
+            if (buffered) buffered.push(emission);
+            else await this.sendEmission(emission);
+          }
+          if (buffered) {
+            const branchPoints: Record<string, string> = Object.create(null);
+            branchPoints[record.uuid] = branchPoint!;
+            stampBranchPoints(
+              buffered.map((emission) => emission.update),
+              branchPoints,
+            );
+            for (const emission of buffered) await this.sendEmission(emission);
+          }
+        }
+      } catch (error) {
+        if (error instanceof HistoryReplayLimitError) throw error;
+        replayError = error;
+      }
+
+      let danglingError: unknown;
+      if (options.finalizeDangling === true) {
+        for (const emission of this.machine.finalize()) {
           this.setActiveRecordId(
             emission.sourceRecordId,
             emission.sourceTimestamp,
           );
-          await this.sendUpdate(emission.update);
+          try {
+            await this.sendUpdate(emission.update);
+          } catch (error) {
+            danglingError ??= error;
+          }
         }
       }
-    } catch (error) {
-      replayError = error;
-    }
 
-    let danglingError: unknown;
-    if (options.finalizeDangling === true) {
-      for (const emission of this.machine.finalize()) {
-        this.setActiveRecordId(
-          emission.sourceRecordId,
-          emission.sourceTimestamp,
+      const replay = this.machine.snapshot();
+      this.copyCumulativeUsage(replay);
+      const state = {
+        pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
+        replay,
+      };
+      this.setActiveRecordId(null);
+
+      if (replayError && danglingError) {
+        throw new AggregateError(
+          [replayError, danglingError],
+          'Replay and dangling-cleanup both failed',
         );
-        try {
-          await this.sendUpdate(emission.update);
-        } catch (error) {
-          danglingError ??= error;
-        }
       }
+      if (replayError) throw replayError;
+      if (danglingError) throw danglingError;
+      return state;
+    } finally {
+      await scratch?.close();
     }
-
-    const replay = this.machine.snapshot();
-    this.copyCumulativeUsage(replay);
-    const state = {
-      pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
-      replay,
-    };
-    this.setActiveRecordId(null);
-
-    if (replayError && danglingError) {
-      throw new AggregateError(
-        [replayError, danglingError],
-        'Replay and dangling-cleanup both failed',
-      );
-    }
-    if (replayError) throw replayError;
-    if (danglingError) throw danglingError;
-    return state;
   }
 
   getPendingToolCalls(): PendingReplayToolCall[] {
@@ -273,6 +329,13 @@ export class HistoryReplayer {
     };
   }
 
+  private async sendEmission(
+    emission: TranscriptReplayEmission,
+  ): Promise<void> {
+    this.setActiveRecordId(emission.sourceRecordId, emission.sourceTimestamp);
+    await this.sendUpdate(emission.update);
+  }
+
   private async sendUpdate(
     update: Parameters<SessionEmitterContext['sendUpdate']>[0],
   ): Promise<void> {
@@ -327,4 +390,67 @@ function toLegacyPendingToolCall(
     ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
     ...(pending.timingMatched ? { timingMatched: true as const } : {}),
   };
+}
+
+function readTranscriptSourceRecordIds(
+  update: SessionUpdate,
+): string[] | undefined {
+  const value = update as unknown as Record<string, unknown>;
+  const meta =
+    value['_meta'] && typeof value['_meta'] === 'object'
+      ? (value['_meta'] as Record<string, unknown>)
+      : undefined;
+  const transcript =
+    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const sourceRecordIds = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(sourceRecordIds)) return undefined;
+  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
+}
+
+// A checkpoint marks the END of its source record, which can replay as
+// several chunks (text/thought/text). Only the LAST visible assistant chunk
+// of the record may expose the branch point: an earlier chunk would restore
+// the record's later content when branched from, and an empty-text usage
+// chunk normalizes to `assistant.usage`, which drops the metadata.
+export function stampBranchPoints(
+  updates: SessionUpdate[],
+  branchPoints: Readonly<Record<string, string>>,
+): void {
+  const lastChunkIndexByRecordId = new Map<string, number>();
+  updates.forEach((update, index) => {
+    if (update.sessionUpdate !== 'agent_message_chunk') return;
+    const text = (update as { content?: { text?: unknown } }).content?.text;
+    if (typeof text !== 'string' || text.length === 0) return;
+    for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+      // Own-property check: transcript record uuids are untrusted input,
+      // and names like 'toString' would otherwise pass via the prototype
+      // chain.
+      if (Object.hasOwn(branchPoints, recordId)) {
+        lastChunkIndexByRecordId.set(recordId, index);
+      }
+    }
+  });
+  const decoratedIndexes = new Set<number>();
+  for (const [recordId, index] of lastChunkIndexByRecordId) {
+    if (decoratedIndexes.has(index)) continue;
+    decoratedIndexes.add(index);
+    const value = updates[index] as unknown as Record<string, unknown>;
+    const meta =
+      value['_meta'] && typeof value['_meta'] === 'object'
+        ? (value['_meta'] as Record<string, unknown>)
+        : undefined;
+    const transcript =
+      meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+        ? (meta['qwenTranscript'] as Record<string, unknown>)
+        : undefined;
+    value['_meta'] = {
+      ...meta,
+      qwenTranscript: {
+        ...transcript,
+        branchRecordId: branchPoints[recordId],
+      },
+    };
+  }
 }

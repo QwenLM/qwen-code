@@ -116,7 +116,7 @@ function fixture(
   );
   const session = {
     authority: {
-      eventsInSequenceRange: (from: number, through: number) =>
+      iterateEvents: (from: number, through: number) =>
         events.filter(
           (event) => event.sequence >= from && event.sequence <= through,
         ),

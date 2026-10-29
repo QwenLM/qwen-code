@@ -43,12 +43,9 @@ export class HostedTextDeltaStream {
     },
   ): Promise<void> {
     const authority = this.session.authority;
-    const events = authority.eventsInSequenceRange(
-      1,
-      authority.committedSequence,
-    );
+    const events = authority.iterateEvents(1, authority.committedSequence);
     if (
-      events.some(
+      await events.some(
         (event) =>
           event.kind === 'message.retracted' &&
           event.payload['messageId'] === messageId,
@@ -61,9 +58,9 @@ export class HostedTextDeltaStream {
         event.payload['messageId'] === messageId &&
         event.payload['turnId'] === this.turnId,
     );
-    if (!deltas.length) return;
+    if (!(await deltas.count())) return;
     if (
-      deltas.some(
+      await deltas.some(
         (event) =>
           event.subject?.type !== 'activation' ||
           event.subject.activationId !== source.sourceActivation.activationId ||
@@ -71,8 +68,8 @@ export class HostedTextDeltaStream {
       )
     )
       throw new Error('Original stream owner conflicts.');
-    const fromSequence = deltas[0].sequence;
-    const throughSequence = deltas.at(-1)!.sequence;
+    const fromSequence = (await deltas.at(0))!.sequence;
+    const throughSequence = (await deltas.at(-1))!.sequence;
     const activation = this.session.activation;
     const commandId = `assistant-retract:${this.turnId}:${messageId}`;
     await authority.appendExecutionEvent(

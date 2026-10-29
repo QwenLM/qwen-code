@@ -136,9 +136,11 @@ try {
     activation,
   }));
   const projected = await session.sink.project();
-  const input = authority
-    .eventsInSequenceRange(1, authority.committedSequence)
-    .find((event) => event.kind === 'input.accepted');
+  const input = (
+    await authority
+      .iterateEvents(1, authority.committedSequence)
+      .collect(1_000_000)
+  ).find((event) => event.kind === 'input.accepted');
   const promptId = input.payload.inputId;
   const messageId = randomUUID();
   const text = 'Original complete output';

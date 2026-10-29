@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
+import { hostedMessageRecords } from './hosted-session-records.js';
 import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -21,6 +22,7 @@ import type {
   HarnessRunAuthorization,
   HarnessToolItem,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type { ManagedHarnessCheckpointView } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
 import {
   HARNESS_MODEL_START_PHASES,
   harnessCheckpointIsAgentWait,
@@ -268,22 +270,25 @@ function isUnprovableExecutionAnswer(cause: unknown): boolean {
 export async function originalRuntimeBroker(
   session: ManagedSession,
   promptId: string,
-  items: readonly HarnessToolItem[],
+  history: Pick<ManagedHarnessCheckpointView, 'tools' | 'checkpoint'>,
   options: HostedWorkspaceBrokerOptions,
 ): Promise<HostedWorkspaceBroker> {
-  const owners = new Set<string>();
-  const intents = new Map(
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .filter((event) => event.kind === 'tool.intent')
-      .map((event) => [
-        event.payload['executionCallId'],
-        event.payload['argsRef'],
-      ]),
-  );
-  for (const item of items) {
+  const throughSequence = history.checkpoint.identity.coveredSequence;
+  let runtimeSessionId: string | undefined;
+  let conflictingOwners = false;
+  const rememberOwner = (owner: string) => {
+    if (runtimeSessionId === undefined) runtimeSessionId = owner;
+    else if (runtimeSessionId !== owner) conflictingOwners = true;
+  };
+  for await (const item of history.tools) {
     if (item.outcomeSource !== 'runtime') continue;
-    const ref = intents.get(item.executionCallId) as
+    const intent = await session.authority.findEvent(
+      'tool.intent',
+      'executionCallId',
+      item.executionCallId,
+      { throughSequence },
+    );
+    const ref = intent?.payload['argsRef'] as
       | ManagedSessionDurableRef
       | undefined;
     if (!ref) throw new RecoveryDeclined();
@@ -300,7 +305,7 @@ export async function originalRuntimeBroker(
       ) as { hookCatalog?: unknown; mcpServers?: unknown };
       if (definition.hookCatalog || definition.mcpServers)
         throw new RecoveryDeclined();
-      owners.add(hostedRuntimeSessionId(promptId));
+      rememberOwner(hostedRuntimeSessionId(promptId));
       continue;
     }
     if (ref.kind !== 'managed-tool-input') throw new RecoveryDeclined();
@@ -313,15 +318,14 @@ export async function originalRuntimeBroker(
       typeof route.runtimeSessionId !== 'string'
     )
       throw new RecoveryDeclined();
-    owners.add(
+    rememberOwner(
       assertManagedSessionStableId(
         route.runtimeSessionId,
         'recovered Runtime owner',
       ),
     );
   }
-  const [runtimeSessionId] = owners;
-  if (owners.size !== 1 || !runtimeSessionId) throw new RecoveryDeclined();
+  if (conflictingOwners || !runtimeSessionId) throw new RecoveryDeclined();
   return new HostedWorkspaceBroker(
     options,
     session.authority.sessionHeader.sessionKey,
@@ -380,11 +384,8 @@ async function recoveredShellCancellationReceipt(input: {
 }): Promise<ManagedSessionDurableRef | undefined> {
   const { session, item, broker } = input;
   const authority = session.authority;
-  const events = authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  );
-  const intent = events.find(
+  const events = authority.iterateEvents(1, authority.committedSequence);
+  const intent = await events.find(
     (event) =>
       event.kind === 'tool.intent' &&
       event.payload['executionCallId'] === item.executionCallId,
@@ -400,11 +401,9 @@ async function recoveredShellCancellationReceipt(input: {
     authorization.checkpoint.identity.turnId !== input.promptId
   )
     throw new RecoveryDeclined();
-  const binding = authorization.checkpoint.runtime?.bindings.find(
-    (entry) => entry.executionCallId === item.executionCallId,
-  );
+  const binding = await authorization.history.binding(item.executionCallId);
   if (!binding || binding.state !== 'dispatch') throw new RecoveryDeclined();
-  const original = events.find(
+  const original = await events.find(
     (event) =>
       event.kind === 'tool.receipt' &&
       event.payload['executionCallId'] === item.executionCallId,
@@ -514,12 +513,14 @@ export async function settleParkedTurnCancelled(input: {
   // unobserved outcome into a witnessed cancellation that contradicts the
   // journal the checkpoint points at.
   const journaled = new Map<string, Part[]>();
-  for (const entry of await input.session.sink.project()) {
+  const pendingIds = new Set(pending.map((item) => item.functionCallId));
+  for await (const entry of hostedMessageRecords(input.session)) {
     if (entry.daemonPromptId !== input.promptId || entry.type !== 'tool_result')
       continue;
     for (const part of entry.message?.parts ?? []) {
       const id = part.functionResponse?.id;
-      if (typeof id === 'string') journaled.set(id, [part]);
+      if (typeof id === 'string' && pendingIds.has(id))
+        journaled.set(id, [part]);
     }
   }
   for (const item of pending) {
@@ -619,7 +620,7 @@ export async function stopParkedRuntimeExecutions(input: {
   const broker = await originalRuntimeBroker(
     input.session,
     input.promptId,
-    authorization.checkpoint.tools?.items ?? [],
+    authorization.history,
     input.brokerOptions,
   );
   // Terminal for the pre-cancel skip — an execution the Broker never knew
@@ -731,14 +732,12 @@ async function answerAbandonedTurnCalls(input: {
   commands?: HostedSessionCommandSession;
   skills?: HostedSkillCatalog;
   hooks?: HostedHookSession;
-  /** A journal projection the caller already holds: one snapshot serves
-   * the caller's classification and this answering pass instead of two
-   * full walks of the committed events (the settle's projection walk). */
-  projected?: Awaited<ReturnType<ManagedSession['sink']['project']>>;
+  /** The same fixed committed prefix as the caller's classification. */
+  projected?: ReturnType<typeof hostedMessageRecords>;
 }): Promise<number> {
   const uncommitted = input.uncommitted ?? 'all';
   const records = (
-    input.projected ?? (await input.session.sink.project())
+    input.projected ?? hostedMessageRecords(input.session)
   ).filter((entry) => entry.daemonPromptId === input.promptId);
   // One authority for the exactly-once predicate: the same helper every
   // replayed fold rides, fed the projection already in hand.
@@ -749,17 +748,20 @@ async function answerAbandonedTurnCalls(input: {
   );
   const owed = new Map<string, { name: string; messageId: string }>();
   const skillResponses = new Map<string, Part[]>();
-  for (const record of records.filter((entry) => entry.type === 'assistant')) {
+  for await (const record of records.filter(
+    (entry) => entry.type === 'assistant',
+  )) {
     const parts = record.message?.parts ?? [];
-    if (
-      uncommitted === 'hosted' &&
-      input.skills &&
-      parts.some(
-        (part) =>
-          part.functionCall?.name === 'skill' &&
-          !answered.has(part.functionCall.id ?? ''),
-      )
-    )
+    let skillOwed = false;
+    for (const part of parts)
+      if (
+        part.functionCall?.name === 'skill' &&
+        !(await answered.has(part.functionCall.id ?? ''))
+      ) {
+        skillOwed = true;
+        break;
+      }
+    if (uncommitted === 'hosted' && input.skills && skillOwed)
       for (const [id, response] of await hostedSkillBatchResponses(
         input.session,
         input.skills,
@@ -769,10 +771,15 @@ async function answerAbandonedTurnCalls(input: {
         input.cwd,
         input.hooks,
       ))
-        skillResponses.set(id, response);
+        if (!(await answered.has(id))) skillResponses.set(id, response);
     for (const part of parts) {
       const call = part.functionCall;
-      if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
+      if (
+        call?.id &&
+        call.name &&
+        !(await answered.has(call.id)) &&
+        !owed.has(call.id)
+      )
         owed.set(call.id, {
           name: call.name,
           messageId: record.uuid,
@@ -787,11 +794,11 @@ async function answerAbandonedTurnCalls(input: {
     // call that never ran.
     const launched =
       call.name === 'agent' || call.name === 'workflow'
-        ? input.children?.record(callKey)
+        ? await input.children?.record(callKey)
         : undefined;
     const sent =
       call.name === 'send_message'
-        ? sentMessageText(input, functionCallId, callKey)
+        ? await sentMessageText(input, functionCallId, callKey)
         : undefined;
     const planDecision =
       call.name === 'team_plan_approval'
@@ -819,7 +826,7 @@ async function answerAbandonedTurnCalls(input: {
       ]);
     } else if (
       commandId !== undefined &&
-      input.commands!.command(commandId) !== undefined
+      (await input.commands!.command(commandId)) !== undefined
     ) {
       parts = await sessionCommandJournalAnswer(input.commands!, {
         commandId,
@@ -831,7 +838,7 @@ async function answerAbandonedTurnCalls(input: {
         { text: sent },
       ]);
     } else if (launched?.completion === 'sent') {
-      const member = input.teams?.membership(callKey);
+      const member = await input.teams?.membership(callKey);
       parts = convertToFunctionResponse(call.name, functionCallId, [
         {
           text:
@@ -848,7 +855,7 @@ async function answerAbandonedTurnCalls(input: {
       const committed =
         input.teams !== undefined &&
         HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
-        input.teams.committedBy(call.name, callKey);
+        (await input.teams.committedBy(call.name, callKey));
       if (
         !committed &&
         (uncommitted === 'none' ||
@@ -906,7 +913,7 @@ async function answerAbandonedTurnCalls(input: {
  * a run that proved it never started since, and answers a broadcast by
  * the recipients it committed (decision 9).
  */
-function sentMessageText(
+async function sentMessageText(
   input: {
     session: ManagedSession;
     promptId: string;
@@ -915,8 +922,8 @@ function sentMessageText(
   },
   callId: string,
   callKey: string,
-): string | undefined {
-  const message = input.messages?.message(
+): Promise<string | undefined> {
+  const message = await input.messages?.message(
     sessionMessageId({
       senderSessionId:
         input.session.authority.sessionHeader.sessionKey.sessionId,
@@ -931,10 +938,14 @@ function sentMessageText(
     const sent = { kind: 'message', childRunId: message.childRunId } as const;
     return hostedRouteAnswer(input.children, {
       ...sent,
-      ...hostedRouteDetails(input.session.authority, sent, message.messageId),
+      ...(await hostedRouteDetails(
+        input.session.authority,
+        sent,
+        message.messageId,
+      )),
     });
   }
-  const continued = input.children?.record(callKey);
+  const continued = await input.children?.record(callKey);
   if (continued?.predecessorChildRunId) {
     const sent = {
       kind: 'continuation',
@@ -943,14 +954,14 @@ function sentMessageText(
     } as const;
     return hostedRouteAnswer(input.children!, {
       ...sent,
-      ...hostedRouteDetails(input.session.authority, sent),
+      ...(await hostedRouteDetails(input.session.authority, sent)),
     });
   }
   // H4e-b2 decision 9: a broadcast commits each recipient under its own
   // position's ids. Every position is probed whatever the journaled
   // arguments say, since a hook may have rewritten the input that ran.
   if (input.children === undefined) return undefined;
-  const reached = hostedBroadcastCommitted({
+  const reached = await hostedBroadcastCommitted({
     authority: input.session.authority,
     children: input.children,
     messages: input.messages,
@@ -959,7 +970,7 @@ function sentMessageText(
     callId,
   });
   if (reached.length === 0) return undefined;
-  const team = input.session.authority
+  const team = await input.session.authority
     .extensionRecordsInDomain('team_state')
     .map((entry) => parseTeamState(entry.record))
     .find((each) => each.lifecycle !== 'deleted');
@@ -981,9 +992,7 @@ function sentMessageText(
     )
   )
     return `${head} Its team has changed since, so nothing tells who else it was meant for.\n${lines}`;
-  const chains = new HostedChildChains(
-    input.session.authority.extensionRecordsInDomain('child_run'),
-  );
+  const chains = new HostedChildChains(input.session.authority);
   // A member the call never committed a send to, or whose send reached a
   // run that never started, did not get it; one that has ended since
   // cannot take it by name either.
@@ -999,7 +1008,7 @@ function sentMessageText(
       unconfirmed.push(member.name);
       continue;
     }
-    const view = hostedMemberView(chains, member.childRunId);
+    const view = await hostedMemberView(chains, member.childRunId);
     if (view.stoppingBeforeStart) settling.push(member.name);
     else if (view.stopping) stopping.push(member.name);
     else if (isEndedMember(view)) ended.push(member.name);
@@ -1033,7 +1042,7 @@ async function hostedSkillBatchResponses(
   catalog: HostedSkillCatalog,
   promptId: string,
   assistant: ChatRecord,
-  records: readonly ChatRecord[],
+  records: ReturnType<typeof hostedMessageRecords>,
   cwd: string,
   hooks?: HostedHookSession,
 ): Promise<Map<string, Part[]>> {
@@ -1050,13 +1059,17 @@ async function hostedSkillBatchResponses(
   const entries = [];
   for (const [index, call] of calls.entries()) {
     if (call.name !== 'skill') continue;
-    const saved = records
-      .filter(
-        (record) =>
-          record.type === 'tool_result' && record.daemonPromptId === promptId,
-      )
-      .flatMap((record) => record.message?.parts ?? [])
-      .filter((part) => part.functionResponse?.id === call.id);
+    const savedRecord = await records.find(
+      (record) =>
+        record.type === 'tool_result' &&
+        record.daemonPromptId === promptId &&
+        record.message?.parts?.some(
+          (part) => part.functionResponse?.id === call.id,
+        ) === true,
+    );
+    const saved = (savedRecord?.message?.parts ?? []).filter(
+      (part) => part.functionResponse?.id === call.id,
+    );
     const responseParts = saved.length
       ? saved
       : problems.some((problem) => problem !== undefined)
@@ -1099,7 +1112,7 @@ async function hostedSkillResponse(
   const initialProblem = catalog.validationError(args, origin);
   if (initialProblem) return refused(initialProblem);
   if (hooks) {
-    const marker = session.authority.extensionRecord(
+    const marker = await session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(HookEventName.PreToolUse, `${promptId}:${callId}`),
     );
@@ -1227,12 +1240,12 @@ async function hostedSkillResponse(
         completed: async (id, _name, _input, result) => {
           if (
             hooks &&
-            !hooks.hasCompletedOccurrence(
+            !(await hooks.hasCompletedOccurrence(
               result['executionStatus'] === 'success'
                 ? HookEventName.PostToolUse
                 : HookEventName.PostToolUseFailure,
               id,
-            )
+            ))
           )
             throw new HostedHookRecoveryRequiredError();
         },
@@ -1327,7 +1340,7 @@ export async function settleCancelledAgentWaitRuns(input: {
       [],
       HOSTED_AGENT_WAIT_ABANDONED_TEXT,
     );
-    if (!journaled.has(run.functionCallId))
+    if (!(await journaled.has(run.functionCallId)))
       await input.managed.sink.write({
         uuid: randomUUID(),
         parentUuid: run.modelMessageId,
@@ -1396,13 +1409,13 @@ export async function fillParkedRoundAgentGaps(input: {
   // and an admitted-but-unsettled wait run polled here would hang the
   // fill forever.
   const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
-  const projected = await input.managed.sink.project();
-  const assistant = projected
+  const projected = hostedMessageRecords(input.managed);
+  const assistant = await projected
     .filter(
       (entry) =>
         entry.daemonPromptId === input.promptId &&
         entry.type === 'assistant' &&
-        entry.message?.parts?.some((part) => part.functionCall) &&
+        entry.message?.parts?.some((part) => part.functionCall) === true &&
         namedRounds.has(entry.uuid),
     )
     .at(-1);
@@ -1471,7 +1484,7 @@ export async function fillParkedRoundAgentGaps(input: {
     if (waitedCalls.has(callId)) continue;
     // The journaled set gates only the fold, never the replay-safe marks —
     // both sibling arms in this diff document and follow the same rule.
-    const foldOwed = !journaled.has(callId);
+    const foldOwed = !(await journaled.has(callId));
     if (name === 'skill' && input.skills) {
       if (foldOwed) {
         await writeFold(skillResponses.get(callId)!);
@@ -1482,7 +1495,7 @@ export async function fillParkedRoundAgentGaps(input: {
     const children = input.children;
     const sent =
       name === 'send_message'
-        ? sentMessageText(
+        ? await sentMessageText(
             {
               session: input.managed,
               promptId: input.promptId,
@@ -1505,7 +1518,7 @@ export async function fillParkedRoundAgentGaps(input: {
     const admitted =
       children === undefined
         ? undefined
-        : children.record(hostedChildRunIdFor(input.promptId, callId));
+        : await children.record(hostedChildRunIdFor(input.promptId, callId));
     if (children === undefined || admitted === undefined) {
       if (foldOwed) {
         await writeFold(
@@ -1552,7 +1565,7 @@ export async function fillParkedRoundAgentGaps(input: {
           }
           break;
         }
-        const record = children.record(runId);
+        const record = await children.record(runId);
         // #14387: a recovery-blocked child is an ending too — its outcome
         // is unwitnessed, but the orphan fill must not poll forever.
         if (
@@ -1574,7 +1587,7 @@ export async function fillParkedRoundAgentGaps(input: {
           }
           break;
         }
-        const acceptance = children.acceptance(runId);
+        const acceptance = await children.acceptance(runId);
         if (acceptance !== undefined) {
           const text = (
             await input.managed.resources.read(acceptance.contentRef)
@@ -1607,7 +1620,7 @@ export async function fillParkedRoundAgentGaps(input: {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
-    journaled.add(callId);
+    journaled.refresh();
   }
   return filled;
 }
@@ -1626,7 +1639,7 @@ async function sessionCommandJournalAnswer(
   run: Pick<HarnessCommandWaitRun, 'commandId' | 'functionCallId' | 'toolName'>,
 ): Promise<Part[]> {
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const record = commands.command(run.commandId);
+    const record = await commands.command(run.commandId);
     const state =
       record === undefined
         ? 'planned'
@@ -1694,7 +1707,7 @@ export async function settleCancelledCommandWaitRuns(input: {
   const journaled = await journaledToolResultIds(input.managed, input.promptId);
   for (const run of input.runs) {
     const parts = await sessionCommandJournalAnswer(input.commands, run);
-    if (!journaled.has(run.functionCallId))
+    if (!(await journaled.has(run.functionCallId)))
       await input.managed.sink.write({
         uuid: randomUUID(),
         parentUuid: run.modelMessageId,
@@ -1741,13 +1754,13 @@ export async function fillParkedRoundCommandGaps(input: {
       : [];
   const namedRounds = new Set(waitRuns.map((run) => run.modelMessageId));
   const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
-  const projected = await input.managed.sink.project();
-  const assistant = projected
+  const projected = hostedMessageRecords(input.managed);
+  const assistant = await projected
     .filter(
       (entry) =>
         entry.daemonPromptId === input.promptId &&
         entry.type === 'assistant' &&
-        entry.message?.parts?.some((part) => part.functionCall) &&
+        entry.message?.parts?.some((part) => part.functionCall) === true &&
         namedRounds.has(entry.uuid),
     )
     .at(-1);
@@ -1763,7 +1776,7 @@ export async function fillParkedRoundCommandGaps(input: {
     const name = part.functionCall?.name;
     if (typeof callId !== 'string' || typeof name !== 'string') continue;
     if (waitedCalls.has(callId)) continue;
-    const foldOwed = !journaled.has(callId);
+    const foldOwed = !(await journaled.has(callId));
     const sent =
       name === 'send_message'
         ? await sentMessageText(
@@ -1807,7 +1820,7 @@ export async function fillParkedRoundCommandGaps(input: {
       });
       filled += 1;
     }
-    journaled.add(callId);
+    journaled.refresh();
   }
   return filled;
 }
@@ -1862,12 +1875,10 @@ async function settleJournalOnlyInterruptedTurn(input: {
   commands?: HostedSessionCommandSession;
 }): Promise<HostedRuntimeRecoveryOutcome | undefined> {
   const authority = input.session.authority;
+  const throughSequence = authority.committedSequence;
   let accepted = false;
   let settled = false;
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
+  for await (const event of authority.iterateEvents(1, throughSequence)) {
     if (
       event.kind === 'input.accepted' &&
       event.payload['turnId'] === input.promptId
@@ -1881,7 +1892,7 @@ async function settleJournalOnlyInterruptedTurn(input: {
   }
   if (settled) return inapplicable();
   if (!accepted) return undefined;
-  const projected = await input.session.sink.project();
+  const projected = hostedMessageRecords(input.session, throughSequence);
   const records = projected.filter(
     (entry) => entry.daemonPromptId === input.promptId,
   );
@@ -1890,11 +1901,11 @@ async function settleJournalOnlyInterruptedTurn(input: {
     input.promptId,
     records,
   );
-  for (const record of records) {
+  for await (const record of records) {
     if (record.type !== 'assistant') continue;
     for (const part of record.message?.parts ?? []) {
       const call = part.functionCall;
-      if (!call?.id || !call.name || answered.has(call.id)) continue;
+      if (!call?.id || !call.name || (await answered.has(call.id))) continue;
       if (!JOURNAL_ONLY_ANSWERABLE_TOOLS.has(call.name)) return undefined;
       // The evidence each answer rides is per-call durable state inside
       // its own funnel; without that funnel the honest answer does not
@@ -2062,7 +2073,7 @@ export async function settleInterruptedTurnRuntime(input: {
       const action =
         requestId === undefined
           ? undefined
-          : input.session.authority.action(requestId);
+          : await input.session.authority.action(requestId);
       if (action === undefined) return { kind: 'held' };
       let finalState = action.state;
       if (action.state === 'requested') {
@@ -2078,7 +2089,8 @@ export async function settleInterruptedTurnRuntime(input: {
           () => !input.session.authority.writesStopped,
         );
         finalState =
-          input.session.authority.action(action.requestId)?.state ?? 'expired';
+          (await input.session.authority.action(action.requestId))?.state ??
+          'expired';
       }
       if (finalState === 'requested') return { kind: 'held' };
       // The final Action outlives the owner that died asking: advance the
@@ -2214,7 +2226,7 @@ export async function settleInterruptedTurnRuntime(input: {
     const action =
       approval?.requestId === undefined
         ? undefined
-        : input.session.authority.action(approval.requestId);
+        : await input.session.authority.action(approval.requestId);
     await answerAbandonedTurnCalls({
       session: input.session,
       sessionId: input.sessionId,
@@ -2376,6 +2388,7 @@ export async function recoverHostedRuntimeTurn(input: {
     );
   }
   let checkpoint = authorization.checkpoint;
+  let checkpointHistory = authorization.history;
   if (checkpoint.identity.turnId !== promptId) {
     if (passive)
       throw new Error(
@@ -2408,8 +2421,8 @@ export async function recoverHostedRuntimeTurn(input: {
       checkpoint.approval !== null &&
       checkpoint.approval.state === 'requested'
     ) {
-      const actionState = session.authority.action(
-        checkpoint.approval.requestId,
+      const actionState = (
+        await session.authority.action(checkpoint.approval.requestId)
       )?.state;
       if (actionState === undefined || actionState === 'requested')
         return inapplicable();
@@ -2436,6 +2449,7 @@ export async function recoverHostedRuntimeTurn(input: {
               'Parked approval resolved to an unrunnable continuation',
             );
           checkpoint = after.checkpoint;
+          checkpointHistory = after.history;
         }
       } else {
         throw new Error(
@@ -2535,15 +2549,23 @@ export async function recoverHostedRuntimeTurn(input: {
       );
     return declined('checkpoint_blocked');
   }
-  const items = (checkpoint.tools?.items ?? []).filter(
+  const inlineItems = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',
   );
+  const owedItems = inlineItems.filter((item) => !item.consumed);
+  let items = owedItems.length > 0 ? owedItems : inlineItems;
+  if (items.length === 0) {
+    const previous = await checkpointHistory.tools.findLast(
+      (item) => item.outcomeSource === 'runtime',
+    );
+    if (previous) items = [previous];
+  }
   let broker: HostedWorkspaceBroker;
   try {
     broker = await originalRuntimeBroker(
       session,
       promptId,
-      items,
+      checkpointHistory,
       input.brokerOptions,
     );
   } catch (cause) {
@@ -2618,19 +2640,15 @@ export async function recoverHostedRuntimeTurn(input: {
         // A write-then-resolve crash window must not journal a tool_result
         // twice when the recovery retries: collect what is already durable.
         const journaled = await journaledToolResultIds(session, promptId);
-        const intents = new Map(
-          session.authority
-            .eventsInSequenceRange(1, session.authority.committedSequence)
-            .filter((event) => event.kind === 'tool.intent')
-            .map((event) => [
-              event.payload['executionCallId'] as string,
-              event,
-            ]),
-        );
         for (const item of pending) {
-          const argsRef = intents.get(item.executionCallId)?.payload[
-            'argsRef'
-          ] as ManagedSessionDurableRef | undefined;
+          const intent = await session.authority.findEvent(
+            'tool.intent',
+            'executionCallId',
+            item.executionCallId,
+          );
+          const argsRef = intent?.payload['argsRef'] as
+            | ManagedSessionDurableRef
+            | undefined;
           if (argsRef === undefined) throw new RecoveryDeclined();
           const stored = JSON.parse(
             (await session.resources.read(argsRef)).toString('utf8'),
@@ -2728,7 +2746,7 @@ export async function recoverHostedRuntimeTurn(input: {
             'managed-tool-outcome',
             outcome,
           );
-          if (!journaled.has(item.functionCallId)) {
+          if (!(await journaled.has(item.functionCallId))) {
             await session.sink.write(record);
           }
           await harness.resolveAwaitRuntime(item.executionCallId, outcomeRef);

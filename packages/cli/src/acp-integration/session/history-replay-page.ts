@@ -22,27 +22,20 @@ import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptRe
 import { Buffer } from 'node:buffer';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
-import { HistoryReplayer } from './history-replayer.js';
-import type { PendingReplayToolCall } from './history-replayer.js';
+import {
+  HistoryReplayer,
+  stampBranchPoints,
+  type HistoryReplayRecords,
+  type PendingReplayToolCall,
+} from './history-replayer.js';
+import { HistoryReplayLimitError } from './history-replay-limit.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
 
 interface ReplayLogger {
   warn(message: string, ...args: unknown[]): void;
 }
 
-export class HistoryReplayLimitError extends Error {
-  constructor(
-    readonly sessionId: string,
-    readonly reason: 'bytes' | 'updates',
-    readonly observed: number,
-    readonly limit: number,
-  ) {
-    super(
-      `Transcript replay for session ${sessionId} exceeds the ${reason} limit (${observed}, max ${limit})`,
-    );
-    this.name = 'HistoryReplayLimitError';
-  }
-}
+export { HistoryReplayLimitError } from './history-replay-limit.js';
 
 export interface HistoryReplayLimits {
   maxBytes: number;
@@ -263,6 +256,7 @@ function replayContext(
   cumulativeUsage: CumulativeUsage,
   config?: Config,
   limits?: HistoryReplayLimits,
+  deliver?: (update: SessionUpdate) => Promise<void>,
 ): SessionEmitterContext {
   let activeRecordId: string | null = null;
   let serializedUpdateBytes = 2;
@@ -286,6 +280,10 @@ function replayContext(
         sessionId,
         deliveredUpdate,
       );
+      if (deliver) {
+        await deliver(deliveredUpdate);
+        return;
+      }
       if (limits) {
         const updateCount = updates.length + 1;
         if (updateCount > limits.maxUpdates) {
@@ -359,17 +357,20 @@ export async function collectHistoryReplayUpdates({
   limits,
   suppressRestoreAskUserQuestion,
   finalizeDangling,
+  sendUpdate,
   branchPointsByAssistantUuid,
+  branchPointForRecord,
 }: {
   sessionId: string;
   config?: Config;
-  records: ChatRecord[];
+  records: HistoryReplayRecords;
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
   logger?: ReplayLogger;
   replayState?: unknown;
   goalBootstrap?: import('./history-replayer.js').HistoryReplayGoalBootstrap;
   limits?: HistoryReplayLimits;
+  sendUpdate?: (update: SessionUpdate) => Promise<void>;
   /**
    * The daemon declined the re-hang (no attached client / fork restore):
    * finalize the trailing ask_user_question normally instead of skipping it,
@@ -389,37 +390,83 @@ export async function collectHistoryReplayUpdates({
    * replayed updates so a session restored from disk still offers Branch.
    */
   branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
+  branchPointForRecord?: (record: ChatRecord) => string | undefined;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
+  let deliveredUpdates = 0;
   let replayError: string | undefined;
+  const resolveBranchPoint =
+    branchPointForRecord ??
+    (branchPointsByAssistantUuid
+      ? (record: ChatRecord) =>
+          Object.hasOwn(branchPointsByAssistantUuid, record.uuid)
+            ? branchPointsByAssistantUuid[record.uuid]
+            : undefined
+      : undefined);
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
     // Prefer live chat when it is initialized (authoritative after startChat
     // preserve). Cold bulk replay runs before startChat — `getChat()` throws
     // — so fall back to the transcript tail instead of finalizing the
     // dangling question that load is about to re-hang.
+    let replayRecords = records;
     let skipFinalizeCallIds: Set<string> | undefined;
     if (
       suppressRestoreAskUserQuestion !== true &&
       config?.getRestoreAskUserQuestion?.() === true
     ) {
       const replayClient = config.getLlmClient?.();
-      const lastHistoryContent =
+      const liveContent =
         replayClient?.isInitialized?.() === true
-          ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
-            lastHistoryContentFromRecords(records))
-          : lastHistoryContentFromRecords(records);
-      skipFinalizeCallIds =
-        restorableAskUserQuestionCallIds(lastHistoryContent);
+          ? replayClient.getChat?.()?.peekLastHistoryEntry?.()
+          : undefined;
+      if (Array.isArray(records))
+        skipFinalizeCallIds = restorableAskUserQuestionCallIds(
+          liveContent ?? lastHistoryContentFromRecords(records),
+        );
+      else {
+        const source = records;
+        const skip = new Set<string>();
+        skipFinalizeCallIds = skip;
+        replayRecords = {
+          async *[Symbol.asyncIterator]() {
+            let lastContent: ChatRecord['message'];
+            for await (const record of source) {
+              if (record.type !== 'system' && record.message)
+                lastContent = record.message;
+              yield record;
+            }
+            for (const id of restorableAskUserQuestionCallIds(
+              liveContent ?? lastContent,
+            ) ?? [])
+              skip.add(id);
+          },
+        };
+      }
     }
     await new HistoryReplayer(
-      replayContext(sessionId, updates, cumulativeUsage, config, limits),
-    ).replay(records, gaps, {
+      replayContext(
+        sessionId,
+        updates,
+        cumulativeUsage,
+        config,
+        limits,
+        sendUpdate
+          ? async (update) => {
+              await sendUpdate(update);
+              deliveredUpdates++;
+            }
+          : undefined,
+      ),
+    ).replay(replayRecords, gaps, {
       ...(initial.goalState ? { initialGoalState: initial.goalState } : {}),
       ...(initial.goalCause ? { initialGoalCause: initial.goalCause } : {}),
       ...(goalBootstrap ? { goalBootstrap } : {}),
       ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
       ...(finalizeDangling === undefined ? {} : { finalizeDangling }),
+      ...(resolveBranchPoint
+        ? { branchPointForRecord: resolveBranchPoint }
+        : {}),
     });
   } catch (error) {
     if (error instanceof HistoryReplayLimitError) throw error;
@@ -427,14 +474,21 @@ export async function collectHistoryReplayUpdates({
     logger?.warn(
       '[historyReplay] History replay failed for session %s (partial updates: %d):',
       sessionId,
-      updates.length,
+      sendUpdate ? deliveredUpdates : updates.length,
       error,
     );
   }
-  if (branchPointsByAssistantUuid) {
-    stampBranchPoints(updates, branchPointsByAssistantUuid);
-  }
   return replayError === undefined ? { updates } : { updates, replayError };
+}
+
+export async function streamHistoryReplayUpdates(
+  options: Omit<
+    Parameters<typeof collectHistoryReplayUpdates>[0],
+    'limits' | 'sendUpdate'
+  > & { sendUpdate: (update: SessionUpdate) => Promise<void> },
+): Promise<void> {
+  const result = await collectHistoryReplayUpdates(options);
+  if (result.replayError !== undefined) throw new Error(result.replayError);
 }
 
 function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
@@ -454,69 +508,6 @@ export interface ReplayedTranscriptPage {
   lastUpdated: string;
   partial?: true;
   replayError?: string;
-}
-
-function readTranscriptSourceRecordIds(
-  update: SessionUpdate,
-): string[] | undefined {
-  const value = update as unknown as Record<string, unknown>;
-  const meta =
-    value['_meta'] && typeof value['_meta'] === 'object'
-      ? (value['_meta'] as Record<string, unknown>)
-      : undefined;
-  const transcript =
-    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
-      ? (meta['qwenTranscript'] as Record<string, unknown>)
-      : undefined;
-  const sourceRecordIds = transcript?.['sourceRecordIds'];
-  if (!Array.isArray(sourceRecordIds)) return undefined;
-  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
-}
-
-// A checkpoint marks the END of its source record, which can replay as
-// several chunks (text/thought/text). Only the LAST visible assistant chunk
-// of the record may expose the branch point: an earlier chunk would restore
-// the record's later content when branched from, and an empty-text usage
-// chunk normalizes to `assistant.usage`, which drops the metadata.
-function stampBranchPoints(
-  updates: SessionUpdate[],
-  branchPoints: Readonly<Record<string, string>>,
-): void {
-  const lastChunkIndexByRecordId = new Map<string, number>();
-  updates.forEach((update, index) => {
-    if (update.sessionUpdate !== 'agent_message_chunk') return;
-    const text = (update as { content?: { text?: unknown } }).content?.text;
-    if (typeof text !== 'string' || text.length === 0) return;
-    for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
-      // Own-property check: transcript record uuids are untrusted input,
-      // and names like 'toString' would otherwise pass via the prototype
-      // chain.
-      if (Object.hasOwn(branchPoints, recordId)) {
-        lastChunkIndexByRecordId.set(recordId, index);
-      }
-    }
-  });
-  const decoratedIndexes = new Set<number>();
-  for (const [recordId, index] of lastChunkIndexByRecordId) {
-    if (decoratedIndexes.has(index)) continue;
-    decoratedIndexes.add(index);
-    const value = updates[index] as unknown as Record<string, unknown>;
-    const meta =
-      value['_meta'] && typeof value['_meta'] === 'object'
-        ? (value['_meta'] as Record<string, unknown>)
-        : undefined;
-    const transcript =
-      meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
-        ? (meta['qwenTranscript'] as Record<string, unknown>)
-        : undefined;
-    value['_meta'] = {
-      ...meta,
-      qwenTranscript: {
-        ...transcript,
-        branchRecordId: branchPoints[recordId],
-      },
-    };
-  }
 }
 
 export async function replayTranscriptRecordPage({

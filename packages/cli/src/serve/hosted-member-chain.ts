@@ -11,6 +11,7 @@ import {
   type ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import {
   parseSessionMessage,
   type SessionMessage,
@@ -235,22 +236,22 @@ export function inputBodyText(body: unknown): string | undefined {
  * disabled until b3d, so nothing here commits; the read keeps plan mode
  * on a b3d journal reopened by this build (decision 5's rollback floor).
  */
-export function memberPlanModeRequired(
+export async function memberPlanModeRequired(
   team: TeamState,
-  plans: ReadonlyArray<{ readonly record: unknown }>,
+  plans: ManagedHistoryQuery<{ readonly record: unknown }>,
   memberName: string,
-): boolean {
+): Promise<boolean> {
   if (team.lifecycle === 'deleted') return false;
   const member = team.members.find((each) => each.name === memberName);
   if (member === undefined || !member.planModeRequired) return false;
-  return !plans.some((entry) => {
+  return !(await plans.some((entry) => {
     const plan = parseTeamPlan(entry.record);
     return (
       plan.teamId === team.teamId &&
       plan.member === memberName &&
       plan.decision === 'approved'
     );
-  });
+  }));
 }
 
 /**
@@ -315,24 +316,29 @@ export function memberPreambleIdentity(
  */
 export async function hostedFirstInputText(input: {
   readonly authority: {
-    committedSequence: number;
-    eventsInSequenceRange(
-      from: number,
-      through: number,
-    ): ReadonlyArray<{
-      readonly kind: string;
-      readonly payload: Readonly<
-        Partial<Record<string, ManagedSessionJsonValue>>
-      >;
-    }>;
+    findEvent(
+      kind: 'input.accepted',
+      field: 'kind',
+      value: 'input.accepted',
+    ): Promise<
+      | {
+          readonly kind: string;
+          readonly payload: Readonly<
+            Partial<Record<string, ManagedSessionJsonValue>>
+          >;
+        }
+      | undefined
+    >;
   };
   readonly resources: {
     read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
 }): Promise<string | undefined> {
-  const first = input.authority
-    .eventsInSequenceRange(1, input.authority.committedSequence)
-    .find((event) => event.kind === 'input.accepted');
+  const first = await input.authority.findEvent(
+    'input.accepted',
+    'kind',
+    'input.accepted',
+  );
   const contentRef = first?.payload['contentRef'];
   if (contentRef === undefined) return undefined;
   const ref = assertManagedSessionDurableRef(contentRef, 'session first input');
@@ -355,45 +361,75 @@ export function isSentInstruction(committed: string, sent: string): boolean {
   return block !== null && committed.slice(block[0].length) === sent;
 }
 
-/** The lead's child Session runs, indexed once per call. */
+export interface HostedChildChainAuthority {
+  readonly committedSequence: number;
+  extensionRecord(
+    domain: ManagedSessionDomain,
+    recordId: string,
+    options?: { readonly throughSequence?: number },
+  ): Promise<{ readonly record: unknown } | undefined>;
+  extensionRecordsInDomain(
+    domain: ManagedSessionDomain,
+    options?: { readonly throughSequence?: number },
+  ): ManagedHistoryQuery<{ readonly record: unknown }>;
+}
+
+/** The lead's child Session runs, read from committed history as needed. */
 export class HostedChildChains {
-  private readonly byId = new Map<string, ChildSessionRun>();
-  private readonly successors = new Map<string, ChildSessionRun[]>();
+  constructor(private readonly authority: HostedChildChainAuthority) {}
 
-  constructor(records: ReadonlyArray<{ readonly record: unknown }>) {
-    // Records come in their first commit's order, so a successor list
-    // ends with the continuation committed last.
-    for (const entry of records) this.add(entry.record);
+  runs(): ManagedHistoryQuery<ChildSessionRun> {
+    return this.runsAt(this.authority.committedSequence);
   }
 
-  /** Add a run committed during the call that owns this index. */
-  add(record: unknown): void {
-    const run = parseChildRun(record);
-    if (!isChildSessionRun(run)) return;
-    this.byId.set(run.childRunId, run);
-    if (run.predecessorChildRunId !== null) {
-      const list = this.successors.get(run.predecessorChildRunId) ?? [];
-      list.push(run);
-      this.successors.set(run.predecessorChildRunId, list);
-    }
+  private runsAt(
+    throughSequence: number,
+  ): ManagedHistoryQuery<ChildSessionRun> {
+    return this.authority
+      .extensionRecordsInDomain('child_run', { throughSequence })
+      .map((entry) => parseChildRun(entry.record))
+      .filter(isChildSessionRun);
   }
 
-  runs(): readonly ChildSessionRun[] {
-    return [...this.byId.values()];
+  run(childRunId: string): Promise<ChildSessionRun | undefined> {
+    return this.runAt(childRunId, this.authority.committedSequence);
   }
 
-  run(childRunId: string): ChildSessionRun | undefined {
-    return this.byId.get(childRunId);
+  private async runAt(
+    childRunId: string,
+    throughSequence: number,
+  ): Promise<ChildSessionRun | undefined> {
+    const entry = await this.authority.extensionRecord(
+      'child_run',
+      childRunId,
+      {
+        throughSequence,
+      },
+    );
+    if (entry === undefined) return undefined;
+    const run = parseChildRun(entry.record);
+    return isChildSessionRun(run) ? run : undefined;
   }
 
   /** The launch a run's chain started from; a launch is its own root. */
-  root(childRunId: string): string {
+  async root(childRunId: string): Promise<string> {
+    const throughSequence = this.authority.committedSequence;
     let id = childRunId;
     for (;;) {
-      const predecessor = this.byId.get(id)?.predecessorChildRunId ?? null;
+      const predecessor =
+        (await this.runAt(id, throughSequence))?.predecessorChildRunId ?? null;
       if (predecessor === null) return id;
       id = predecessor;
     }
+  }
+
+  private continuations(
+    childRunId: string,
+    throughSequence: number,
+  ): ManagedHistoryQuery<ChildSessionRun> {
+    return this.runsAt(throughSequence).filter(
+      (run) => run.predecessorChildRunId === childRunId,
+    );
   }
 
   /**
@@ -401,12 +437,14 @@ export class HostedChildChains {
    * that did not prove it never started. H4d-a decision 9 lets at most one
    * started continuation follow a run.
    */
-  head(childRunId: string): ChildSessionRun | undefined {
-    let head = this.byId.get(childRunId);
+  async head(childRunId: string): Promise<ChildSessionRun | undefined> {
+    const throughSequence = this.authority.committedSequence;
+    let head = await this.runAt(childRunId, throughSequence);
     while (head !== undefined) {
-      const next = (this.successors.get(head.childRunId) ?? []).find(
-        (run) => run.run.execution !== 'not_started_proven',
-      );
+      const next = await this.continuations(
+        head.childRunId,
+        throughSequence,
+      ).find((run) => run.run.execution !== 'not_started_proven');
       if (next === undefined) return head;
       head = next;
     }
@@ -414,9 +452,10 @@ export class HostedChildChains {
   }
 
   /** The continuation of `childRunId` committed last, started or not. */
-  newestContinuation(childRunId: string): ChildSessionRun | undefined {
-    const list = this.successors.get(childRunId);
-    return list === undefined ? undefined : list[list.length - 1];
+  newestContinuation(childRunId: string): Promise<ChildSessionRun | undefined> {
+    return this.continuations(childRunId, this.authority.committedSequence).at(
+      -1,
+    );
   }
 
   /**
@@ -424,25 +463,43 @@ export class HostedChildChains {
    * is one, it had proved it never started by then, or routing would have
    * reached it instead (H4d-a decision 9).
    */
-  previousContinuation(childRunId: string): ChildSessionRun | undefined {
-    const predecessor = this.byId.get(childRunId)?.predecessorChildRunId;
+  async previousContinuation(
+    childRunId: string,
+  ): Promise<ChildSessionRun | undefined> {
+    const throughSequence = this.authority.committedSequence;
+    const predecessor = (await this.runAt(childRunId, throughSequence))
+      ?.predecessorChildRunId;
     if (predecessor === null || predecessor === undefined) return undefined;
-    const list = this.successors.get(predecessor) ?? [];
-    const index = list.findIndex((run) => run.childRunId === childRunId);
-    return index > 0 ? list[index - 1] : undefined;
+    let previous: ChildSessionRun | undefined;
+    for await (const run of this.continuations(predecessor, throughSequence)) {
+      if (run.childRunId === childRunId) return previous;
+      previous = run;
+    }
+    return undefined;
   }
 
   /** Every run of the chain a launch started, never-started ones included. */
-  chain(rootChildRunId: string): readonly ChildSessionRun[] {
-    const runs: ChildSessionRun[] = [];
-    const visit = (id: string) => {
-      const run = this.byId.get(id);
-      if (run === undefined) return;
-      runs.push(run);
-      for (const next of this.successors.get(id) ?? []) visit(next.childRunId);
-    };
-    visit(rootChildRunId);
-    return runs;
+  chain(rootChildRunId: string): ManagedHistoryQuery<ChildSessionRun> {
+    const throughSequence = this.authority.committedSequence;
+    return new ManagedHistoryQuery(
+      async function* (this: HostedChildChains) {
+        let run = await this.runAt(rootChildRunId, throughSequence);
+        while (run !== undefined) {
+          yield run;
+          let started: ChildSessionRun | undefined;
+          // Only the last continuation may have started. Earlier attempts
+          // proved they never started and cannot have descendants of their own.
+          for await (const next of this.continuations(
+            run.childRunId,
+            throughSequence,
+          )) {
+            if (next.run.execution === 'not_started_proven') yield next;
+            else started = next;
+          }
+          run = started;
+        }
+      }.bind(this),
+    );
   }
 }
 
@@ -457,13 +514,13 @@ export interface HostedChainMember {
  * Decision 2: the member of the lead's open team whose chain a run belongs
  * to — its chain root on the open team's roster — or none.
  */
-export function hostedOpenTeamChainMember(
-  teams: ReadonlyArray<{ readonly record: unknown }>,
+export async function hostedOpenTeamChainMember(
+  teams: ManagedHistoryQuery<{ readonly record: unknown }>,
   chains: HostedChildChains,
   childRunId: string,
-): HostedChainMember | undefined {
-  const root = chains.root(childRunId);
-  for (const entry of teams) {
+): Promise<HostedChainMember | undefined> {
+  const root = await chains.root(childRunId);
+  for await (const entry of teams) {
     const team = parseTeamState(entry.record);
     if (team.lifecycle === 'deleted') continue;
     const member = team.members.find((each) => each.childRunId === root);
@@ -492,11 +549,11 @@ export interface HostedMemberView {
   readonly neverStarted: ChildSessionRun | undefined;
 }
 
-export function hostedMemberView(
+export async function hostedMemberView(
   chains: HostedChildChains,
   rootChildRunId: string,
-): HostedMemberView {
-  const head = chains.head(rootChildRunId);
+): Promise<HostedMemberView> {
+  const head = await chains.head(rootChildRunId);
   // A rostered member always has a chain head. Treat a missing one as
   // running so callers fail closed by blocking continuation and deletion.
   const state: HostedMemberView['state'] =
@@ -508,7 +565,9 @@ export function hostedMemberView(
   // Every continuation the head took proved it never started, or the
   // newest that did not would be the head.
   const newest =
-    head === undefined ? undefined : chains.newestContinuation(head.childRunId);
+    head === undefined
+      ? undefined
+      : await chains.newestContinuation(head.childRunId);
   return {
     head,
     state,
@@ -552,10 +611,10 @@ export interface HostedNeverStarted {
   readonly lostMessages: number;
 }
 
-export function hostedNeverStarted(
+export async function hostedNeverStarted(
   run: ChildSessionRun,
-  messages: readonly SessionMessage[],
-): HostedNeverStarted {
+  messages: ManagedHistoryQuery<SessionMessage>,
+): Promise<HostedNeverStarted> {
   return {
     childRunId: run.childRunId,
     predecessorChildRunId: run.predecessorChildRunId,
@@ -563,11 +622,13 @@ export function hostedNeverStarted(
     cancelled: run.run.state === 'cancelled',
     // b3c: a member message's sender is another member, so the
     // never-started note never tells the lead to send it again (decision 8).
-    lostMessages: messages.filter(
-      (message) =>
-        message.childRunId === run.childRunId &&
-        !message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
-    ).length,
+    lostMessages: await messages
+      .filter(
+        (message) =>
+          message.childRunId === run.childRunId &&
+          !message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
+      )
+      .count(),
   };
 }
 
@@ -633,46 +694,47 @@ export interface HostedRouteDetails {
   readonly deliveryUnconfirmed?: true;
 }
 
-export function hostedRouteDetails(
-  authority: {
-    extensionRecordsInDomain(
-      domain: ManagedSessionDomain,
-    ): ReadonlyArray<{ readonly record: unknown }>;
-  },
+export async function hostedRouteDetails(
+  authority: HostedChildChainAuthority,
   route: {
     readonly kind: 'message' | 'continuation';
     readonly childRunId: string;
   },
   /** The id a message route was committed under: its delivery is read. */
   messageId?: string,
-  chains = new HostedChildChains(
-    authority.extensionRecordsInDomain('child_run'),
-  ),
-): HostedRouteDetails {
+  chains = new HostedChildChains(authority),
+): Promise<HostedRouteDetails> {
   const messages = outboundChildMessages(
     authority.extensionRecordsInDomain('session_message'),
   );
-  const member = hostedOpenTeamChainMember(
+  const member = await hostedOpenTeamChainMember(
     authority.extensionRecordsInDomain('team_state'),
     chains,
     route.childRunId,
   );
-  const reached = chains.run(route.childRunId);
+  const reached = await chains.run(route.childRunId);
   const previous =
     route.kind === 'continuation'
-      ? chains.previousContinuation(route.childRunId)
+      ? await chains.previousContinuation(route.childRunId)
       : undefined;
   // A run that never started says more than the cancel H4d-b gives its
   // messages, so that note takes precedence. A message never handed over
   // to a run that ended or is being stopped is one the relay cancels
   // (H4d-b), so an answer written before that step already reads it so.
-  const sentState =
+  const sentRecord =
     route.kind === 'message' &&
     messageId !== undefined &&
     reached !== undefined &&
     reached.run.execution !== 'not_started_proven'
-      ? messages.find((message) => message.messageId === messageId)?.run
-          .delivery?.state
+      ? await authority.extensionRecord('session_message', messageId)
+      : undefined;
+  const sentMessage =
+    sentRecord === undefined
+      ? undefined
+      : parseSessionMessage(sentRecord.record);
+  const sentState =
+    sentMessage?.direction === 'outbound' && sentMessage.route === 'to_child'
+      ? sentMessage.run.delivery?.state
       : undefined;
   const delivery =
     sentState === 'planned' &&
@@ -682,17 +744,17 @@ export function hostedRouteDetails(
       : sentState;
   const view =
     delivery === 'cancelled' || delivery === 'rejected'
-      ? hostedMemberView(chains, chains.root(route.childRunId))
+      ? await hostedMemberView(chains, await chains.root(route.childRunId))
       : undefined;
   return {
     ...(member === undefined
       ? {}
       : { member: { name: member.name, teamName: member.team.name } }),
     ...(reached?.run.execution === 'not_started_proven'
-      ? { ownNeverStarted: hostedNeverStarted(reached, messages) }
+      ? { ownNeverStarted: await hostedNeverStarted(reached, messages) }
       : {}),
     ...(previous?.run.execution === 'not_started_proven'
-      ? { previousNeverStarted: hostedNeverStarted(previous, messages) }
+      ? { previousNeverStarted: await hostedNeverStarted(previous, messages) }
       : {}),
     ...((delivery === 'cancelled' || delivery === 'rejected') &&
     view !== undefined
@@ -715,8 +777,8 @@ export function hostedRouteDetails(
 
 /** The lead's outbound messages to the child runs of one Session. */
 export function outboundChildMessages(
-  records: ReadonlyArray<{ readonly record: unknown }>,
-): readonly SessionMessage[] {
+  records: ManagedHistoryQuery<{ readonly record: unknown }>,
+): ManagedHistoryQuery<SessionMessage> {
   return records
     .map((entry) => parseSessionMessage(entry.record))
     .filter(
@@ -736,37 +798,41 @@ export function outboundChildMessages(
  * `:blocked:notify` prompt id collapses to a digest (`hostedPromptKey`),
  * and every other prompt id is assigned whole.
  */
-export function givenWorkThisTurn(
+export async function givenWorkThisTurn(
   chains: HostedChildChains,
   rootChildRunId: string,
-  messages: readonly SessionMessage[],
+  messages: ManagedHistoryQuery<SessionMessage>,
   turnPrefix: string,
-): boolean {
-  const chain = chains.chain(rootChildRunId);
-  // A message to a continuation that never started never arrives (H4d-b
-  // cancels it), so only the chain's runs that did start can take one.
-  const ids = new Set(
-    chain
-      .filter((run) => run.run.execution !== 'not_started_proven')
-      .map((run) => run.childRunId),
-  );
+): Promise<boolean> {
   const fromThisTurn = (callKey: string | null) =>
     callKey !== null && callKey.startsWith(turnPrefix);
-  return (
-    chain.some(
-      (run) =>
-        run.predecessorChildRunId !== null &&
-        run.run.execution !== 'not_started_proven' &&
-        fromThisTurn(run.run.executionCallId),
-    ) ||
-    messages.some(
-      (message) =>
-        ids.has(message.childRunId) &&
-        message.run.delivery?.state !== 'cancelled' &&
-        message.run.delivery?.state !== 'rejected' &&
-        fromThisTurn(message.run.executionCallId),
+  if (
+    await chains
+      .chain(rootChildRunId)
+      .some(
+        (run) =>
+          run.predecessorChildRunId !== null &&
+          run.run.execution !== 'not_started_proven' &&
+          fromThisTurn(run.run.executionCallId),
+      )
+  )
+    return true;
+  for await (const message of messages) {
+    if (
+      message.run.delivery?.state === 'cancelled' ||
+      message.run.delivery?.state === 'rejected' ||
+      !fromThisTurn(message.run.executionCallId)
     )
-  );
+      continue;
+    const run = await chains.run(message.childRunId);
+    if (
+      run !== undefined &&
+      run.run.execution !== 'not_started_proven' &&
+      (await chains.root(run.childRunId)) === rootChildRunId
+    )
+      return true;
+  }
+  return false;
 }
 
 /**
@@ -774,10 +840,10 @@ export function givenWorkThisTurn(
  * work, so the member may be recorded on the task a call completes, as
  * #13846 records a completed member, whatever later runs of the chain did.
  */
-export function hasCompletedRun(
+export async function hasCompletedRun(
   chains: HostedChildChains,
   rootChildRunId: string,
-): boolean {
+): Promise<boolean> {
   return chains
     .chain(rootChildRunId)
     .some((run) => run.run.state === 'settled');

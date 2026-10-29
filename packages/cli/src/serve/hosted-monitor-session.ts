@@ -43,7 +43,9 @@ export interface HostedMonitorStore {
     extensionRecord(
       domain: 'monitor_run',
       recordId: string,
-    ): { readonly record: unknown; readonly revision: number } | undefined;
+    ): Promise<
+      { readonly record: unknown; readonly revision: number } | undefined
+    >;
     commitExtensionRecord(
       command: ManagedSessionCommand,
       request: { readonly domain: 'monitor_run'; readonly record: unknown },
@@ -89,8 +91,8 @@ export class HostedMonitorSession {
   ) {}
 
   /** The last committed body of one Monitor, parsed. */
-  record(monitorId: string): MonitorRun | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async record(monitorId: string): Promise<MonitorRun | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'monitor_run',
       monitorId,
     );
@@ -319,7 +321,7 @@ export class HostedMonitorSession {
     runtime: MonitorRuntimeBinding,
     receipt: Record<string, unknown>,
   ): Promise<void> {
-    const previous = this.record(monitorId);
+    const previous = await this.record(monitorId);
     if (!previous) throw new Error(`Monitor ${monitorId} has no record.`);
     if (
       previous.run.execution !== 'outcome_unknown' ||
@@ -386,7 +388,7 @@ export class HostedMonitorSession {
     input?: ManagedSessionInputRequest,
   ): Promise<void> {
     const write = this.writes.then(async () => {
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'monitor_run',
         monitorId,
       );

@@ -87,12 +87,16 @@ class LocalManagedHookModelScope {
     if (!shared) {
       shared = { snapshot: null };
       let restoredModels = false;
-      const events = this.session.authority.eventsInSequenceRange(
-        1,
-        this.session.authority.committedSequence,
-      );
-      for (const event of [...events].reverse()) {
-        if (event.kind !== 'model.attempt') continue;
+      let throughSequence = this.session.authority.committedSequence;
+      for (;;) {
+        const event = await this.session.authority.findEvent(
+          'model.attempt',
+          'kind',
+          'model.attempt',
+          { last: true, throughSequence },
+        );
+        if (!event) break;
+        throughSequence = event.sequence - 1;
         for (const field of ['usageRef', 'routeRef']) {
           const ref = event.payload[field] as ManagedSessionDurableRef | null;
           if (!ref || !MODEL_BUDGET_RESOURCE_KINDS.has(ref.kind)) continue;
@@ -369,8 +373,8 @@ class LocalManagedHookModelScope {
       const authority = this.session.authority;
       const attemptId = `${operation.operationId}:model`;
       if (
-        authority
-          .eventsInSequenceRange(1, authority.committedSequence)
+        await authority
+          .iterateEvents(1, authority.committedSequence)
           .some(
             (event) =>
               event.kind === 'model.attempt' &&

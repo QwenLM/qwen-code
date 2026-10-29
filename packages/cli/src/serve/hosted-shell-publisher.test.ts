@@ -573,9 +573,11 @@ it.each(['output verification', 'receipt queue'] as const)(
     expect(replaced).toBe(true);
     expect(session!.authority.committedSequence).toBe(replacementSequence);
     expect(
-      session!.authority
-        .eventsInSequenceRange(1, session!.authority.committedSequence)
-        .filter((event) => event.kind === 'tool.receipt'),
+      (
+        await session!.authority
+          .iterateEvents(1, session!.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'tool.receipt'),
     ).toEqual([]);
     expect(
       parseHarnessCheckpointV1(

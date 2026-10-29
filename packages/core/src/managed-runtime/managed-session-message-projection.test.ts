@@ -216,6 +216,107 @@ const branchRecord: ChatRecord = {
 };
 
 describe('managed session message projection', () => {
+  it.each([null, 'external-owner', 'branch-1'])(
+    'restores historical branch context with parent %s and rejects only cycles',
+    async (parentUuid) => {
+      const harness = await createHarness();
+      let cold: LocalManagedSessionAuthority | undefined;
+      const first = { ...records[0], parentUuid };
+      const check = async (projection: ManagedSessionMessageProjection) => {
+        if (parentUuid === branchRecord.uuid) {
+          await expect(projection.projectModelRecords()).rejects.toThrow(
+            'parent cycle',
+          );
+          await expect(projection.projectContextRecords()).rejects.toThrow(
+            'parent cycle',
+          );
+        } else {
+          await expect(projection.projectModelRecords()).resolves.toEqual([
+            first,
+            records[1],
+          ]);
+          await expect(projection.projectContextRecords()).resolves.toEqual([
+            { ...first, parentUuid: null },
+            records[1],
+            branchRecord,
+          ]);
+        }
+      };
+      try {
+        const sink = new ManagedSessionRecordSink(
+          harness.authority,
+          harness.store,
+          () => HOLDS,
+        );
+        await sink.write(first);
+        await sink.write(records[1]);
+        const stateRef = await harness.store.publish(
+          'managed-branch-checkpoint',
+          Buffer.from(JSON.stringify(branchRecord)),
+        );
+        await harness.authority.appendExecution(
+          {
+            ...command('commitBranchCheckpoint', 'recorder:branch-1'),
+            contentDigest: stateRef.digest,
+          },
+          [historicalCheckpoint(harness, stateRef)],
+          HOLDS,
+        );
+        await check(harness.projection);
+        await harness.close();
+        cold = await LocalManagedSessionAuthority.openReadOnly({
+          sessionKey,
+          cwd: '/workspace',
+          version: 'test',
+          resources: harness.store,
+          scan: (consume) =>
+            LocalJsonlManagedSessionJournalStore.scan(
+              {
+                transcriptPath: harness.transcriptPath,
+                runtimeBaseDir: harness.runtimeBaseDir,
+                sessionKey,
+              },
+              consume,
+            ),
+        });
+        await check(new ManagedSessionMessageProjection(cold, harness.store));
+      } finally {
+        await cold?.disposeHistory();
+        await harness.close();
+      }
+    },
+  );
+
+  it('accepts an external owner parent while rejecting an actual active-chain cycle', async () => {
+    const harness = await createHarness();
+    const sink = new ManagedSessionRecordSink(
+      harness.authority,
+      harness.store,
+      () => HOLDS,
+    );
+    const active = async () => {
+      const chain: ChatRecord[] = [];
+      for await (const record of sink.iterateActiveRecords())
+        chain.push(record);
+      return chain;
+    };
+    try {
+      const first = { ...records[0], parentUuid: 'external-owner' };
+      await sink.write(first);
+      await expect(active()).resolves.toEqual([first]);
+      const left = { ...records[1], parentUuid: 'cycle-peer' };
+      await sink.write(left);
+      await sink.write({
+        ...records[0],
+        uuid: 'cycle-peer',
+        parentUuid: left.uuid,
+      });
+      await expect(active()).rejects.toThrow('parent cycle');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('projects a fixed committed cut without reading later missing messages', async () => {
     const harness = await createHarness();
     try {
@@ -227,9 +328,11 @@ describe('managed session message projection', () => {
       await sink.write(records[0]);
       const cut = harness.authority.committedSequence;
       await sink.write(records[1]);
-      const latest = harness.authority
-        .eventsInSequenceRange(cut + 1, harness.authority.committedSequence)
-        .find((event) => event.kind === 'message.committed')!;
+      const latest = (await (
+        await harness.authority
+          .iterateEvents(cut + 1, harness.authority.committedSequence)
+          .collect(1_000_000)
+      ).find((event) => event.kind === 'message.committed'))!;
       const missing = latest.payload[
         'contentRef'
       ] as unknown as ManagedSessionDurableRef;
@@ -346,9 +449,10 @@ describe('managed session message projection', () => {
         Promise.all([checkpoint, message, release]),
       ).resolves.toHaveLength(3);
       expect(
-        harness.authority
-          .readEvents()
-          .map((event) => [event.sequence, event.kind]),
+        (await harness.authority.readEvents()).map((event) => [
+          event.sequence,
+          event.kind,
+        ]),
       ).toEqual([
         [1, 'activation.changed'],
         [2, 'checkpoint.committed'],
@@ -758,6 +862,13 @@ describe('managed session message projection', () => {
       // them for a reader. The width distinction is documented at both
       // projection sites.
       await expect(sink.project()).resolves.toEqual([user]);
+      const messages: ChatRecord[] = [];
+      for await (const record of sink.iterateMessageRecords())
+        messages.push(record);
+      expect(messages).toEqual([user]);
+      const history: ChatRecord[] = [];
+      for await (const record of sink.iterateRecords()) history.push(record);
+      expect(history).toEqual([user, turnResult, fileHistory]);
     } finally {
       await harness.close();
     }
@@ -1254,12 +1365,12 @@ describe('managed session message projection', () => {
       HOLDS,
     );
 
-    const committed = harness.authority
-      .readEvents({
+    const committed = (
+      await harness.authority.readEvents({
         afterSequence: 0,
         limit: MANAGED_SESSION_LIMITS.maxReadEvents,
       })
-      .find((event) => event.kind === 'message.committed');
+    ).find((event) => event.kind === 'message.committed');
     const contentRef = committed?.payload['contentRef'];
     expect(contentRef).toMatchObject({ kind: 'managed-message-chunks' });
 

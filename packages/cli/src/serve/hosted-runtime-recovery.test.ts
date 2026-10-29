@@ -838,35 +838,62 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('re-attaches the Runtime Session when nothing is left to drive', async () => {
-    await parkAtAwaitRuntime('write_file', false, true);
-    const acquire = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
-      .mockResolvedValue();
-    const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
-    const replacement = await open('boot-2', false);
-    try {
-      const recovered = mustRecover(
-        await recoverHostedRuntimeTurn({
-          session: replacement,
-          sessionId: SESSION_ID,
-          cwd: root,
-          promptId: PROMPT_ID,
-          brokerOptions,
-          passive: false,
-        }),
-      );
-      // Nothing to re-dispatch, but the dead owner's Runtime Session still
-      // pins the Workspace — the takeover must hold it so the terminal route
-      // can hand it back.
-      expect(recovered).toBeDefined();
-      expect(recovered!.acquiredRuntime).toBe(true);
-      expect(acquire).toHaveBeenCalledOnce();
-      expect(execute).not.toHaveBeenCalled();
-    } finally {
-      await replacement.close();
-    }
-  });
+  it.each([false, true])(
+    're-attaches the Runtime Session when nothing is left to drive (archive-only=%s)',
+    async (archiveOnly) => {
+      await parkAtAwaitRuntime('write_file', false, true);
+      const acquire = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockResolvedValue();
+      const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+      const replacement = await open('boot-2', false);
+      try {
+        if (archiveOnly) {
+          await createManagedHarnessHandle(replacement).consumeRuntimeResults();
+          const authorize = replacement.authority.harnessRunAuthorization.bind(
+            replacement.authority,
+          );
+          vi.spyOn(
+            replacement.authority,
+            'harnessRunAuthorization',
+          ).mockImplementation(async () => {
+            const verdict = await authorize();
+            if (verdict.status !== 'runnable') return verdict;
+            const checkpoint = {
+              ...verdict.checkpoint,
+              tools: { ...verdict.checkpoint.tools!, items: [] },
+            };
+            return {
+              ...verdict,
+              checkpoint,
+            };
+          });
+        }
+        const recovered = mustRecover(
+          await recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive: false,
+          }),
+        );
+        // Nothing to re-dispatch, but the dead owner's Runtime Session still
+        // pins the Workspace — the takeover must hold it so the terminal route
+        // can hand it back.
+        expect(recovered).toBeDefined();
+        expect(recovered!.acquiredRuntime).toBe(true);
+        expect(recovered.report.executions).toMatchObject([
+          { executionCallId: EXECUTION_ID, status: { state: 'settled' } },
+        ]);
+        expect(acquire).toHaveBeenCalledOnce();
+        expect(execute).not.toHaveBeenCalled();
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('reports parked executions without dispatching on a passive load', async () => {
     await parkAtAwaitRuntime();
@@ -2528,7 +2555,9 @@ describe('recoverHostedRuntimeTurn', () => {
         toolProfile: true,
       });
       expect(runtime.kind).toBe('ready');
-      expect(replacement.authority.action(ACTION_ID)?.state).toBe('expired');
+      expect((await replacement.authority.action(ACTION_ID))?.state).toBe(
+        'expired',
+      );
       if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
       expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
       // The abandoned call meets the same cancelled response the other
@@ -2563,7 +2592,9 @@ describe('recoverHostedRuntimeTurn', () => {
           toolProfile: true,
         }),
       ).resolves.toEqual({ kind: 'held' });
-      expect(replacement.authority.action(ACTION_ID)?.state).toBe('requested');
+      expect((await replacement.authority.action(ACTION_ID))?.state).toBe(
+        'requested',
+      );
     } finally {
       await replacement.close();
     }

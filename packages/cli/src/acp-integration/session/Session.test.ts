@@ -28,9 +28,11 @@ import {
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { SessionTranscriptReader } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
   getApiHistoryPromptId,
+  getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { DaemonToolLoopState } from './Session.js';
@@ -607,6 +609,7 @@ describe('Session', () => {
     supportsMessageGroupDeletion: ReturnType<typeof vi.fn>;
     deleteMessageGroups: ReturnType<typeof vi.fn>;
     readActiveTranscriptChain: ReturnType<typeof vi.fn>;
+    readLastApiPromptCancellation: ReturnType<typeof vi.fn>;
     recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
@@ -827,6 +830,10 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    vi.spyOn(
+      SessionTranscriptReader.prototype,
+      'hasBackgroundNotification',
+    ).mockResolvedValue(false);
     // Self-hosted CI runners export QWEN_RUNTIME_DIR; it outranks
     // Storage.setRuntimeBaseDir, breaking the runtime-pinning assertions.
     vi.stubEnv('QWEN_RUNTIME_DIR', '');
@@ -1011,6 +1018,14 @@ describe('Session', () => {
       supportsMessageGroupDeletion: vi.fn().mockReturnValue(true),
       deleteMessageGroups: vi.fn(),
       readActiveTranscriptChain: vi.fn().mockResolvedValue([] as ChatRecord[]),
+      readLastApiPromptCancellation: vi.fn(
+        async (history: readonly Content[], trailing?: number) =>
+          getLastApiPromptCancellation(
+            history,
+            await mockChatRecordingService.readActiveTranscriptChain(),
+            trailing,
+          ),
+      ),
       recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
@@ -1097,6 +1112,7 @@ describe('Session', () => {
 
     mockConfig = {
       storage: {
+        getProjectRoot: vi.fn().mockReturnValue('/repo'),
         getRuntimeBaseDir: vi.fn(() => core.Storage.getRuntimeBaseDir()),
       },
       setApprovalMode: vi.fn(),
@@ -20115,6 +20131,175 @@ describe('Session', () => {
       expect(
         queued.filter((item) => item.taskId === completion.taskId),
       ).toHaveLength(0);
+    });
+
+    it.each([undefined, 'legacy'] as const)(
+      'keeps Legacy notification admission independent of Managed history (%s)',
+      async (engine) => {
+        mockConfig.getSessionExecutionEngine = vi.fn().mockReturnValue(engine);
+        vi.mocked(
+          SessionTranscriptReader.prototype.hasBackgroundNotification,
+        ).mockRejectedValue(new Error('Managed history is unavailable'));
+        const completion = {
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'legacy-worker-completion',
+          status: 'completed',
+          kind: 'agent' as const,
+        };
+        await expect(
+          session.enqueueBackgroundNotification(completion),
+        ).resolves.toEqual({ accepted: true });
+        await expect(
+          session.enqueueBackgroundNotification(completion),
+        ).resolves.toEqual({ accepted: true });
+        expect(
+          SessionTranscriptReader.prototype.hasBackgroundNotification,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('keeps every primed Legacy notification identity without a Managed cache limit', async () => {
+      mockConfig.getSessionExecutionEngine = vi.fn().mockReturnValue('legacy');
+      session.primeTurnState(0, [
+        'old-legacy-completion',
+        ...Array.from({ length: 2200 }, (_, index) => `legacy-${index}`),
+      ]);
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockRejectedValue(new Error('Managed history is unavailable'));
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Already delivered.',
+          modelText: '<task-notification />',
+          taskId: 'old-legacy-completion',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('queries canonical notification history after the positive cache has evicted an old task', async () => {
+      mockConfig.getSessionExecutionEngine = vi.fn().mockReturnValue('managed');
+      const completion = {
+        displayText: 'done',
+        modelText: '<task-notification />',
+        taskId: 'old-completion',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+      session.primeTurnState(0, [
+        completion.taskId,
+        ...Array.from({ length: 2200 }, (_, index) => `completion-${index}`),
+      ]);
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockResolvedValueOnce(true);
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).toHaveBeenCalledWith('test-session-id', completion.taskId);
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('uses the fixed restore proof and refuses an unavailable fresh canonical notification lookup', async () => {
+      mockConfig.getSessionExecutionEngine = vi.fn().mockReturnValue('managed');
+      const completion = {
+        displayText: 'done',
+        modelText: '<task-notification />',
+        taskId: 'restored-completion',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+      const restored = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false);
+      session.primeTurnState(0, [], restored);
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).not.toHaveBeenCalled();
+      const failure = new Error('canonical lookup unavailable');
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockRejectedValueOnce(failure);
+      await expect(
+        session.enqueueBackgroundNotification({
+          ...completion,
+          taskId: 'unproven-completion',
+        }),
+      ).rejects.toBe(failure);
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'legacy', 'managed'] as const)(
+      'preserves missing-transcript notification admission for engine %s',
+      async (engine) => {
+        mockConfig.getSessionExecutionEngine = vi.fn().mockReturnValue(engine);
+        const failure = Object.assign(new Error('transcript missing'), {
+          code: 'ENOENT',
+        });
+        vi.mocked(
+          SessionTranscriptReader.prototype.hasBackgroundNotification,
+        ).mockRejectedValueOnce(failure);
+        const admission = session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-first-notification',
+          status: 'completed',
+          kind: 'agent',
+        });
+        if (engine === 'managed') {
+          await expect(admission).rejects.toBe(failure);
+          expect(
+            mockChatRecordingService.recordNotificationStrict,
+          ).not.toHaveBeenCalled();
+        } else {
+          await expect(admission).resolves.toEqual({ accepted: true });
+          expect(
+            mockChatRecordingService.recordNotificationStrict,
+          ).toHaveBeenCalledOnce();
+        }
+      },
+    );
+
+    it('returns unaccepted for a recorder-less Legacy session with no transcript', async () => {
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockRejectedValueOnce(
+        Object.assign(new Error('transcript missing'), { code: 'ENOENT' }),
+      );
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-without-recorder',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: false });
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
     });
 
     it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {

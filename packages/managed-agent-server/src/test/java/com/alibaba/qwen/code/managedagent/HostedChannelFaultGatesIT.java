@@ -468,7 +468,7 @@ class HostedChannelFaultGatesIT {
                 "--qwen.managed-agent.internal-server.address=127.0.0.1",
                 "--qwen.managed-agent.internal-server.port=" + internal);
         internalPort = internal;
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
@@ -1333,12 +1333,12 @@ class HostedChannelFaultGatesIT {
                     assertThat(support.inputAcceptedCount(tenant, sessionId))
                             .as("the replay never commits a second input")
                             .isEqualTo(1);
-                    assertThat(modelCallsFor(fault))
-                            .as("the replay never re-runs the turn")
-                            .isEqualTo(1);
                     JsonNode replayed = support.drive(caseDir, "pull", base);
                     assertThat(replayed.path("sends")).hasSize(1);
                     HostedChannelGateSupport.assertSendsTo(replayed);
+                    assertThat(modelCallsFor(fault))
+                            .as("the replay never re-runs the turn")
+                            .isEqualTo(1);
                     assertThat(((Number) support.routeProjection(tenant,
                             sessionId).get("revision")).intValue())
                             .isEqualTo(1);

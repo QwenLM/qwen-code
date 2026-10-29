@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -232,11 +233,13 @@ it.each([
             'await_action',
           );
           requestId = authorization.checkpoint.approval!.requestId;
-          expect(session.authority.action(requestId)?.state).toBe('requested');
+          expect((await session.authority.action(requestId))?.state).toBe(
+            'requested',
+          );
         },
         { timeout: 10_000 },
       );
-      const action = session.authority.action(requestId)!;
+      const action = (await session.authority.action(requestId))!;
       const options = JSON.parse(
         (await session.resources.read(action.optionsRef!)).toString(),
       );
@@ -265,9 +268,11 @@ it.each([
       const plans = published.filter(
         (item) => item.kind === 'hosted-approval-continuation',
       );
-      const finalEvents = session.authority
-        .eventsInSequenceRange(1, session.authority.committedSequence)
-        .filter((event) => event.kind === 'hosted.batch.planned');
+      const finalEvents = (
+        await session.authority
+          .iterateEvents(1, session.authority.committedSequence)
+          .collect(1_000_000)
+      ).filter((event) => event.kind === 'hosted.batch.planned');
       expect(plans).toHaveLength(padding === 62_000 ? 2 : 0);
       expect(finalEvents).toHaveLength(padding === 62_000 ? 1 : 0);
       expect(published.every((item) => item.bytes <= limit)).toBe(true);
@@ -401,22 +406,27 @@ function approvalSelectionFixture(
           },
         },
       }),
-      eventsInSequenceRange: () => events,
+      iterateEvents: () =>
+        new ManagedHistoryQuery(async function* () {
+          yield* events;
+        }),
       action: (id: string) => actions.get(id),
     },
     sink: {
-      project: async () => [
-        {
-          uuid: 'current-batch',
-          type: 'assistant',
-          daemonPromptId: 'prompt',
-          message: {
-            parts: ['call-first', 'call-legacy'].map((id) => ({
-              functionCall: { id },
-            })),
+      async *iterateMessageRecords() {
+        yield* [
+          {
+            uuid: 'current-batch',
+            type: 'assistant',
+            daemonPromptId: 'prompt',
+            message: {
+              parts: ['call-first', 'call-legacy'].map((id) => ({
+                functionCall: { id },
+              })),
+            },
           },
-        },
-      ],
+        ];
+      },
     },
     resources: { read },
   } as unknown as ManagedSession;

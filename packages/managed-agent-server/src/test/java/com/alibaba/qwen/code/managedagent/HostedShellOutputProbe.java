@@ -317,16 +317,34 @@ final class HostedShellOutputProbe implements AutoCloseable {
         if (report == null) {
             return;
         }
-        // Cold load reads the journal before recording its own activation and release.
+        // Freeze startup recovery separately from later canonical history reads.
         assertThat(journal.subList(journal.size() - 2, journal.size()).stream().map(row -> row.get("operation")))
                 .containsExactly("installActivation", "releaseActivation");
-        assertThat(report.path("restoreTransactions").size()).isEqualTo(journal.size() - 2);
+        int restoreRevision = journal.size() - 2;
+        var restoreHead = report.path("restoreHead");
+        var restoreLast = journal.get(restoreRevision - 1);
+        assertThat(restoreHead.path("journalRevision").asInt()).isEqualTo(restoreRevision);
+        assertThat(restoreHead.path("committedSequence").asLong())
+                .isEqualTo(((Number) restoreLast.get("last_sequence")).longValue());
+        assertThat(restoreHead.path("lastCommitDigest").asText()).isEqualTo(restoreLast.get("commit_digest"));
+        assertThat(report.path("restoreTransactions").size()).isEqualTo(restoreRevision);
         for (int index = 0; index < report.path("restoreTransactions").size(); index++) {
             var restored = report.path("restoreTransactions").get(index);
             var row = journal.get(index);
+            assertThat(restored.path("journalRevision").asInt()).isEqualTo(index + 1);
             assertThat(restored.path("transactionId").asText()).isEqualTo(row.get("transaction_id"));
             assertThat(Base64.getDecoder().decode(restored.path("recordBytesBase64").asText())).isEqualTo((byte[]) row.get("record_bytes"));
             assertThat(restored.path("recordDigest").asText()).isEqualTo(row.get("record_digest"));
+        }
+        assertThat(report.path("postRestoreTransactions").isArray()).isTrue();
+        for (var observed : report.path("postRestoreTransactions")) {
+            int observedRevision = observed.path("journalRevision").asInt();
+            assertThat(observedRevision).isGreaterThan(restoreRevision).isLessThanOrEqualTo(journal.size());
+            var row = journal.get(observedRevision - 1);
+            assertThat(observed.path("transactionId").asText()).isEqualTo(row.get("transaction_id"));
+            assertThat(Base64.getDecoder().decode(observed.path("recordBytesBase64").asText()))
+                    .isEqualTo((byte[]) row.get("record_bytes"));
+            assertThat(observed.path("recordDigest").asText()).isEqualTo(row.get("record_digest"));
         }
         if (session.get("fault").toString().startsWith("receipt-")) {
             var target = report.path("target");

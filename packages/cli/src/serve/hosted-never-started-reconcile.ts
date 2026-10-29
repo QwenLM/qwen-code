@@ -137,7 +137,9 @@ export async function reconcileNeverStartedChildRuns(input: {
   const sessionKey: ManagedSessionKey =
     input.authority.sessionHeader.sessionKey;
   const candidates: ChildRun[] = [];
-  for (const entry of input.authority.extensionRecordsInDomain('child_run')) {
+  for await (const entry of input.authority.extensionRecordsInDomain(
+    'child_run',
+  )) {
     const body = entry.record;
     if (
       body === null ||
@@ -157,7 +159,7 @@ export async function reconcileNeverStartedChildRuns(input: {
   // claimed under, so a stranded record can rebuild its own Broker probe
   // without trusting an in-memory horror.
   const intents = new Map<string, ManagedSessionDurableRef>();
-  for (const event of input.authority.eventsInSequenceRange(
+  for await (const event of input.authority.iterateEvents(
     1,
     input.authority.committedSequence,
   )) {

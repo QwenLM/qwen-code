@@ -72,8 +72,8 @@ export async function readHostedTurnApprovalSelection(
     ManagedSessionApprovalSelection | undefined
   >,
 ): Promise<HostedApprovalSelection | undefined> {
-  const accepted = session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
+  const accepted = await session.authority
+    .iterateEvents(1, session.authority.committedSequence)
     .findLast(
       (event) =>
         event.kind === 'input.accepted' &&

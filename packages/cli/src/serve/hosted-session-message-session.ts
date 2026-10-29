@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -59,10 +60,10 @@ import {
 export interface HostedSessionMessageStore extends HostedChildAgentStore {
   readonly authority: HostedChildAgentStore['authority'] & {
     readonly committedSequence: number;
-    eventsInSequenceRange(
+    iterateEvents(
       from: number,
       through: number,
-    ): readonly ManagedSessionEvent[];
+    ): ManagedHistoryQuery<ManagedSessionEvent>;
   };
 }
 
@@ -194,8 +195,8 @@ export class HostedSessionMessageSession {
   ) {}
 
   /** The last committed body of one message chain in this journal. */
-  message(messageId: string): SessionMessage | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async message(messageId: string): Promise<SessionMessage | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'session_message',
       messageId,
     );
@@ -227,7 +228,7 @@ export class HostedSessionMessageSession {
       );
     }
     await this.children.serialized(async () => {
-      const sent = this.message(params.messageId);
+      const sent = await this.message(params.messageId);
       if (sent !== undefined) {
         if (
           sent.direction !== 'outbound' ||
@@ -255,13 +256,13 @@ export class HostedSessionMessageSession {
             message.childRunId === lineage.parentChildRunId,
         );
       const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
-      if (sentBefore.length >= limits.maxPerRun) {
+      if ((await sentBefore.count()) >= limits.maxPerRun) {
         throw new ManagedSessionRecordError(
           `This Session has sent its parent ${limits.maxPerRun} messages (budget_exhausted).`,
         );
       }
       if (
-        sentBefore.filter(isUndeliveredMessage).length >=
+        (await sentBefore.filter(isUndeliveredMessage).count()) >=
         limits.maxInFlightPerRun
       ) {
         throw new ManagedSessionRecordError(
@@ -390,7 +391,7 @@ export class HostedSessionMessageSession {
       let fromTaskId: string | null = null;
       let teammate: string | undefined;
       if (params.route === 'to_parent') {
-        const run = this.store.authority.extensionRecord(
+        const run = await this.store.authority.extensionRecord(
           'child_run',
           params.childRunId,
         );
@@ -410,12 +411,12 @@ export class HostedSessionMessageSession {
         // root is on the open team's roster. The reply hint stays H4d-b's
         // task id: a later team may reuse both names, and the task id
         // always reaches the chain that wrote.
-        teammate = hostedOpenTeamChainMember(
-          this.store.authority.extensionRecordsInDomain('team_state'),
-          new HostedChildChains(
-            this.store.authority.extensionRecordsInDomain('child_run'),
-          ),
-          params.childRunId,
+        teammate = (
+          await hostedOpenTeamChainMember(
+            this.store.authority.extensionRecordsInDomain('team_state'),
+            new HostedChildChains(this.store.authority),
+            params.childRunId,
+          )
         )?.name;
       } else if (
         this.lineage?.parentSessionId !== params.senderSessionId ||
@@ -425,7 +426,7 @@ export class HostedSessionMessageSession {
           'Session message to a child must follow its recorded lineage.',
         );
       }
-      const received = this.message(params.messageId);
+      const received = await this.message(params.messageId);
       if (received !== undefined) {
         if (
           received.direction !== 'inbound' ||
@@ -510,7 +511,7 @@ export class HostedSessionMessageSession {
    */
   private async inPlanMode(): Promise<boolean> {
     try {
-      const text = await hostedFirstInputText(this.store);
+      const text = await await hostedFirstInputText(this.store);
       return text !== undefined && hasPlanModeBlock(text);
     } catch {
       return true;
@@ -526,7 +527,7 @@ export class HostedSessionMessageSession {
    */
   async consume(messageId: string): Promise<void> {
     await this.store.authority.settlePendingAppend();
-    const receipt = this.message(messageId);
+    const receipt = await this.message(messageId);
     if (receipt === undefined || receipt.direction !== 'inbound') {
       throw new ManagedSessionRecordError(
         `Session message ${messageId} has no receipt here.`,
@@ -534,8 +535,8 @@ export class HostedSessionMessageSession {
     }
     if (receipt.run.delivery?.state === 'consumed') return;
     const authority = this.store.authority;
-    const settled = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
+    const settled = await authority
+      .iterateEvents(1, authority.committedSequence)
       .filter(
         (event) =>
           event.kind === 'turn.settled' &&
@@ -560,7 +561,7 @@ export class HostedSessionMessageSession {
    * consumed. An input that carries no receipt here is not a message's.
    */
   async markConsumed(inputId: string): Promise<void> {
-    const receipt = this.store.authority
+    const receipt = await this.store.authority
       .extensionRecordsInDomain('session_message')
       .map((entry) => parseSessionMessage(entry.record))
       .find(
@@ -580,7 +581,7 @@ export class HostedSessionMessageSession {
     step: (previous: SessionMessage) => SessionMessage,
   ): Promise<void> {
     return this.children.serialized(async () => {
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'session_message',
         messageId,
       );

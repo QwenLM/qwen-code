@@ -445,7 +445,9 @@ describe('child Workspace receipt (#13753 I2)', () => {
           sessionKey,
         );
         await children.admit(launchParams({ workspaceMode }));
-        expect(children.record('run-1')!.workspaceMode).toBe(workspaceMode);
+        expect((await children.record('run-1'))!.workspaceMode).toBe(
+          workspaceMode,
+        );
         await children.dispatchStarted('run-1', {
           dispatchId: 'dispatch-1',
           runtime: BINDING,
@@ -463,9 +465,9 @@ describe('child Workspace receipt (#13753 I2)', () => {
         await children.accept('run-1', {
           notification: { description: 'audit the diff' },
         });
-        const input = authority
-          .readEvents({ afterSequence: 0, limit: 64 })
-          .find((event) => event.kind === 'input.accepted')!;
+        const input = (
+          await authority.readEvents({ afterSequence: 0, limit: 64 })
+        ).find((event) => event.kind === 'input.accepted')!;
         const contentRef = (input.payload as Record<string, unknown>)[
           'contentRef'
         ] as Parameters<typeof harness.store.read>[0];
@@ -520,7 +522,7 @@ describe('child Workspace receipt (#13753 I2)', () => {
       await expect(
         children.admit(launchParams({ workspaceMode: 'shared' })),
       ).rejects.toThrow('different evidence');
-      expect(children.record('run-1')!.workspaceMode).toBe('worktree');
+      expect((await children.record('run-1'))!.workspaceMode).toBe('worktree');
     });
   });
 });
@@ -534,7 +536,7 @@ describe('hosted child agent session (H4b)', () => {
         sessionKey,
       );
       await children.admit(launchParams());
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -566,7 +568,10 @@ describe('hosted child agent session (H4b)', () => {
       });
       // The acceptance and its notification input + wake ride one
       // transaction: domain.committed then input.accepted/wake.requested.
-      const events = authority.readEvents({ afterSequence: 0, limit: 64 });
+      const events = await authority.readEvents({
+        afterSequence: 0,
+        limit: 64,
+      });
       const kinds = events.map((event) => event.kind);
       const acceptanceIndex = kinds.lastIndexOf('domain.committed');
       expect(kinds.slice(acceptanceIndex)).toEqual([
@@ -579,18 +584,18 @@ describe('hosted child agent session (H4b)', () => {
       expect((input.payload as Record<string, unknown>)['source']).toBe(
         'child_agent',
       );
-      expect(authority.taskViews()[0]).toMatchObject({
+      expect((await authority.taskViews())[0]).toMatchObject({
         kind: 'child_agent',
         state: 'completed',
       });
       await children.markAccepted('run-1');
       await children.markConsumed('run-1');
-      const record = children.record('run-1')!;
+      const record = (await children.record('run-1'))!;
       expect(record.run.delivery).toEqual({
         target: 'session',
         state: 'consumed',
       });
-      expect(children.acceptance('run-1')!.run.delivery).toEqual({
+      expect((await children.acceptance('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'consumed',
       });
@@ -612,31 +617,33 @@ describe('hosted child agent session (H4b)', () => {
       await children.accept('run-1', {
         notification: { description: 'audit the diff' },
       });
-      expect(children.record('run-1')!.run.delivery).toEqual({
+      expect((await children.record('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'accepting',
       });
       // The wake turn consumed before the relay's accepted commit landed:
       // accepting → accepted → consumed in two ordered revisions.
       await children.markConsumed('run-1');
-      expect(children.record('run-1')!.run.delivery).toEqual({
+      expect((await children.record('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'consumed',
       });
-      expect(children.acceptance('run-1')!.run.delivery).toEqual({
+      expect((await children.acceptance('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'consumed',
       });
       // The relay's later accepted is now a no-op, not a rewinding commit.
-      const eventsBefore = authority.readEvents({
-        afterSequence: 0,
-        limit: 64,
-      }).length;
+      const eventsBefore = (
+        await authority.readEvents({
+          afterSequence: 0,
+          limit: 64,
+        })
+      ).length;
       await children.markAccepted('run-1');
-      expect(authority.readEvents({ afterSequence: 0, limit: 64 }).length).toBe(
-        eventsBefore,
-      );
-      expect(children.record('run-1')!.run.delivery).toEqual({
+      expect(
+        (await authority.readEvents({ afterSequence: 0, limit: 64 })).length,
+      ).toBe(eventsBefore);
+      expect((await children.record('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'consumed',
       });
@@ -660,16 +667,21 @@ describe('hosted child agent session (H4b)', () => {
         result: Buffer.from('{"summary":"clean"}', 'utf8'),
         receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
       });
-      const before = authority.readEvents({
+      const before = (
+        await authority.readEvents({
+          afterSequence: 0,
+          limit: 64,
+        })
+      ).length;
+      await children.accept('run-1');
+      const events = await authority.readEvents({
         afterSequence: 0,
         limit: 64,
-      }).length;
-      await children.accept('run-1');
-      const events = authority.readEvents({ afterSequence: 0, limit: 64 });
+      });
       expect(events.slice(before).map((event) => event.kind)).toEqual([
         'domain.committed',
       ]);
-      const acceptance = children.acceptance('run-1')!;
+      const acceptance = (await children.acceptance('run-1'))!;
       expect(acceptance.parentExecutionCallId).toBe('call-1');
     });
   });
@@ -690,10 +702,12 @@ describe('hosted child agent session (H4b)', () => {
         notification: { description: 'audit the diff' },
       });
       await children.markAccepted('run-1');
-      const eventsBefore = authority.readEvents({
-        afterSequence: 0,
-        limit: 64,
-      }).length;
+      const eventsBefore = (
+        await authority.readEvents({
+          afterSequence: 0,
+          limit: 64,
+        })
+      ).length;
       // Restarting the funnel (a harness replacement) must not restate any
       // already-committed revision: every verb is replay-safe by command id
       // or by deep-equal skip.
@@ -710,9 +724,9 @@ describe('hosted child agent session (H4b)', () => {
         notification: { description: 'audit the diff' },
       });
       await restarted.markAccepted('run-1');
-      expect(authority.readEvents({ afterSequence: 0, limit: 64 }).length).toBe(
-        eventsBefore,
-      );
+      expect(
+        (await authority.readEvents({ afterSequence: 0, limit: 64 })).length,
+      ).toBe(eventsBefore);
     });
   });
 
@@ -736,7 +750,7 @@ describe('hosted child agent session (H4b)', () => {
     await withAuthority(
       harness,
       async (authority) => {
-        expect(authority.taskViews()).toEqual([
+        expect(await authority.taskViews()).toEqual([
           {
             taskId: TASK_ID,
             sessionId,
@@ -753,11 +767,11 @@ describe('hosted child agent session (H4b)', () => {
           { authority, resources: harness.store },
           sessionKey,
         );
-        expect(children.record('run-1')!.run.delivery).toEqual({
+        expect((await children.record('run-1'))!.run.delivery).toEqual({
           target: 'session',
           state: 'accepted',
         });
-        expect(children.acceptance('run-1')!.run.delivery).toEqual({
+        expect((await children.acceptance('run-1'))!.run.delivery).toEqual({
           target: 'session',
           state: 'accepted',
         });
@@ -782,7 +796,7 @@ describe('hosted child agent session (H4b)', () => {
           receipt: Buffer.from('{}', 'utf8'),
         }),
       ).rejects.toThrow('byte_limit');
-      expect(children.record('run-1')!.run.state).toBe('running');
+      expect((await children.record('run-1'))!.run.state).toBe('running');
     });
   });
 
@@ -799,16 +813,16 @@ describe('hosted child agent session (H4b)', () => {
         runtime: BINDING,
       });
       await children.requestStop('run-1');
-      expect(children.record('run-1')).toMatchObject({
+      expect(await children.record('run-1')).toMatchObject({
         stopRequested: true,
         run: { state: 'running' },
       });
-      expect(authority.taskViews()[0]).toMatchObject({
+      expect((await authority.taskViews())[0]).toMatchObject({
         state: 'running',
         runtimeState: 'draining',
       });
       await children.settleCancelled('run-1', { started: false });
-      expect(children.record('run-1')).toMatchObject({
+      expect(await children.record('run-1')).toMatchObject({
         stopReason: 'stop_requested',
         run: {
           state: 'cancelled',
@@ -826,15 +840,22 @@ describe('hosted child agent session (H4b)', () => {
         { authority, resources: harness.store },
         sessionKey,
       );
-      expect(children.activeChildRunsOf('scope-main')).toHaveLength(0);
+      expect(
+        await children.activeChildRunsOf('scope-main').collect(1_000_000),
+      ).toHaveLength(0);
       await settleThroughAttach(children);
       await children.admit(
         launchParams({ childRunId: 'run-2', executionCallId: 'call-2' }),
       );
       expect(
-        children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
+        await children
+          .activeChildRunsOf('scope-main')
+          .map((run) => run.childRunId)
+          .collect(1_000_000),
       ).toEqual(['run-1', 'run-2']);
-      expect(children.activeChildRunsOf('scope-other')).toHaveLength(0);
+      expect(
+        await children.activeChildRunsOf('scope-other').collect(1_000_000),
+      ).toHaveLength(0);
       await children.settleCompleted('run-1', {
         result: Buffer.from('{"ok":true}', 'utf8'),
         receipt: Buffer.from('{}', 'utf8'),
@@ -844,7 +865,10 @@ describe('hosted child agent session (H4b)', () => {
       );
       await children.settleCancelled('run-3', { started: false });
       expect(
-        children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
+        await children
+          .activeChildRunsOf('scope-main')
+          .map((run) => run.childRunId)
+          .collect(1_000_000),
       ).toEqual(['run-2']);
     });
   });
@@ -870,7 +894,7 @@ describe('hosted child agent session (H4b)', () => {
         {
           domain: 'child_run',
           record: {
-            ...children.record('run-1')!,
+            ...(await children.record('run-1'))!,
             kind: 'workflow',
             childRunId: 'workflow-1',
             inputRef,
@@ -879,15 +903,18 @@ describe('hosted child agent session (H4b)', () => {
         { class: 'trusted_entry' },
       );
       expect(
-        children
+        await children
           .launchedChildRunsOf('scope-main')
-          .map((run) => [run.kind, run.childRunId]),
+          .map((run) => [run.kind, run.childRunId])
+          .collect(1_000_000),
       ).toEqual([
         ['child_agent', 'run-1'],
         ['workflow', 'workflow-1'],
       ]);
-      expect(children.activeChildRunsOf('scope-main')).toHaveLength(2);
-      expect(children.record('workflow-1')).toMatchObject({
+      expect(
+        await children.activeChildRunsOf('scope-main').collect(1_000_000),
+      ).toHaveLength(2);
+      expect(await children.record('workflow-1')).toMatchObject({
         kind: 'workflow',
         childRunId: 'workflow-1',
       });
@@ -910,11 +937,20 @@ describe('hosted child agent session (H4b)', () => {
         executionCallId: 'call-shell',
         args: { command: 'sleep 60', is_background: true },
       });
-      expect(authority.extensionRecordsInDomain('child_run')).toHaveLength(2);
       expect(
-        children.launchedChildRunsOf('scope-main').map((run) => run.childRunId),
+        await authority
+          .extensionRecordsInDomain('child_run')
+          .collect(1_000_000),
+      ).toHaveLength(2);
+      expect(
+        await children
+          .launchedChildRunsOf('scope-main')
+          .map((run) => run.childRunId)
+          .collect(1_000_000),
       ).toEqual(['run-1']);
-      expect(children.activeChildRunsOf('scope-main')).toHaveLength(1);
+      expect(
+        await children.activeChildRunsOf('scope-main').collect(1_000_000),
+      ).toHaveLength(1);
     });
   });
 
@@ -946,7 +982,9 @@ describe('hosted child agent session (H4b)', () => {
       }
       // The parked runs are evidence, not live work — the scope's slots
       // are all free.
-      expect(children.activeChildRunsOf('scope-main')).toHaveLength(0);
+      expect(
+        await children.activeChildRunsOf('scope-main').collect(1_000_000),
+      ).toHaveLength(0);
       // ...so the next launch is admitted, past the count the blocked
       // runs would have held without the exclusion.
       await children.admit(
@@ -956,7 +994,10 @@ describe('hosted child agent session (H4b)', () => {
         }),
       );
       expect(
-        children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
+        await children
+          .activeChildRunsOf('scope-main')
+          .map((run) => run.childRunId)
+          .collect(1_000_000),
       ).toEqual(['run-next']);
     });
   });
@@ -980,9 +1021,9 @@ describe('hosted child agent session (H4b)', () => {
       await children.settleRecoveryBlocked('run-1', {
         reason: 'runtime_lost',
       });
-      const input = authority
-        .readEvents({ afterSequence: 0, limit: 64 })
-        .findLast((event) => event.kind === 'input.accepted');
+      const input = (
+        await authority.readEvents({ afterSequence: 0, limit: 64 })
+      ).findLast((event) => event.kind === 'input.accepted');
       expect(input?.payload['turnId']).toBe('run-1:blocked:notify');
       const text = JSON.parse(
         (
@@ -995,7 +1036,7 @@ describe('hosted child agent session (H4b)', () => {
       ).text as string;
       expect(text).toContain('<status>blocked</status>');
       expect(text).toContain(
-        `<result>\n${childRunEndedText(children.record('run-1')!)}\n</result>`,
+        `<result>\n${childRunEndedText((await children.record('run-1'))!)}\n</result>`,
       );
       expect(text).toContain('recovery blocked (outcome unknown).');
       expect(text).not.toContain('running');
@@ -1036,19 +1077,21 @@ describe('hosted child agent session (H4b)', () => {
         receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
       };
       const resultRef = await children.settleCompleted('run-1', payload);
-      const eventsBefore = authority.readEvents({
-        afterSequence: 0,
-        limit: 64,
-      }).length;
+      const eventsBefore = (
+        await authority.readEvents({
+          afterSequence: 0,
+          limit: 64,
+        })
+      ).length;
       // The same replay after a lost reply answers with the committed
       // copies and no second terminal revision.
       await expect(children.settleCompleted('run-1', payload)).resolves.toEqual(
         resultRef,
       );
-      expect(authority.readEvents({ afterSequence: 0, limit: 64 }).length).toBe(
-        eventsBefore,
-      );
-      expect(children.record('run-1')!.resultRef).toEqual(resultRef);
+      expect(
+        (await authority.readEvents({ afterSequence: 0, limit: 64 })).length,
+      ).toBe(eventsBefore);
+      expect((await children.record('run-1'))!.resultRef).toEqual(resultRef);
     });
   });
 
@@ -1064,20 +1107,22 @@ describe('hosted child agent session (H4b)', () => {
         result: Buffer.from('审阅通过', 'utf8'),
         receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
       });
-      const eventsBefore = authority.readEvents({
-        afterSequence: 0,
-        limit: 64,
-      }).length;
+      const eventsBefore = (
+        await authority.readEvents({
+          afterSequence: 0,
+          limit: 64,
+        })
+      ).length;
       await expect(
         children.settleCompleted('run-1', {
           result: Buffer.from('审阅不通过', 'utf8'),
           receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
         }),
       ).rejects.toThrow('was already settled with a different result');
-      expect(authority.readEvents({ afterSequence: 0, limit: 64 }).length).toBe(
-        eventsBefore,
-      );
-      expect(children.record('run-1')!.run.state).toBe('settled');
+      expect(
+        (await authority.readEvents({ afterSequence: 0, limit: 64 })).length,
+      ).toBe(eventsBefore);
+      expect((await children.record('run-1'))!.run.state).toBe('settled');
     });
   });
 });
@@ -1119,7 +1164,7 @@ describe('hosted workflow child session (#13803)', () => {
       expect(envelope.script).toBe(SCRIPT);
       expect(inputRef.kind).toBe('managed-input');
       const taskId = `task_${managedExtensionRecordKey(sessionId, 'child_run', 'run-1')}`;
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId,
           sessionId,
@@ -1151,13 +1196,13 @@ describe('hosted workflow child session (#13803)', () => {
       await children.accept('run-1', {
         notification: { description: 'workflow/audit' },
       });
-      const acceptance = children.acceptance('run-1');
+      const acceptance = await children.acceptance('run-1');
       expect(acceptance).toBeDefined();
       // The notification names the record's own kind, so the wake and
       // consumption predicates see a workflow-sourced input.
-      const input = authority
-        .readEvents({ afterSequence: 0, limit: 64 })
-        .findLast((event) => event.kind === 'input.accepted');
+      const input = (
+        await authority.readEvents({ afterSequence: 0, limit: 64 })
+      ).findLast((event) => event.kind === 'input.accepted');
       expect(input?.payload['source']).toBe('workflow');
       expect(input?.payload['turnId']).toBe('run-1:accept:notify');
       // The funnel feeds the renderer the record's kind — the pure
@@ -1175,7 +1220,7 @@ describe('hosted workflow child session (#13803)', () => {
       expect(notified).toContain('Workflow child "workflow/audit" finished.');
       await children.markAccepted('run-1');
       await children.markConsumed('run-1');
-      expect(children.record('run-1')!.run.delivery).toEqual({
+      expect((await children.record('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'consumed',
       });
@@ -1193,7 +1238,7 @@ describe('hosted workflow child session (#13803)', () => {
       const first = await children.admitWorkflow(workflowParams());
       const replayed = await children.admitWorkflow(workflowParams());
       expect(replayed.inputRef).toEqual(first.inputRef);
-      expect(children.record('run-1')!.run.definition).toEqual(
+      expect((await children.record('run-1'))!.run.definition).toEqual(
         WORKFLOW_DEFINITION,
       );
       await expect(
@@ -1223,12 +1268,12 @@ describe('hosted workflow child session (#13803)', () => {
       });
       await children.requestStop('run-1');
       await children.settleCancelled('run-1', { started: false });
-      expect(children.record('run-1')).toMatchObject({
+      expect(await children.record('run-1')).toMatchObject({
         kind: 'workflow',
         stopReason: 'stop_requested',
         stopRequested: true,
       });
-      expect(children.record('run-1')!.run.delivery).toEqual({
+      expect((await children.record('run-1'))!.run.delivery).toEqual({
         target: 'session',
         state: 'cancelled',
       });
@@ -1253,10 +1298,10 @@ describe('hosted workflow child session (#13803)', () => {
           started: false,
         });
       }
-      expect(childRunEndedText(children.record('run-1')!)).toMatch(
+      expect(childRunEndedText((await children.record('run-1'))!)).toMatch(
         /^Child agent run failed \(/,
       );
-      expect(childRunEndedText(children.record('run-2')!)).toMatch(
+      expect(childRunEndedText((await children.record('run-2'))!)).toMatch(
         /^Workflow child run failed \(/,
       );
     });
@@ -1342,7 +1387,7 @@ describe('public child launches', () => {
           launchParams({ childRunId: 'run-2', publicLaunch: snapshot }),
         ),
       ).rejects.toThrow('disabled');
-      expect(children.record('run-2')).toBeUndefined();
+      expect(await children.record('run-2')).toBeUndefined();
     });
   });
 
@@ -1372,8 +1417,8 @@ describe('public child launches', () => {
         cancelled.add('source-1');
       });
       await children.cancelSourcePrompt('source-1');
-      expect(children.record('run-1')!.stopRequested).toBe(true);
-      expect(children.record('run-2')!.stopRequested).toBe(false);
+      expect((await children.record('run-1'))!.stopRequested).toBe(true);
+      expect((await children.record('run-2'))!.stopRequested).toBe(false);
       await expect(
         children.admit(
           launchParams({ childRunId: 'run-3', publicLaunch: snapshot }),
@@ -1386,15 +1431,17 @@ describe('public child launches', () => {
       await children.accept('run-1', {
         notification: { description: 'late result' },
       });
-      expect(children.record('run-1')!.resultRef).toBeDefined();
+      expect((await children.record('run-1'))!.resultRef).toBeDefined();
       expect(
-        authority
-          .eventsInSequenceRange(1, authority.committedSequence)
-          .filter(
-            (event) =>
-              event.kind === 'input.accepted' &&
-              event.payload['turnId'] === 'run-1:accept:notify',
-          ),
+        (
+          await authority
+            .iterateEvents(1, authority.committedSequence)
+            .collect(1_000_000)
+        ).filter(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === 'run-1:accept:notify',
+        ),
       ).toEqual([]);
       expect(await children.cancelledNotification('run-1:accept:notify')).toBe(
         true,
@@ -1409,9 +1456,9 @@ describe('public child launches', () => {
           (id) => cancelled.has(id),
         );
         await restored.stopCancelledSources();
-        expect(restored.record('run-1')!.stopRequested).toBe(true);
+        expect((await restored.record('run-1'))!.stopRequested).toBe(true);
         expect(await restored.publicLaunchSnapshot('run-1')).toEqual(snapshot);
-        expect(restored.record('run-2')!.stopRequested).toBe(false);
+        expect((await restored.record('run-2'))!.stopRequested).toBe(false);
       },
       { create: false },
     );
