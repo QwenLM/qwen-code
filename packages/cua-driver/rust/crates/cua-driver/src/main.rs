@@ -393,7 +393,7 @@ fn main() {
             }
         }
         let (initialized_tx, initialized_rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let code = match private_worker::run(generation, Some(initialized_tx)) {
                 Ok(()) => 0,
                 Err(error) => {
@@ -406,8 +406,10 @@ fn main() {
             // worker process lifetime.
             std::process::exit(code);
         });
-        if initialized_rx.recv().unwrap_or(false) {
+        if initialized_rx.recv().unwrap_or(false) && platform_macos::session::has_graphic_access() {
             platform_macos::pip::run_appkit_main_loop();
+        } else {
+            let _ = worker.join();
         }
         return;
     }

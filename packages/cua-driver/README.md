@@ -163,14 +163,17 @@ through `qwen-cua-driver call`.
 The native agent cursor is enabled by default. On macOS, a local PiP also
 updates the two most recently observed, authorized windows in each session,
 including while the agent is idle. Drag a card or its Move preview handle to move the borderless window.
-Hover to reveal its floating controls, or close it to stop that preview. It does not forward input to the target app. Use
+Hover to reveal its floating controls, or close it to stop that preview; a later authorized observation can recreate it. It does not forward input to the target app. Use
 `--no-overlay` and `--no-pip` when starting the owning host to disable them;
 `experimental_pip: false` in `~/.cua-driver/config.json` also disables PiP.
-Restart the owning host after editing the file, preserving its other keys.
+Restart the owning host after changing flags or editing the file, preserving its other keys.
+For the installed app's default MCP proxy, restart the app-owned daemon.
+Restarting only the MCP client or proxy does not reconfigure an existing daemon.
 CLI flags take precedence: remove an explicit `--pip` or `--experimental-pip`
-if the file should control the setting. Close or disable PiP before sharing
-or recording the desktop if its mirrored windows should not be visible;
-screen sharing is not detected automatically.
+if the file should control the setting. Disable PiP and restart its owning
+host before sharing or recording the desktop if its mirrored windows should
+not be visible. Closing the panel alone is temporary; screen sharing is not
+detected automatically.
 Windows and X11 retain cursor support; PiP is macOS-only.
 
 ## 0.20 runtime and SDK surface

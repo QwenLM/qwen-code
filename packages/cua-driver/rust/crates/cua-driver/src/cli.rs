@@ -1148,6 +1148,27 @@ impl std::fmt::Display for LaunchDaemonError {
 #[cfg(target_os = "macos")]
 impl std::error::Error for LaunchDaemonError {}
 
+#[cfg(any(target_os = "macos", test))]
+fn native_ui_args(args: impl Iterator<Item = String>) -> Vec<String> {
+    let mut args = args;
+    let mut forwarded = Vec::new();
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--no-overlay" | "--no-pip" | "--experimental-pip" | "--pip" => {
+                forwarded.push(argument)
+            }
+            "--experimental-pip-geometry" => {
+                forwarded.push(argument);
+                if let Some(value) = args.next() {
+                    forwarded.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    forwarded
+}
+
 #[cfg(target_os = "macos")]
 pub fn launch_daemon_and_wait(
     socket_path: &str,
@@ -1187,14 +1208,7 @@ pub fn launch_daemon_and_wait(
     if claude_code_compat {
         open_args.push("--claude-code-computer-use-compat");
     }
-    let ui_flags: Vec<_> = std::env::args()
-        .filter(|argument| {
-            matches!(
-                argument.as_str(),
-                "--no-overlay" | "--no-pip" | "--experimental-pip" | "--pip"
-            )
-        })
-        .collect();
+    let ui_flags = native_ui_args(std::env::args());
     for flag in &ui_flags {
         open_args.push(flag.as_str());
     }
@@ -3994,6 +4008,30 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn native_ui_arguments_preserve_geometry_and_toggle_order() {
+        let argv = args(&[
+            "mcp",
+            "--no-pip",
+            "--experimental-pip-geometry",
+            "600x400+-100+25",
+            "--pip",
+        ]);
+        assert_eq!(
+            native_ui_args(argv.into_iter()),
+            args(&[
+                "--no-pip",
+                "--experimental-pip-geometry",
+                "600x400+-100+25",
+                "--pip"
+            ])
+        );
+        assert_eq!(
+            native_ui_args(args(&["mcp", "--no-overlay", "--socket", "/tmp/socket"]).into_iter()),
+            args(&["--no-overlay"])
+        );
     }
 
     #[test]

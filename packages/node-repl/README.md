@@ -173,8 +173,13 @@ application from that observation. The global `cua` is already loaded.
 The native agent cursor is enabled by default. macOS also shows a live local
 PiP for the session's two most recently observed, authorized windows. It
 refreshes while JavaScript is idle. Drag a card or its Move preview handle to move the borderless window.
-Hover to reveal its floating controls, or close it to stop the preview. `js_reset` clears the owning cursor and preview. Start the
-server with `--no-overlay` or `--no-pip` to disable either surface.
+Hover to reveal its floating controls, or close it to stop that preview; a later authorized observation can recreate it. `js_reset` clears the owning cursor and preview. Start the
+ordinary MCP server with `--no-overlay` or `--no-pip` to disable either surface.
+For desktop relay, set `"experimental_pip": false` in the local Mac's
+`~/.cua-driver/config.json`, preserving other keys, then restart the relay.
+Relay install arguments are not forwarded to its child server.
+Disable PiP and restart its host before sharing the desktop if its mirrored
+windows should not be visible; closing the current panel is only temporary.
 
 On macOS, grant Accessibility and Screen Recording to the responsible host
 shown by macOS (the client, terminal, or Node process, depending on how you

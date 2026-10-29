@@ -104,6 +104,7 @@ impl Presentation {
 
 struct Handles {
     session: String,
+    slot: usize,
     panel: *mut AnyObject,
     root: *mut AnyObject,
     cards: [CardViews; 2],
@@ -315,6 +316,13 @@ fn initial_origin(
     }
 }
 
+fn preview_slot(occupied: impl Iterator<Item = usize>) -> usize {
+    let occupied: Vec<_> = occupied.collect();
+    (0..5)
+        .find(|slot| !occupied.contains(slot))
+        .unwrap_or(occupied.len() % 5)
+}
+
 unsafe fn available(panel: *mut AnyObject) -> Option<NSRect> {
     let mut screen: *mut AnyObject = if panel.is_null() {
         std::ptr::null_mut()
@@ -446,6 +454,7 @@ mod tests {
         let nil = std::ptr::null_mut();
         let handles = Rc::new(Handles {
             session: session.into(),
+            slot: 0,
             panel,
             root: nil,
             cards: std::array::from_fn(|_| CardViews {
@@ -529,6 +538,22 @@ mod tests {
         let explicit = initial_origin(&config, screen, size, 0);
         assert_eq!(explicit, (-400.0, 322.0));
         assert_eq!(initial_origin(&config, screen, size, 1), explicit);
+    }
+
+    #[test]
+    fn closing_an_older_owner_frees_its_default_placement_slot() {
+        let mut owners = vec![0, 1];
+        assert_eq!(preview_slot(owners.iter().copied()), 2);
+        owners.remove(0);
+        let slot = preview_slot(owners.iter().copied());
+        assert_eq!(slot, 0);
+        let config = pip_preview::PipConfig::default();
+        let screen = rect([0.0, 0.0, 1800.0, 1000.0]);
+        assert_ne!(
+            initial_origin(&config, screen, (400.0, 300.0), slot),
+            initial_origin(&config, screen, (400.0, 300.0), owners[0])
+        );
+        assert!(preview_slot(0..5) < 5);
     }
 
     #[test]
@@ -984,7 +1009,8 @@ unsafe fn create(
     let bounds = card_bounds(config, &sizes, screen);
     let layout = state::layout(&sizes, sizes.len() - 1, bounds);
     let (width, height) = layout.size;
-    let slot = WINDOWS.with(|windows| windows.borrow().len());
+    let slot =
+        WINDOWS.with(|windows| preview_slot(windows.borrow().values().map(|handles| handles.slot)));
     let (x, y) = initial_origin(config, screen, layout.size, slot);
     let panel: *mut AnyObject = msg_send![panel_class(), alloc];
     let panel: *mut AnyObject = msg_send![panel, initWithContentRect: rect([x, y, width, height]) styleMask: 128u64 backing: 2u64 defer: false];
@@ -1078,6 +1104,7 @@ unsafe fn create(
     let point: NSPoint = msg_send![class!(NSEvent), mouseLocation];
     Some(Rc::new(Handles {
         session: session.to_owned(),
+        slot,
         panel,
         root,
         cards,

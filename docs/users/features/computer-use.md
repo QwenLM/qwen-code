@@ -71,11 +71,11 @@ The server executes JavaScript with ordinary Node.js permissions and follows the
 
 `js` completes in one call and defaults to a 30-second timeout. A timeout can leave external effects; observe before retrying. `js_reset` discards bindings and gracefully closes the owning native/browser session. After context compaction call `cua.rewriteDocumentation()` before continuing.
 
-The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. The borderless window starts near the lower-right; drag a card or its Move preview handle to reposition it. Hover reveals floating controls and brings a rear card forward. Close it to stop the preview; the image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
+The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. The borderless window starts near the lower-right; drag a card or its Move preview handle to reposition it. Hover reveals floating controls and brings a rear card forward. Close it to stop that preview; a later authorized observation can create it again. The image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
 
-To disable PiP without changing the MCP registration, set `"experimental_pip": false` in `~/.cua-driver/config.json`, preserving its other keys, then restart the owning MCP server or runtime. This existing key is retained for compatibility. CLI flags override the file: remove any explicit `--pip` or `--experimental-pip` flag if you want the file to control the setting.
+To disable PiP without changing the MCP registration, set `"experimental_pip": false` in `~/.cua-driver/config.json`, preserving its other keys, then restart the owning MCP server or runtime. This existing key is retained for compatibility. The server's `--no-pip` argument also disables PiP and takes precedence over the file.
 
-The preview may be visible to others when you share or record the desktop, including during a full-screen presentation. Close it before sharing, or disable it before starting the server; sharing is not detected automatically.
+The preview may be visible to others when you share or record the desktop, including during a full-screen presentation. For a persistent opt-out, disable PiP and restart its owning runtime before sharing; closing the current panel alone does not prevent a later observation from recreating it. Sharing is not detected automatically.
 
 ## Remote desktop relay
 

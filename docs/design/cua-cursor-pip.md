@@ -28,7 +28,7 @@ One process owns AppKit infrastructure. Preview data and cleanup are runtime/ses
 
 ## Native floating-card presentation
 
-The panel joins all Spaces with stationary, cycle-excluded behavior and uses only AppKit's FullScreenAuxiliary full-screen role. It never requests FullScreenPrimary or FullScreenNone. It may appear in desktop sharing or recording; automatic sharing detection is outside this feature, and users can close or disable the preview before sharing.
+The panel joins all Spaces with stationary, cycle-excluded behavior and uses only AppKit's FullScreenAuxiliary full-screen role. It never requests FullScreenPrimary or FullScreenNone. It may appear in desktop sharing or recording; automatic sharing detection is outside this feature. Closing stops the current preview, but later authorized observations may recreate it. A persistent sharing opt-out uses the existing disable flag or configuration and restarts the owning host.
 
 The preview is one independent, borderless, nonactivating NSPanel per private session. Its background is visually transparent and it has no permanent title bar. A near-clear native background keeps the gaps in the local input surface: macOS otherwise passes clicks through zero-alpha window pixels. The default location is the lower-right of the screen work area; the user can drag the cards or the explicit Move preview handle to reposition the whole window. Existing explicit geometry still selects the starting position and a maximum card size. Position is retained for that live panel, including subsequent frames and card-order changes. Snapping, inertia, position persistence and attaching to a particular client window are outside this change.
 

@@ -28,7 +28,7 @@ macOS controller仅在预览可见且owner有效时以约3fps采样，工作队�
 
 ## 原生浮动卡片展示
 
-panel加入全部Space，保持stationary且不参与窗口循环，全屏角色仅使用AppKit的FullScreenAuxiliary，不请求FullScreenPrimary或FullScreenNone。它可能出现在桌面共享或录屏中；自动检测共享不属于本功能，用户可在共享前关闭或禁用预览。
+panel加入全部Space，保持stationary且不参与窗口循环，全屏角色仅使用AppKit的FullScreenAuxiliary，不请求FullScreenPrimary或FullScreenNone。它可能出现在桌面共享或录屏中；自动检测共享不属于本功能。关闭只停止当前预览，后续授权观察可能重新创建它。共享前需要持久关闭时，应使用现有禁用参数或配置，并重启拥有该预览的宿主。
 
 每个私有session使用一个独立、无边框、不激活的NSPanel。窗口背景视觉透明，没有常驻标题栏。使用近透明的原生背景，使间隙仍属于本地输入区域；macOS否则会将点击穿过窗口的零alpha像素。默认位置为屏幕工作区右下角；用户可拖动卡片或明确的Move preview手柄，移动整个窗口。现有显式geometry仍指定初始位置和卡片最大尺寸。位置在该panel存活期间保留，后续刷新及卡片换层不重置位置。本轮不增加吸边、惯性、位置持久化或绑定某个客户端窗口的行为。
 

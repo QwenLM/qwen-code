@@ -1140,13 +1140,15 @@ impl Tool for ClickTool {
                         self.state
                             .cursor_registry
                             .update_position(&cursor_key, screen_x, screen_y);
-                        crate::cursor::overlay::send_command(
-                            cursor_key.clone(),
-                            cursor_overlay::OverlayCommand::ClickPulse {
-                                x: screen_x,
-                                y: screen_y,
-                            },
-                        );
+                        if !focus_only {
+                            crate::cursor::overlay::send_command(
+                                cursor_key.clone(),
+                                cursor_overlay::OverlayCommand::ClickPulse {
+                                    x: screen_x,
+                                    y: screen_y,
+                                },
+                            );
+                        }
                         let label = if focus_only { "focused" } else { "pressed" };
                         return ToolResult::text(format!(
                             "✅ PX hit-test {label} the background element via AX."
