@@ -12643,7 +12643,9 @@ describe('App loading phrase settings', () => {
     testState.settings = [setting('ui.customWittyPhrases', [' ', 42])];
     renderApp();
     await flush();
-    expect(testState.latestChatCustomization?.loadingPhrases).toBeUndefined();
+    const customization = testState.latestChatCustomization;
+    expect(customization).not.toBeNull();
+    expect(customization?.loadingPhrases).toBeUndefined();
   });
 
   it('keeps host phrase customization ahead of workspace settings', async () => {
