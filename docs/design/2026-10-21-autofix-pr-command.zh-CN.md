@@ -105,7 +105,9 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - GitHub 对 bot 评论的答复：`.qwen/tmp/autofix-pr-<n>-replies.json`
 - 日志、修复说明和回复计划：`.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - 用户给每一轮的附加指令：`.qwen/tmp/autofix-pr-<n>-instructions.txt`
-- 评审者游标：`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
+- 评审者游标：`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`——这一个仍在
+  clone 的**主** worktree（`repoRoot()`）下，而非 watch 根：`qwen review
+watch-repo` 是 clone 级探针，不是按会话的 watch
 
 ## 6. 辅助命令契约
 

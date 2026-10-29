@@ -8,26 +8,29 @@ import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   linkSync,
   lstatSync,
   openSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import { isWithinRoot } from '../../config/path-comparison.js';
 import {
   HOSTNAME_RE,
   isOwnerRepo,
   normalizeGhHostForUrl,
 } from '../review/lib/gh.js';
-import { git, repoRoot } from '../review/lib/git.js';
+import { git, gitOpt, repoRoot } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
@@ -273,6 +276,161 @@ export function watchRoot(): string {
     return git('rev-parse', '--show-toplevel');
   }
   return repoRoot();
+}
+
+/**
+ * The worktree paths from `git worktree list --porcelain -z`, main first.
+ *
+ * NUL-delimited so a path holding a newline stays one record and cannot
+ * fabricate an extra `worktree ` root that a scan would then read outside the
+ * clone. The line form cannot represent such a path safely at all, so callers
+ * only ever parse the `-z` output here and fall back to the main worktree
+ * alone when git has no `-z`.
+ */
+export function parseWorktreePaths(nulOutput: string): string[] {
+  const paths: string[] = [];
+  for (const field of nulOutput.split('\0')) {
+    if (field.startsWith('worktree ')) {
+      paths.push(field.slice('worktree '.length));
+    }
+  }
+  return paths;
+}
+
+/**
+ * Every worktree of the clone, main first, read NUL-safely. One git command.
+ * git before 2.36 has no `-z`, and the line form cannot safely list a path
+ * that holds a newline, so the fallback scans the main worktree alone (always
+ * the first record, never a fabricated one) rather than risk reading outside
+ * the clone. `repoRoot` throws outside a repository, as it always has.
+ */
+export function cloneWorktreeRoots(): string[] {
+  const z = gitOpt('worktree', 'list', '--porcelain', '-z');
+  if (z !== null) return parseWorktreePaths(z);
+  return [repoRoot()];
+}
+
+/**
+ * The worktree whose `.qwen/tmp` holds this PR's state, or null when the clone
+ * has no watch of it. A watch lives wherever it was prepared, which a helper
+ * cannot re-derive from its own cwd — the session may have moved — so every
+ * helper that operates on an existing watch finds it here rather than guessing
+ * a root. A stale state file in one worktree loses to a live watch worktree in
+ * another. Only the JSON metadata is read; no git command runs in a discovered
+ * worktree.
+ */
+export function findWatchRoot(prNumber: number): string | null {
+  assertPositiveInteger(prNumber, 'PR number');
+  let found: string | null = null;
+  for (const root of vouchedScanRoots(cloneWorktreeRoots())) {
+    const paths = autofixPrPaths(root, prNumber);
+    if (!isRegularFile(paths.statePath)) continue;
+    if (
+      found === null ||
+      (!existsSync(autofixPrPaths(found, prNumber).worktreePath) &&
+        existsSync(paths.worktreePath))
+    ) {
+      found = root;
+    }
+  }
+  return found;
+}
+
+/**
+ * The root a helper operates on: the watch's discovered root when the clone
+ * already holds one (wherever it was prepared, so a session that moved still
+ * finds it), else the session's own root for a fresh prepare. Containment is
+ * not enforced here — `prepare` refuses a resolved worktree outside the
+ * session's working directory, and cleanup must reach a watch in any worktree
+ * to end it; the daemon guards the fix agent's commands separately.
+ */
+export function resolveWatchRoot(prNumber: number): string {
+  return findWatchRoot(prNumber) ?? watchRoot();
+}
+
+/**
+ * The worktree roots a watch scan may read, main first. Drops watch worktrees
+ * nested in another root's `.qwen/tmp` (a state file force-added there would
+ * forge a watch), and vouches each remaining root against the genuine clone: a
+ * stale entry an unrelated repository now occupies, or a sibling whose `.git`
+ * was rewritten, is not this clone's worktree and must not be read as one.
+ * File reads only — no git command — so the daemon's listing stays within its
+ * single git call.
+ */
+export function vouchedScanRoots(roots: string[]): string[] {
+  if (roots.length === 0) return [];
+  const main = roots[0]!;
+  const notNested = roots.filter(
+    (r) =>
+      !roots.some(
+        (other) => other !== r && isWithinRoot(r, join(other, '.qwen', 'tmp')),
+      ),
+  );
+  let genuineCommon: string;
+  let genuineWorktrees: string;
+  try {
+    genuineCommon = realpathSync(join(main, '.git'));
+    genuineWorktrees = realpathSync(join(genuineCommon, 'worktrees'));
+  } catch {
+    // No linked-worktree entries yet, or the main git dir is unreadable:
+    // nothing to vouch against, so keep the enumerated roots.
+    return notNested;
+  }
+  return notNested.filter(
+    (r) => r === main || vouchesForClone(r, genuineCommon, genuineWorktrees),
+  );
+}
+
+/** Whether `root`'s `.git` names this clone's own worktree entry, and back. */
+function vouchesForClone(
+  root: string,
+  genuineCommon: string,
+  genuineWorktrees: string,
+): boolean {
+  const dotGit = join(root, '.git');
+  let st;
+  try {
+    st = lstatSync(dotGit);
+  } catch {
+    return false;
+  }
+  if (st.isDirectory()) {
+    try {
+      return realpathSync(dotGit) === genuineCommon;
+    } catch {
+      return false;
+    }
+  }
+  if (!st.isFile()) return false;
+  let text: string;
+  try {
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return false;
+  }
+  if (!text.startsWith('gitdir: ')) return false;
+  const pointer = text.slice('gitdir: '.length).replace(/[\r\n]+$/, '');
+  let entry: string;
+  try {
+    entry = realpathSync(isAbsolute(pointer) ? pointer : join(root, pointer));
+  } catch {
+    return false;
+  }
+  if (dirname(entry) !== genuineWorktrees) return false;
+  let back: string;
+  try {
+    back = readFileSync(join(entry, 'gitdir'), 'utf8').replace(/[\r\n]+$/, '');
+  } catch {
+    return false;
+  }
+  try {
+    return (
+      realpathSync(isAbsolute(back) ? back : join(entry, back)) ===
+      realpathSync(dotGit)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Throws unless `value` is a positive integer; `what` names it. */

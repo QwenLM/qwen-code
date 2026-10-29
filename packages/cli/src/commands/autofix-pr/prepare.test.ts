@@ -396,6 +396,42 @@ describe('runPrepare (real git)', () => {
     }
   });
 
+  it('merges PR history across two relocation hops', () => {
+    // main handles X; linked A imports X, handles Y; linked B must union both
+    // histories ([X, Y]), not import the stale main copy ([X]) first-match.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledCommentIds: ['X'],
+    });
+    runCleanup(7, false);
+    const linkedA = join(dir, 'linkedA');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherA', linkedA, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedA);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const aPaths = autofixPrPaths(linkedA, 7);
+    expect(readState(aPaths.statePath)!.handledCommentIds).toEqual(['X']);
+    writeState(aPaths.statePath, {
+      ...readState(aPaths.statePath)!,
+      handledCommentIds: ['X', 'Y'],
+    });
+    runCleanup(7, false);
+    const linkedB = join(dir, 'linkedB');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherB', linkedB, 'origin/main');
+    process.chdir(linkedB);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      expect(
+        readState(autofixPrPaths(linkedB, 7).statePath)!.handledCommentIds,
+      ).toEqual(['X', 'Y']);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
   it('starts one watch at a time: a second start waits for the lock', () => {
     const paths = autofixPrPaths(clone, 7);
     mkdirSync(dirname(paths.lockPath), { recursive: true });

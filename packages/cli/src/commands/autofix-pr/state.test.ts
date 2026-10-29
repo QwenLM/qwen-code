@@ -33,9 +33,26 @@ import {
   stateDefect,
   writeState,
   assertOwnedBySession,
+  parseWorktreePaths,
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
+
+describe('parseWorktreePaths', () => {
+  it('keeps a newline-bearing path one record, fabricating no extra root', () => {
+    const evil = '/tmp/repo/evil\nworktree /tmp/injected-root';
+    const out =
+      `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0\0` +
+      `worktree ${evil}\0HEAD ${'b'.repeat(40)}\0detached\0\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo', evil]);
+  });
+
+  it('parses ordinary worktrees and tolerates a stripped trailing NUL', () => {
+    const out = `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo']);
+    expect(parseWorktreePaths('')).toEqual([]);
+  });
+});
 
 describe('isBranchName', () => {
   it('accepts what git accepts as a branch name', () => {

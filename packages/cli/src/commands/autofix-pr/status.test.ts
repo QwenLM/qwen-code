@@ -645,8 +645,9 @@ describe('runStatus', () => {
         // marker first to isolate what status itself executes.
         rmSync(marker, { force: true });
         const { watches } = runStatus({});
-        const planted = watches.find(({ pr }) => pr === 7);
-        expect(planted?.gitTrusted).toBe(false);
+        // The rewritten sibling is not vouched for against the genuine clone,
+        // so its forged watch is not listed at all and its config never runs.
+        expect(watches.some(({ pr }) => pr === 7)).toBe(false);
         expect(existsSync(marker)).toBe(false);
       } finally {
         rmSync(sibling, { recursive: true, force: true });
@@ -655,4 +656,172 @@ describe('runStatus', () => {
       }
     },
   );
+
+  const commitBase = () =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+  const stateAt = (
+    paths: ReturnType<typeof autofixPrPaths>,
+    pr: number,
+    patch: Partial<AutofixPrState> = {},
+  ) => {
+    mkdirSync(dirname(paths.statePath), { recursive: true });
+    writeState(paths.statePath, {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: pr,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: `feat-${pr}`,
+      baseRefName: 'main',
+      branch: paths.branch,
+      worktreePath: paths.worktreePath,
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      ...patch,
+    });
+  };
+  const addWatchWorktree = (paths: ReturnType<typeof autofixPrPaths>) => {
+    execFileSync('git', ['branch', paths.branch], { cwd: repo });
+    mkdirSync(dirname(paths.worktreePath), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-q', paths.worktreePath, paths.branch],
+      {
+        cwd: repo,
+      },
+    );
+  };
+
+  it('surfaces a read failure of the primary worktree, not an empty listing', () => {
+    mkdirSync(join(repo, '.qwen'), { recursive: true });
+    writeFileSync(join(repo, '.qwen', 'tmp'), 'not a directory');
+    expect(() => runStatus({})).toThrow();
+  });
+
+  it('reports gitTrusted true for a genuine watch rooted in a linked worktree', () => {
+    commitBase();
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    const paths = autofixPrPaths(linked, 7);
+    try {
+      addWatchWorktree(paths);
+      stateAt(paths, 7);
+      const { watches } = runStatus({});
+      const watch = watches.find(({ pr }) => pr === 7);
+      expect(watch?.worktreePath).toBe(paths.worktreePath);
+      expect(watch?.gitTrusted).toBe(true);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', paths.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      execFileSync('git', ['branch', '-D', paths.branch], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers a live main-rooted watch over a stale state file in a linked root', () => {
+    commitBase();
+    const mainPaths = autofixPrPaths(repo, 7);
+    addWatchWorktree(mainPaths);
+    stateAt(mainPaths, 7);
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    try {
+      // A stale state file in the linked root, with no worktree there.
+      stateAt(autofixPrPaths(linked, 7), 7);
+      const { watches } = runStatus({ work: false });
+      expect(watches).toHaveLength(1);
+      expect(watches[0]!.worktreePath).toBe(mainPaths.worktreePath);
+      expect(watches[0]!.worktreeExists).toBe(true);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', mainPaths.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      execFileSync('git', ['branch', '-D', mainPaths.branch], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('does not list a watch forged inside a watch worktree own .qwen/tmp', () => {
+    commitBase();
+    const host = autofixPrPaths(repo, 3);
+    addWatchWorktree(host);
+    try {
+      // A state file force-added inside the watch worktree's own tree.
+      const forged = autofixPrPaths(host.worktreePath, 9);
+      stateAt(forged, 9);
+      const { watches } = runStatus({ work: false });
+      expect(watches.some(({ pr }) => pr === 9)).toBe(false);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', host.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['branch', '-D', host.branch], { cwd: repo });
+    }
+  });
+
+  it('does not read a foreign repository occupying a stale worktree entry', () => {
+    commitBase();
+    write(7);
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    // Delete the worktree without prune, then check out an unrelated repo at
+    // the same path holding its own watch state.
+    rmSync(linked, { recursive: true, force: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', linked]);
+    stateAt(autofixPrPaths(linked, 9), 9, { repo: 'thing', owner: 'other' });
+    try {
+      const { watches } = runStatus({ work: false });
+      expect(watches.some(({ pr }) => pr === 9)).toBe(false);
+      expect(watches.some(({ pr }) => pr === 7)).toBe(true);
+    } finally {
+      execFileSync('git', ['worktree', 'prune'], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
 });

@@ -157,7 +157,9 @@ all, so a watch is found whichever of them holds it:
 - what GitHub said of bot comments: `.qwen/tmp/autofix-pr-<n>-replies.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - the user's instructions for every round: `.qwen/tmp/autofix-pr-<n>-instructions.txt`
-- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
+- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json` — this
+  one stays under the clone's **main** worktree (`repoRoot()`), not the watch
+  root: `qwen review watch-repo` is a clone-level probe, not a per-session watch
 
 ## 6. Helper contracts
 

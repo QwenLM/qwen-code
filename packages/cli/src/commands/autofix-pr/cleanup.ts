@@ -29,7 +29,7 @@ import {
   keepHistory,
   readState,
   repoRoot,
-  watchRoot,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -149,7 +149,7 @@ export function runCleanup(
   force: boolean,
   takeOver = false,
 ): void {
-  const root = watchRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   if (
     existsSync(paths.worktreePath) &&

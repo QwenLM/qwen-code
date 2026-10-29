@@ -12,6 +12,7 @@ import {
   type StatusOutcome,
   type WatchStatus,
 } from '../../commands/autofix-pr/status.js';
+import { parseWorktreePaths } from '../../commands/autofix-pr/state.js';
 import { sanitizedGitEnv } from '../../commands/review/lib/worktree.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
@@ -61,24 +62,39 @@ export interface AutofixPrWatchesView {
  * call answers, on the listing's own short timeout.
  */
 export async function cloneWorktreesOf(cwd: string): Promise<string[]> {
+  const opts = {
+    timeout: GIT_TIMEOUT_MS,
+    windowsHide: true,
+    // As the helpers run git: an exported `GIT_DIR` or `GIT_CONFIG_*` would
+    // point it at another repository.
+    env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
+  };
   try {
+    // NUL-delimited so a worktree path holding a newline cannot fabricate an
+    // extra root the listing would then read outside the clone.
     const { stdout } = await execFileAsync(
       'git',
-      ['-C', cwd, 'worktree', 'list', '--porcelain'],
-      {
-        timeout: GIT_TIMEOUT_MS,
-        windowsHide: true,
-        // As the helpers run git: an exported `GIT_DIR` or `GIT_CONFIG_*`
-        // would point it at another repository.
-        env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
-      },
+      ['-C', cwd, 'worktree', 'list', '--porcelain', '-z'],
+      opts,
     );
-    return stdout
-      .split('\n')
-      .filter((line) => line.startsWith('worktree '))
-      .map((line) => line.slice('worktree '.length).replace(/\r$/, ''));
+    return parseWorktreePaths(stdout);
   } catch {
-    return [];
+    // git before 2.36 has no `-z`, and the line form cannot safely list a
+    // path that holds a newline, so fall back to the main worktree alone
+    // (always the first record) rather than risk a fabricated root.
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['-C', cwd, 'worktree', 'list', '--porcelain'],
+        opts,
+      );
+      const first = stdout
+        .split('\n')
+        .find((line) => line.startsWith('worktree '));
+      return first ? [first.slice('worktree '.length).replace(/\r$/, '')] : [];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -103,6 +119,16 @@ export async function listAutofixPrWatches(
   // worktree, so a watch prepared from any of them is listed.
   const root = worktrees[0]!;
   const outcome = runStatus({ roots: worktrees, git: false, session: null });
+  // The CLI prints `unreadable[].error` with the full state-file path; this
+  // view crosses the workspace boundary, so a sibling checkout's absolute
+  // path and state-file name are redacted (the remedy names only the PR).
+  const redactError = (error: string): string => {
+    let redacted = error;
+    for (const worktree of worktrees) {
+      redacted = redacted.split(worktree).join('<worktree>');
+    }
+    return redacted.replace(/autofix-pr-\d+-state\.json/g, '<state-file>');
+  };
   return {
     v: 1,
     available: true,
@@ -118,7 +144,14 @@ export async function listAutofixPrWatches(
         ...watch
       }) => watch,
     ),
-    ...(outcome.unreadable ? { unreadable: outcome.unreadable } : {}),
+    ...(outcome.unreadable
+      ? {
+          unreadable: outcome.unreadable.map(({ pr, error }) => ({
+            pr,
+            error: redactError(error),
+          })),
+        }
+      : {}),
   };
 }
 

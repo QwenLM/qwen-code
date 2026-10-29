@@ -51,6 +51,7 @@ vi.mock('../review/lib/gh.js', async (importOriginal) => ({
 vi.mock('./state.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./state.js')>()),
   watchRoot: () => mocks.root,
+  resolveWatchRoot: () => mocks.root,
 }));
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mocks.stdout,

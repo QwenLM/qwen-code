@@ -34,6 +34,9 @@ import {
   historyPath,
   isBranchName,
   isCommandSafeName,
+  cloneWorktreeRoots,
+  findWatchRoot,
+  vouchedScanRoots,
   readHistory,
   readState,
   watchRoot,
@@ -413,21 +416,23 @@ function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
  * A PR's history an earlier watch kept in another worktree of this clone. The
  * supported migration cleans up in the old owning worktree — which keeps the
  * history beside the old state — and prepares in a new one, so the fresh watch
- * imports it rather than answering the same comments again. The first readable
- * history of this repository wins, the main worktree first. Only the JSON
- * metadata is read; no git command runs in the discovered worktree.
+ * imports it rather than answering the same comments again. Several worktrees
+ * may hold a history (one per relocation hop), so they are merged with the same
+ * union `keepHistory` uses: a first-match would import a stale copy and
+ * re-answer what a later hop already handled. Only the JSON metadata is read;
+ * no git command runs in a discovered worktree.
  */
 function importHistory(
   prNumber: number,
   repository: { host: string; owner: string; repo: string },
   excludeRoot: string,
 ): AutofixPrHistory | null {
-  const listed = gitOpt('worktree', 'list', '--porcelain');
-  if (listed === null) return null;
   const exclude = realpathNearestExisting(excludeRoot);
-  for (const line of listed.split('\n')) {
-    if (!line.startsWith('worktree ')) continue;
-    const root = line.slice('worktree '.length);
+  const union = (a: string[] = [], b: string[] = []) => [
+    ...new Set([...a, ...b]),
+  ];
+  let merged: AutofixPrHistory | null = null;
+  for (const root of vouchedScanRoots(cloneWorktreeRoots())) {
     if (realpathNearestExisting(root) === exclude) continue;
     let history: AutofixPrHistory | null = null;
     try {
@@ -437,9 +442,39 @@ function importHistory(
     } catch {
       continue;
     }
-    if (history && sameRepository(history, repository)) return history;
+    if (!history || !sameRepository(history, repository)) continue;
+    if (merged === null) {
+      merged = { ...history };
+      continue;
+    }
+    merged = {
+      ...merged,
+      handledCommentIds: union(
+        merged.handledCommentIds,
+        history.handledCommentIds,
+      ),
+      postedCommentIds: union(
+        merged.postedCommentIds,
+        history.postedCommentIds,
+      ),
+      handledChecks: union(merged.handledChecks, history.handledChecks),
+      rerunChecks: union(merged.rerunChecks, history.rerunChecks),
+      heldChecks: union(merged.heldChecks, history.heldChecks),
+      handledConflictSha:
+        merged.handledConflictSha ?? history.handledConflictSha ?? null,
+      pendingPosts: [
+        ...(merged.pendingPosts ?? []),
+        ...(history.pendingPosts ?? []),
+      ],
+      deferredRuns: [
+        ...new Set([
+          ...(merged.deferredRuns ?? []),
+          ...(history.deferredRuns ?? []),
+        ]),
+      ],
+    };
   }
-  return null;
+  return merged;
 }
 
 export function runPrepare(args: PrepareArgs): void {
@@ -448,7 +483,10 @@ export function runPrepare(args: PrepareArgs): void {
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
-  const root = watchRoot();
+  // Resume the watch wherever the clone holds it; a fresh one roots at the
+  // session's own worktree. assertSessionCanRunWorktree below still refuses a
+  // resolved worktree outside the session's working directory.
+  const root = findWatchRoot(args.pr) ?? watchRoot();
   const paths = autofixPrPaths(root, args.pr);
 
   // A resume hands back the same worktree, so both refusals come before the

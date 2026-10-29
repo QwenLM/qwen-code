@@ -653,4 +653,25 @@ describe('runCleanup (real git)', () => {
       rmSync(other, { recursive: true, force: true });
     }
   });
+
+  it('ends a main-rooted watch from a daemon session in a linked worktree', () => {
+    // The watch is rooted in the main worktree (beforeEach); a daemon session
+    // in a linked worktree must still discover and end it, not report a
+    // nonexistent path under its own root and leave the real watch running.
+    const linked = join(dirname(repo), `${basename(repo)}-linked`);
+    run(repo, 'worktree', 'add', '-q', '--detach', linked);
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linked);
+    try {
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(existsSync(paths.worktreePath)).toBe(false);
+      expect(branchExists()).toBe(false);
+    } finally {
+      process.chdir(repo);
+      delete process.env['QWEN_CODE_SERVE'];
+      run(repo, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
 });

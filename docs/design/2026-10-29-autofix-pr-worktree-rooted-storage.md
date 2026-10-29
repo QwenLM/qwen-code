@@ -73,20 +73,37 @@ worktree's `.qwen/tmp` so "two workspaces of one clone list the same watches".
 
 ## Proposed solution
 
-### 1. Environment-aware watch root
+### 1. Environment-aware watch root, discovered across the clone
 
-Add `watchRoot()` in `packages/cli/src/commands/autofix-pr/state.ts`:
+`watchRoot()` (in `packages/cli/src/commands/autofix-pr/state.ts`) is where a
+**fresh** watch roots:
 
 - Daemon session (`QWEN_CODE_SERVE === '1'`): the **current worktree's
   toplevel** (`git rev-parse --show-toplevel` from cwd) — the session's
   containment boundary, so artifacts are reachable.
 - Otherwise: `repoRoot()` (the clone's main worktree), exactly as today.
 
-Every helper resolves `autofixPrPaths(watchRoot(), pr)` instead of
-`autofixPrPaths(repoRoot(), pr)`: `prepare`, `snapshot`, `sync`, `push`,
-`reply`, `rerun`, `ci-log`, `schedule`, `fix`, `cleanup`, and `status`'s
-default root. `repoRoot()` itself is unchanged (the `review` command and the
-listing's display root still use it).
+A watch lives wherever it was prepared, and a helper cannot re-derive that
+from its own cwd: the session may have moved, and `cleanup` must reach a watch
+in any worktree to end it. So an **existing** watch is discovered, not guessed.
+`findWatchRoot(pr)` scans the clone's worktrees for
+`autofix-pr-<pr>-state.json` (a live watch worktree wins over a stale state
+file), and `resolveWatchRoot(pr) = findWatchRoot(pr) ?? watchRoot()`. `prepare`
+resumes the discovered watch — still refused outside the session boundary by
+`assertSessionCanRunWorktree` — or creates a fresh one at `watchRoot()`;
+`snapshot`, `sync`, `push`, `reply`, `rerun`, `ci-log`, `schedule`, `fix` and
+`cleanup` resolve via `resolveWatchRoot`.
+
+The listing (`status` by default, and the daemon route) does not pick one
+root: it scans **every** worktree of the clone (`cloneWorktreeRoots()`), so a
+watch is found whichever worktree holds it. Enumeration is NUL-safe
+(`git worktree list --porcelain -z`, `parseWorktreePaths`): a path holding a
+newline stays one record and cannot fabricate an extra root the scan would
+read outside the clone. git before 2.36 has no `-z`, and the line form cannot
+represent such a path safely, so the fallback scans the main worktree alone
+(always the first record) rather than risk a fabricated root. `repoRoot()`
+itself is unchanged — the `review` command and its reviewer cursor still root
+at the main worktree.
 
 For a main-worktree session `watchRoot() === repoRoot()`, so existing
 main-rooted watches and main-clone sessions behave identically. The only
@@ -109,23 +126,37 @@ listing therefore anchors every trust check (and `unsavedWork`) to
 `repoRoot()`, the genuine clone's main worktree, whose `.git` is a real
 directory a sibling cannot rewrite. A watch rooted in a linked worktree is
 still validated against the genuine clone's worktree entries, so legitimate
-watches stay trusted.
+watches stay trusted. The write path is anchored the same way: `requireWorktree`
+takes a separate `trustRoot` (the genuine clone) distinct from its `root` (the
+watch root, which stays the stop of the symlink walk), and `push`/`sync` pass
+`repoRoot()`. A discovered watch root is never the trust anchor.
 
 ### 3. Clone-wide watch listing
 
 `status` (default, no explicit root) and the daemon `listAutofixPrWatches`
-enumerate `git worktree list --porcelain` and scan each worktree's
-`.qwen/tmp`, merging watches. Dedupe by PR number: git forbids the same branch
-checked out in two worktrees, so a PR's watch worktree exists in at most one
-worktree and merges never double-count an active watch. The daemon view keeps
-reporting the clone's main worktree as `root` for display; the scan covers all
-worktrees, preserving "two workspaces of one clone list the same watches".
-A programmatic single `root` passed to `runStatus` (tests, internal callers)
-still scans just that worktree; the CLI exposes no `--root` flag. Each
-worktree's directory scan is isolated: a sibling whose `.qwen/tmp` is a
-regular file or inaccessible (ENOTDIR/EACCES) is skipped, not allowed to
-abort the listing of every other worktree's watches — which through the
-daemon would be a 500 for the whole clone.
+enumerate the clone's worktrees NUL-safely (`cloneWorktreeRoots`) and scan
+each one's `.qwen/tmp`, merging watches. Dedupe by PR number: git forbids the
+same branch checked out in two worktrees, so a PR's watch worktree exists in
+at most one worktree and merges never double-count an active watch; a live
+watch worktree wins over a stale state file in another root. The daemon view
+keeps reporting the clone's main worktree as `root` for display; the scan
+covers all worktrees, preserving "two workspaces of one clone list the same
+watches". A programmatic single `root` passed to `runStatus` (tests, internal
+callers) still scans just that worktree; the CLI exposes no `--root` flag.
+
+Before reading, `vouchedScanRoots` filters the enumerated roots (file reads
+only, no git command, so the daemon stays within its one git call): it drops
+watch worktrees nested in another root's `.qwen/tmp` (a state file force-added
+there would forge a watch), and vouches each remaining root against the
+genuine clone's worktree entries — a stale entry an unrelated repository now
+occupies, or a sibling whose `.git` was rewritten, is not read as this clone's
+watch. Each worktree's directory scan is then isolated: a sibling whose
+`.qwen/tmp` is a regular file or inaccessible (ENOTDIR/EACCES) is skipped, not
+allowed to abort the listing of every other worktree's watches (a 500 for the
+whole clone via the daemon). The **primary** root's read failure is surfaced
+(thrown), not swallowed into an empty listing — an unreadable main `.qwen/tmp`
+is a real diagnostic. The daemon view redacts sibling absolute paths and
+state-file names from `unreadable[].error` (the CLI keeps the full path).
 
 ### 4. prepare refusal stays as a safety net
 
@@ -161,16 +192,15 @@ to prepare from.
 
 - **Existing main-rooted watches.** A main-clone session still finds them
   (`watchRoot === repoRoot`); the clone-wide listing shows them from any
-  worktree. A linked-worktree session computes paths under its own worktree
-  and will not find a main-rooted state file; `prepare` there attempts a new
-  watch and hits the branch-in-use refusal. Documented remedy: run `cleanup`
-  from the worktree that owns the watch (the main worktree for a legacy watch
-  — `cleanup` from the linked session roots there and would not find it), then
-  re-`prepare` in the target worktree. `cleanup` keeps a worktree that holds
-  work; no silent data loss. `prepare` imports the PR's history from the old
-  owning worktree when the new root has none, so handled comments, posted
-  replies and CI rerun records survive the relocation instead of being
-  answered again.
+  worktree. Helpers discover the watch wherever it lives (`findWatchRoot`), so
+  a linked-worktree session can `cleanup` a main-rooted watch directly — no
+  need to change directory to the owning worktree. To move a watch to another
+  worktree, `cleanup` it (adding `--take-over` when it belongs to another
+  session, which `assertOwnedBySession` otherwise refuses) and re-`prepare` in
+  the target. `prepare` imports and **merges** the PR's history across the
+  clone's worktrees, so handled comments, posted replies and CI rerun records
+  survive even a multi-hop relocation instead of being answered again.
+  `cleanup` keeps a worktree that holds work; no silent data loss.
 - **Cross-environment operation.** A watch prepared under the daemon in a
   linked worktree lives there; operate it from that worktree. Plain-CLI
   `status` still discovers it via the clone-wide scan.
@@ -179,10 +209,17 @@ to prepare from.
 
 ## Validation plan
 
-- Unit: `watchRoot()` env split (daemon linked / daemon main / plain CLI);
-  each helper roots at `watchRoot()`; clone-wide `status` merge + dedupe;
-  daemon listing across multiple worktrees; trust checks unchanged when root
-  is a linked worktree.
+- Unit: `parseWorktreePaths` NUL-safety (a newline-bearing path fabricates no
+  root); `watchRoot()` env split and `resolveWatchRoot`/`findWatchRoot`
+  discovery — `cleanup` ends a main-rooted watch from a daemon session in a
+  linked worktree, and `prepare` relocates and merges history across two hops;
+  clone-wide `status` merge + live-worktree dedupe (discriminating both
+  orderings); `vouchedScanRoots` (a nested watch worktree and a foreign stale
+  entry are not read); the primary root's read failure is surfaced; trust
+  anchored to the genuine clone on both the listing and the write path
+  (`requireWorktree`/`unsavedWork`), a rewritten sibling gitfile never
+  executing its config; the daemon listing across worktrees with `unreadable`
+  paths redacted.
 - Regression pin: a daemon session in a linked worktree prepares a watch
   whose worktree is inside the session cwd and `assertSessionCanRunWorktree`
   passes (the exact b1887512 failure).

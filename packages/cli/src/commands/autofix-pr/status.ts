@@ -12,13 +12,13 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { gitOpt } from '../review/lib/git.js';
 import { unsavedWork } from './cleanup.js';
 import { untrustedGitfile, untrustedSubmodules } from './worktree.js';
 import { DEFAULT_EVERY } from './schedule.js';
 import {
   assertPositiveInteger,
   autofixPrPaths,
+  cloneWorktreeRoots,
   currentSessionId,
   isRegularFile,
   MAX_PUSHES,
@@ -26,6 +26,7 @@ import {
   readState,
   repoRoot,
   sameRepository,
+  vouchedScanRoots,
   type AutofixPrGateCursor,
   type AutofixPrWatchOptions,
   type NeedsHumanItem,
@@ -145,22 +146,6 @@ function modifiedAt(path: string): string | null {
   }
 }
 
-/**
- * Every worktree of the clone, main first: a watch keeps its files under the
- * worktree it was prepared from, which under the daemon is the session's own
- * rather than necessarily the main one. Falls back to the main worktree when
- * git cannot list them — which throws outside a repository, as `repoRoot`
- * always has.
- */
-function worktreeRoots(): string[] {
-  const listed = gitOpt('worktree', 'list', '--porcelain');
-  const roots = (listed ?? '')
-    .split('\n')
-    .filter((line) => line.startsWith('worktree '))
-    .map((line) => line.slice('worktree '.length));
-  return roots.length > 0 ? roots : [repoRoot()];
-}
-
 export function runStatus(args: {
   pr?: number;
   /** false skips `worktreeWork` (null), a git scan of the worktree. */
@@ -183,12 +168,18 @@ export function runStatus(args: {
 }): StatusOutcome {
   if (args.pr !== undefined) assertPositiveInteger(args.pr, 'PR number');
   const roots =
-    args.roots ?? (args.root !== undefined ? [args.root] : worktreeRoots());
+    args.roots ??
+    (args.root !== undefined ? [args.root] : cloneWorktreeRoots());
+  // Only genuine, non-nested worktrees of this clone are read: a watch
+  // worktree's own `.qwen/tmp` or a foreign repository at a stale entry must
+  // not forge a watch.
+  const scanRoots = vouchedScanRoots(roots);
+  const primary = scanRoots[0];
   // The worktree whose `.qwen/tmp` holds each PR's state. Git forbids one
   // branch in two worktrees, so a PR's watch lives in at most one; a stale
   // state file left in another loses to the one with a live worktree.
   const rootByPr = new Map<number, string>();
-  for (const root of roots) {
+  for (const root of scanRoots) {
     const tmp = join(root, '.qwen', 'tmp');
     let found: number[];
     try {
@@ -198,11 +189,13 @@ export function runStatus(args: {
         .map(Number)
         .filter((n) => Number.isSafeInteger(n) && n > 0)
         .filter((n) => args.pr === undefined || n === args.pr);
-    } catch {
-      // A sibling worktree's `.qwen/tmp` may be a regular file or
-      // inaccessible (ENOTDIR/EACCES). That root then holds no readable watch,
-      // and one bad root must not abort the listing of every other worktree's
-      // watches — which through the daemon would be a 500 for the whole clone.
+    } catch (err) {
+      // The primary root's read failure is a real diagnostic, not an empty
+      // listing — surface it. A sibling worktree's `.qwen/tmp` may be a
+      // regular file or inaccessible (ENOTDIR/EACCES); that root holds no
+      // readable watch, and one bad sibling must not abort the listing of
+      // every other worktree's watches (a 500 for the whole clone via daemon).
+      if (root === primary) throw err;
       continue;
     }
     for (const pr of found) {

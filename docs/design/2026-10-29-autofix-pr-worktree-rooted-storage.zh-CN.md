@@ -67,19 +67,32 @@ linked-worktree 会话的 cwd 既不是主 worktree，也不是会话拥有的�
 
 ## 方案
 
-### 1. 感知环境的 watch 根
+### 1. 感知环境的 watch 根，跨 clone 发现
 
-在 `packages/cli/src/commands/autofix-pr/state.ts` 新增 `watchRoot()`：
+`watchRoot()`（在 `packages/cli/src/commands/autofix-pr/state.ts`）决定**新建**
+watch 的落盘根：
 
 - daemon 会话（`QWEN_CODE_SERVE === '1'`）：取**当前 worktree 的 toplevel**
   （从 cwd 跑 `git rev-parse --show-toplevel`）——即会话的包含边界，产物因而
   可达。
 - 否则：`repoRoot()`（clone 的主 worktree），与今天完全一致。
 
-每个 helper 改用 `autofixPrPaths(watchRoot(), pr)` 而非
-`autofixPrPaths(repoRoot(), pr)`：`prepare`、`snapshot`、`sync`、`push`、
-`reply`、`rerun`、`ci-log`、`schedule`、`fix`、`cleanup`，以及 `status` 的
-默认根。`repoRoot()` 本身不变（`review` 命令与列表的展示根仍用它）。
+watch 落在它被 prepare 的那个 worktree，而 helper 无法从自己的 cwd 反推出来：
+会话可能已经移动，且 `cleanup` 必须能够到任意 worktree 里的 watch 去结束它。
+所以**既有** watch 是被发现，而非猜测。`findWatchRoot(pr)` 扫描 clone 的各
+worktree 找 `autofix-pr-<pr>-state.json`（活 watch worktree 优先于陈旧状态
+文件），`resolveWatchRoot(pr) = findWatchRoot(pr) ?? watchRoot()`。`prepare`
+恢复发现到的 watch——仍由 `assertSessionCanRunWorktree` 拒绝会话边界之外的
+——或在 `watchRoot()` 新建；`snapshot`、`sync`、`push`、`reply`、`rerun`、
+`ci-log`、`schedule`、`fix`、`cleanup` 都经 `resolveWatchRoot` 解析。
+
+列表（`status` 默认与 daemon 路由）不选单一根：它扫描 clone 的**每一个**
+worktree（`cloneWorktreeRoots()`），所以无论 watch 落在哪个 worktree 都能被
+找到。枚举是 NUL 安全的（`git worktree list --porcelain -z`、
+`parseWorktreePaths`）：含换行的路径仍是一条记录，不会伪造出额外的根让扫描
+读到 clone 之外。git 2.36 之前没有 `-z`，而行式无法安全表示这种路径，所以
+fallback 只扫描主 worktree（恒为第一条），而不冒伪造根的风险。`repoRoot()`
+本身不变——`review` 命令及其 reviewer 游标仍以主 worktree 为根。
 
 对主 worktree 会话而言 `watchRoot() === repoRoot()`，因此既有的按主 worktree
 落盘的 watch 与主 clone 会话行为完全一致。唯一的行为变化发生在 linked-worktree
@@ -98,20 +111,32 @@ watch，但兄弟检出的 `.git` 是一个 gitfile，在其中运行过的代�
 每一次信任检查（以及 `unsavedWork`）都锚定到 `repoRoot()`，即 genuine clone
 的主 worktree，它的 `.git` 是兄弟无法改写的真实目录。rooted 在 linked
 worktree 的 watch 仍按 genuine clone 的 worktree 登记项来校验，所以合法 watch
-依旧受信任。
+依旧受信任。写路径同样锚定：`requireWorktree` 接收独立的 `trustRoot`
+（genuine clone），与其 `root`（watch 根，仍作为符号链接 walk 的停止点）分开；
+`push`/`sync` 传入 `repoRoot()`。发现来的 watch 根绝不作信任锚。
 
 ### 3. 按 clone 全量列出 watch
 
-`status`（默认、未显式指定 root）与 daemon 的 `listAutofixPrWatches` 枚举
-`git worktree list --porcelain`，扫描每个 worktree 的 `.qwen/tmp` 并合并
-watch。按 PR 编号去重：git 不允许同一分支在两个 worktree 同时检出，所以一个
-PR 的 watch worktree 至多存在于一个 worktree，合并绝不会重复计入活跃 watch。
-daemon 视图仍把 clone 的主 worktree 作为展示用的 `root`；扫描覆盖所有
-worktree，从而保持「同一 clone 的两个 workspace 列出相同的 watch」。程序化
-传给 `runStatus` 的单个 `root`（测试、内部调用方）仍只扫描那一个 worktree；
-CLI 不提供 `--root` flag。每个 worktree 的目录扫描相互隔离：某个兄弟的
-`.qwen/tmp` 是普通文件或不可访问（ENOTDIR/EACCES）时跳过它，而不会让其余所有
-worktree 的 watch 列表整体中止——经 daemon 那会是整个 clone 的 500。
+`status`（默认、未显式指定 root）与 daemon 的 `listAutofixPrWatches` 以 NUL
+安全方式枚举 clone 的各 worktree（`cloneWorktreeRoots`），扫描每个的
+`.qwen/tmp` 并合并 watch。按 PR 编号去重：git 不允许同一分支在两个 worktree
+同时检出，所以一个 PR 的 watch worktree 至多存在于一个 worktree，合并绝不会
+重复计入活跃 watch；活 watch worktree 优先于另一根里的陈旧状态文件。daemon
+视图仍把 clone 的主 worktree 作为展示用的 `root`；扫描覆盖所有 worktree，从而
+保持「同一 clone 的两个 workspace 列出相同的 watch」。程序化传给 `runStatus`
+的单个 `root`（测试、内部调用方）仍只扫描那一个 worktree；CLI 不提供 `--root`
+flag。
+
+读取之前，`vouchedScanRoots` 先过滤枚举出的根（仅文件读取、不跑 git 命令，
+所以 daemon 仍只用一次 git 调用）：丢弃嵌套在另一根 `.qwen/tmp` 里的 watch
+worktree（在那里 force-add 一个状态文件会伪造 watch），并把每个剩余的根对照
+genuine clone 的 worktree 登记项做担保——被无关仓库占据的失效条目、或 `.git`
+被改写的兄弟，都不会被当成本 clone 的 watch 读取。然后每个 worktree 的目录
+扫描相互隔离：某个兄弟的 `.qwen/tmp` 是普通文件或不可访问（ENOTDIR/EACCES）
+时跳过它，而不会让其余所有 worktree 的 watch 列表整体中止（经 daemon 那会是
+整个 clone 的 500）。**主根**的读取失败会被抛出（surface），而不是吞成空列表
+——主 `.qwen/tmp` 不可读是真实的诊断信号。daemon 视图会对 `unreadable[].error`
+里的兄弟绝对路径与状态文件名脱敏（CLI 保留完整路径）。
 
 ### 4. prepare 拒绝作为安全网保留
 
@@ -144,13 +169,13 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
 
 - **既有的按主 worktree 落盘的 watch。** 主 clone 会话仍能找到它们
   （`watchRoot === repoRoot`）；按 clone 全量列表从任意 worktree 都能看到。
-  linked-worktree 会话会在自身 worktree 下计算路径，找不到主 worktree 的状态
-  文件；在那里 `prepare` 会尝试新建 watch 并撞上「分支已被检出」的拒绝。
-  文档化的补救：在拥有该 watch 的 worktree 里跑 `cleanup`（遗留 watch 在主
-  worktree——从 linked 会话跑 `cleanup` 会以那里为根，找不到它），再在目标
-  worktree 重新 `prepare`。cleanup 会保留持有工作的 worktree；不会静默丢失数据。
-  新根没有 history 时，`prepare` 会从旧 owning worktree 导入该 PR 的 history，
-  使已处理评论、已发回复与 CI 重跑记录在迁移后保留，而不是被再次回应。
+  helper 会发现 watch 实际所在的 worktree（`findWatchRoot`），所以 linked-worktree
+  会话可以直接 `cleanup` 一个主 worktree 落盘的 watch——无需切到拥有它的
+  worktree。要把 watch 迁到另一个 worktree，`cleanup` 它（当它属于另一个会话
+  时加 `--take-over`，否则 `assertOwnedBySession` 会拒绝），再在目标重新
+  `prepare`。`prepare` 会跨 clone 的各 worktree 导入并**合并**该 PR 的 history，
+  使已处理评论、已发回复与 CI 重跑记录即便多跳迁移也保留，而不是被再次回应。
+  cleanup 会保留持有工作的 worktree；不会静默丢失数据。
 - **跨环境操作。** 在 daemon 下于 linked worktree prepare 的 watch 就落在
   那里；从该 worktree 操作它。plain-CLI 的 `status` 仍通过按 clone 全量扫描
   发现它。
@@ -159,9 +184,14 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
 
 ## 验证计划
 
-- 单元：`watchRoot()` 的环境分支（daemon linked / daemon main / plain CLI）；
-  每个 helper 都以 `watchRoot()` 落盘；按 clone 全量 `status` 的合并与去重；
-  daemon 跨多 worktree 的列表；root 为 linked worktree 时信任检查不变。
+- 单元：`parseWorktreePaths` 的 NUL 安全（含换行的路径不伪造根）；`watchRoot()`
+  的环境分支与 `resolveWatchRoot`/`findWatchRoot` 发现——`cleanup` 从 linked
+  worktree 的 daemon 会话结束一个主 worktree 落盘的 watch，`prepare` 跨两跳
+  迁移并合并 history；按 clone 全量 `status` 的合并与活 worktree 去重（两种
+  顺序都能判别）；`vouchedScanRoots`（嵌套 watch worktree 与外来失效条目不被
+  读取）；主根读取失败被 surface；信任在列表与写路径（`requireWorktree`/
+  `unsavedWork`）都锚定 genuine clone，被改写的兄弟 gitfile 绝不执行其配置；
+  daemon 跨 worktree 列表且 `unreadable` 路径脱敏。
 - 回退 pin：linked worktree 里的 daemon 会话 prepare 出一个 worktree 落在
   会话 cwd 之内的 watch，且 `assertSessionCanRunWorktree` 通过（即 b1887512
   的 exact 失败场景）。

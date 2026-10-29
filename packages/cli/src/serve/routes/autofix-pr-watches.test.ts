@@ -231,7 +231,7 @@ describe('autofix-pr watch routes', () => {
         const view = await listAutofixPrWatches(root);
         expect(view.watches.map((watch) => watch.pr)).toEqual([7]);
         const calls = readFileSync(log, 'utf8').trim().split('\n');
-        expect(calls).toEqual([`-C ${root} worktree list --porcelain`]);
+        expect(calls).toEqual([`-C ${root} worktree list --porcelain -z`]);
       } finally {
         vi.unstubAllEnvs();
         rmSync(shim, { recursive: true, force: true });
@@ -344,5 +344,24 @@ describe('autofix-pr watch routes', () => {
     );
     expect(fromQualified.status).toBe(503);
     expect(fromQualified.body).not.toHaveProperty('watches');
+  });
+
+  it('redacts sibling worktree paths from the unreadable errors', async () => {
+    const linked = join(root, '..', `${root.split('/').at(-1)}-linked`);
+    git(root, 'worktree', 'add', '-q', '--detach', linked);
+    try {
+      const linkedPaths = autofixPrPaths(linked, 9);
+      mkdirSync(dirname(linkedPaths.statePath), { recursive: true });
+      // The filename says PR 9 but the state says PR 7: unreadable.
+      writeState(linkedPaths.statePath, watchState());
+      const view = await listAutofixPrWatches(root);
+      expect(view.unreadable?.some((u) => u.pr === 9)).toBe(true);
+      const json = JSON.stringify(view);
+      expect(json).not.toContain(linked);
+      expect(json).not.toContain('autofix-pr-9-state.json');
+    } finally {
+      git(root, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
   });
 });
