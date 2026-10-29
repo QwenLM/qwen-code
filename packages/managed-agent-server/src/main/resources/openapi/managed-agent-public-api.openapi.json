@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.96.0",
+    "version": "1.97.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes."
   },
   "servers": [
@@ -1245,9 +1245,22 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "description": "Message projection is not ready for a complete stream handoff; retry the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         },
-        "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
+        "description": "Default view: Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. Explicit view=messages instead returns at most100 current ma_message Items using tenant/Session keyset pagination, independent of published snapshots. Bodies are live per page. coveredSequence and lastSequence are the projection sequence included by this read, so the client resumes SSE there and does not skip an unprojected tail. Only bounded lifecycle events for the selected Turns accompany the Items. An older cursor pins direction, scope, sequence membership and projection generation;409 message_projection_changed requires reloading history."
       }
     },
     "/api/agent/web-shell/v1/events/stream": {
@@ -5236,7 +5249,7 @@
         },
         "responses": {
           "200": {
-            "description": "Immutable public item snapshot page.",
+            "description": "Chronological Item page: published snapshot by default, or live messages when explicitly selected.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5262,9 +5275,19 @@
           },
           "409": {
             "$ref": "#/components/responses/CursorExpired"
+          },
+          "503": {
+            "description": "Message projection has not caught up; retry the export.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         },
-        "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
+        "description": "Default view: Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page. Explicit view=messages instead reads live message-table pages forward. The first read captures a finite membership bound; later body/status changes are allowed and no persistent snapshot is created or selected. snapshotThroughSequence then names that membership bound, not frozen content. If the initial message projection lags committed events,503 message_projection_pending asks the caller to retry instead of returning incomplete history. Projection-generation changes invalidate the cursor.",
         "summary": "Read one immutable public Session snapshot page for reading exports"
       }
     },
@@ -7503,9 +7526,19 @@
           },
           "409": {
             "$ref": "#/components/responses/CursorExpired"
+          },
+          "503": {
+            "description": "Message projection is not ready for a complete stream handoff; retry the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         },
-        "description": "Requires current Session read authorization on every page. The first page returns at most limit Items from the newest published snapshot, in chronological order. nextCursor pages toward older Items in that same signed, retained snapshot. snapshotThroughSequence identifies its coverage, which may lag the current Session head; an empty page with zero coverage does not certify an empty Session because no published snapshot may be available. This page does not contain live tail events or current approval/task state; use the existing transcript, event and state APIs for those. A newer snapshot does not change an existing cursor. Forward export cursors cannot be used here and backward cursors cannot be used for exports. No journal replay, writer acquisition or local cache is involved.",
+        "description": "Default view: Requires current Session read authorization on every page. The first page returns at most limit Items from the newest published snapshot, in chronological order. nextCursor pages toward older Items in that same signed, retained snapshot. snapshotThroughSequence identifies its coverage, which may lag the current Session head; an empty page with zero coverage does not certify an empty Session because no published snapshot may be available. This page does not contain live tail events or current approval/task state; use the existing transcript, event and state APIs for those. A newer snapshot does not change an existing cursor. Forward export cursors cannot be used here and backward cursors cannot be used for exports. No journal replay, writer acquisition or local cache is involved. Explicit view=messages instead reads current message-table Items backward without any published snapshot, using the same scoped keyset and projection-generation rules as messages-view transcript reads. snapshotThroughSequence then names the initial sequence membership bound; bodies can change between pages. This mode does not return lifecycle events or claim fixed snapshot content.",
         "summary": "Read recent published Session items and page toward older items"
       }
     }
@@ -8921,13 +8954,18 @@
           },
           "cursor": {
             "type": ["string", "null"],
-            "maxLength": 512
+            "maxLength": 4096
           },
           "limit": {
             "type": ["integer", "null"],
             "minimum": 1,
             "maximum": 1000,
             "default": 100
+          },
+          "view": {
+            "type": ["string", "null"],
+            "enum": ["messages", null],
+            "description": "Select direct live message-table pages. Omit to retain the existing snapshot/event view. Message view accepts limit1..100; cursors bind scope, direction, membership range and projection generation, not frozen bodies."
           }
         }
       },
@@ -15693,7 +15731,8 @@
           "snapshotThroughSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": " In explicit messages view, this is the fixed sequence membership upper bound; row bodies are live, not frozen snapshot content."
           }
         }
       },
@@ -15715,6 +15754,11 @@
             "minimum": 1,
             "maximum": 100,
             "default": 100
+          },
+          "view": {
+            "type": ["string", "null"],
+            "enum": ["messages", null],
+            "description": "Select direct live message-table pages. Omit to retain the existing snapshot/event view. Message view accepts limit1..100; cursors bind scope, direction, membership range and projection generation, not frozen bodies."
           }
         }
       },
