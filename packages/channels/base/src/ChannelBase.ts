@@ -2192,17 +2192,37 @@ export abstract class ChannelBase {
    * Drop the session's queued (not yet drained) mid-turn injections, e.g. when
    * the running turn is cancelled: they are already invalid for the cancelled
    * turn and must not surface in the next one out of context. Surfaces the drop
-   * through the same buffer-drop notification the collect path uses.
+   * through the same buffer-drop notification the collect path uses, but only
+   * for the not-yet-drained tail: injections the child already drained reached
+   * the running turn, so reporting them as dropped would contradict the
+   * transport state adapters acknowledge from that notification.
    */
   private dropMidTurnInjections(sessionId: string): void {
     this.injectDegradedSessions.delete(sessionId);
     this.injectUnsupportedNotified.delete(sessionId);
     const pending = this.midTurnInjections.get(sessionId);
     this.midTurnInjections.delete(sessionId);
+    // Take the bridge's leftovers before clearing them: their count is the
+    // authoritative number of accepted injections the child never received.
+    const undrainedCount =
+      this.bridge.takeUndrainedMidTurnMessages?.(sessionId).length;
     this.bridge.dropMidTurnMessages?.(sessionId);
     if (!pending || pending.length === 0) return;
-    const chatId = pending[0]!.envelope.chatId;
-    const messageIds = pending
+    // A drain always consumes from the head of the admission ledger, so the
+    // undrained messages are exactly its tail. Bridges without the accessor
+    // cannot tell, and keep the older whole-ledger behaviour.
+    const dropped =
+      undrainedCount === undefined
+        ? pending
+        : pending.slice(
+            Math.max(
+              0,
+              pending.length - Math.min(undrainedCount, pending.length),
+            ),
+          );
+    if (dropped.length === 0) return;
+    const chatId = dropped[0]!.envelope.chatId;
+    const messageIds = dropped
       .map((entry) => entry.envelope.messageId)
       .filter((id): id is string => id !== undefined);
     try {

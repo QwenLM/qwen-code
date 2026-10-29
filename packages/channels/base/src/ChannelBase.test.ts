@@ -25064,6 +25064,13 @@ describe('ChannelBase', () => {
         );
         expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
 
+        // The bridge still holds the message: it is the undrained tail.
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce(['cancelled text']);
+
         await ch.cancelPromptForTest(sessionId);
         expect(dropMidTurnMessages).toHaveBeenCalledWith(sessionId);
         expect(ch.promptBufferDrops).toEqual([
@@ -25088,6 +25095,87 @@ describe('ChannelBase', () => {
         resolvers[1]?.('next done');
         await next;
         await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('reports only the undrained tail as dropped when earlier injections were already drained', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const dropMidTurnMessages = enableInjectionDrop();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-tail-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // A then B are accepted; the child already drained A, so only B is
+        // still undrained when the turn is cancelled.
+        await ch.handleInbound(
+          envelope({ text: 'drained text', messageId: 'm-tail-2' }),
+        );
+        await ch.handleInbound(
+          envelope({ text: 'undrained text', messageId: 'm-tail-3' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(2);
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce(['undrained text']);
+
+        await ch.cancelPromptForTest(sessionId);
+        expect(dropMidTurnMessages).toHaveBeenCalledWith(sessionId);
+        expect(ch.promptBufferDrops).toEqual([
+          expect.objectContaining({
+            sessionId,
+            messageIds: ['m-tail-3'],
+          }),
+        ]);
+
+        resolvers[0]!('done');
+        await running;
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('does not report a drop when every injection was already drained', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const dropMidTurnMessages = enableInjectionDrop();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-all-drained-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({ text: 'drained one', messageId: 'm-all-drained-2' }),
+        );
+        await ch.handleInbound(
+          envelope({ text: 'drained two', messageId: 'm-all-drained-3' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(2);
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce([]);
+
+        await ch.cancelPromptForTest(sessionId);
+        expect(dropMidTurnMessages).toHaveBeenCalledWith(sessionId);
+        expect(ch.promptBufferDrops).toEqual([]);
+
+        resolvers[0]!('done');
+        await running;
       } finally {
         resolvers.forEach((resolve) => resolve('done'));
       }
