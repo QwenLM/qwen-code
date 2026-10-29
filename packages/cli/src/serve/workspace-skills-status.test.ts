@@ -989,14 +989,26 @@ describe('createWorkspaceSkillsStatusProvider', () => {
 
       const directory = path.join(skillsDir, 'watched');
       const manifest = path.join(directory, 'SKILL.md');
+      const writeManifest = (description: string) =>
+        fsp.writeFile(
+          manifest,
+          `---\nname: watched\ndescription: ${description}\n---\nBODY_${description}`,
+        );
       await fsp.mkdir(directory, { recursive: true });
-      await fsp.writeFile(
-        manifest,
-        '---\nname: watched\ndescription: Watched\n---\nBODY_watched',
-      );
+      await writeManifest('Watched');
+      // Linux establishes the inotify watches asynchronously after `watch()`
+      // returns, so a write that lands in that window is folded into the
+      // initial scan (which `ignoreInitial` discards) and never replayed.
+      // Rewrite until an event is delivered: the frozen clock keeps the
+      // fallback scan out of this, so only a live watcher can observe it.
       await vi.waitFor(
-        async () => expect(await skillNames()).toContain('watched'),
-        { timeout: 5_000 },
+        async () => {
+          if (!(await skillNames()).includes('watched')) {
+            await writeManifest('Watched');
+          }
+          expect(await skillNames()).toContain('watched');
+        },
+        { timeout: 10_000, interval: 250 },
       );
 
       await fsp.writeFile(
