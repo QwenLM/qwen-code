@@ -510,6 +510,12 @@ export class PoolEntry {
         this.onClosed(this.id);
       }
     };
+    this.client.onTransportClosed = () => {
+      this.statusChangeListener?.(
+        this.serverName,
+        MCPServerStatus.DISCONNECTED,
+      );
+    };
     addMCPStatusChangeListener(this.statusChangeListener);
   }
 

@@ -554,6 +554,7 @@ export class McpClient {
    * consumer post-disconnect.
    */
   private lastTransportError?: Error;
+  onTransportClosed?: () => void;
   private instructions: string | undefined;
 
   constructor(
@@ -578,6 +579,7 @@ export class McpClient {
       this.lastTransportError ??= new Error('MCP transport closed');
       if (!getAllMCPServerStatuses().has(this.serverName)) {
         this.status = MCPServerStatus.DISCONNECTED;
+        this.onTransportClosed?.();
         return;
       }
       this.updateStatus(MCPServerStatus.DISCONNECTED);

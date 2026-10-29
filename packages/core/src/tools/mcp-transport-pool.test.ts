@@ -1034,6 +1034,40 @@ describe('McpTransportPool', () => {
       }
     });
 
+    it('replaces a removed pooled server after EOF before its idle drain', async () => {
+      const mocked = mockMcpSuccess();
+      const pool = mkPool();
+      const r = mkSessionRegistries();
+      const cfg = new MCPServerConfig('node');
+      const first = await pool.acquire(
+        'srv',
+        cfg,
+        'a',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
+      first.release();
+      removeMCPServerStatus('srv');
+      try {
+        (mocked as unknown as { onclose: () => void }).onclose();
+        expect(getAllMCPServerStatuses().has('srv')).toBe(false);
+        const replacement = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        expect(mocked.connect).toHaveBeenCalledTimes(2);
+        expect(replacement.client).not.toBe(first.client);
+      } finally {
+        await pool.drainAll();
+        removeMCPServerStatus('srv');
+      }
+    });
+
     it('observes EOF and shares one replacement across sessions', async () => {
       const mocked = mockMcpSuccess({ toolNames: ['count'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
