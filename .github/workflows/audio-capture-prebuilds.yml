@@ -19,7 +19,7 @@ on:
   workflow_call:
     inputs:
       ref:
-        type: string
+        type: 'string'
         default: ''
   workflow_dispatch:
 
@@ -81,7 +81,7 @@ jobs:
       # Keep Linux binaries compatible with older glibc even on newer ECS hosts.
       - name: 'Build Linux prebuild on ECS'
         if: "${{ runner.environment == 'self-hosted' }}"
-        shell: bash
+        shell: 'bash'
         run: |-
           docker run --rm --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
