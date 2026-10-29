@@ -18,6 +18,76 @@ function harness(html: string) {
   return { surface, frame, content, onEvent, onError };
 }
 
+describe('host theme in the view document', () => {
+  it('pins the color scheme and copies standard style variables', () => {
+    const h = harness('<p id="out">Ready</p>');
+    const root = h.content.documentElement;
+    expect(root.style.colorScheme).toBe('light dark');
+    h.surface.setHostStyle({
+      theme: 'dark',
+      variables: {
+        '--color-text-primary': 'oklch(98.5% 0 0)',
+        '--color-border-primary': 'oklch(100% 0 0/.1)',
+        '--font-sans': '-apple-system, "Segoe UI", system-ui',
+        '--border-radius-md': '6px',
+      },
+    });
+    expect(root.style.colorScheme).toBe('dark');
+    expect(root.style.getPropertyValue('--color-text-primary')).toBe(
+      'oklch(98.5% 0 0)',
+    );
+    expect(root.style.getPropertyValue('--font-sans')).toBe(
+      '-apple-system, "Segoe UI", system-ui',
+    );
+    h.surface.setHostStyle({
+      theme: 'light',
+      variables: { '--color-text-primary': 'rgb(10, 10, 10)' },
+    });
+    expect(root.style.colorScheme).toBe('light');
+    expect(root.style.getPropertyValue('--color-text-primary')).toBe(
+      'rgb(10, 10, 10)',
+    );
+    expect(root.style.getPropertyValue('--color-border-primary')).toBe('');
+  });
+
+  it('ignores non-standard names and values that could escape a declaration', () => {
+    const h = harness('<p id="out">Ready</p>');
+    h.surface.setHostStyle({
+      variables: {
+        '--color-text-primary': 'red; background: url(/secret)',
+        '--color-text-secondary': '}body{display:none',
+        '--gu-text': 'red',
+        color: 'red',
+        '--color-text-danger': 'rgb(231, 0, 11)',
+      },
+    });
+    const style = h.content.documentElement.style;
+    expect(style.getPropertyValue('--color-text-primary')).toBe('');
+    expect(style.getPropertyValue('--color-text-secondary')).toBe('');
+    expect(style.getPropertyValue('--gu-text')).toBe('');
+    expect(style.color).toBe('');
+    expect(style.getPropertyValue('--color-text-danger')).toBe(
+      'rgb(231, 0, 11)',
+    );
+  });
+
+  it('applies a theme received before the view mounts', () => {
+    const frame = document.createElement('iframe');
+    document.body.replaceChildren(frame);
+    const surface = new ViewSurface(frame, vi.fn(), vi.fn());
+    surface.setHostStyle({
+      theme: 'dark',
+      variables: { '--color-text-primary': 'rgb(250, 250, 250)' },
+    });
+    surface.attach(frame.contentDocument!, '<p id="out">Ready</p>', '');
+    const root = frame.contentDocument!.documentElement;
+    expect(root.style.colorScheme).toBe('dark');
+    expect(root.style.getPropertyValue('--color-text-primary')).toBe(
+      'rgb(250, 250, 250)',
+    );
+  });
+});
+
 describe('generated markup display', () => {
   it('preserves valid common IDs without exposing named DOM properties to the renderer', () => {
     const ids = [

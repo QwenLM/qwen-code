@@ -419,7 +419,11 @@ export function VoiceButton({
         title={label}
       >
         <span className={styles.recDot} aria-hidden="true" />
-        <span className={styles.wave} aria-hidden="true">
+        <span
+          className={styles.wave}
+          data-web-shell-voice-waveform
+          aria-hidden="true"
+        >
           {levels.map((lvl, i) => (
             <span
               key={i}

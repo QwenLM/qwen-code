@@ -38,7 +38,7 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
-import { VERDICTS } from '../../scripts/verify-pr-check.mjs';
+import { ATTRIBUTIONS, VERDICTS } from '../../scripts/verify-pr-check.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -5270,6 +5270,39 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('schedule nothing');
   });
 
+  // A manual re-verification round that records its head only after it
+  // finishes leaves the shared dedup file on the previous head while it
+  // runs: the next watch fire reads that stale head and starts a second
+  // round for the same head (PR #15816 review, P2). The registration must
+  // precede the round, as the watch prompt's own write-before-start rule does.
+  it('registers a manual re-verification round before it starts', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    // The phrase is a documented trigger, and an ambiguous PR is asked about.
+    expect(flat).toContain('有更新了，重新验证');
+    expect(flat).toContain('ask when that is ambiguous');
+    // An unchanged head gets an answer, not a round.
+    expect(flat).toContain('the head has not moved since');
+    // The shared state is checked and registered before the round runs.
+    expect(flat).toContain(
+      'Register the round in the shared watch state before starting it',
+    );
+    expect(flat).toContain('write `H` as in-flight');
+    expect(flat).toContain(
+      'the same write-before-start rule the watch prompt follows',
+    );
+    expect(flat).toContain(
+      'record `H` as verified in the same file once the round completes',
+    );
+    // Registration is a step of its own ahead of the round, not an
+    // afterthought behind it.
+    expect(
+      flat.indexOf('Register the round in the shared watch state'),
+    ).toBeLessThan(flat.indexOf('Run the follow-up protocol above'));
+    // Publishing consent is not inherited from the phrase.
+    expect(flat).toContain('the phrase alone does not post a comment');
+  });
+
   // The TUI renders `argument-hint` beside the command name; without the field
   // `/verify-pr` looks like it takes no arguments, unlike `/review`.
   it('declares an argument hint for the command prompt', () => {
@@ -5301,6 +5334,132 @@ describe('qwen-triage verify hardening round 2', () => {
     // And it must sit in Hard rules, not in narrative prose.
     expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
       verifySkill.indexOf('## Hard rules'),
+    );
+  });
+
+  // The rule above named two causes (PR, harness) and left the third unnamed.
+  // A round proved a repo test red on both arms, booked that red twice, and
+  // published `findings` while its own verdict line said neither reason was a
+  // PR defect. The A/A paragraph taught how to prove a red environmental and
+  // never how to count it, so the two halves have to name each other.
+  it('names the environment attribution and connects the A/A proof to the count', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const rules = flat.slice(flat.indexOf('## Hard rules'));
+
+    expect(rules).toContain('failures: [{ id, attribution }]');
+    for (const attribution of ATTRIBUTIONS) {
+      expect(rules).toContain(`\`${attribution}\``);
+    }
+    expect(rules).toContain('Only `pr` can carry `findings` or `blocked`');
+    // The counting consequence lives with the A/A proof, not only in the rule.
+    const notCovered = flat.slice(
+      flat.indexOf('**Not covered** — every claim'),
+      flat.indexOf('**Methodology**'),
+    );
+    expect(notCovered).toContain(
+      'how you count it, not just how you describe it',
+    );
+    expect(notCovered).toContain('It never enters `fail`');
+    expect(notCovered).toContain('_Not covered_');
+  });
+
+  // Hand-run, the guard asks "is anything new?" — and a fetch that errored
+  // answers "no". 324 review comments became 0 and the comparison read clean.
+  it('makes the pre-publish guard fail closed and owns both halves', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('scripts/verify-pr-guard.mjs');
+    expect(flat).toContain('the hand-run version fails open');
+    expect(flat).toContain('--compare --start');
+    expect(flat).toContain('a failed fetch as fatal and writes no snapshot');
+    expect(flat).toContain('shorter than the start snapshot');
+    expect(flat).toContain(
+      'A question you did not get answered is never a clean guard',
+    );
+    // A review has submitted_at and no updated_at, and neither an edit nor a
+    // dismissal moves it, so the stamp alone cannot answer "did anything
+    // change?". The boundary is stated too: reactions are not compared.
+    expect(flat).toContain('reviews carry `submitted_at`, not `updated_at`');
+    expect(flat).toContain(
+      'neither editing a review body nor dismissing the review moves it',
+    );
+    expect(flat).toContain("and each review's state, next to its stamp");
+    expect(flat).toContain('refuses a fetched item with no body');
+    expect(flat).toContain('or a review with no state');
+    expect(flat).toContain('reaction counts are deliberately not compared');
+  });
+
+  // "Every production commit was mutated on its own" shipped while two commits
+  // had no row. A coverage claim is a number over a set, so it is generated
+  // from the enumeration rather than asserted.
+  it('generates coverage claims from the enumeration', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain(
+      'A coverage claim is universally quantified, so generate it from the enumeration',
+    );
+    expect(flat).toContain('coverageClaim: "per-commit"');
+    expect(flat).toContain('productionCommits');
+    expect(flat).toContain('rows[].commit');
+    expect(flat).toContain('git log --no-merges base..head --not <target>');
+    // The claim is earned by the enumeration, not by having run mutations: a
+    // round with an uncovered commit reports per-guard and names the gap.
+    expect(flat).toContain('only when every enumerated commit has a row');
+    expect(flat).toContain('otherwise report the matrix per-guard');
+    const rules = flat.slice(flat.indexOf('## Hard rules'));
+    expect(rules).toContain('The same binds a **coverage claim**');
+  });
+
+  // Both obvious recipes are wrong in opposite directions. --no-merges keeps
+  // everything a merge brought in, so a branch that merged main counts main's
+  // work as its own; --first-parent throws away every second parent, so it also
+  // drops the PR's own feature-branch commits. Measured on a graph with one
+  // feature merge and one main merge: 5, 1, and 3 for the correct answer.
+  it('enumerates the commits the branch authored, and only those', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain(
+      'Both obvious recipes are wrong, in opposite directions',
+    );
+    expect(flat).toContain(
+      '`--no-merges` alone drops the merge commit but keeps',
+    );
+    expect(flat).toContain('also throws away the PR');
+    expect(flat).toContain('subtract the target with `--not`');
+    // --not returns nothing once the branch has landed, so the recipe carries
+    // the precondition it depends on rather than reading as unconditional.
+    expect(flat).toContain('Do this while the PR is open');
+    expect(flat).toContain('once the branch has landed in the target');
+    // Scoped to the coverage paragraph: neither recipe may be presented as the
+    // command to run, though another section could legitimately cite one.
+    const paragraph = flat.slice(
+      flat.indexOf('A coverage claim is universally quantified'),
+      flat.indexOf('Survivors of that matrix are not noise'),
+    );
+    expect(paragraph).not.toContain('git log --first-parent');
+    expect(paragraph).not.toContain(
+      'derive the set (`git log --no-merges base..head`)',
+    );
+  });
+
+  // A rule the artifact contract never asks for is a rule nothing produces:
+  // the checker reads mutations.json and failures[], so the contract that
+  // tells the round what to write has to name both.
+  it('asks the artifact contract for the files the new checks read', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const start = flat.indexOf('## Artifact contract');
+    const contract = flat.slice(start, flat.indexOf('## ', start + 3));
+
+    expect(contract).toContain('`mutations.json`');
+    expect(contract).toContain('coverageClaim: "per-commit"');
+    expect(contract).toContain(
+      'git log --no-merges <previous>..<head> --not <target>',
+    );
+    expect(contract).toContain(
+      'one `{id, attribution}` entry per failed assertion',
+    );
+    expect(contract).toContain(
+      '`attribution` one of `pr`, `harness` or `environment`',
     );
   });
 

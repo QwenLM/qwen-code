@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
@@ -551,9 +551,17 @@ public class ManagedAgentProperties implements EnvironmentAware {
         }
     }
 
-    /** Shared startup and preflight validation for scratch-only external workers. */
+    /**
+     * Shared startup and preflight validation for every external worker kind.
+     *
+     * <p>{@code external-workspace} is a provisioning prerequisite in this
+     * increment: it binds registered EXTERNAL storage, but Hosted files, Shell and
+     * Session close stay unimplemented, so it must keep the managed Workspace
+     * features disabled exactly as the scratch profile does.
+     */
     public void validateExternalRuntime() {
-        if (!ExternalRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())) {
+        String provisioner = runtimeBroker.getProvisioner();
+        if (!ExternalRuntimeKinds.isExternal(provisioner)) {
             return;
         }
         if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
@@ -565,8 +573,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 || runtimeBroker.isOperatorRecoveryEnabled()
                 || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
                 || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
-            throw new IllegalStateException("External Runtime supports scratch Sessions only;"
-                    + " managed Workspace features must be disabled");
+            throw new IllegalStateException(ExternalRuntimeKinds.isWorkspace(provisioner)
+                    ? "External Workspace Runtime is a storage provisioning prerequisite;"
+                            + " managed Workspace files, Shell and recovery features must stay"
+                            + " disabled until files execution and Session close are verified"
+                    : "External Runtime supports scratch Sessions only;"
+                            + " managed Workspace features must be disabled");
         }
         if (!"session".equals(runtimeBroker.getIsolationClass())
                 || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())

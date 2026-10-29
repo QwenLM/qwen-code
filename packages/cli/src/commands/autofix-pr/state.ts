@@ -6,8 +6,12 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  closeSync,
+  constants,
+  fstatSync,
   linkSync,
   lstatSync,
+  openSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -286,6 +290,35 @@ export function isRegularFile(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isFile() === true;
 }
 
+/**
+ * A regular file's text, or null when nothing is there. Opened without
+ * following a link and without blocking, and judged by what was opened: a
+ * FIFO put in its place after a check would otherwise hang the reader — the
+ * daemon's included, which lists the watches on its own thread.
+ */
+export function readRegularFile(path: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`${path} is not a regular file`);
+    }
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function readGateCursor(gatePath: string): AutofixPrGateCursor | null {
   if (lstatSync(gatePath, { throwIfNoEntry: false }) === undefined) {
     return null;
@@ -293,9 +326,9 @@ export function readGateCursor(gatePath: string): AutofixPrGateCursor | null {
   if (!isRegularFile(gatePath)) {
     throw new Error(`${gatePath} is not a regular file`);
   }
-  const parsed = JSON.parse(
-    readFileSync(gatePath, 'utf8'),
-  ) as AutofixPrGateCursor;
+  const text = readRegularFile(gatePath);
+  if (text === null) return null;
+  const parsed = JSON.parse(text) as AutofixPrGateCursor;
   if (parsed.version !== 1) {
     throw new Error(
       `unsupported autofix-pr gate cursor version in ${gatePath}: ${String(parsed.version)}`,
@@ -540,7 +573,17 @@ export function readState(statePath: string): AutofixPrState | null {
       `${statePath} is not a regular file; \`qwen autofix-pr cleanup <pr> --force\` discards it.`,
     );
   }
-  const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as AutofixPrState;
+  // Replaced since by something that is no regular file: refused alike.
+  let text: string | null;
+  try {
+    text = readRegularFile(statePath);
+  } catch {
+    throw new Error(
+      `${statePath} is not a regular file; \`qwen autofix-pr cleanup <pr> --force\` discards it.`,
+    );
+  }
+  if (text === null) return null;
+  const parsed = JSON.parse(text) as AutofixPrState;
   if (parsed.version !== 1) {
     throw new Error(
       `unsupported autofix-pr state version in ${statePath}: ${String(parsed.version)}`,

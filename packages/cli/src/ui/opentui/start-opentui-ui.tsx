@@ -45,6 +45,7 @@ import {
   useRenderer,
 } from '@opentui/react';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { modBandInput } from '../utils/mod-band-tree.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -168,6 +169,18 @@ function OpenTuiEntryApp({
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
+  // The Mods' band above the prompt. OpenTUI has no session survey.
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
+        columns: width,
+        rows: height,
+        isFullscreen: renderer.screenMode === 'alternate-screen',
+        hasSurvey: false,
+        isWorking: live.streaming,
+      }),
+    );
+  }, [config, renderer, width, height, live.streaming]);
 
   const userMessagesRef = useRef<readonly string[]>([]);
   const userMessages = useMemo(() => {
