@@ -34,50 +34,63 @@ const version = '5.5.1';
 const portLookup =
   spawnSync('sh', ['-c', 'command -v lsof || command -v ss']).status === 0;
 
-it('falls back from an unavailable download proxy and still checks the archive digest', () => {
-  const root = mkdtempSync(join(tmpdir(), 'rmq-download-'));
-  try {
-    const bin = join(root, 'bin');
-    const log = join(root, 'calls');
-    mkdirSync(bin);
-    writeFileSync(
-      join(bin, 'curl'),
-      `#!/usr/bin/env bash
+it.each([
+  ['uses the proxy', 'true', 2],
+  ['falls back from an unavailable proxy', 'false', 4],
+])(
+  '%s and still checks the archive digest',
+  (_description, proxyWorks, count) => {
+    const root = mkdtempSync(join(tmpdir(), 'rmq-download-'));
+    try {
+      const bin = join(root, 'bin');
+      const log = join(root, 'calls');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'curl'),
+        `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$CURL_LOG"
-case " $* " in *' --proxy '*) exit 7;; esac
+case " $* " in
+  *' --proxy '*) [ "$PROXY_WORKS" = true ] || exit 7 ;;
+  *) [ "$PROXY_WORKS" = false ] || exit 7 ;;
+esac
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '-o' ]; then shift; printf 'invalid' > "$1"; fi
   shift
 done
 `,
-    );
-    chmodSync(join(bin, 'curl'), 0o755);
-    const result = spawnSync('bash', [script, 'start'], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        CURL_LOG: log,
-        RMQ_JAVA_HOME: root,
-        RMQ_WORK_DIR: join(root, 'work'),
-        RMQ_CACHE_DIR: join(root, 'cache'),
-        RMQ_VERSION: '5.5.1',
-        RMQ_HOLDER_DIR: '',
-        RMQ_DOWNLOAD_PROXY: 'http://127.0.0.1:7890',
-      },
-    });
-    const calls = readFileSync(log, 'utf8').trim().split('\n');
-    expect(calls).toHaveLength(4);
-    expect(calls[0]).toContain('--proxy http://127.0.0.1:7890');
-    expect(calls[1]).not.toContain('--proxy');
-    expect(calls[2]).toContain('--proxy http://127.0.0.1:7890');
-    expect(calls[3]).not.toContain('--proxy');
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('failed its SHA-512 check');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+      );
+      chmodSync(join(bin, 'curl'), 0o755);
+      const result = spawnSync('bash', [script, 'start'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          CURL_LOG: log,
+          PROXY_WORKS: proxyWorks,
+          RMQ_JAVA_HOME: root,
+          RMQ_WORK_DIR: join(root, 'work'),
+          RMQ_CACHE_DIR: join(root, 'cache'),
+          RMQ_VERSION: '5.5.1',
+          RMQ_HOLDER_DIR: '',
+          RMQ_DOWNLOAD_PROXY: 'http://127.0.0.1:7890',
+        },
+      });
+      const calls = readFileSync(log, 'utf8').trim().split('\n');
+      expect(calls).toHaveLength(count);
+      for (const [index, call] of calls.entries()) {
+        if (proxyWorks === 'true' || index % 2 === 0) {
+          expect(call).toContain('--proxy http://127.0.0.1:7890');
+        } else {
+          expect(call).not.toContain('--proxy');
+        }
+      }
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('failed its SHA-512 check');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 const component = `
 import { createServer } from 'node:net';

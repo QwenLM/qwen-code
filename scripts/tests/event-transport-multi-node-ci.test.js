@@ -45,7 +45,9 @@ describe('EventTransport multi-node gates CI', () => {
   it('uses the HZ runner proxy only for distribution downloads', () => {
     expect(
       step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY,
-    ).toContain("startsWith(runner.name, 'ecs-qwen-hz')");
+    ).toBe(
+      "${{ startsWith(runner.name, 'ecs-qwen-hz') && 'http://127.0.0.1:7890' || '' }}",
+    );
   });
 
   it('runs the gate profile with every coordinate the gate requires', () => {
