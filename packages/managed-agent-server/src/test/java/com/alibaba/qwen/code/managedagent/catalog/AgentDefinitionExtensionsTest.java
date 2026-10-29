@@ -71,6 +71,42 @@ class AgentDefinitionExtensionsTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"model_invocable", "user_invocable"})
+    void invocationFlagsAreOnlyAcceptedOnSessionCatalogs(String field) {
+        var skill = new LinkedHashMap<>(SKILL);
+        skill.put(field, false);
+        assertRefused("skills", () -> AgentDefinitionExtensions.skills(List.of(skill), true));
+        assertThat(AgentDefinitionExtensions.sessionSkills(List.of(skill))).containsExactly(skill);
+    }
+
+    @Test
+    void sessionCatalogHasSeparateBoundsAndPreservesInvocationPolicy() {
+        var skill = new LinkedHashMap<>(SKILL);
+        skill.put("body", "x".repeat(512 * 1024));
+        skill.put("model_invocable", false);
+        skill.put("user_invocable", true);
+        assertThat(AgentDefinitionExtensions.sessionSkills(List.of(skill))).containsExactly(skill);
+        assertRefused("skills", () -> AgentDefinitionExtensions.skills(List.of(skill), true));
+        var oversized = new LinkedHashMap<>(skill);
+        oversized.put("body", "x".repeat(512 * 1024 + 1));
+        assertRefused("skills", () -> AgentDefinitionExtensions.sessionSkills(List.of(oversized)));
+        var catalog = new ArrayList<Map<String, Object>>();
+        for (int i = 0; i < 256; i++) {
+            catalog.add(Map.of("name", "skill-" + i, "description", "d", "body", "b"));
+        }
+        assertThat(AgentDefinitionExtensions.sessionSkills(catalog)).hasSize(256);
+        catalog.add(Map.of("name", "overflow", "description", "d", "body", "b"));
+        assertRefused("skills", () -> AgentDefinitionExtensions.sessionSkills(catalog));
+        catalog.clear();
+        for (int i = 0; i < 5; i++) {
+            var entry = new LinkedHashMap<>(skill);
+            entry.put("name", "large-" + i);
+            catalog.add(entry);
+        }
+        assertRefused("skills", () -> AgentDefinitionExtensions.sessionSkills(catalog));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"", " ", "bad name", "bad/name", "bad\nname", "\uD800"})
     void refusesInvalidSkillNames(String name) {
         Map<String, Object> skill = new LinkedHashMap<>(SKILL);
@@ -98,13 +134,18 @@ class AgentDefinitionExtensionsTest {
     }
 
     @Test
-    void mcpPinsRequireTheMcpProfileAndPreserveSafeIntegerRevisions() {
+    void mcpPinsSupportOrdinaryShellAndPreserveSafeIntegerRevisions() {
         assertThat(AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.MCP))
                 .containsExactly(Map.of("serverId", "docs", "serverRevision", 1L,
                         "definitionDigest", "a".repeat(64)));
         assertThat(AgentDefinitionExtensions.mcpServers(null, WorkspaceToolProfiles.FILES)).isEmpty();
+        assertThat(AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.SHELL))
+                .isEqualTo(AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.MCP));
+        assertThat(AgentDefinitionExtensions.mcpServers(null, WorkspaceToolProfiles.SHELL)).isEmpty();
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(null, WorkspaceToolProfiles.MCP));
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.FILES));
+        assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.READ));
+        assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), "hosted-workspace-shell/2"));
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP, MCP), WorkspaceToolProfiles.MCP));
         for (Object revision : List.of(0, -1, 1.5, "1", 9007199254740992L)) {
             Map<String, Object> pin = new LinkedHashMap<>(MCP);

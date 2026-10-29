@@ -115,6 +115,43 @@ public class CsiNativeReadbackProtocolTest {
         assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.executeResult(JsonCodec.encode(response), request));
     }
 
+    @Test
+    void appliesTheCheckpointReaderLimitWithoutWideningOrdinaryReferences() throws Exception {
+        var fixture = JsonCodec.parseObject(Files.readAllBytes(Path.of(
+                "../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "fixture");
+        var valid = ((List<?>) fixture.get("valid")).stream().map(ManagedCsiFilesProtocolTest::map).toList();
+        var execute = valid.stream().filter(row -> "execute".equals(row.get("name"))).findFirst().orElseThrow();
+        var request = CsiNativeReadbackProtocol.request(ManagedCsiFilesProtocolTest.map(execute.get("request")));
+        for (Object candidate : (List<?>) fixture.get("checkpointSizeCases")) {
+            var size = ManagedCsiFilesProtocolTest.map(candidate);
+            var response = new LinkedHashMap<>(ManagedCsiFilesProtocolTest.map(execute.get("response")));
+            var evidence = new LinkedHashMap<>(ManagedCsiFilesProtocolTest.map(response.get("evidence")));
+            var grant = new LinkedHashMap<>(ManagedCsiFilesProtocolTest.map(evidence.get("grant")));
+            var checkpoint = new LinkedHashMap<>(ManagedCsiFilesProtocolTest.map(grant.get("checkpointRef")));
+            checkpoint.put("byteLength", size.get("byteLength"));
+            grant.put("checkpointRef", checkpoint);
+            evidence.put("grant", grant);
+            response.put("evidence", evidence);
+            if (Boolean.TRUE.equals(size.get("valid"))) {
+                assertTrue(BrokerValues.sameJsonMap(response, CsiNativeReadbackProtocol.response(response, request)));
+            } else {
+                assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.response(response, request));
+            }
+        }
+        var prepare = valid.stream().filter(row -> "prepare".equals(row.get("name"))).findFirst().orElseThrow();
+        for (int bytes : List.of(65536, 65537)) {
+            var ordinary = new LinkedHashMap<>(ManagedCsiFilesProtocolTest.map(prepare.get("request")));
+            var subject = new LinkedHashMap<>(ManagedCsiFilesProtocolTest.map(ordinary.get("subject")));
+            subject.put("byteLength", bytes);
+            ordinary.put("subject", subject);
+            if (bytes == 65536) {
+                assertTrue(BrokerValues.sameJsonMap(ordinary, CsiNativeReadbackProtocol.request(ordinary)));
+            } else {
+                assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.request(ordinary));
+            }
+        }
+    }
+
     public static Map<String, Object> executionResult(String text) {
         return Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", text)));
     }

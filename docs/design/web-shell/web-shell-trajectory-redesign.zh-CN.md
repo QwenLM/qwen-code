@@ -630,14 +630,17 @@ _左：upstream `main` `a1fb0306ae`，用 Playwright mock daemon 截取。右：
   - `TrajectoryPanel.tsx`：布局分档观察器；覆盖在 `inert` 列表上的下钻层，以及用
     `ResizablePanelGroup` 实现的左右分栏；单击打开详情；↑ / ↓ 切换；“返回”时恢复焦点
     和滚动位置。
-  - `ArtifactPanel.tsx`：传入 `workspaceCwd`，可选传入 `onOpenFile` 和
-    `onOpenAgent`。
 - **测试 ID：** `trajectory-inspector` 改为 `trajectory-detail`，8 处 e2e 用法在同一
   PR 中更新。
 - **完成标准**
   - 停靠面板中详情至少显示 20 行内容。
   - “返回”后滚动偏移误差不超过一行，选中项保留，焦点回到列表。
   - 指针和键盘都能调整侧栏宽度。
+- **移到 PR-R3：** 以下内容依赖 PR-R3 引入的行合并和步骤模型。
+  - 步骤的内容区（回复、思考、工具调用）。在此之前，步骤显示事实、标识符和生命周期。
+  - 轮次的实际历时和 token。在此之前，轮次显示步骤数、工具数、主模型耗时和提示词。
+  - 由 `ArtifactPanel.tsx` 传入 `workspaceCwd`、`onOpenFile` 和 `onOpenAgent`，
+    以及依赖它们的文件和代理链接。
 
 ### PR-R3 行与树
 
@@ -648,6 +651,7 @@ _左：upstream `main` `a1fb0306ae`，用 Playwright mock daemon 截取。右：
   - `summarizeTrajectory.ts`：主要模型和每轮实际历时。
   - `TrajectoryPanel.tsx`：树形网格、吸顶轮次标题、微型条、按 owner 的搜索计数与
     跳转、子孙失败的空心图标。
+  - `TrajectoryDetail.tsx` 和 `ArtifactPanel.tsx`：从 PR-R2 移来的各项。
 - **测试**
   - 布局单元测试：行合并、嵌套、无法解析的父调用、残缺轮次、计时帧出现之前的会话
     （其回复仍可见）、插入的提示。

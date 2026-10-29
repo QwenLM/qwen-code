@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -57,6 +56,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -88,6 +89,10 @@ class HostedPublicWorkspaceIT {
     private boolean residentRestart;
     private com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.Placement retainedPlacement;
     private boolean shellLifecycleV2;
+    private boolean publicChildren;
+    private boolean publicChildBackground;
+    private boolean publicChildRestarted;
+    private boolean publicChildFallback;
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
     private HttpServer storeRelay;
@@ -101,6 +106,159 @@ class HostedPublicWorkspaceIT {
     // the Session owner, proving R1's second-operator handoff.
     private final java.util.Set<String> operatorAnswered = new java.util.HashSet<>();
     private final java.util.Set<String> fixedAnswered = new java.util.HashSet<>();
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(240)
+    void publicChildAgentsRunWritableTasksWithAggregatedApprovals(boolean background) throws Exception {
+        publicChildren = true;
+        publicChildBackground = background;
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        boolean web = background;
+        String created = web ? "/api/agent/web-shell/v1/sessions/create" : "/v1/agents/sessions";
+        Map<String, Object> body = web
+                ? Map.of("agentId", "qwen-code", "idempotencyKey", "public-child", "input", List.of(),
+                        "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child"))
+                : Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        String parent = request("POST", created, body, "public-child", "actor", 202).path(web ? "sessionId" : "id").asText();
+        assertThat(request("GET", "/v1/agents/sessions/" + parent, null, null, "actor", 200)
+                .at("/capabilities/child_agents").asBoolean()).isTrue();
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", parent, "idempotencyKey", "public-child-turn",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_PUBLIC_PARENT"))),
+                "public-child-turn", "actor", 202).path("turnId").asText();
+        await().atMost(Duration.ofSeconds(120)).untilAsserted(() -> {
+            JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+            for (JsonNode action : page.path("data")) {
+                String id = action.path("actionId").asText();
+                if (answered.add(action.path("sessionId").asText() + ":" + id)) {
+                    request("POST", "/api/agent/web-shell/v1/actions/respond",
+                            Map.of("sessionId", action.path("sessionId").asText(), "actionId", id, "idempotencyKey", id,
+                                    "response", Map.of("kind", "permission", "optionId", "allow",
+                                            "inputRevision", action.path("inputRevision").asLong(), "policyRevision", action.path("policyRevision").asText())),
+                            id, "actor", 202);
+                }
+            }
+            assertThat(modelFailure.get()).isNull();
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, parent, turn)).isEqualTo("COMPLETED");
+            assertThat(root.resolve("public-child.txt")).hasContent("child-write");
+            assertThat(root.resolve("public-child-shell.txt")).hasContent("child-shell");
+            JsonNode tasks = request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200);
+            assertThat(tasks.path("data").size()).isEqualTo(1);
+            assertThat(tasks.at("/data/0/state").asText()).isEqualTo("completed");
+            assertThat(tasks.at("/data/0/approvalMode").asText()).isEqualTo("default");
+            assertThat(tasks.path("activeChildCount").asLong()).isZero();
+        });
+        String child = jdbc.queryForObject("SELECT session_id FROM ma_session WHERE tenant_id=? AND parent_session_id=?", String.class, tenant, parent);
+        assertThat(answered).anyMatch(id -> id.startsWith(child + ":"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND parent_session_id=? AND public_child_agents_version=1",
+                Integer.class, tenant, parent)).isEqualTo(1);
+        JsonNode transcript = request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", child), null, "actor", 200);
+        assertThat(transcript.toString()).contains("G0_PUBLIC_CHILD_DONE");
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE tenant_id=? AND session_id=?"
+                    + " AND domain='child_run' AND delivery_state='consumed'", Integer.class, tenant, parent)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id=? AND session_id=?", String.class, tenant, child))
+                    .isEqualTo("CLOSED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id=? AND session_id=?"
+                    + " AND operation_kind='CHILD_SESSION_CLOSE' AND state='close_debt'", Integer.class, tenant, parent)).isZero();
+        });
+        request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", child, "idempotencyKey", "forbidden-child-turn", "input", List.of(Map.of("type", "input_text", "text", "new turn"))),
+                "forbidden-child-turn", "actor", 409);
+    }
+
+    @Test
+    @Timeout(240)
+    void publicChildKeepsTheFallbackRuntimeModel() throws Exception {
+        publicChildFallback = true;
+        publicChildAgentsRunWritableTasksWithAggregatedApprovals(true);
+        assertThat(modelRequests).anyMatch(body -> "g0-source".equals(body.path("model").asText()));
+        assertThat(modelRequests.stream().filter(body -> "g0-fixture".equals(body.path("model").asText())).toList())
+                .isNotEmpty().allSatisfy(body -> assertThat(body.path("temperature").asDouble()).isEqualTo(0.2));
+    }
+
+    @Test
+    @Timeout(240)
+    void publicChildApprovalAndParentStopSurviveJavaAndHarnessRestart() throws Exception {
+        publicChildren = true;
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        var roots = boot();
+        register("workspace-0", "storage-0");
+        String parent = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "restart-child", "actor", 202).path("id").asText();
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", parent, "idempotencyKey", "restart-child-turn",
+                        "input", List.of(Map.of("type", "input_text", "text", "G0_PUBLIC_PARENT"))),
+                "restart-child-turn", "actor", 202).path("turnId").asText();
+        JsonNode waiting = await().atMost(Duration.ofSeconds(90)).until(() -> {
+            JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+            for (JsonNode action : page.path("data")) {
+                if (!parent.equals(action.path("sessionId").asText())) {
+                    return action;
+                }
+                String id = action.path("actionId").asText();
+                if (answered.add(id)) {
+                    request("POST", "/api/agent/web-shell/v1/actions/respond",
+                            Map.of("sessionId", parent, "actionId", id, "idempotencyKey", id,
+                                    "response", Map.of("kind", "permission", "optionId", "allow",
+                                            "inputRevision", action.path("inputRevision").asLong(),
+                                            "policyRevision", action.path("policyRevision").asText())), id, "actor", 202);
+                }
+            }
+            assertThat(modelFailure.get()).isNull();
+            return null;
+        }, Objects::nonNull);
+        String child = waiting.path("sessionId").asText();
+        var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
+        int brokerPort = properties.getRuntimeBroker().getPort();
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        spring.close();
+        publicChildRestarted = true;
+        Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+        startSpring(cli, roots, harnessPort, brokerPort);
+        startHarness(cli, harnessPort, brokerPort);
+        await().atMost(Duration.ofSeconds(45)).untilAsserted(() -> {
+            JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", parent, "includeChildren", true), null, "actor", 200);
+            assertThat(page.path("data")).anyMatch(action -> action.path("sessionId").asText().equals(child)
+                    && action.path("actionId").equals(waiting.path("actionId"))
+                    && action.path("inputRevision").equals(waiting.path("inputRevision")));
+        });
+        Map<String, Object> cancel = Map.of("type", "agent.session.cancel", "turn_id", turn);
+        request("POST", "/v1/agents/sessions/" + parent + "/events", cancel, "stop-public-child", "actor", 202);
+        request("POST", "/v1/agents/sessions/" + parent + "/events", cancel, "stop-public-child", "actor", 202);
+        // Recovery may wait for the old writer lease and one full retry backoff.
+        await().atMost(Duration.ofSeconds(150)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, parent, turn)).isEqualTo("CANCELLED");
+            JsonNode tasks = request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200);
+            assertThat(tasks.at("/data/0/stopRequested").asBoolean()).isTrue();
+            assertThat(tasks.at("/data/0/state").asText()).isEqualTo("cancelled");
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id=? AND session_id=?", String.class, tenant, child))
+                    .isEqualTo("CLOSED");
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND parent_session_id=?", Integer.class, tenant, parent)).isEqualTo(1);
+        assertThat(roots.getFirst().resolve("child/public-child.txt")).doesNotExist();
+        assertThat(roots.getFirst().resolve("child/public-child-shell.txt")).doesNotExist();
+        assertThat(modelFailure.get()).isNull();
+    }
 
     @Test
     @Timeout(150)
@@ -118,6 +276,63 @@ class HostedPublicWorkspaceIT {
         // approval answered by the non-owner OPERATOR — pin the handoff,
         // or the responder ternary can collapse to the owner unnoticed.
         assertThat(operatorAnswered).hasSize(2);
+    }
+
+    @Test
+    @Timeout(240)
+    void liveApprovalChangesReleaseOnlyThePermittedPendingToolsOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create",
+                Map.of("agentId", "qwen-code", "idempotencyKey", "live-session", "input", List.of(),
+                        "approvalMode", "default",
+                        "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "live-session", "actor", 202).path("sessionId").asText();
+        assertThat(request("POST", "/api/agent/web-shell/v1/session-approval/query",
+                Map.of("sessionId", session), null, "actor", 200).path("liveSupported").asBoolean()).isTrue();
+        String marker = "G0_DEFINITION_APPROVAL_LIVE";
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", session, "idempotencyKey", marker,
+                        "input", List.of(Map.of("type", "input_text", "text", marker))),
+                marker, "actor", 202).path("turnId").asText();
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", session), null, "actor", 200).path("data");
+            assertThat(actions.size()).isEqualTo(1);
+            assertThat(actions.get(0).path("toolName").asText()).isEqualTo("write_file");
+        });
+        assertThat(root.resolve(marker + ".write")).doesNotExist();
+        request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                Map.of("sessionId", session, "idempotencyKey", "live-auto-edit",
+                        "approvalMode", "auto-edit", "expectedRevision", 0), null, "actor", 200);
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", session), null, "actor", 200).path("data");
+            assertThat(actions.size()).isEqualTo(1);
+            assertThat(actions.get(0).path("toolName").asText()).isEqualTo("run_shell_command");
+        });
+        assertThat(Files.readString(root.resolve(marker + ".write"))).isEqualTo("BYTES_" + marker + "\n");
+        assertThat(root.resolve(marker + ".shell")).doesNotExist();
+        request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                Map.of("sessionId", session, "idempotencyKey", "live-yolo",
+                        "approvalMode", "yolo", "expectedRevision", 1), null, "actor", 200);
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                String.class, tenant, session, turn)).isEqualTo("COMPLETED"));
+        assertThat(Files.readString(root.resolve(marker + ".shell"))).isEqualTo("once\n");
+        assertThat(jdbc.queryForMap("SELECT approval_mode, approval_revision FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", tenant, session, turn))
+                .containsEntry("approval_mode", "default").containsEntry("approval_revision", 0L);
+        assertThat(jdbc.queryForList("SELECT state FROM ma_session_record WHERE tenant_id=? AND session_id=?"
+                + " AND record_kind='ACTION'", String.class, tenant, session)).containsExactly("decided", "decided");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id=?"
+                + " AND execution_state='SETTLED'", Integer.class, session)).isEqualTo(2);
+        assertThat(modelRequests).hasSize(3);
+        assertThat(modelFailure.get()).isNull();
     }
 
     @Test
@@ -322,7 +537,7 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
-        assertThat(modelRequests).hasSize(shellLifecycleV2 ? 4 : 8);
+        assertThat(modelRequests).hasSize(4);
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
@@ -427,9 +642,8 @@ class HostedPublicWorkspaceIT {
                         String.class, session)).containsExactly("UNKNOWN");
             });
             var connector = spring.getBean(HarnessConnector.class);
-            var attachments = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
-            var attached = attachments.values().stream().map(HarnessSessionRef.class::cast)
-                    .filter(ref -> session.equals(ref.getHarnessSessionId())).findFirst().orElseThrow();
+            var attached = attachment(connector, session);
+            assertThat(attached).as("Spring's attachment to %s", session).isNotNull();
             var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.
@@ -552,8 +766,8 @@ class HostedPublicWorkspaceIT {
                     String.class, binding)).isEqualTo("RELEASED");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?"
-                    + " AND holder_key IS NOT NULL", Integer.class, binding)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                    + " AND execution_storage_key IS NOT NULL", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
             assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())
@@ -578,230 +792,54 @@ class HostedPublicWorkspaceIT {
         }
     }
 
-    // W2: a controlled cwd change settles through the production server and
-    // the deployment's real Workspace probe, on both API surfaces.
     @Test
     @Timeout(480)
-    void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
+    void legacyWorkspaceCwdOperationsSettleAndPivotLaterTurns() throws Exception {
         List<Path> roots = boot();
         Files.createDirectory(roots.get(0).resolve("child2"));
         register("workspace-0", "storage-0");
-        register("workspace-1", "storage-1");
         Map<String, Object> creation = Map.of("agent_id", "qwen-code",
-                "input", List.of(Map.of("type", "input_text", "text",
-                        "G0_FILES")), "workspace",
-                Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+                "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
         String session = request("POST", "/v1/agents/sessions", creation,
-                "w2-create", "actor", 202).path("id").asText();
-        // The Session first runs a real tool Turn in the original
-        // directory, so the later Turn has something to escape from.
+                "legacy-cwd-create", "actor", 202).path("id").asText();
         awaitTurn(session, null, "child", roots.get(0));
-
-        Map<String, Object> change = Map.of("cwd_relative", "child2//",
-                "expected_context_revision", 1);
-        // A just-completed Turn can retain the Runtime context for a moment;
-        // re-drive the same idempotency key until admission answers 202.
-        JsonNode operation = await().atMost(Duration.ofSeconds(35))
-                .until(() -> {
-                    HttpResponse<String> answer = rawRequest("POST",
-                            "/v1/agents/sessions/" + session + "/cwd", change,
-                            "w2-cwd-1", "actor");
-                    JsonNode body = json.readTree(answer.body());
-                    if (answer.statusCode() == 409
-                            && "session_context_busy".equals(body.path("error")
-                                    .path("code").asText())) {
-                        return null;
-                    }
-                    assertThat(answer.statusCode())
-                            .as("POST /cwd: %s", answer.body())
-                            .isEqualTo(202);
-                    return body;
-                }, Objects::nonNull);
-        assertThat(operation.path("type").asText()).isEqualTo("cwd_change");
-        assertThat(operation.path("target_cwd_relative").asText())
-                .isEqualTo("child2");
-        assertThat(operation.path("expected_context_revision").asLong())
-                .isEqualTo(1);
-        assertThat(operation.path("status").asText())
-                .isIn("pending", "installing");
-        assertThat(operation.path("replayed").asBoolean()).isFalse();
-        String operationId = operation.path("id").asText();
-
-        // The same key replays even spelled differently once normalized.
-        JsonNode replay = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child2/./",
-                        "expected_context_revision", 1),
-                "w2-cwd-1", "actor", 202);
-        assertThat(replay.path("id").asText()).isEqualTo(operationId);
-        assertThat(replay.path("replayed").asBoolean()).isTrue();
-
+        // A durable Turn result can precede the Runtime's confirmed release.
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() ->
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?"
+                        + " AND session_state <> 'RELEASED'", Integer.class, tenant, session)).isZero());
+        var store = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore.class);
+        String operation = LegacyCwdOperations.seed(jdbc, store, tenant, session, "actor", "actor-digest",
+                "legacy-cwd", "digest", "child2", 1).operation().operationId();
         await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
-                    + "/operations/" + operationId, null, null, "actor", 200);
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                    null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
-            assertThat(polled.path("result_context_revision").asLong())
-                    .isEqualTo(2);
-            assertThat(polled.path("replayed").asBoolean()).isFalse();
+            assertThat(polled.path("result_context_revision").asLong()).isEqualTo(2);
         });
-        JsonNode read = request("GET", "/v1/agents/sessions/" + session,
+        JsonNode web = request("POST", "/api/agent/web-shell/v1/operations/query",
+                Map.of("sessionId", session, "operationId", operation), null, "actor", 200);
+        assertThat(web.path("status").asText()).isEqualTo("completed");
+        assertThat(web.path("resultContextRevision").asLong()).isEqualTo(2);
+        JsonNode events = request("GET", "/v1/agents/sessions/" + session + "/events",
                 null, null, "actor", 200);
-        assertThat(read.at("/workspace/cwd_relative").asText())
-                .isEqualTo("child2");
-        assertThat(read.at("/workspace/context_revision").asLong())
-                .isEqualTo(2);
-        assertThat(read.at("/workspace/state").asText()).isEqualTo("ready");
-        JsonNode events = request("GET", "/v1/agents/sessions/" + session
-                + "/events", null, null, "actor", 200);
-        JsonNode changed = null;
+        long changed = 0;
         for (JsonNode event : events.path("data")) {
-            if ("session.context.changed"
-                    .equals(event.path("type").asText())) {
-                changed = event;
+            if ("session.context.changed".equals(event.path("type").asText())) {
+                changed++;
             }
         }
-        assertThat(changed).as("session.context.changed in %s", events)
-                .isNotNull();
-        assertThat(changed.path("data").path("cwdRelative").asText())
-                .isEqualTo("child2");
-        assertThat(changed.path("data").path("contextRevision").asLong())
-                .isEqualTo(2);
-        assertThat(changed.path("data").path("workspaceId").asText())
-                .isEqualTo("workspace-0");
-
-        Map<String, Object> webChange = Map.of("sessionId", session,
-                "idempotencyKey", "w2-cwd-web-1", "cwdRelative", ".",
-                "expectedContextRevision", 2);
-        JsonNode webOperation = request("POST",
-                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
-                null, "actor", 202);
-        assertThat(webOperation.path("type").asText())
-                .isEqualTo("cwd_change");
-        String webOperationId = webOperation.path("operationId").asText();
-        JsonNode webReplay = request("POST",
-                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
-                null, "actor", 202);
-        assertThat(webReplay.path("operationId").asText())
-                .isEqualTo(webOperationId);
-        assertThat(webReplay.path("replayed").asBoolean()).isTrue();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("POST",
-                    "/api/agent/web-shell/v1/operations/query",
-                    Map.of("sessionId", session,
-                            "operationId", webOperationId),
-                    null, "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("completed");
-            assertThat(polled.path("resultContextRevision").asLong())
-                    .isEqualTo(3);
-        });
-
-        assertRefusal(request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "..", "expected_context_revision",
-                        3), "w2-bad-lexical", "actor", 400), "invalid_cwd");
-        assertRefusal(request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child",
-                        "expected_context_revision", 1),
-                "w2-stale-revision", "actor", 409), "context_revision_conflict");
-        String legacy = request("POST", "/v1/agents/sessions",
-                Map.of("agent_id", "qwen-code"), "w2-legacy", null, 202)
-                .path("id").asText();
-        assertRefusal(request("POST",
-                "/v1/agents/sessions/" + legacy + "/cwd",
-                Map.of("cwd_relative", ".", "expected_context_revision",
-                        1), "w2-legacy-cwd", "actor", 400),
-                "unsupported_feature");
-        request("POST", "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child",
-                        "expected_context_revision", 3),
-                "w2-stranger", "stranger", 404);
-
-        // A missing target fails the operation, never the Session.
-        JsonNode missing = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "missing",
-                        "expected_context_revision", 3),
-                "w2-missing-dir", "actor", 202);
-        String missingOperation = missing.path("id").asText();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
-                    + "/operations/" + missingOperation, null, null,
-                    "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("failed");
-            assertThat(polled.path("failure_code").asText())
-                    .isEqualTo("workspace_unavailable");
-            assertThat(polled.path("result_context_revision")
-                    .isMissingNode()).isTrue();
-        });
-        read = request("GET", "/v1/agents/sessions/" + session, null, null,
-                "actor", 200);
-        assertThat(read.at("/workspace/cwd_relative").asText())
-                .isEqualTo(".");
-        assertThat(read.at("/workspace/context_revision").asLong())
-                .isEqualTo(3);
-
-        // The WebShell twin's failed projection must carry failureCode too —
-        // the contract condition requires it, and generated clients read it.
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("POST",
-                    "/api/agent/web-shell/v1/operations/query",
-                    Map.of("sessionId", session,
-                            "operationId", missingOperation),
-                    null, "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("failed");
-            assertThat(polled.path("failureCode").asText())
-                    .isEqualTo("workspace_unavailable");
-        });
-
-        // The Session is not wedged: the next admitted change completes.
-        String recovered = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child2",
-                        "expected_context_revision", 3),
-                "w2-recovered", "actor", 202).path("id").asText();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
-                    + "/operations/" + recovered, null, null, "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("completed");
-            assertThat(polled.path("result_context_revision").asLong())
-                    .isEqualTo(4);
-        });
-
-        events = request("GET", "/v1/agents/sessions/" + session + "/events",
-                null, null, "actor", 200);
-        long changedEvents = 0;
-        for (JsonNode event : events.path("data")) {
-            if ("session.context.changed"
-                    .equals(event.path("type").asText())) {
-                changedEvents++;
-            }
-        }
-        // Each completed change emitted once; the refused one emitted none.
-        assertThat(changedEvents).isEqualTo(3);
-
-        // #13112 landed the missing half of the pivot: a bound later Turn
-        // installs the committed binding on its fresh Runtime Session, so
-        // the turn's file writes land only in the changed directory — a
-        // stale-runtime reuse would land them back in the original one.
-        // The sentinel makes the direction discriminating: identical bytes
-        // flowed through both Turns of the fixture model otherwise.
-        Files.writeString(roots.get(0).resolve("child")
-                .resolve("proof.txt"), "sentinel");
-        String laterTurn = request("POST",
-                "/v1/agents/sessions/" + session + "/events",
+        assertThat(changed).isEqualTo(1);
+        Files.writeString(roots.get(0).resolve("child/proof.txt"), "sentinel");
+        String laterTurn = request("POST", "/v1/agents/sessions/" + session + "/events",
                 Map.of("type", "agent.session.input.message", "input",
-                        List.of(Map.of("type", "input_text", "text",
-                                "G0_FILES"))),
-                "w2-later-turn", "actor", 202).path("turn_id").asText();
+                        List.of(Map.of("type", "input_text", "text", "G0_FILES"))),
+                "legacy-cwd-later-turn", "actor", 202).path("turn_id").asText();
         awaitTurn(session, laterTurn, "child2", roots.get(0));
-        assertThat(Files.readString(roots.get(0).resolve("child2")
-                .resolve("proof.txt"))).isEqualTo("after");
+        assertThat(Files.readString(roots.get(0).resolve("child2/proof.txt"))).isEqualTo("after");
+        assertThat(Files.readString(roots.get(0).resolve("child/proof.txt"))).isEqualTo("sentinel");
         assertThat(roots.get(0).resolve("proof.txt")).doesNotExist();
-        // The sentinel survives: a reused pre-change installation would
-        // have overwritten it with the fixture's "before"->"after".
-        assertThat(Files.readString(roots.get(0).resolve("child")
-                .resolve("proof.txt"))).isEqualTo("sentinel");
     }
 
     private static void assertRefusal(JsonNode refusal, String code) {
@@ -860,7 +898,18 @@ class HostedPublicWorkspaceIT {
         residentPublicHandoff(true);
     }
 
+    @Test
+    @EnabledOnOs(OS.MAC)
+    @Timeout(180)
+    void residentUnsupportedToolRefusalAllowsCloseAndAnotherFileSession() throws Exception {
+        residentPublicHandoff(false, true);
+    }
+
     private void residentPublicHandoff(boolean reconstruct) throws Exception {
+        residentPublicHandoff(reconstruct, false);
+    }
+
+    private void residentPublicHandoff(boolean reconstruct, boolean unsupportedTool) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
         resident = true;
         residentRestart = reconstruct;
@@ -942,6 +991,21 @@ class HostedPublicWorkspaceIT {
             assertThat(fixture.workerAlive()).isTrue();
             assertThat(fixture.starts).hasValue(1);
             saveResidentOwnership("after-application-reconstruction");
+        }
+        if (unsupportedTool) {
+            String refused = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
+                    "input", List.of(Map.of("type", "input_text", "text", "G0_RESIDENT_UNSUPPORTED")),
+                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                    "resident-unsupported", "actor", 202).path("id").asText();
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
+                        String.class, refused)).isEqualTo("COMPLETED");
+            });
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                    Long.class, refused)).isZero();
+            assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
+            closeResidentSession(refused, "resident-unsupported-close");
         }
         String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
         saveResidentOwnership("after-second-turn");
@@ -1442,6 +1506,9 @@ class HostedPublicWorkspaceIT {
         if (definitionApproval) {
             arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
         }
+        if (!publicChildren) {
+            arguments.add("--qwen.managed-agent.harness.workspace-child-agents-enabled=false");
+        }
         if (shellLifecycleV2) {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                     "private-test-bucket", 1048576));
@@ -1467,14 +1534,16 @@ class HostedPublicWorkspaceIT {
                                 retainedPlacement);
                     }
                     if (shellLifecycleV2) {
-                        publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
+                        if (publicationObjects == null) {
+                            publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
+                        }
                         HostedGateTestSupport.stubPublicationOss(context,
                                 publicationObjects, "publication-oss-fixture");
                     }
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
-        if (definitionApproval || "Linux".equals(System.getProperty("os.name"))) {
+        if (!publicChildRestarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
@@ -1574,20 +1643,28 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectory(temporary.resolve("home"));
-        Path config = Files.createDirectory(home.resolve(".qwen"));
+        Path home = Files.createDirectories(temporary.resolve("home"));
+        Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
-        Files.writeString(config.resolve("settings.json"), json.writeValueAsString(Map.of(
-                "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", "g0-fixture"),
-                "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", List.of(Map.of(
-                        "id", "g0-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl))))));
+        List<Map<String, Object>> models = new ArrayList<>(List.of(Map.of(
+                "id", "g0-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl)));
+        Map<String, Object> settings = new java.util.LinkedHashMap<>(Map.of(
+                "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", publicChildFallback ? "g0-source" : "g0-fixture"),
+                "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", models)));
+        if (publicChildFallback) {
+            settings.put("modelFallbacks", "g0-fixture");
+            models.add(Map.of("id", "g0-source", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl,
+                    "generationConfig", Map.of("contextWindowSize", 100000, "samplingParams", Map.of("temperature", 0.2),
+                            "maxRetries", 0, "retryInitialDelayMs", 1, "retryMaxDelayMs", 1)));
+        }
+        Files.writeString(config.resolve("settings.json"), json.writeValueAsString(settings));
         Path log = temporary.resolve("harness.log");
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
                 "--managed-runtime-broker-url", "http://127.0.0.1:" + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
-                .directory(decoy.toFile()).redirectErrorStream(true).redirectOutput(log.toFile());
+                .directory(decoy.toFile()).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
         Map<String, String> environment = builder.environment();
         environment.clear();
         for (String name : List.of("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT")) {
@@ -1599,7 +1676,9 @@ class HostedPublicWorkspaceIT {
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
         if (shellLifecycleV2) {
-            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
+            environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
+        } else {
+            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "");
         }
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
@@ -1623,12 +1702,35 @@ class HostedPublicWorkspaceIT {
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             modelRequests.add(body);
+            if (publicChildFallback && "g0-source".equals(body.path("model").asText())) {
+                byte[] response = "{\"error\":{\"message\":\"model overloaded\",\"type\":\"server_error\",\"code\":\"overloaded\"}}"
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.getResponseHeaders().set("retry-after-ms", "1");
+                exchange.sendResponseHeaders(503, response.length);
+                exchange.getResponseBody().write(response);
+                return;
+            }
             List<String> tools = new ArrayList<>();
             body.path("tools").forEach(tool -> tools.add(tool.path("function").path("name").asText()));
-            if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
-            } else {
+            if (publicChildren) {
+                assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
+                assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
+            } else if (shell) {
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob"));
+                if (shellLifecycleV2) {
+                    expectedTools.add("monitor");
+                }
+                assertThat(tools).containsExactlyInAnyOrderElementsOf(expectedTools);
+                body.path("tools").forEach(tool -> {
+                    if ("run_shell_command".equals(tool.at("/function/name").asText())) {
+                        assertThat(tool.at("/function/parameters/properties").has("is_background")).isEqualTo(shellLifecycleV2);
+                    }
+                });
+            } else if (resident) {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            } else {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
@@ -1654,37 +1756,34 @@ class HostedPublicWorkspaceIT {
             int step = results.size();
             boolean definitionTurn = prompt.get().contains("G0_DEFINITION_APPROVAL_");
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
-            boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) {
                 assertThat(results.get(2).toString()).contains("after");
             }
             boolean residentSecond = resident && prompt.get().contains("G0_RESIDENT_SECOND");
+            boolean residentUnsupported = resident && prompt.get().contains("G0_RESIDENT_UNSUPPORTED");
+            if (residentUnsupported && step >= 1) {
+                assertThat(results.getFirst().toString()).contains("Resident Workspace supports only");
+            }
             if (residentSecond && step >= 1) {
                 assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
             }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 1) {
-                assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 2) {
-                assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            }
-            if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
-                assertThat(results.get(foregroundOnly ? 0 : 2).toString()).contains("G0_SHELL_STDOUT");
+            if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)) {
+                assertThat(results.getFirst().toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
             var delta = choice.putObject("delta").put("role", "assistant");
-            boolean toolCall = step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
+            boolean publicParent = publicChildren && tools.contains("agent");
+            boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
+                    : step < (residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (toolCall) {
-                String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
                                 : List.of("write_file", "edit", "read_file")).get(step);
-                Map<String, Object> args = runShell ? switch (foregroundOnly ? 2 : step) {
-                    case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
-                    case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
-                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
-                } : switch (step) {
+                Map<String, Object> args = runShell
+                        ? Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof")
+                        : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", resident ? "after-first-" + tenant : "after");
                     default -> Map.of("file_path", "proof.txt");
@@ -1694,6 +1793,10 @@ class HostedPublicWorkspaceIT {
                             ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
                             : Map.of("file_path", "proof.txt");
                 }
+                if (residentUnsupported) {
+                    name = "web_fetch";
+                    args = Map.of("url", "https://resident.invalid/never-requested", "prompt", "Unsupported resident tool");
+                }
                 if (definitionTurn) {
                     String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];
                     name = step == 0 ? "write_file" : "run_shell_command";
@@ -1701,17 +1804,26 @@ class HostedPublicWorkspaceIT {
                             : Map.of("command", "printf 'once\\n' >> " + marker + ".shell",
                                     "description", "Append the definition approval proof");
                 }
+                if (publicChildren) {
+                    name = publicParent ? "agent" : step == 0 ? "write_file" : "run_shell_command";
+                    args = publicParent ? Map.of("description", "write two proofs", "prompt", "G0_PUBLIC_CHILD", "run_in_background", publicChildBackground)
+                            : step == 0 ? Map.of("file_path", "public-child.txt", "content", "child-write")
+                            : Map.of("command", "printf child-shell > public-child-shell.txt");
+                    if (!publicParent) {
+                        assertThat(body.path("messages").toString()).doesNotContain("G0_PUBLIC_PARENT");
+                    }
+                }
                 if (shellFault != null) {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
-                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
+                    args = Map.of("command", quote(node) + " -e " + quote(producer), "timeout", 60000);
                 }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
                         .put("arguments", json.writeValueAsString(args));
             } else {
-                delta.put("content", "G0_DONE");
+                delta.put("content", publicChildren && !publicParent ? "G0_PUBLIC_CHILD_DONE" : "G0_DONE");
             }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
@@ -1780,10 +1892,6 @@ class HostedPublicWorkspaceIT {
                 receiptResponses.incrementAndGet();
             }
         }
-    }
-
-    private static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)

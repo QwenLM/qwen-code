@@ -80,8 +80,13 @@ class ManagedRuntimeRetentionGuardMySqlIT {
     }
 
     @Test
-    void localHolderAndCsiRetirementRetainBindings() throws Exception {
-        contract.localHolderAndCsiRetirementRetainBindings();
+    void releasedRuntimeSessionWithMembershipPinsItsBindingUntilEvidenceCleanup() throws Exception {
+        contract.releasedRuntimeSessionWithMembershipPinsItsBindingUntilEvidenceCleanup();
+    }
+
+    @Test
+    void csiRetirementRetainsItsBinding() throws Exception {
+        contract.csiRetirementRetainsItsBinding();
     }
 
     @Test

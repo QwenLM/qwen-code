@@ -64,7 +64,7 @@ test('the composer no-workspace target creates an exact standalone session @smok
   );
 });
 
-test('the sidebar New task keeps the primary workspace route on a capable daemon @smoke', async ({
+test('the sidebar New session keeps the primary workspace route on a capable daemon @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -111,7 +111,7 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
   const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New task',
+    name: 'New session',
     exact: true,
   });
   await expect(newTaskButtons).toHaveCount(2);
@@ -194,6 +194,79 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
   ).toHaveLength(1);
 });
 
+test('no-workspace sessions remain visible beside collapsed Workspaces and persist independently @smoke', async ({
+  page,
+}, testInfo) => {
+  const sessionId = '33333333-3333-4333-8333-333333333333';
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [...standaloneFeatures, 'workspace_qualified_rest_core'],
+    },
+    standaloneSessions: [
+      standaloneSummary(sessionId, 'Independent conversation'),
+    ],
+  });
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+
+  const sidebar = page.getByRole('complementary');
+  const projects = sidebar
+    .getByRole('button', {
+      name: 'Workspaces',
+      exact: true,
+    })
+    .first();
+  await expect(sidebar.getByTestId('recent-sessions')).toBeVisible();
+  const group = sidebar.getByTestId('standalone-active-group');
+  const toggle = group.getByRole('button', {
+    name: 'No-workspace sessions',
+    exact: true,
+  });
+  const row = group.getByText('Independent conversation', { exact: true });
+  await expect(row).toBeVisible();
+  await projects.click();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(group).toBeVisible();
+  await expect(row).toBeVisible();
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toBeVisible();
+
+  await toggle.click();
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toHaveCount(0);
+  await projects.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+  await sidebar
+    .getByRole('button', { name: 'Search sessions', exact: true })
+    .click();
+  await sidebar
+    .getByRole('textbox', { name: 'Search sessions', exact: true })
+    .fill('Independent');
+  await expect(row).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.workspace-expanded:standalone:active',
+      ),
+    ),
+  ).toBe('false');
+  await row.click();
+  await expect(page).toHaveURL(
+    new URL(
+      `/session/${sessionId}?context=standalone`,
+      String(testInfo.project.use.baseURL),
+    ).href,
+  );
+});
+
 test('standalone Recents keeps lifecycle actions on exact standalone routes @smoke', async ({
   page,
 }, testInfo) => {
@@ -256,12 +329,24 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toHaveCount(0);
-  await page.getByRole('button', { name: 'Archived', exact: true }).click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: 'Archived conversations', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
   await openSessionAction(page, 'Renamed conversation', 'Restore');
+  await expect(
+    page.locator('[data-web-shell-archived-sessions]'),
+  ).not.toContainText('Renamed conversation');
+  await page
+    .getByRole('region', { name: 'Settings', exact: true })
+    .getByRole('button', { name: 'back', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
@@ -297,7 +382,7 @@ async function installScenario(
 
 async function clickNewTask(page: Page): Promise<void> {
   const newTask = page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first();
   await expect(newTask).toBeEnabled();
   await newTask.click();

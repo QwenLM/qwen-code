@@ -206,13 +206,28 @@ class ManagedRuntimeRetentionGuardTest {
     }
 
     @Test
-    void localHolderAndCsiRetirementRetainBindings() throws Exception {
-        jdbc.update("INSERT INTO ma_storage_owner"
-                + " (storage_key, holder_key, binding_id, runtime_generation, runtime_session_id)"
-                + " VALUES (?, ?, 'local', 1, 'session')", "a".repeat(64), "b".repeat(64));
+    void releasedRuntimeSessionWithMembershipPinsItsBindingUntilEvidenceCleanup() throws Exception {
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
+        var retired = retire(bindings, request("retained-member"));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var acquiring = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("retained-member", "member", "bootstrap",
+                retired.getRequest().getScope()), retired.getBindingId(), retired.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.parse("2000-01-01T00:00:00Z")));
+        assertThat(sessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.RELEASED,
+                Instant.parse("2000-01-01T00:00:00Z")))).isNotNull();
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", "a".repeat(64), "member".getBytes(StandardCharsets.UTF_8));
+        var retention = new JdbcRuntimeRetention(source, bindings, guard);
+        assertThat(retention.sweep(Duration.ofDays(30), 100, null).bindingsDeleted()).isZero();
+        assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?", String.class, "member".getBytes(StandardCharsets.UTF_8)))
+                .isEqualTo("a".repeat(64));
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "member".getBytes(StandardCharsets.UTF_8));
+        assertThat(retention.sweep(Duration.ofDays(30), 100, null).bindingsDeleted()).isEqualTo(1);
+    }
+
+    @Test
+    void csiRetirementRetainsItsBinding() throws Exception {
         operation("CSI_RETIREMENT", "csi-retirement", "csi", 2);
         try (var connection = source.getConnection()) {
-            assertThat(guard.bindingReferenced(connection, binding("local", 1))).isTrue();
             assertThat(guard.bindingReferenced(connection, binding("csi", 2))).isTrue();
             assertThat(guard.bindingReferenced(connection, binding("absent", 1))).isFalse();
         }

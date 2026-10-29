@@ -1,4 +1,5 @@
 import type { ManagedAgentSessionSummary } from './managed-agent-provider';
+import { isManagedSessionRunning } from './managed-agent-provider';
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { useI18n } from '../../i18n';
 import { Spinner } from '../ui/spinner';
@@ -14,9 +15,7 @@ export function ManagedSessionProgress({
   loading: boolean;
 }) {
   const { t } = useI18n();
-  const active =
-    summary &&
-    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
+  const active = summary && isManagedSessionRunning(summary.phase);
   const now = useSharedNow(Boolean(active));
   if (!submitting && !loading && !active) return null;
 

@@ -93,13 +93,13 @@ export function LoopDetectionConfirmation({
             </Box>
             <Box marginTop={1}>
               <Text color={theme.text.secondary}>
-                Note: Setting &quot;model.skipLoopDetection&quot; to true in
-                your settings.json disables only the heuristic loop checks for
-                future sessions; the always-on guards (consecutive identical
-                tool calls, repeated shell inspection commands, and the per-turn
-                tool-call cap) are not affected by it. The cap is tunable via
-                &quot;model.maxToolCallsPerTurn&quot; (0 disables it). Disabling
-                for this session above suppresses everything.
+                Note: Setting &quot;model.loopProtection&quot; in your
+                settings.json to &quot;warn&quot; reminds the model instead of
+                stopping, and &quot;off&quot; turns loop protection off, for
+                future sessions. &quot;model.skipLoopDetection&quot; disables
+                only the heuristic loop checks. The tool-call budget is tunable
+                via &quot;model.maxToolCallsPerTurn&quot; (0 disables it).
+                Disabling for this session above suppresses everything.
               </Text>
             </Box>
           </Box>

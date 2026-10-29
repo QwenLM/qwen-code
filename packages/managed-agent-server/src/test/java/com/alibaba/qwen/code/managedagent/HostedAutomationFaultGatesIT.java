@@ -23,7 +23,10 @@ import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -38,6 +41,7 @@ import java.nio.file.attribute.FileTime;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -50,6 +54,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
+import java.util.stream.LongStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -64,6 +70,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class HostedAutomationFaultGatesIT {
     private static final String TOKEN = "fg11-local-fixture";
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+    // A public task event cursor: base64url of its scope key and sequence.
+    private static final Pattern TASK_CURSOR = Pattern.compile("tev2:[^:]+:([0-9]+)");
     private static final String OPERATIONS = "/automations/operations";
     // The Harness store client's bounded retry of one commit (http-managed-session-store.ts).
     private static final int STORE_ATTEMPTS = 3;
@@ -105,6 +113,12 @@ class HostedAutomationFaultGatesIT {
     // FG11f: the publication case faults the physical object write and keeps
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
+    // Cases that close a Session need the Workspace lifecycle the guard gates.
+    private boolean workspaceLifecycle;
+    // FG11g: the gate cases run their probe as a Shell execution of a public
+    // Shell Session, so the deployment admits Shell definitions and a durable
+    // local-process Runtime, as the publication arms do.
+    private boolean shellSessions;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
     private final Map<String, Integer> physicalPuts = new ConcurrentHashMap<>();
     private final AtomicInteger publicationFaultsSeen = new AtomicInteger();
@@ -121,6 +135,8 @@ class HostedAutomationFaultGatesIT {
     private Path decoy;
     private String node;
     private int port;
+    // FG11e: the Session stream clients a case opened, cut in teardown.
+    private final List<SessionStream> streams = new CopyOnWriteArrayList<>();
 
     record Operation(String kind, String scheduleId, String occurrenceKey, String body, int status,
             boolean dropped) { }
@@ -1086,6 +1102,310 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-retire", 202);
     }
 
+    // FG11e: the run's task event feed and the public Session stream are both
+    // cut while the wake Turn is held — after the fire, before the settle —
+    // and resumed from the last position each reader saw once the run has
+    // settled. Each reader's prefix and resumed suffix is that stream's
+    // committed journal, item for item: a resume that restarts below its
+    // cursor repeats an item, and one that starts past it loses one.
+    @Test
+    @Timeout(600)
+    void fg11eStreamsResumeAcrossTheSettleOnMySql() throws Exception {
+        // A stream the case cut stays open server-side until its next write
+        // fails, holding Spring's graceful shutdown for its whole 30 s window;
+        // a short heartbeat is that write.
+        springExtras.add("--qwen.managed-agent.events.heartbeat-interval=2s");
+        boot("fg11e");
+        String session = createSession("stream-gap");
+        String id = create(session, "FG11A_HOLD", "0 0 1 1 *", "fg11e-stream-base");
+        SessionStream cutStream = new SessionStream(session, 0);
+        List<String> beforeFire = settledSessionLedger(session);
+        cutStream.awaitThrough(beforeFire.size());
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11e-stream-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11e-stream-run")));
+        String task = automationTask(session);
+        // One event per page, so every page boundary the cut reader crossed is
+        // a cursor it resumed from.
+        List<JsonNode> taskPrefix = new ArrayList<>();
+        String taskCut = taskEvents(session, task, null, taskPrefix);
+        cutStream.abort();
+        // Read the position only once the reader stopped: a frame read after
+        // it would be replayed on resume and count as a duplicate.
+        long sessionCut = cutStream.lastSequence();
+        assertThat(taskPrefix).as("the held run committed task events before the cut").isNotEmpty();
+        assertThat(taskPrefix).extracting(event -> event.path("state").asText())
+                .as("the cut lands before the settle").doesNotContain("completed", "failed", "cancelled");
+        heldModel.countDown();
+        waiting().atMost(Duration.ofSeconds(120)).until(() -> "completed".equals(runState(run)));
+
+        List<JsonNode> taskSuffix = new ArrayList<>();
+        taskEvents(session, task, taskCut, taskSuffix);
+        List<JsonNode> taskView = new ArrayList<>(taskPrefix);
+        taskView.addAll(taskSuffix);
+        List<String> taskLedger = taskLedger(session, task);
+        assertThat(taskLedger.stream().map(row -> Long.parseLong(row.split(" ")[0])).toList())
+                .as("the task journal itself has no gap").isEqualTo(LongStream
+                        .rangeClosed(1, taskLedger.size()).boxed().toList());
+        assertThat(taskView.stream().map(this::servedTaskEvent).toList())
+                .as("the cut prefix and the resumed suffix are the task journal").isEqualTo(taskLedger);
+        assertThat(taskView).extracting(event -> event.path("state").asText())
+                .as("one terminal state, last").endsWith("completed")
+                .filteredOn(state -> List.of("completed", "failed", "cancelled").contains(state)).hasSize(1);
+        List<JsonNode> again = new ArrayList<>();
+        taskEvents(session, task, taskCut, again);
+        assertThat(again).as("a second resume from the same cursor serves the same suffix")
+                .isEqualTo(taskSuffix);
+
+        // The precondition the Session arm's automation content waits on
+        // (#13598 round 1): the fire and settle add nothing to the Session's
+        // public journal, so this arm gates the resume across that window,
+        // not the run's own output. A projection that starts carrying the run
+        // reddens this line, and the expectation moves with it.
+        assertThat(settledSessionLedger(session)).as("the run adds no event to the Session stream")
+                .isEqualTo(beforeFire);
+        // A public Turn after the settle gives the resumed reader a tail to
+        // reach, so the wait ends on a committed row rather than a timeout.
+        request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type",
+                "agent.session.input.message", "input", List.of(Map.of("type", "input_text", "text",
+                        "FG11E_TAIL"))), "fg11e-stream-tail", 202);
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
+                session)).containsExactly("COMPLETED", "COMPLETED"));
+        SessionStream resumed = new SessionStream(session, sessionCut);
+        resumed.awaitThrough(settledSessionLedger(session).size());
+        resumed.abort();
+        List<JsonNode> sessionView = new ArrayList<>(cutStream.frames);
+        sessionView.addAll(resumed.frames);
+        List<Long> sequences = sessionView.stream().map(frame -> frame.path("sequence").asLong()).toList();
+        assertThat(sequences).as("the Session view: no gap, no duplicate").isEqualTo(LongStream
+                .rangeClosed(1, sequences.size()).boxed().toList());
+        assertThat(sessionView.stream().map(frame -> frame.path("sequence").asLong() + " "
+                + frame.path("event_id").asText() + " " + frame.path("type").asText()).toList())
+                .as("the Session frames are its journal").isEqualTo(sessionLedger(session).stream()
+                        .limit(sessionView.size()).toList());
+
+        assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(run + ":"))
+                .as("the run settled once").containsExactly(run + ":3");
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Occurrence: manual:fg11e-stream-run"))
+                .as("one model Turn for the occurrence").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11e-stream-retire", 202);
+        assertNoModelFailure();
+    }
+
+    // FG11e: the run list is paged newest first while a run is inserted
+    // between the pages. The cursor names the last row the first page served,
+    // so the second page continues below it: no row repeats, none is skipped,
+    // and the inserted run appears only on a fresh first page.
+    @Test
+    @Timeout(600)
+    void fg11eRunListCursorHoldsAcrossAnInsertOnMySql() throws Exception {
+        boot("fg11e");
+        String session = createSession("run-list");
+        String id = create(session, "FG11E_LIST", "0 0 1 1 *", "fg11e-list-base");
+        String first = completedRun(id, "fg11e-list-1");
+        String second = completedRun(id, "fg11e-list-2");
+        String third = completedRun(id, "fg11e-list-3");
+        JsonNode head = request("GET", "/v1/agent-automations/" + id + "/runs?limit=2", null, null, 200);
+        assertThat(runIds(head)).as("the first page, newest first").containsExactly(third, second);
+        assertThat(head.path("has_more").asBoolean()).as("the first page has more").isTrue();
+        String cursor = head.path("next_cursor").asText();
+        String inserted = completedRun(id, "fg11e-list-4");
+        JsonNode rest = request("GET", "/v1/agent-automations/" + id + "/runs?limit=2&cursor=" + cursor, null,
+                null, 200);
+        assertThat(runIds(rest)).as("the cursor continues below the first page across the insert")
+                .containsExactly(first);
+        assertThat(rest.path("has_more").asBoolean()).as("the walk ends on the oldest run").isFalse();
+        List<String> walk = new ArrayList<>();
+        String next = "";
+        do {
+            JsonNode page = request("GET", "/v1/agent-automations/" + id + "/runs?limit=2"
+                    + (next.isEmpty() ? "" : "&cursor=" + next), null, null, 200);
+            walk.addAll(runIds(page));
+            next = page.path("has_more").asBoolean() ? page.path("next_cursor").asText() : "";
+        } while (!next.isEmpty());
+        assertThat(walk).as("a fresh walk sees the insert at the head and every run once")
+                .containsExactly(inserted, third, second, first);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
+                .as("one model Turn per run").hasSize(4);
+        // The runs settle one after another, so the journal holds one settle
+        // per run, in that order, and nothing more.
+        assertThat(commands(session, "settleRun")).as("each run settled once")
+                .containsExactly(first + ":3", second + ":3", third + ":3", inserted + ":3");
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11e-list-retire", 202);
+        assertNoModelFailure();
+    }
+
+    // A manual run of the definition, once its run has settled completed.
+    private String completedRun(String scheduleId, String key) throws Exception {
+        String run = request("POST", "/v1/agent-automations/" + scheduleId + "/runs", null, key, 202).path("id")
+                .asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> "completed".equals(runState(run)));
+        return run;
+    }
+
+    private static List<String> runIds(JsonNode page) {
+        var ids = new ArrayList<String>();
+        page.path("data").forEach(run -> ids.add(run.path("id").asText()));
+        return ids;
+    }
+
+    // The public task of the Session's only automation run.
+    private String automationTask(String session) throws Exception {
+        JsonNode tasks = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200);
+        assertThat(tasks.path("data")).as("one task").hasSize(1);
+        JsonNode task = tasks.path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the task is the run's").isEqualTo("automation_run");
+        return task.path("id").asText();
+    }
+
+    // Pages the task's events one at a time from {@code after} into
+    // {@code into}, and answers the cursor the last page handed back. A page
+    // that hands back the cursor it was read from would page forever.
+    private String taskEvents(String session, String task, String after, List<JsonNode> into) throws Exception {
+        String cursor = after;
+        while (true) {
+            JsonNode page = request("GET", "/v1/agents/sessions/" + session + "/tasks/" + task + "/events?limit=1"
+                    + (cursor == null ? "" : "&after=" + cursor), null, null, 200);
+            page.path("data").forEach(into::add);
+            String next = page.path("next_cursor").asText();
+            if (!page.path("has_more").asBoolean()) {
+                return next;
+            }
+            assertThat(next).as("each page advances the task cursor").isNotEqualTo(cursor);
+            cursor = next;
+        }
+    }
+
+    // The task's committed events, each as its sequence and then exactly what
+    // the public read serves for it.
+    private List<String> taskLedger(String session, String task) {
+        return jdbc.query("SELECT sequence_id, event_type, gmt_create, state, runtime_state FROM ma_public_event"
+                + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?"
+                + " ORDER BY sequence_id", (row, index) -> row.getLong("sequence_id") + " "
+                        + row.getString("event_type") + " " + row.getLong("gmt_create") + " "
+                        + row.getString("state") + " " + row.getString("runtime_state"), tenant, session, task);
+    }
+
+    // The served event as its ledger row. The sequence is decoded from the
+    // served cursor here rather than re-encoded with the store's own encoder,
+    // so the cursor's format is witnessed independently of the code under
+    // test. A cursor outside that format fails here: falling back to its
+    // decoded text would accept one that decodes to a bare sequence.
+    private String servedTaskEvent(JsonNode event) {
+        String cursor = new String(Base64.getUrlDecoder().decode(event.path("cursor").asText()),
+                StandardCharsets.US_ASCII);
+        var position = TASK_CURSOR.matcher(cursor);
+        assertThat(position.matches()).as("the served cursor %s names a task position", cursor).isTrue();
+        return position.group(1) + " " + event.path("type").asText() + " "
+                + event.path("created_at").asLong() + " " + text(event, "state") + " "
+                + text(event, "runtime_state");
+    }
+
+    private static String text(JsonNode node, String field) {
+        return node.hasNonNull(field) ? node.get(field).asText() : null;
+    }
+
+    // The Session stream's committed public events, as its frames name them.
+    private List<String> sessionLedger(String session) {
+        return jdbc.queryForList("SELECT CONCAT(sequence_id, ' ', CAST(event_id AS CHAR), ' ', event_type) FROM"
+                + " ma_public_event WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND"
+                + " stream_id = X'' ORDER BY sequence_id", String.class, tenant, session);
+    }
+
+    // The ledger once every Runtime warm a Turn started has reported: the
+    // result lands asynchronously and can follow the Turn's completion.
+    private List<String> settledSessionLedger(String session) {
+        AtomicReference<List<String>> settled = new AtomicReference<>();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> {
+            List<String> rows = sessionLedger(session);
+            settled.set(rows);
+            return rows.stream().filter(row -> row.endsWith(" environment.provisioning")).count()
+                    == rows.stream().filter(row -> row.endsWith(" environment.ready")
+                            || row.endsWith(" environment.failed")).count();
+        });
+        return settled.get();
+    }
+
+    // One client of a Session's public event stream. It owns its HttpClient,
+    // so abort cuts the connection mid-stream the way a lost client does;
+    // frames is everything it read.
+    private final class SessionStream {
+        private final List<JsonNode> frames = new CopyOnWriteArrayList<>();
+        private final AtomicReference<Throwable> failure = new AtomicReference<>();
+        private final HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+        private final Thread reader;
+        private volatile boolean aborted;
+
+        SessionStream(String session, long after) throws Exception {
+            HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port
+                    + "/v1/agents/sessions/" + session + "/events?stream=true")).GET()
+                    .header("X-Qwen-Tenant-Id", tenant).header("Accept", "text/event-stream");
+            if (after > 0) {
+                request.header("Last-Event-ID", Long.toString(after));
+            }
+            HttpResponse<InputStream> response = client.send(request.build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            assertThat(response.statusCode()).as("the Session stream of %s", session).isEqualTo(200);
+            reader = Thread.ofVirtual().start(() -> read(response.body()));
+            streams.add(this);
+        }
+
+        // Each frame's SSE id and event name must be its own sequence and
+        // type: a resync frame, which carries no id, fails the reader here.
+        private void read(InputStream body) {
+            try (BufferedReader lines = new BufferedReader(new InputStreamReader(body, StandardCharsets.UTF_8))) {
+                String id = null;
+                String event = null;
+                StringBuilder data = new StringBuilder();
+                for (String line = lines.readLine(); line != null; line = lines.readLine()) {
+                    if (line.startsWith("id:")) {
+                        id = line.substring(3).trim();
+                    } else if (line.startsWith("event:")) {
+                        event = line.substring(6).trim();
+                    } else if (line.startsWith("data:")) {
+                        data.append(data.isEmpty() ? "" : "\n").append(line.substring(5).stripLeading());
+                    } else if (line.isEmpty() && !data.isEmpty()) {
+                        JsonNode frame = json.readTree(data.toString());
+                        if (!frame.path("sequence").asText().equals(id)
+                                || !frame.path("type").asText().equals(event)) {
+                            throw new IllegalStateException("SSE id/event " + id + "/" + event + " do not name "
+                                    + frame);
+                        }
+                        frames.add(frame);
+                        id = null;
+                        event = null;
+                        data.setLength(0);
+                    }
+                }
+            } catch (IOException | RuntimeException error) {
+                if (!aborted) {
+                    failure.compareAndSet(null, error);
+                }
+            }
+        }
+
+        long lastSequence() {
+            return frames.isEmpty() ? 0 : frames.getLast().path("sequence").asLong();
+        }
+
+        void awaitThrough(long sequence) {
+            waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
+                assertThat(failure.get()).as("the Session stream reader").isNull();
+                assertThat(lastSequence()).as("the Session stream reached %s", sequence)
+                        .isGreaterThanOrEqualTo(sequence);
+            });
+        }
+
+        void abort() throws InterruptedException {
+            aborted = true;
+            client.shutdownNow();
+            reader.join(10_000);
+            assertThat(reader.isAlive()).as("the cut stream stopped").isFalse();
+        }
+    }
+
     // FG11f: the wake turn's Shell output is captured and published, and the
     // arm faults the physical object write. The store never rewrites the
     // object and never re-runs the Shell, so these assertions read what it
@@ -1221,6 +1541,257 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11f-retire", 202);
     }
 
+    // FG11g: a definition's gate probe decides each fire in the Workspace
+    // Runtime before any run is claimed
+    // (docs/design/2026-10-22-managed-automation-gate.md): a quiet probe never
+    // wakes the Session, a printing one wakes it once with the output attached,
+    // a failing one is counted on the definition, and a reply lost after the
+    // probe ran replays the Broker's receipt instead of running it again. The
+    // probe scripts log every execution to a file beside them, so the number of
+    // executions is read from the Workspace, not inferred.
+    @Test
+    @Timeout(600)
+    void fg11gGateProbesDecideEveryFireOnMySql() throws Exception {
+        shellSessions = true;
+        boot("fg11g");
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
+        List<Clocked> cases = new ArrayList<>();
+        if (selected("fg11g", "quiet-never-wakes")) {
+            cases.add(gateQuietNeverWakes());
+        }
+        if (selected("fg11g", "output-wakes-once")) {
+            cases.add(gateOutputWakesOnce());
+        }
+        if (selected("fg11g", "lost-reply-after-delivery")) {
+            cases.add(gateLostReplyAfterDelivery());
+        }
+        if (selected("fg11g", "failing-gate")) {
+            cases.add(gateFailing());
+        }
+        if (selected("fg11g", "lost-reply-before-claim")) {
+            cases.add(gateLostReplyBeforeClaim());
+        }
+        scannerHold.countDown();
+        for (Clocked clocked : cases) {
+            clocked.settle();
+        }
+        assertThat(armed).as("every armed reply was dropped").isEmpty();
+        assertNoModelFailure();
+    }
+
+    // quiet-never-wakes: two slots of a gate that prints nothing leave two
+    // skipped/gate_quiet rows, one probe execution each, no run record and no
+    // model prompt; the definition reports the quiet streak.
+    private Clocked gateQuietNeverWakes() throws Exception {
+        String session = createShellSession("gate-quiet");
+        String gate = gateScript("fg11g-quiet", "exit 0");
+        JsonNode created = request("POST", "/v1/agent-automations",
+                gatedDefinition(session, "FG11G_QUIET", gate), "fg11g-quiet-base", 202);
+        assertThat(created.path("gate").asText()).isEqualTo(gate);
+        assertThat(created.has("gate_status")).isFalse();
+        String id = created.path("id").asText();
+        return () -> {
+            awaitDecidedSlots(id, 2);
+            List<Map<String, Object>> rows = decidedSlots(id);
+            assertThat(rows).as("every slot is withheld as quiet").allSatisfy(row -> assertThat(row)
+                    .containsEntry("outcome", "skipped").containsEntry("reason", "gate_quiet"));
+            assertThat(executions("fg11g-quiet")).as("one probe per slot").isEqualTo(rows.size());
+            assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                    + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                    .as("no run while the gate is quiet").isEmpty();
+            assertThat(modelPrompts).noneMatch(prompt -> prompt.contains("Automation ID: " + id));
+            JsonNode read = request("GET", "/v1/agent-automations/" + id, null, "fg11g-quiet-read", 200);
+            assertThat(read.path("gate_status").path("last_outcome").asText()).isEqualTo("quiet");
+            assertThat(read.path("gate_status").path("quiet_since_delivery").asInt())
+                    .isGreaterThanOrEqualTo(2);
+            assertThat(read.path("gate_status").path("consecutive_failures").asInt()).isEqualTo(0);
+            request("DELETE", "/v1/agent-automations/" + id, null, "fg11g-quiet-retire", 202);
+        };
+    }
+
+    // output-wakes-once: the probe prints on its second execution only; the
+    // first slot is quiet, the second fires one run whose model prompt carries
+    // the output as data, and nothing fires twice for that occurrence.
+    private Clocked gateOutputWakesOnce() throws Exception {
+        String session = createShellSession("gate-output");
+        String gate = gateScript("fg11g-output",
+                "if [ \"$(wc -l < fg11g-output.log)\" -eq 2 ]; then echo \"FG11G_EVENT: comment on #7\"; fi");
+        String id = request("POST", "/v1/agent-automations",
+                gatedDefinition(session, "FG11G_OUTPUT", gate), "fg11g-output-base", 202).path("id").asText();
+        return () -> {
+            Map<String, Object> fired = awaitOccurrenceWith(id, "fired");
+            String key = (String) fired.get("occurrence_key");
+            assertOneRun(session, id, (String) fired.get("run_id"), key, 1, 0);
+            String prompt = modelPrompts.stream().filter(each -> each.contains("Occurrence: " + key))
+                    .findFirst().orElseThrow();
+            assertThat(prompt).contains("Gate output.").contains("<gate-output>")
+                    .contains("FG11G_EVENT: comment on #7").contains("</gate-output>");
+            List<Map<String, Object>> rows = decidedSlots(id);
+            assertThat(rows.get(0)).as("the first slot was quiet")
+                    .containsEntry("outcome", "skipped").containsEntry("reason", "gate_quiet");
+            assertThat(rows).filteredOn(row -> "fired".equals(row.get("outcome"))).hasSize(1);
+            assertThat(executions("fg11g-output")).as("one probe per slot").isEqualTo(rows.size());
+            JsonNode read = request("GET", "/v1/agent-automations/" + id, null, "fg11g-output-read", 200);
+            assertThat(read.path("gate_status").path("last_outcome").asText()).isIn("delivered", "quiet");
+            request("DELETE", "/v1/agent-automations/" + id, null, "fg11g-output-retire", 202);
+        };
+    }
+
+    // lost-reply-after-delivery: the probe prints on its first execution and
+    // the Harness's fire_run reply is dropped after the run committed. The
+    // re-driven call replays the committed run: one probe execution for that
+    // slot, one claim, one dispatch, one model prompt.
+    private Clocked gateLostReplyAfterDelivery() throws Exception {
+        String session = createShellSession("gate-lost-after");
+        String gate = gateScript("fg11g-lost-after",
+                "if [ \"$(wc -l < fg11g-lost-after.log)\" -eq 1 ]; then echo \"FG11G_LOST_AFTER\"; fi");
+        String id = request("POST", "/v1/agent-automations",
+                gatedDefinition(session, "FG11G_LOST_AFTER", gate), "fg11g-lost-after-base", 202)
+                .path("id").asText();
+        arm("gate-lost-reply-after-delivery", body -> kind(body, "fire_run")
+                && id.equals(body.path("scheduleId").asText()));
+        return () -> {
+            Map<String, Object> fired = awaitOccurrenceWith(id, "fired");
+            String key = (String) fired.get("occurrence_key");
+            assertThat(((Number) fired.get("attempts")).intValue()).as("re-driven once").isEqualTo(1);
+            assertOneRun(session, id, (String) fired.get("run_id"), key, 2, 1);
+            List<Map<String, Object>> rows = decidedSlots(id);
+            assertThat(rows.get(0)).as("the first slot is the delivered one")
+                    .containsEntry("occurrence_key", key).containsEntry("outcome", "fired");
+            // The dropped reply cost no second execution: one probe per slot.
+            assertThat(executions("fg11g-lost-after")).isEqualTo(rows.size());
+            request("DELETE", "/v1/agent-automations/" + id, null, "fg11g-lost-after-retire", 202);
+        };
+    }
+
+    // failing-gate: a probe that exits 1 withholds every slot as gate_failed,
+    // carries its exit and its stderr tail in last_error, grows the
+    // definition's failure streak, and never commits a run.
+    private Clocked gateFailing() throws Exception {
+        String session = createShellSession("gate-failing");
+        String gate = gateScript("fg11g-failing", "echo nope >&2; exit 1");
+        String id = request("POST", "/v1/agent-automations",
+                gatedDefinition(session, "FG11G_FAILING", gate), "fg11g-failing-base", 202).path("id").asText();
+        return () -> {
+            awaitDecidedSlots(id, 2);
+            List<Map<String, Object>> rows = decidedSlots(id);
+            assertThat(rows).allSatisfy(row -> assertThat(row)
+                    .containsEntry("outcome", "skipped").containsEntry("reason", "gate_failed")
+                    .containsEntry("last_error", "exited with code 1; stderr: nope"));
+            assertThat(executions("fg11g-failing")).isEqualTo(rows.size());
+            assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                    + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                    .as("no run while the gate fails").isEmpty();
+            assertThat(modelPrompts).noneMatch(prompt -> prompt.contains("Automation ID: " + id));
+            JsonNode read = request("GET", "/v1/agent-automations/" + id, null, "fg11g-failing-read", 200);
+            assertThat(read.path("gate_status").path("last_outcome").asText()).isEqualTo("failed");
+            assertThat(read.path("gate_status").path("consecutive_failures").asInt())
+                    .isGreaterThanOrEqualTo(2);
+            assertThat(read.path("gate_status").path("last_error").asText())
+                    .isEqualTo("exited with code 1; stderr: nope");
+            request("DELETE", "/v1/agent-automations/" + id, null, "fg11g-failing-retire", 202);
+        };
+    }
+
+    // lost-reply-before-claim: a quiet probe's fire_run reply is dropped. The
+    // re-driven call reads the Broker's receipt of the first execution, so the
+    // slot still settles quiet after exactly one execution.
+    private Clocked gateLostReplyBeforeClaim() throws Exception {
+        String session = createShellSession("gate-lost-before");
+        String gate = gateScript("fg11g-lost-before", "exit 0");
+        String id = request("POST", "/v1/agent-automations",
+                gatedDefinition(session, "FG11G_LOST_BEFORE", gate), "fg11g-lost-before-base", 202)
+                .path("id").asText();
+        arm("gate-lost-reply-before-claim", body -> kind(body, "fire_run")
+                && id.equals(body.path("scheduleId").asText()));
+        return () -> {
+            awaitDecidedSlots(id, 1);
+            Map<String, Object> first = decidedSlots(id).get(0);
+            assertThat(first).containsEntry("outcome", "skipped").containsEntry("reason", "gate_quiet");
+            assertThat(((Number) first.get("attempts")).intValue()).as("re-driven once").isEqualTo(1);
+            assertThat(operations).filteredOn(operation -> id.equals(operation.scheduleId())
+                    && "fire_run".equals(operation.kind())
+                    && first.get("occurrence_key").equals(operation.occurrenceKey()))
+                    .as("the slot was asked twice, once dropped").hasSize(2)
+                    .filteredOn(Operation::dropped).hasSize(1);
+            // The replay read the receipt: the script ran once for that slot.
+            assertThat(executions("fg11g-lost-before")).isEqualTo(decidedSlots(id).size());
+            assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                    + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                    .isEmpty();
+            request("DELETE", "/v1/agent-automations/" + id, null, "fg11g-lost-before-retire", 202);
+        };
+    }
+
+    /** A public Shell Session on the Workspace, warmed by one Turn, the way the publication arm boots. */
+    private String createShellSession(String name) throws Exception {
+        String definition = request("POST", "/v1/agents", Map.of(
+                "model", Map.of(),
+                "instructions", "Reply with FG11_DONE.",
+                "tools", List.of(Map.of("type", "hosted_profile", "profile", "hosted-workspace-shell/1")),
+                "permission_policy", Map.of("approval_mode", "default")), "fg11g-definition-" + name, 202)
+                .path("id").asText();
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create", Map.of(
+                "agentId", definition, "idempotencyKey", "fg11g-session-" + name, "input", List.of(),
+                "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "fg11g-session-" + name, 202).path("sessionId").asText();
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
+                session)).isEqualTo("ACTIVE"));
+        request("POST", "/v1/agents/sessions/" + session + "/events", Map.of(
+                "type", "agent.session.input.message",
+                "input", List.of(Map.of("type", "input_text", "text", "FG11_WARM " + name))), "fg11g-warm-" + name,
+                202);
+        waiting().atMost(Duration.ofSeconds(90)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
+                .containsExactly("COMPLETED"));
+        return session;
+    }
+
+    /** A probe script in the Session's directory that logs each execution, then runs `body`. */
+    private String gateScript(String name, String body) throws IOException {
+        Path child = temporary.resolve("workspace-0").resolve("child");
+        Files.writeString(child.resolve(name + ".sh"), "#!/bin/sh\necho run >> " + name + ".log\n" + body + "\n");
+        return "sh ./" + name + ".sh";
+    }
+
+    private int executions(String name) throws IOException {
+        Path log = temporary.resolve("workspace-0").resolve("child").resolve(name + ".log");
+        return Files.exists(log) ? Files.readAllLines(log).size() : 0;
+    }
+
+    private Map<String, Object> gatedDefinition(String session, String marker, String gate) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>(definition(session, marker, "* * * * *"));
+        body.put("gate", gate);
+        return body;
+    }
+
+    private List<Map<String, Object>> decidedSlots(String scheduleId) {
+        return jdbc.queryForList("SELECT occurrence_key, outcome, reason, attempts, last_error, run_id"
+                + " FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?"
+                + " AND occurrence_key LIKE 'schedule:%' AND outcome <> 'firing' ORDER BY slot", tenant, scheduleId);
+    }
+
+    private void awaitDecidedSlots(String scheduleId, int count) {
+        waiting().atMost(Duration.ofSeconds(200)).until(() -> decidedSlots(scheduleId).size() >= count);
+    }
+
+    /** The first scheduled occurrence that settled with `outcome`, waiting past quiet ones. */
+    private Map<String, Object> awaitOccurrenceWith(String scheduleId, String outcome) {
+        AtomicReference<Map<String, Object>> found = new AtomicReference<>();
+        waiting().atMost(Duration.ofSeconds(240)).until(() -> {
+            for (Map<String, Object> row : decidedSlots(scheduleId)) {
+                if (outcome.equals(row.get("outcome"))) {
+                    found.set(row);
+                    return true;
+                }
+            }
+            return false;
+        });
+        return found.get();
+    }
+
     private HostedGateTestSupport.PublicationFaults publicationFaults(String arm) {
         return new HostedGateTestSupport.PublicationFaults() {
             @Override
@@ -1348,6 +1919,320 @@ class HostedAutomationFaultGatesIT {
                 .noneMatch(prompt -> prompt.contains("FG11D_INTENT"));
     }
 
+    // FG11d: a Session carrying a live definition is closed, and the next slot
+    // records `skipped` for `session_not_active` with no model Turn. This pins
+    // today's behaviour rather than changing it; later slots reach the same
+    // admission refusal while the definition stays live, which the reason line
+    // tells apart from a retirement.
+    @Test
+    @Timeout(600)
+    void fg11dClosedSessionSkipsTheNextSlotOnMySql() throws Exception {
+        workspaceLifecycle = true;
+        boot("fg11d");
+        String session = createSession("close-queued");
+        // Park the scanner until the Session has closed: a minute boundary in
+        // the setup window would otherwise let the definition fire while the
+        // Session is still active, and that prompt would outlive the close and
+        // redden the final assertion for the wrong reason.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_CLOSE", "* * * * *"), "fg11d-close-base", 202).path("id").asText();
+        String close = request("POST", "/v1/agents/sessions/" + session + "/close", null, "fg11d-close", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(request("GET",
+                "/v1/agents/sessions/" + session + "/operations/" + close, null, null, 200)
+                .path("status").asText()).as("the close completes").isEqualTo("completed"));
+        // The close is what decides the slot's fate, so the scanner starts here.
+        scannerHold.countDown();
+        assertThat(awaitOccurrence(id, "skipped")).as("the skip names the closed Session")
+                .containsEntry("reason", "session_not_active");
+        assertThat(modelPrompts).as("no Turn starts for a closed Session")
+                .noneMatch(prompt -> prompt.contains("FG11D_CLOSE"));
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-close-retire", 202);
+    }
+
+    // FG11d: a close cannot cut a turn that is in flight. The Session answers
+    // `409 turn_active`, so an automation input queued behind that turn is
+    // decided by the turn rather than by the close attempt — the refusal is what
+    // this arm can pin, because no close ever reaches the queue.
+    @Test
+    @Timeout(600)
+    void fg11dCloseIsRefusedWhileATurnIsActiveOnMySql() throws Exception {
+        workspaceLifecycle = true;
+        boot("fg11d");
+        String session = createSession("close-turn-active");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-active-base", 202).path("id").asText();
+        // The fire parks on the model, so the Session carries an active turn.
+        request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-active-held", 202);
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-active-held")));
+        HttpResponse<String> refused = send("POST", "/v1/agents/sessions/" + session + "/close", null,
+                "fg11d-close-active");
+        assertThat(refused.statusCode()).as("a close cannot cut an active turn").isEqualTo(409);
+        assertThat(refused.body()).as("the refusal names the turn").contains("turn_active");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-active-retire", 202);
+    }
+
+    // FG11d: a retry under the same key reuses the run it already created. The
+    // second POST answers that run, records no second occurrence and starts no
+    // second Turn, so a client retrying a lost answer cannot double the work.
+    @Test
+    @Timeout(600)
+    void fg11dRetriedFireReusesItsRunOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("retry-reuse");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_RETRY", "0 0 1 1 *"), "fg11d-retry-base", 202).path("id").asText();
+        String first = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-retry-run", 202)
+                .path("id").asText();
+        String second = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-retry-run", 202)
+                .path("id").asText();
+        assertThat(second).as("the retry answers the run it already made").isEqualTo(first);
+        // The fire commits asynchronously: wait for the occurrence and for the
+        // Turn it starts before judging what the retry did not add.
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?",
+                String.class, tenant, id)).as("one occurrence").hasSize(1));
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("Automation ID: " + id)));
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
+                .as("both requests share one Turn").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-retry-retire", 202);
+    }
+
+    // FG11d: a run that completes on its own keeps its outcome. A cancel that
+    // arrives after the run settled is refused with
+    // `409 task_action_unavailable`, and neither the run nor its occurrence is
+    // rewritten.
+    @Test
+    @Timeout(600)
+    void fg11dSettledRunKeepsItsOutcomeOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("settled-outcome");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_SETTLED", "0 0 1 1 *"), "fg11d-settled-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-settled-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(90)).untilAsserted(() -> assertThat(runState(run))
+                .as("the run completes on its own").isEqualTo("completed"));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        HttpResponse<String> refused = send("POST",
+                "/v1/agents/sessions/" + session + "/tasks/" + task.path("id").asText() + "/cancel", null,
+                "fg11d-settled-cancel");
+        assertThat(refused.statusCode()).as("a settled run is not cancellable: %s", refused.body()).isEqualTo(409);
+        // The refusal is the projection's "does not accept a cancellation now",
+        // not `task_already_settled`: the settled task is no longer a cancel
+        // target at all, so the coordinator never reaches its terminal branch.
+        assertThat(refused.body()).as("the refusal names the closed window")
+                .contains("task_action_unavailable");
+        assertThat(runState(run)).as("the run keeps its own outcome").isEqualTo("completed");
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-settled-run"))
+                .as("the occurrence stays fired").containsEntry("outcome", "fired");
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-settled-retire", 202);
+    }
+
+    // FG11d: retrying a cancel under the same key reuses its operation. The
+    // second request answers the already-cancelled task, records nothing new and
+    // starts no Turn.
+    @Test
+    @Timeout(600)
+    void fg11dCancelRetryReusesItsOperationOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel-retry");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-cancel-retry-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-cancel-retry-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-cancel-retry-run")));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        String taskId = task.path("id").asText();
+        JsonNode first = request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel",
+                null, "fg11d-cancel-retry", 202);
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(run))
+                .as("the run is cancelled").isEqualTo("cancelled"));
+        // The retry reuses the committed cancel instead of acting twice, and the
+        // answer has to say so: same operation, the task it names, and the
+        // replay flag. Without them "reuses its operation" would rest on the run
+        // state alone, which a second operation could also have produced.
+        JsonNode second = request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel",
+                null, "fg11d-cancel-retry", 202);
+        assertThat(first.path("id").asText()).as("the first cancel commits an operation").isNotEmpty();
+        assertThat(second.path("id").asText()).as("the retry answers the same operation")
+                .isEqualTo(first.path("id").asText());
+        assertThat(second.path("task_id").asText()).as("the operation names the cancelled task")
+                .isEqualTo(taskId);
+        assertThat(first.path("replayed").asBoolean()).as("the first cancel is not a replay").isFalse();
+        assertThat(second.path("replayed").asBoolean()).as("the retry is answered as a replay").isTrue();
+        assertThat(runState(run)).as("the retry changes nothing").isEqualTo("cancelled");
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-cancel-retry-run"))
+                .as("the occurrence settles once").containsEntry("outcome", "fired");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retry-retire", 202);
+    }
+
+    // FG11d: a second manual fire cannot join a Session that is already running
+    // this definition's turn. Admission refuses it with `overlap` — the open
+    // Turn and the definition's overlap policy each answer so, and the cell
+    // pins the answer rather than which arm produced it — so the queue the
+    // cancellation matrix would cancel never forms: the refusal is recorded
+    // where an occurrence would go, no run commits behind it and no Turn starts.
+    @Test
+    @Timeout(600)
+    void fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("second-fire");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-second-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-second-first", 202)
+                .path("id").asText();
+        // The parked model keeps the first run non-terminal, so countActive still
+        // sees it. The refusal below is answered by the definition's default
+        // `skip` policy at one active run (AutomationScanner's count arm), not by
+        // the open-Turn arm: that arm reads public `ma_turn` rows, and none is
+        // open here — createSession's warm turn has already completed. Every
+        // admission arm answers the same reason, so this cell cannot tell them
+        // apart, and it does not pin the open-Turn guard.
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-second-first")));
+        HttpResponse<String> refused = send("POST", "/v1/agent-automations/" + id + "/runs", null,
+                "fg11d-second-refused");
+        assertThat(refused.statusCode()).as("a second fire is refused while the Turn runs: %s",
+                refused.body()).isEqualTo(409);
+        assertThat(refused.body()).as("the refusal names the overlap")
+                .contains("automation_run_skipped").contains("overlap");
+        Map<String, Object> decision = jdbc.queryForMap("SELECT outcome, reason, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-second-refused");
+        assertThat(decision).as("the refused fire records why it did not run")
+                .containsEntry("outcome", "skipped").containsEntry("reason", "overlap");
+        assertThat(((Number) decision.get("attempts")).intValue()).as("no attempt was spent").isZero();
+        assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                .as("only the admitted run exists").containsExactly(run);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
+                .as("the refused fire starts no Turn").hasSize(1);
+        assertThat(runState(run)).as("the first run is untouched by the refusal").isEqualTo("running");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-second-retire", 202);
+    }
+
+    // FG11d: a cancel stops the run it names and leaves the Session usable. Once
+    // the target settles `cancelled`, the next manual fire is admitted and runs
+    // to completion — the cancelled turn does not leave the Session wedged, and
+    // the definition stays `live`. A scheduled future slot is outside this arm:
+    // the definition's cron never comes due inside it.
+    @Test
+    @Timeout(600)
+    void fg11dSiblingRunSurvivesACancelOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel-isolation");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-iso-base", 202).path("id").asText();
+        String first = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-iso-first", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-iso-first")));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + task.path("id").asText() + "/cancel", null,
+                "fg11d-iso-cancel", 202);
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(first))
+                .as("the target run is cancelled").isEqualTo("cancelled"));
+        // The cancelled turn's model call is still in flight; releasing it must
+        // not revive the run, and the Session has to admit what comes next.
+        heldModel.countDown();
+        String sibling = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-iso-sibling", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(sibling))
+                .as("the sibling run completes").isEqualTo("completed"));
+        assertThat(runState(first)).as("the cancel still stands").isEqualTo("cancelled");
+        assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
+                .as("the schedule survives both").isEqualTo("live");
+        // Every sibling cancel cell pins the occurrence ledger. The row count only
+        // catches a spurious third key: a re-drive of a named key is an UPDATE on
+        // the (tenant, schedule, occurrence_key) primary key — `deferOccurrence`
+        // bumps `attempts` — so it leaves the count alone and is caught by the
+        // attempts assertion instead.
+        Map<String, Object> cancelled = jdbc.queryForMap("SELECT outcome, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-iso-first");
+        assertThat(cancelled).as("the cancelled key keeps its one fired occurrence")
+                .containsEntry("outcome", "fired");
+        assertThat(((Number) cancelled.get("attempts")).intValue())
+                .as("the cancelled key is never re-driven").isZero();
+        Map<String, Object> siblingOccurrence = jdbc.queryForMap("SELECT outcome, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-iso-sibling");
+        assertThat(siblingOccurrence).as("the sibling key fires its own occurrence")
+                .containsEntry("outcome", "fired");
+        assertThat(((Number) siblingOccurrence.get("attempts")).intValue())
+                .as("the sibling key is never re-driven").isZero();
+        assertThat(jdbc.queryForList("SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ?", String.class, tenant, id))
+                .as("no third occurrence key exists").hasSize(2);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-first"))
+                .as("the cancelled run keeps its one Turn").hasSize(1);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-sibling"))
+                .as("the sibling runs its own Turn").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-iso-retire", 202);
+    }
+
+    // FG11d: the queued-input arm is reachable on the public surface, and this cell
+    // is the witness the design record cites for it. Under `queue_one` admission
+    // admits a second manual fire while the first run is active — the open-Turn arm
+    // reads only public `ma_turn` rows and the automation wake turn is journal-side,
+    // so it never fires — and the second run commits with its input waiting behind
+    // the parked turn: no prompt for its occurrence ever appears. Cancelling that
+    // queued run is a different matter: measured here, a task cancel is accepted and
+    // the run stays `running`, because the queue is settled by the turn, not by the
+    // cancel. That arm stays open in the record.
+    @Test
+    @Timeout(600)
+    void fg11dQueueOneAdmitsASecondFireOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("queue-one");
+        Map<String, Object> body = new java.util.LinkedHashMap<>(
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"));
+        body.put("overlap", "queue_one");
+        String id = request("POST", "/v1/agent-automations", body, "fg11d-queue-base", 202)
+                .path("id").asText();
+        String active = request("POST", "/v1/agent-automations/" + id + "/runs", null,
+                "fg11d-queue-active", 202).path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-queue-active")));
+        // queue_one admits at one active run, so this fire commits its own run whose
+        // input waits behind the parked turn: no second prompt may appear.
+        String queued = request("POST", "/v1/agent-automations/" + id + "/runs", null,
+                "fg11d-queue-second", 202).path("id").asText();
+        assertThat(queued).as("the queued fire commits its own run").isNotEqualTo(active);
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> runState(queued) != null);
+        assertThat(runState(queued)).as("the queued run is committed, not settled")
+                .isNotIn("cancelled", "completed", "failed");
+        // The parked turn, not the overlap arm, is what holds the queued input, so this
+        // is an observation over a dwell rather than an attribution to `queue_one`.
+        waiting().atMost(Duration.ofSeconds(2)).during(Duration.ofMillis(1500))
+                .until(() -> modelPrompts.stream().noneMatch(
+                        prompt -> prompt.contains("manual:fg11d-queue-second")));
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-queue-second"))
+                .as("the queued occurrence is recorded as fired").containsEntry("outcome", "fired");
+        assertThat(runState(active)).as("the active run is untouched")
+                .isNotIn("cancelled", "completed", "failed");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-queue-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
@@ -1359,9 +2244,11 @@ class HostedAutomationFaultGatesIT {
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         Files.createDirectory(temporary.resolve("broker"));
-        if (publicationFaults != null) {
-            // Durable local-process mode refuses a Runtime state directory
-            // any other account can read; a public Shell Session needs it.
+        if (publicationFaults != null || workspaceLifecycle || shellSessions) {
+            // Durable local-process mode refuses a Runtime state directory any
+            // other account can read: the publication arms need it for a public
+            // Shell Session, and the Workspace lifecycle arm needs it before a
+            // close can be admitted.
             Files.setPosixFilePermissions(temporary.resolve("broker"),
                     java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
         }
@@ -1521,9 +2408,9 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.durable-local-process="
-                        + (publicationFaults != null),
+                        + (publicationFaults != null || workspaceLifecycle || shellSessions),
                 "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                        + (publicationFaults != null
+                        + (publicationFaults != null || workspaceLifecycle || shellSessions
                                 || "Linux".equals(System.getProperty("os.name"))),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
@@ -1542,6 +2429,10 @@ class HostedAutomationFaultGatesIT {
             // Workspace Shell refuses the server default of yolo; the session
             // still runs yolo from its definition, so the wake turn needs no
             // approval round-trip.
+            arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        } else if (shellSessions) {
+            arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
+            arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
             arguments.add("--qwen.managed-agent.harness.approval-mode=default");
         }
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
@@ -1566,7 +2457,8 @@ class HostedAutomationFaultGatesIT {
         // Registration must follow the same condition as the guard itself: the
         // guard allows Linux and macOS, and a public Shell wake turn verifies
         // the registered root before any execution.
-        if (publicationFaults != null || "Linux".equals(System.getProperty("os.name"))) {
+        if (publicationFaults != null || workspaceLifecycle || shellSessions
+                || "Linux".equals(System.getProperty("os.name"))) {
             spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }
@@ -1791,6 +2683,7 @@ class HostedAutomationFaultGatesIT {
         List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
                 this::writeEvidence,
                 this::dropRefusals,
+                () -> streams.forEach(stream -> stream.client.shutdownNow()),
                 () -> {
                     if (harness != null) {
                         harness.descendants().forEach(ProcessHandle::destroyForcibly);

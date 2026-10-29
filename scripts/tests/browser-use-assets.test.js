@@ -5,7 +5,6 @@
  */
 
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,7 +22,7 @@ const runtimeFiles = [
 ];
 const playwrightPath = 'packages/browser-use/node_modules/playwright-core';
 
-describe('browser-use builtin resources', () => {
+describe('isolated browser runtime fixtures', () => {
   let root;
 
   beforeEach(() => {
@@ -66,65 +65,77 @@ describe('browser-use builtin resources', () => {
     fs.rmSync(root, { force: true, recursive: true });
   });
 
-  it.each([
-    ['dev', skillPath],
-    ['core', 'packages/core/dist/src/skills/bundled/browser-use'],
-    ['bundle', 'dist/bundled/browser-use'],
-  ])(
-    'stages the complete runtime for %s and removes stale generated files',
-    (mode, target) => {
-      write(`${target}/runtime/stale.json`, '{}\n');
-      if (mode === 'dev') {
-        copyBrowserUseAssets(root, path.join(root, target));
-      } else {
-        write(`${skillPath}/runtime/source-only.json`, '{}\n');
-        const readdirSync = fs.readdirSync;
-        vi.spyOn(fs, 'readdirSync').mockImplementation((directory, ...args) => {
-          if (directory === path.join(root, skillPath, 'runtime')) {
-            throw new Error(
-              'General asset copying must not walk generated runtime',
-            );
-          }
-          return readdirSync(directory, ...args);
-        });
-        if (mode === 'core')
-          copyFiles({ root: path.join(root, 'packages/core') });
-        else copyBundleAssets({ root });
-      }
+  it('copies an isolated runtime fixture and removes stale generated files', () => {
+    const target = 'isolated-fixture';
+    write(`${target}/runtime/stale.json`, '{}\n');
+    copyBrowserUseAssets(root, path.join(root, target));
 
-      const runtimeDir = path.join(root, target, 'runtime');
-      expect(fs.readdirSync(runtimeDir).sort()).toEqual([
-        'NOTICE',
-        'index.js',
-        'native-host.js',
-        'node_modules',
-        'scripts',
-      ]);
-      expect(fs.readdirSync(path.join(runtimeDir, 'scripts'))).toEqual([
-        'native-host-setup.js',
-      ]);
-      for (const file of runtimeFiles) {
-        expect(fs.readFileSync(path.join(runtimeDir, file), 'utf8')).toBe(
-          `// ${file}\n`,
-        );
-      }
-      for (const file of [
-        'package.json',
-        'lib/server/injected.js',
-        'LICENSE',
-        'NOTICE',
-        'types/types.d.ts',
-        'bin/install.sh',
-      ]) {
-        expect(
-          fs.readFileSync(
-            path.join(runtimeDir, 'node_modules/playwright-core', file),
-          ),
-        ).toEqual(fs.readFileSync(path.join(root, playwrightPath, file)));
-      }
-      expect(fs.readFileSync(path.join(runtimeDir, 'NOTICE'), 'utf8')).toBe(
-        'Browser use notice\n',
+    const runtimeDir = path.join(root, target, 'runtime');
+    expect(fs.readdirSync(runtimeDir).sort()).toEqual([
+      'NOTICE',
+      'index.js',
+      'native-host.js',
+      'node_modules',
+      'scripts',
+    ]);
+    expect(fs.readdirSync(path.join(runtimeDir, 'scripts'))).toEqual([
+      'native-host-setup.js',
+    ]);
+    for (const file of runtimeFiles) {
+      expect(fs.readFileSync(path.join(runtimeDir, file), 'utf8')).toBe(
+        `// ${file}\n`,
       );
+    }
+    for (const file of [
+      'package.json',
+      'lib/server/injected.js',
+      'LICENSE',
+      'NOTICE',
+      'types/types.d.ts',
+      'bin/install.sh',
+    ]) {
+      expect(
+        fs.readFileSync(
+          path.join(runtimeDir, 'node_modules/playwright-core', file),
+        ),
+      ).toEqual(fs.readFileSync(path.join(root, playwrightPath, file)));
+    }
+    expect(fs.readFileSync(path.join(runtimeDir, 'NOTICE'), 'utf8')).toBe(
+      'Browser use notice\n',
+    );
+  });
+
+  it.each(['core', 'bundle'])(
+    'excludes retired skills from %s even with stale source and output assets',
+    (mode) => {
+      const target =
+        mode === 'core'
+          ? 'packages/core/dist/src/skills/bundled'
+          : 'dist/bundled';
+      for (const name of ['browser-use', 'computer-use']) {
+        write(
+          `packages/core/src/skills/bundled/${name}/SKILL.md`,
+          '# Retired\n',
+        );
+        write(
+          `packages/core/src/skills/bundled/${name}/runtime/stale.json`,
+          '{}\n',
+        );
+        write(`${target}/${name}/SKILL.md`, '# Stale output\n');
+      }
+      write('packages/core/src/skills/bundled/current/SKILL.md', '# Current\n');
+      fs.rmSync(path.join(root, 'packages/browser-use/dist'), {
+        recursive: true,
+      });
+      if (mode === 'core')
+        copyFiles({ root: path.join(root, 'packages/core') });
+      else copyBundleAssets({ root });
+      for (const name of ['browser-use', 'computer-use']) {
+        expect(fs.existsSync(path.join(root, target, name))).toBe(false);
+      }
+      expect(
+        fs.readFileSync(path.join(root, target, 'current/SKILL.md'), 'utf8'),
+      ).toBe('# Current\n');
     },
   );
 
@@ -138,37 +149,6 @@ describe('browser-use builtin resources', () => {
       ).toThrow('npm run build --workspace=@qwen-code/browser-use');
     },
   );
-
-  it('stages the dev runtime when the copy script runs from another directory', () => {
-    const scriptPath = path.join(root, 'scripts/copy-browser-use-assets.js');
-    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
-    fs.copyFileSync(
-      new URL('../copy-browser-use-assets.js', import.meta.url),
-      scriptPath,
-    );
-    write('package.json', '{"type":"module"}\n');
-
-    const result = spawnSync(process.execPath, [scriptPath], {
-      cwd: tmpdir(),
-      encoding: 'utf8',
-    });
-
-    expect(result.status, result.stderr).toBe(0);
-    for (const file of runtimeFiles) {
-      expect(
-        fs.readFileSync(path.join(root, skillPath, 'runtime', file), 'utf8'),
-      ).toBe(`// ${file}\n`);
-    }
-    expect(
-      fs.existsSync(
-        path.join(
-          root,
-          skillPath,
-          'runtime/node_modules/playwright-core/LICENSE',
-        ),
-      ),
-    ).toBe(true);
-  });
 
   it('uses the SDK-local pinned Playwright instead of the hoisted version', () => {
     write(
@@ -206,17 +186,6 @@ describe('browser-use builtin resources', () => {
     expect(() =>
       copyBrowserUseAssets(root, path.join(root, skillPath)),
     ).toThrow('Browser-use requires playwright-core 1.2.3, but resolved 9.9.9');
-  });
-
-  it('does not silently omit resources when the builtin skill exists', () => {
-    fs.rmSync(path.join(root, 'packages/browser-use/dist/index.js'));
-
-    expect(() => copyBundleAssets({ root })).toThrow(
-      'Browser-use runtime not found',
-    );
-    expect(() => copyFiles({ root: path.join(root, 'packages/core') })).toThrow(
-      'Browser-use runtime not found',
-    );
   });
 
   it('declares the browser-use build dependency for recursive scheduling', () => {

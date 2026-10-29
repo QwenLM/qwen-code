@@ -8,6 +8,7 @@
 import {
   afterAll,
   afterEach,
+  onTestFinished,
   beforeAll,
   describe,
   expect,
@@ -228,6 +229,11 @@ function timingFrame(
 const text = (element: Element | null) => element?.textContent ?? '';
 const rowsOf = (container: HTMLElement) =>
   Array.from(container.querySelectorAll('[role="row"]'));
+/** The selected row's cell; a click on it opens its details. */
+const selectedRow = (container: HTMLElement) =>
+  container.querySelector<HTMLElement>(
+    '[role="gridcell"][data-selected="true"]',
+  )!;
 /** A button by its text or accessible name, popovers included. */
 function findButton(container: HTMLElement, name: string) {
   const match = (root: ParentNode) =>
@@ -337,7 +343,7 @@ describe('execution following', () => {
       );
       expect(followStatus(container)).toBe('Paused');
       expect(
-        container.querySelector('[data-testid="trajectory-inspector"]'),
+        container.querySelector('[data-testid="trajectory-detail"]'),
       ).not.toBeNull();
       let complete!: (result: TrajectoryPageResult) => void;
       read.mockImplementationOnce(
@@ -357,7 +363,7 @@ describe('execution following', () => {
       await act(async () => complete(page(REAL_EVENTS)));
       expect(followStatus(container)).toBe('Live');
       expect(
-        container.querySelector('[data-testid="trajectory-inspector"]'),
+        container.querySelector('[data-testid="trajectory-detail"]'),
       ).toBeNull();
       expect(
         container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
@@ -865,7 +871,7 @@ describe('TrajectoryPanel', () => {
           .click(),
       );
       const close = container.querySelector<HTMLButtonElement>(
-        '[aria-label="Close details"]',
+        '[aria-label="Back to records"]',
       )!;
       close.focus();
       expect(
@@ -886,7 +892,7 @@ describe('TrajectoryPanel', () => {
         );
       });
       expect(
-        container.querySelector('[data-testid="trajectory-inspector"]'),
+        container.querySelector('[data-testid="trajectory-detail"]'),
       ).toBeNull();
       expect(
         container.querySelector('[data-testid="trajectory-execution-row"]'),
@@ -975,8 +981,7 @@ describe('TrajectoryPanel', () => {
     expect(historyRow.getAttribute('aria-selected')).toBe('false');
     expect(rows[0]!.getAttribute('aria-selected')).toBe('true');
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]')!
-        .textContent,
+      container.querySelector('[data-testid="trajectory-detail"]')!.textContent,
     ).toContain('new-model');
     await act(async () =>
       store.ingest(
@@ -1000,12 +1005,11 @@ describe('TrajectoryPanel', () => {
     expect(rows[0]!.dataset.executionKey).toBe(key);
     expect(rows[0]!.dataset.status).toBe('success');
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]')!
-        .textContent,
+      container.querySelector('[data-testid="trajectory-detail"]')!.textContent,
     ).toContain('Succeeded');
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>('[aria-label="Close details"]')!
+        .querySelector<HTMLButtonElement>('[aria-label="Back to records"]')!
         .click(),
     );
     expect(document.activeElement).toBe(
@@ -1059,7 +1063,7 @@ describe('TrajectoryPanel', () => {
         .click(),
     );
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]'),
+      container.querySelector('[data-testid="trajectory-detail"]'),
     ).not.toBeNull();
     const refresh = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Refresh"]',
@@ -1070,7 +1074,7 @@ describe('TrajectoryPanel', () => {
       container.querySelector('[data-testid="trajectory-execution-row"]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]'),
+      container.querySelector('[data-testid="trajectory-detail"]'),
     ).toBeNull();
     refresh.focus();
     present = true;
@@ -1079,7 +1083,7 @@ describe('TrajectoryPanel', () => {
       container.querySelector('[data-testid="trajectory-execution-row"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]'),
+      container.querySelector('[data-testid="trajectory-detail"]'),
     ).toBeNull();
     expect(document.activeElement).toBe(refresh);
   });
@@ -1146,20 +1150,20 @@ describe('TrajectoryPanel', () => {
       )!;
       if (target === 'collapsed') await act(async () => toggle.click());
       const details = container.querySelector<HTMLElement>(
-        '[data-testid="trajectory-inspector"]',
+        '[data-testid="trajectory-detail"]',
       )!;
       const refresh = container.querySelector<HTMLButtonElement>(
         'button[aria-label="Refresh"]',
       )!;
       const close = details.querySelector<HTMLButtonElement>(
-        '[aria-label="Close details"]',
+        '[aria-label="Back to records"]',
       )!;
       (target === 'outside' ? refresh : close).focus();
       await act(async () => {
         for (let id = 1; id <= 256; id++) store.ingest(owner, event(id));
       });
       expect(
-        container.querySelector('[data-testid="trajectory-inspector"]'),
+        container.querySelector('[data-testid="trajectory-detail"]'),
       ).toBeNull();
       expect(
         (container.getRootNode() as Document | ShadowRoot).activeElement,
@@ -1227,7 +1231,7 @@ describe('TrajectoryPanel', () => {
       ),
     ).toBeNull();
     const close = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Close details"]',
+      '[aria-label="Back to records"]',
     )!;
     close.focus();
     await act(async () =>
@@ -1239,7 +1243,7 @@ describe('TrajectoryPanel', () => {
       ),
     );
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]'),
+      container.querySelector('[data-testid="trajectory-detail"]'),
     ).toBeNull();
     expect(document.activeElement).toBe(toggle);
   });
@@ -1304,9 +1308,9 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    await act(async () => findButton(container, 'View details').click());
+    await act(async () => selectedRow(container).click());
     const details = container.querySelector(
-      '[data-testid="trajectory-inspector"] pre',
+      '[data-testid="trajectory-detail"] pre',
     );
     expect(details?.textContent).toContain('"executionId": "exec-matched"');
     expect(details?.textContent).toContain('"outcome": "success"');
@@ -1362,21 +1366,12 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
         .click(),
     );
-    await act(async () => findButton(container, 'View details').click());
+    await act(async () => selectedRow(container).click());
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]'),
+      container.querySelector('[data-testid="trajectory-detail"]'),
     ).not.toBeNull();
-    await act(async () => {
-      [
-        ...container.querySelectorAll<HTMLButtonElement>(
-          '[data-testid="trajectory-inspector"] button',
-        ),
-      ]
-        .find((button) => button.textContent === 'Body')!
-        .click();
-    });
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+      text(container.querySelector('[data-testid="trajectory-detail"] pre')),
     ).toContain('first payload');
 
     failRefresh = true;
@@ -1386,7 +1381,7 @@ describe('TrajectoryPanel', () => {
         .click(),
     );
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+      text(container.querySelector('[data-testid="trajectory-detail"] pre')),
     ).toContain('first payload');
 
     failRefresh = false;
@@ -1397,10 +1392,10 @@ describe('TrajectoryPanel', () => {
         .click(),
     );
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+      text(container.querySelector('[data-testid="trajectory-detail"]')),
     ).toContain('The record window changed');
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+      text(container.querySelector('[data-testid="trajectory-detail"]')),
     ).not.toContain('second payload');
 
     act(() =>
@@ -1408,28 +1403,23 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
         .click(),
     );
-    await act(async () => {
-      [
-        ...container.querySelectorAll<HTMLButtonElement>(
-          '[data-testid="trajectory-inspector"] button',
-        ),
-      ]
-        .find((button) => button.textContent === 'Body')!
-        .click();
-    });
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+      text(container.querySelector('[data-testid="trajectory-detail"] pre')),
     ).toContain('second payload');
   });
 
-  it('keeps the grid focused while an open inspector follows row selection', async () => {
+  it('keeps the grid focused while side details follow row selection', async () => {
+    const width = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockReturnValue(1200);
+    onTestFinished(() => width.mockRestore());
     const container = await render(async () => page(REAL_EVENTS));
     act(() =>
       container
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    await act(async () => findButton(container, 'View details').click());
+    await act(async () => selectedRow(container).click());
     const grid = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-rows"]',
     )!;
@@ -1441,23 +1431,32 @@ describe('TrajectoryPanel', () => {
     );
     expect(document.activeElement).toBe(grid);
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+      text(container.querySelector('[data-testid="trajectory-detail"]')),
     ).not.toContain('Select a record');
     act(() =>
       container
         .querySelector<HTMLElement>('[data-testid="trajectory-turn"]')!
         .click(),
     );
+    const detail = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-detail"]',
+    )!;
+    expect(detail.dataset.presentation).toBe('side');
+    expect(text(detail.querySelector('h3'))).toMatch(/^Turn \d+$/);
+    expect(text(detail)).toContain('Steps');
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"]')),
-    ).toContain('Turn selected. Select a record');
-    await act(async () => {
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-inspector"] button[aria-label="Close details"]',
-        )!
+        .querySelector('[data-testid="trajectory-records"] > div > div')
+        ?.hasAttribute('inert'),
+    ).toBe(false);
+    await act(async () => {
+      detail
+        .querySelector<HTMLButtonElement>('button[aria-label="Close details"]')!
         .click();
     });
+    expect(container.querySelector('[data-testid="trajectory-detail"]')).toBe(
+      null,
+    );
     expect(document.activeElement).toBe(grid);
   });
 
@@ -1568,24 +1567,52 @@ describe('TrajectoryPanel', () => {
     expect(document.body.textContent).toContain('1 without duration');
   });
 
-  it('offers details only on the selected record', async () => {
+  it('opens drill-in details over inert records on click, and Back returns to them', async () => {
     const container = await render(async () => page(REAL_EVENTS));
     const request = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-row-request"]',
     )!;
-    const user = container.querySelector<HTMLElement>(
-      '[data-testid="trajectory-row-user"]',
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
     )!;
-    const openers = () =>
-      container.querySelectorAll('button[aria-label="View details"]');
-    expect(openers()).toHaveLength(0);
-    act(() => request.click());
+    const records = grid.closest(
+      '[data-testid="trajectory-records"] > div',
+    )!.firstElementChild!;
+    expect(container.querySelector('button[aria-label="View details"]')).toBe(
+      null,
+    );
+    await act(async () => request.click());
     expect(request.getAttribute('aria-selected')).toBe('true');
-    expect(openers()).toHaveLength(1);
-    expect(request.contains(openers()[0]!)).toBe(true);
-    act(() => user.click());
+    const detail = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-detail"]',
+    )!;
+    expect(detail.dataset.presentation).toBe('drill-in');
+    expect(records.hasAttribute('inert')).toBe(true);
+    // The list stays mounted under the overlay.
+    expect(grid.isConnected).toBe(true);
+    expect(document.activeElement).toBe(detail.querySelector('h3'));
+
+    await act(async () =>
+      detail
+        .querySelector<HTMLButtonElement>('[aria-label="Next record"]')!
+        .click(),
+    );
     expect(request.getAttribute('aria-selected')).toBe('false');
-    expect(user.contains(openers()[0]!)).toBe(true);
+    expect(container.querySelector('[data-testid="trajectory-detail"]')).toBe(
+      detail,
+    );
+
+    await act(async () =>
+      detail
+        .querySelector<HTMLButtonElement>('[aria-label="Back to records"]')!
+        .click(),
+    );
+    expect(container.querySelector('[data-testid="trajectory-detail"]')).toBe(
+      null,
+    );
+    expect(records.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(grid);
+    expect(selectedRow(container)).not.toBe(request);
   });
 
   it.each(['cancelled', 'canceled'])('mutes a %s tool row', async (status) => {
@@ -2280,13 +2307,20 @@ describe('TrajectoryPanel', () => {
     ).toHaveLength(0);
     expect(grid.getAttribute('tabindex')).toBe('0');
 
-    // Clicking hands focus back, so the arrow keys keep working afterwards.
+    // A click opens the row's details, which take focus; leaving them hands
+    // focus back to the grid, so the arrow keys keep working afterwards.
     const rows = () =>
       Array.from(
         container.querySelectorAll('[data-testid^="trajectory-row-"]'),
       ) as HTMLElement[];
     const clicked = rows()[1]!;
     await act(async () => clicked.click());
+    expect(document.activeElement?.tagName).toBe('H3');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Back to records"]')!
+        .click(),
+    );
     expect(document.activeElement).toBe(grid);
     // The row the assistive technology is told about is the row under the
     // pointer, so focus and the selection cannot name different rows.
@@ -2612,9 +2646,9 @@ describe('collapsible trajectory', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
         .click(),
     );
-    await act(async () => findButton(container, 'View details').click());
+    await act(async () => selectedRow(container).click());
     const inspector = () =>
-      container.querySelector('[data-testid="trajectory-inspector"]')!;
+      container.querySelector('[data-testid="trajectory-detail"]')!;
     expect(text(inspector())).toContain('Keep this detail');
     await act(async () => fold(container).click());
     expect(fold(container).getAttribute('aria-expanded')).toBe('false');
@@ -2658,7 +2692,7 @@ describe('collapsible trajectory', () => {
       ),
     );
     expect(
-      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+      text(container.querySelector('[data-testid="trajectory-detail"]')),
     ).toContain('fold-model');
     await act(async () =>
       grid(container).dispatchEvent(
@@ -2940,10 +2974,10 @@ describe('trajectory diagnostic filters', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
         .click(),
     );
-    await act(async () => button(container, 'View details').click());
+    await act(async () => selectedRow(container).click());
     await typeQuery(container, 'qwen-search');
     const inspector = container.querySelector<HTMLElement>(
-      '[data-testid="trajectory-inspector"]',
+      '[data-testid="trajectory-detail"]',
     )!;
     expect(inspector.textContent).toContain('Unique needle');
     await act(async () => button(inspector, 'Clear filters').click());
@@ -3053,9 +3087,9 @@ describe('trajectory diagnostic filters', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
         .click(),
     );
-    await act(async () => button(container, 'View details').click());
+    await act(async () => selectedRow(container).click());
     const inspector = () =>
-      container.querySelector('[data-testid="trajectory-inspector"]')!;
+      container.querySelector('[data-testid="trajectory-detail"]')!;
     await typeQuery(container, 'qwen-search');
     expect(inspector().textContent).toContain('Unique needle');
     expect(inspector().textContent).toContain(
@@ -3107,7 +3141,7 @@ describe('trajectory diagnostic filters', () => {
         ?.getAttribute('data-selected'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-testid="trajectory-inspector"]'),
+      container.querySelector('[data-testid="trajectory-detail"]'),
     ).toBeNull();
     expect(container.textContent).toContain('1 of 1');
     await typeQuery(container, 'no such text');
@@ -3212,7 +3246,7 @@ it('reveals a request when its independent filter and time contexts have an empt
       .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
       .click(),
   );
-  await act(async () => findButton(container, 'View details').click());
+  await act(async () => selectedRow(container).click());
   const input = container.querySelector<HTMLInputElement>(
     'input[type="search"]',
   )!;
@@ -3248,7 +3282,7 @@ it('reveals a request when its independent filter and time contexts have an empt
   ).toContain('0 matches');
   expect(findButton(container, 'Next').disabled).toBe(true);
   const inspector = container.querySelector(
-    '[data-testid="trajectory-inspector"]',
+    '[data-testid="trajectory-detail"]',
   )!;
   expect(inspector.textContent).toContain('does not match the current filters');
   expect(inspector.textContent).not.toContain('outside the selected time');

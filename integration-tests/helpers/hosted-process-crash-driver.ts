@@ -13,7 +13,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
-import { relayUpstream } from './hosted-relay-headers.js';
+import { relayedHeaders, relayUpstream } from './hosted-relay-headers.js';
 import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
@@ -26,7 +26,9 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as {
   storeUrl: string;
   brokerUrl: string;
   controlUrl: string;
+  harnessProxyPort?: number;
 };
+const settlement = config.fault === 'recovery-settlement';
 type Transaction = {
   transactionId: string;
   recordBytesBase64: string;
@@ -44,6 +46,12 @@ const report = {
   staleWriterConflicts: 0,
   fencedWriterRenewals: 0,
   target: undefined as Transaction | undefined,
+  cancelAdmissions: 0,
+  promptSubmissions: 0,
+  continuationsAfterFailure: 0,
+  postFailureLoads: [] as boolean[],
+  lateCancelReplays: 0,
+  originalCancelBody: '',
 };
 const proof = path.join(config.directory, 'proof.txt');
 const inFlight = !['harness-prepare', 'harness-result'].includes(config.fault);
@@ -54,6 +62,13 @@ let restoring = false;
 let injected = false;
 let serviceKilled = false;
 let proxyFailure: unknown;
+let originalCancel:
+  | { path: string; headers: Record<string, string>; body: Buffer }
+  | undefined;
+let releaseFollowupModel!: () => void;
+const followupModel = new Promise<void>((resolve) => {
+  releaseFollowupModel = resolve;
+});
 const sealedWriters = new Set<string>();
 // Writer identities (bootIds) of Harness processes this driver has SIGKILLed.
 const killedWriters = new Set<string>();
@@ -110,6 +125,99 @@ const proxy = createServer(async (req, res) => {
     const fields = body.length
       ? JSON.parse(body.toString())
       : Object.fromEntries(url.searchParams);
+    if (
+      settlement &&
+      !store &&
+      !req.url!.startsWith('/internal/runtime-broker/')
+    ) {
+      const target = new URL(req.url!, cli.baseUrl);
+      if (
+        req.method === 'GET' &&
+        target.pathname.endsWith('/events') &&
+        !injected
+      ) {
+        await enteredTool();
+        injected = true;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'fixture_event_stream_rejected' }));
+        return;
+      }
+      if (
+        req.method === 'POST' &&
+        target.pathname === `/session/${config.sessionId}/prompt`
+      ) {
+        report.promptSubmissions++;
+        if (!injected) report.promptId = fields.promptId;
+      }
+      if (
+        injected &&
+        req.method === 'POST' &&
+        target.pathname ===
+          `/session/${config.sessionId}/managed-runtime/continue`
+      )
+        report.continuationsAfterFailure++;
+      if (injected && target.pathname.endsWith('/load'))
+        report.postFailureLoads.push(fields.cancellationTakeover === true);
+      const headers = Object.fromEntries(
+        Object.entries(req.headers)
+          .filter(
+            ([key]) => !['host', 'content-length', 'connection'].includes(key),
+          )
+          .map(([key, value]) => [
+            key,
+            Array.isArray(value) ? value.join(',') : value!,
+          ]),
+      );
+      if (
+        req.method === 'POST' &&
+        target.pathname === `/session/${config.sessionId}/cancel` &&
+        !originalCancel
+      ) {
+        originalCancel = { path: target.pathname, headers, body };
+        report.originalCancelBody = body.toString();
+      }
+      const upstream = await fetch(target, {
+        method: req.method,
+        headers,
+        ...(body.length ? { body } : {}),
+      });
+      if (target.pathname.endsWith('/events') && upstream.body) {
+        res.writeHead(upstream.status, relayedHeaders(upstream.headers));
+        const reader = upstream.body.getReader();
+        res.once('close', () => {
+          void reader.cancel().catch(() => {});
+        });
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          res.write(next.value);
+        }
+        res.end();
+        return;
+      }
+      const bytes = Buffer.from(await upstream.arrayBuffer());
+      if (
+        (target.pathname === '/session' ||
+          target.pathname === `/session/${config.sessionId}/load`) &&
+        upstream.ok
+      )
+        clientId = JSON.parse(bytes.toString()).clientId;
+      if (target.pathname.endsWith('/cancel') && upstream.ok) {
+        report.cancelAdmissions++;
+        if (report.cancelAdmissions === 1) {
+          assert.equal(
+            (await json(`/session/${config.sessionId}/status`)).hasActivePrompt,
+            true,
+          );
+          serviceKilled = true;
+          const signal = await control('recovery-settlement');
+          report.signalEvidence.push({ process: 'spring', ...signal });
+          assert.notEqual(signal.pid, signal.newPid);
+        }
+      }
+      relayUpstream(res, upstream, bytes);
+      return;
+    }
     const commit = store && url.pathname.endsWith('/transactions:commit');
     if (
       commit &&
@@ -142,6 +250,7 @@ const proxy = createServer(async (req, res) => {
         req.method === 'POST' &&
         [
           '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
           '/internal/runtime-broker/v1/tool-sessions:active-holds',
         ].includes(url.pathname);
       assert.equal(fields.harnessSessionId, config.sessionId);
@@ -149,11 +258,12 @@ const proxy = createServer(async (req, res) => {
         fields.runtimeSessionId,
         harnessScoped ? undefined : report.promptId,
       );
-      assert.notEqual(
-        operation,
-        'release',
-        'Unsettled execution must retain its owner',
-      );
+      if (!settlement)
+        assert.notEqual(
+          operation,
+          'release',
+          'Unsettled execution must retain its owner',
+        );
       if (!(harnessScoped && operation === 'active-holds'))
         report.operations.push(operation);
       if (req.method === 'GET')
@@ -172,7 +282,7 @@ const proxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(40_000),
     });
     const bytes = Buffer.from(await upstream.arrayBuffer());
-    const json = upstream.headers
+    const responseJson = upstream.headers
       .get('content-type')
       ?.includes('application/json')
       ? JSON.parse(bytes.toString())
@@ -198,7 +308,7 @@ const proxy = createServer(async (req, res) => {
         // current boot's grant is never tolerated: catching that conflict is
         // the whole reason the fence exists.
         assert.equal(
-          json.error.code,
+          responseJson.error.code,
           'managed_session_writer_conflict',
           `${url}: ${bytes}`,
         );
@@ -212,14 +322,14 @@ const proxy = createServer(async (req, res) => {
         // after the cold load's acquire bumped the writer generation; the
         // writer fence rejecting it is the designed outcome, not a failure.
         assert.equal(
-          json?.error?.code,
+          responseJson?.error?.code,
           'managed_session_writer_conflict',
           `${url}: ${bytes}`,
         );
         report.staleWriterConflicts++;
       } else if (url.pathname.endsWith(':release-mount')) {
         assert(
-          isLegitimateMountRelease(upstream.status, json.code),
+          isLegitimateMountRelease(upstream.status, responseJson.code),
           `${upstream.status} ${url}: ${bytes}`,
         );
       } else if (upstream.status === 409) {
@@ -230,17 +340,17 @@ const proxy = createServer(async (req, res) => {
             config.fault.startsWith('worker-'),
           `${url}: ${bytes}`,
         );
-        assert.equal(json.code, 'runtime_broker_execution_unknown');
+        assert.equal(responseJson.code, 'runtime_broker_execution_unknown');
       } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     }
     if (restoring && store && url.pathname.endsWith('/transactions'))
-      report.restoreTransactions.push(...json.transactions);
+      report.restoreTransactions.push(...responseJson.transactions);
     if (!store && operation === 'prepare') {
       assert.equal(report.executionCallId, '');
-      report.executionCallId = json.executionCallId;
+      report.executionCallId = responseJson.executionCallId;
       report.idempotencyKey = fields.idempotencyKey;
       if (config.fault === 'harness-prepare') {
-        assert.equal(json.status.state, 'prepared');
+        assert.equal(responseJson.status.state, 'prepared');
         const evidence = await control('evidence');
         assert.equal(evidence.executionState, 'PREPARED');
         assert.equal(evidence.dispatchGeneration, 0);
@@ -250,9 +360,9 @@ const proxy = createServer(async (req, res) => {
         return;
       }
     }
-    if (!store && operation === 'start' && inFlight) {
+    if (!store && operation === 'start' && inFlight && !settlement) {
       assert.equal(injected, false);
-      assert.equal(json.status.state, 'executing');
+      assert.equal(responseJson.status.state, 'executing');
       await enteredTool();
       if (
         config.fault === 'harness-start' ||
@@ -284,13 +394,18 @@ const proxy = createServer(async (req, res) => {
     res.destroy();
   }
 });
-await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+await new Promise<void>((resolve) =>
+  proxy.listen(config.harnessProxyPort ?? 0, '127.0.0.1', resolve),
+);
 const address = proxy.address();
 assert(address && typeof address !== 'string');
 const proxyUrl = `http://127.0.0.1:${address.port}`;
-const model = await startFakeOpenAIServer(() => {
+const model = await startFakeOpenAIServer(async () => {
   report.modelCalls++;
-  if (report.modelCalls > 1) return { content: 'UNEXPECTED_CONTINUATION' };
+  if (report.modelCalls > 1) {
+    if (settlement) await followupModel;
+    return { content: settlement ? 'FOLLOW_UP_OK' : 'UNEXPECTED_CONTINUATION' };
+  }
   return {
     toolCalls: [
       fakeToolCall(
@@ -364,8 +479,7 @@ async function assertEffect() {
   );
 }
 
-try {
-  await start();
+async function runExistingCase() {
   const boot = cli.bootId;
   const route = `/session/${config.sessionId}`;
   const created = await json('/session', {
@@ -522,10 +636,141 @@ try {
     `FG6C ${config.fault}: execution=${report.executionCallId}, signals=${JSON.stringify(report.signalEvidence)}, cold=blocked, statusReads=${JSON.stringify(report.statusReads)}`,
   );
   console.log('HOSTED_PROCESS_CRASH_OK');
+}
+
+async function runRecoverySettlement() {
+  async function api(route: string, body?: object, expected = 200) {
+    if (proxyFailure) throw proxyFailure;
+    const response = await fetch(config.storeUrl + route, {
+      method: body ? 'POST' : 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Qwen-Tenant-Id': config.tenantId,
+        'X-Qwen-Actor-Id': 'actor',
+        'Idempotency-Key': randomUUID(),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await response.text();
+    assert.equal(response.status, expected, `${route}: ${text}`);
+    return text ? JSON.parse(text) : {};
+  }
+  const route = `/v1/agents/sessions/${config.sessionId}`;
+  const turn = await api(
+    `${route}/events`,
+    {
+      type: 'agent.session.input.message',
+      input: [{ type: 'input_text', text: 'RECOVERY_SETTLEMENT' }],
+    },
+    202,
+  );
+  await waitUntil(() => {
+    if (proxyFailure) throw proxyFailure;
+    return report.signalEvidence.length === 1;
+  }, 60_000);
+  await api(`${route}/recovery/recheck`, { turnId: turn.turn_id }, 202);
+  await waitUntil(() => report.cancelAdmissions >= 2, 30_000);
+  assert.equal(
+    (await json(`/session/${config.sessionId}/status`)).hasActivePrompt,
+    true,
+  );
+  await control('recovery-pending');
+  assert.equal(report.modelCalls, 1);
+  assert.equal(report.promptSubmissions, 1);
+  assert.equal(report.continuationsAfterFailure, 0);
+  assert(report.postFailureLoads.length > 0);
+  assert(
+    report.postFailureLoads.every(Boolean),
+    'replacement must use cancellation-only loads',
+  );
+  await unlink(`${proof}.read-gate`);
+  await waitUntil(async () => {
+    await api(`${route}/recovery/recheck`, { turnId: turn.turn_id }, 202);
+    return (await api(`${route}/turns/${turn.turn_id}`)).status === 'cancelled';
+  }, 60_000);
+  await waitUntil(
+    async () => (await api(`${route}/recovery`)).nextTurnAllowed === true,
+    30_000,
+  );
+  assert.equal(
+    report.modelCalls,
+    1,
+    'settling cancellation must not continue the original model',
+  );
+  assert.equal(report.promptSubmissions, 1);
+  const followup = await api(
+    `${route}/events`,
+    {
+      type: 'agent.session.input.message',
+      input: [{ type: 'input_text', text: 'FOLLOW_UP' }],
+    },
+    202,
+  );
+  await waitUntil(() => report.modelCalls === 2);
+  assert.equal(
+    (await json(`/session/${config.sessionId}/status`)).hasActivePrompt,
+    true,
+  );
+  assert(
+    originalCancel,
+    'the original input cancellation must have been captured',
+  );
+  const delayedCancel = await fetch(new URL(originalCancel.path, cli.baseUrl), {
+    method: 'POST',
+    headers: originalCancel.headers,
+    body: originalCancel.body,
+  });
+  assert.equal(delayedCancel.status, 204, await delayedCancel.text());
+  report.lateCancelReplays++;
+  releaseFollowupModel();
+  await waitUntil(async () => {
+    const status = (await api(`${route}/turns/${followup.turn_id}`)).status;
+    assert.notEqual(
+      status,
+      'cancelled',
+      'a late original-input cancellation must not cancel the follow-up Turn',
+    );
+    return status === 'completed';
+  }, 30_000);
+  assert.equal(report.modelCalls, 2);
+  assert.equal(report.promptSubmissions, 2);
+  assert.equal(
+    JSON.parse(report.originalCancelBody || '{}').promptId,
+    report.promptId,
+  );
+  await waitUntil(async () =>
+    JSON.stringify(await api(`${route}/items?limit=100`)).includes(
+      'FOLLOW_UP_OK',
+    ),
+  );
+  assert.equal(
+    report.operations.filter((operation) => operation === 'start').length,
+    1,
+  );
+  assert.equal(
+    report.operations.filter((operation) => operation === 'prepare').length,
+    1,
+  );
+  if (proxyFailure) throw proxyFailure;
+  await writeFile(`${configPath}.results`, JSON.stringify(report));
+  console.log(
+    `FG6C recovery-settlement: execution=${report.executionCallId}, signals=${JSON.stringify(report.signalEvidence)}, cancellations=${report.cancelAdmissions}, submissions=${report.promptSubmissions}, models=${report.modelCalls}, continuations=${report.continuationsAfterFailure}`,
+  );
+  console.log(
+    'HOSTED_PROCESS_CRASH_OK recovery-settlement marker=durable native=running restart=cancel-only toolStarts=1 followup=completed staleCancel=ignored',
+  );
+}
+
+try {
+  await start();
+  if (settlement) await runRecoverySettlement();
+  else await runExistingCase();
 } catch (cause) {
   console.error(`FG6C ${config.fault}`, JSON.stringify(report), cli.output);
   throw cause;
 } finally {
+  releaseFollowupModel();
   // The parent owns worker cleanup; do not unblock an uncertain Edit.
   await cli.close();
   await model.close();

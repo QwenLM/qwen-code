@@ -133,7 +133,7 @@ public final class ResidentWorkspaces {
             throw WorkspaceExecutionStore.unavailable();
         }
         requireRegistration(jdbc, selected);
-        var originals = jdbc.query("SELECT b.binding_id, b.runtime_generation FROM ma_runtime_binding b"
+        var originals = jdbc.query("SELECT b.binding_id, b.runtime_generation, b.resource_handle_json FROM ma_runtime_binding b"
                 + " JOIN ma_runtime_slot slot ON slot.active_binding_id = b.binding_id AND slot.request_key = b.request_key"
                 + " WHERE b.request_key = ? AND b.tenant_id = ? AND b.workspace_id = ? AND b.workspace_generation = ?"
                 + " AND b.canonical_cwd = ? AND b.storage_id = ? AND b.capability_digest = ?"
@@ -141,7 +141,7 @@ public final class ResidentWorkspaces {
                 + " AND b.provisioner_kind = 'kubernetes-workspace' AND b.binding_state = 'READY'"
                 + " AND b.drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
                 + " AND b.provision_seed_ciphertext IS NOT NULL AND b.attestation_generation > 0 FOR UPDATE",
-                (row, index) -> new Original(row.getString(1), row.getLong(2)), request(binding).requestKey(), tenantId,
+                (row, index) -> new Original(row.getString(1), row.getLong(2), row.getString(3)), request(binding).requestKey(), tenantId,
                 binding.getWorkspaceId(), Long.toString(binding.getWorkspaceGeneration()), selected.registration().mountRoot(),
                 binding.getStorageId(), ResidentWorkspaceProfile.CAPABILITY_DIGEST);
         var owners = jdbc.queryForList("SELECT binding_id FROM ma_runtime_session WHERE tenant_id = ?"
@@ -157,6 +157,7 @@ public final class ResidentWorkspaces {
             throw WorkspaceExecutionStore.unavailable();
         }
         var original = originals.getFirst();
+        var storage = heldStorage(original.handle());
         if (owners.stream().anyMatch(value -> !original.id().equals(value))
                 || !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE tenant_id = ?"
                     + " AND harness_session_id = ? AND (binding_id <> ? OR runtime_generation <> ?"
@@ -169,9 +170,11 @@ public final class ResidentWorkspaces {
                     + " AND runtime_generation = ? AND session_state <> 'RELEASED' FOR UPDATE", String.class,
                     original.id(), original.generation()).isEmpty()
                 || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'"
-                    + " AND csi_phase = 'RESERVED' AND csi_revision = 1 AND binding_id = ? AND runtime_generation = ?"
+                    + " AND csi_phase = 'RESERVED' AND csi_revision = ? AND csi_reservation_id = ?"
+                    + " AND binding_id = ? AND runtime_generation = ?"
                     + " AND csi_registration_key = ? AND csi_registration_revision = ? AND holder_key IS NULL"
                     + " AND runtime_session_id IS NULL", Long.class, selected.registration().physicalKey(),
+                    Long.parseLong((String) storage.get("reservationRevision")), storage.get("reservationId"),
                     original.id(), original.generation(), selected.registration().aliasKey(), selected.registration().revision()) != 1
                 || !jdbc.queryForList("SELECT execution_call_id FROM ma_tool_execution WHERE binding_id = ?"
                     + " AND runtime_generation = ? AND execution_state <> 'SETTLED' FOR UPDATE",
@@ -181,5 +184,22 @@ public final class ResidentWorkspaces {
         return true;
     }
 
-    private record Original(String id, long generation) { }
+    static java.util.Map<String, Object> heldStorage(String encoded) {
+        try {
+            var handle = com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle.fromJson("kubernetes-workspace", 1, encoded);
+            var storage = com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map(handle.getValue().get("storage"));
+            var revision = (String) storage.get("reservationRevision");
+            if (revision == null || !revision.matches("[1-9][0-9]{0,18}")
+                    || !com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision.residentReserved(Long.parseLong(revision))
+                    || !(storage.get("reservationId") instanceof String reservation)
+                    || !java.util.UUID.fromString(reservation).toString().equals(reservation)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return storage;
+        } catch (IllegalArgumentException | ClassCastException failure) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private record Original(String id, long generation, String handle) { }
 }

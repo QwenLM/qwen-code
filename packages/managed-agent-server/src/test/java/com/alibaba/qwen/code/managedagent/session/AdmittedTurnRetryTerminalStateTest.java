@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.InOrder;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -30,8 +29,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -40,15 +39,15 @@ import static org.mockito.Mockito.when;
 /**
  * Regression for issue #13182 finding 2: once submissionAttempted is
  * recorded, a Turn stuck on transient Harness failures must converge to a
- * terminal failure after the bounded post-admission retry budget
- * (maxPostAdmissionRetries, default 10) instead of rescheduling without any
- * bound.
+ * cancellation-only recovery after the bounded post-admission retry budget
+ * (maxPostAdmissionRetries, default 10). Native settlement remains necessary
+ * before the Workspace Turn can become terminal.
  */
 class AdmittedTurnRetryTerminalStateTest {
     // 10 is exactly the spent budget; 42 is far past it.
     @ParameterizedTest(name = "retryCount = {0}")
     @ValueSource(ints = {10, 42})
-    void admittedTurnFailsAfterThePostAdmissionRetryBudgetIsSpent(
+    void admittedWorkspaceTurnParksAfterThePostAdmissionRetryBudgetIsSpent(
             int retryCount) {
         DaemonHttpException unavailable = mock(DaemonHttpException.class);
         when(unavailable.getStatusCode()).thenReturn(503);
@@ -56,30 +55,19 @@ class AdmittedTurnRetryTerminalStateTest {
                 new ManagedAgentProperties(), unavailable, "epoch-1");
         AgentStateStore store = dispatched.store();
 
-        // A distinct code from pre-admission exhaustion: the Turn may have
-        // been admitted, so blind retry is not safe. The terminal record is
-        // preceded by a best-effort cancel of the admitted Turn through the
-        // Session's bound Harness — after failTurn clears the dispatch
-        // owner, nothing could ever reach the admitted Turn again (review
-        // round 5, R5-3). The recorded epoch is what proves the admission
-        // to the cancel gate (review round 6, R6-3).
-        InOrder order = inOrder(store, dispatched.harness());
-        order.verify(dispatched.harness()).cancel("tenant", "session");
-        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("hosted_harness_unavailable_after_admission"),
-                anyString());
-        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong(), anyBoolean());
+        verifyParked(store, "hosted_harness_unavailable_after_admission");
+        verify(dispatched.harness()).recoverManagedFailureCancellation(eq("tenant"),
+                eq("session"), eq("turn"), anyString(), eq("11111111-1111-4111-8111-111111111111"));
     }
 
     // The cancel carries no Turn identity — the daemon aborts whichever Turn
     // the Session is running — so a Turn holding only a submission mark
     // must not trigger it: the mark can belong to a Turn the daemon refused
     // while another Turn is live on the Session, and cancelling then aborts
-    // that Turn (review round 6, R6-3). The terminal record still lands.
+    // that Turn (review round 6, R6-3). Missing proof keeps this Turn parked.
     @ParameterizedTest(name = "retryCount = {0}")
     @ValueSource(ints = {10, 42})
-    void aNeverAdmittedTurnIsNotCancelledBeforeTheTerminalFail(
+    void aLostAdmissionDoesNotPermitASessionScopedCancel(
             int retryCount) {
         DaemonHttpException unavailable = mock(DaemonHttpException.class);
         when(unavailable.getStatusCode()).thenReturn(503);
@@ -89,11 +77,10 @@ class AdmittedTurnRetryTerminalStateTest {
 
         verify(dispatched.harness(), never()).cancel(anyString(),
                 anyString());
-        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("hosted_harness_unavailable_after_admission"),
-                anyString());
+        verifyParked(store, "hosted_harness_unavailable_after_admission");
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyBoolean());
+        verify(dispatched.harness(), never()).cancelOriginalTurn(anyString(), anyString(), anyString());
     }
 
     // The named recovery refusals never reach the post-admission budget this
@@ -102,16 +89,13 @@ class AdmittedTurnRetryTerminalStateTest {
     // when the claimed record carries no epoch — the shape
     // dispatchTransientFailure builds — so retryCount = 5 exhausts the
     // PRE-admission budget (default 5) and its named-code branch records the
-    // daemon's own verdict. The post-admission arm would record the generic
-    // hosted_harness_unavailable_after_admission instead (review round 5,
-    // R5-1). No cancel precedes the record here either: the Turn carries no
-    // recorded admission, and the session-scoped cancel would abort
-    // whichever Turn the Harness is actually running (review round 6,
-    // R6-3).
+    // daemon's own verdict in the cancellation-only diagnostic. The durable
+    // submission mark still requires native proof before terminal state;
+    // no session-scoped cancel is safe without a recorded admission.
     @ParameterizedTest(name = "refusalCode = {0}")
     @ValueSource(strings = {"hosted_turn_recovery_required",
             "hosted_prompt_recovery_required"})
-    void namedRecoveryRefusalsTerminateAtThePreAdmissionBudgetWithTheirOwnCode(
+    void namedRecoveryRefusalsKeepTheirCodeWhileAwaitingNativeEvidence(
             String refusalCode) {
         DaemonHttpException refusal = mock(DaemonHttpException.class);
         when(refusal.getStatusCode()).thenReturn(409);
@@ -122,10 +106,10 @@ class AdmittedTurnRetryTerminalStateTest {
 
         verify(dispatched.harness(), never()).cancel(anyString(),
                 anyString());
-        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq(refusalCode), anyString());
+        verifyParked(store, refusalCode);
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyBoolean());
+        verify(dispatched.harness(), never()).cancelOriginalTurn(anyString(), anyString(), anyString());
     }
 
     // The cancel gate on a terminal pre-admission fail reads the re-read
@@ -134,9 +118,15 @@ class AdmittedTurnRetryTerminalStateTest {
     // terminal fail must reconcile first, and a gate reading the claim-time
     // record would miss it (review R4-1; the epoch gate itself is R6-3's).
     @Test
-    void aSubmissionMarkedAfterTheClaimIsCancelledBeforeTheTerminalFail() {
+    void aSubmissionMarkedAfterTheClaimStillRequiresNativeSettlement() {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(store.markTurnFailureRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString())).thenReturn(true);
+        when(store.parkTurnForRuntimeRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyLong())).thenReturn(true);
+        when(harness.recoverManagedFailureCancellation(anyString(), anyString(),
+                anyString(), anyString(), eq("11111111-1111-4111-8111-111111111111"))).thenReturn(new Attachment("boot-1"));
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
@@ -181,12 +171,11 @@ class AdmittedTurnRetryTerminalStateTest {
             coordinator.close();
         }
 
-        InOrder order = inOrder(store, harness);
-        order.verify(harness).cancel("tenant", "session");
-        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("hosted_harness_unavailable"), anyString());
-        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong(), anyBoolean());
+        verifyParked(store, "hosted_harness_unavailable");
+        verify(harness).recoverManagedFailureCancellation(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("11111111-1111-4111-8111-111111111111"));
+        verify(harness).cancelOriginalTurn("tenant", "session", "11111111-1111-4111-8111-111111111111");
+        verify(harness, never()).cancel(anyString(), anyString());
     }
 
     // 9 is the last retry inside the budget; 6 is already past the
@@ -214,10 +203,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 properties).store();
 
         if (expectFailure) {
-            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(),
-                    eq("hosted_harness_unavailable_after_admission"),
-                    anyString());
+            verifyParked(store, "hosted_harness_unavailable_after_admission");
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong(), eq(false));
@@ -226,9 +212,8 @@ class AdmittedTurnRetryTerminalStateTest {
 
     // The RuntimeBrokerException arm funnels into the same post-admission
     // budget: once the Turn may have been admitted, even a non-retryable
-    // broker failure is retried while the budget lasts and terminates the
-    // Turn once the budget is spent — keeping the broker's own failure code
-    // rather than blaming the Harness.
+    // broker failure is retried while the budget lasts and parks for native
+    // evidence once it is spent, preserving the broker's own failure code.
     @ParameterizedTest(name = "retryCount = {0}, fails = {1}")
     @CsvSource({"10, true", "9, false"})
     void brokerFailuresHonourThePostAdmissionBudget(int retryCount,
@@ -238,8 +223,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 WorkspaceExecutionStore.unavailable()).store();
 
         if (expectFailure) {
-            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(), eq("workspace_unavailable"), anyString());
+            verifyParked(store, "workspace_unavailable");
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong(), eq(false));
@@ -262,9 +246,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 new ManagedAgentProperties(), refusal).store();
 
         if (expectFailure) {
-            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(), eq("managed_session_open_failed"),
-                    anyString());
+            verifyParked(store, "managed_session_open_failed");
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong(), eq(false));
@@ -318,29 +300,25 @@ class AdmittedTurnRetryTerminalStateTest {
     // generation change, and the exemption alone would retry the Turn
     // forever with nothing to tell it from a healthy retry. Once its run
     // without journaled progress reaches the churn cap the exemption lapses:
-    // the admitted Turn is cancelled and failed with the post-admission
-    // unavailable code, as a spent budget would be (review round 3, R3-6).
+    // the admitted Turn enters cancellation-only recovery with the
+    // post-admission unavailable diagnostic (review round 3, R3-6).
     @ParameterizedTest(name = "consecutive exempt failures = {0}")
     @ValueSource(ints = {40, 57})
-    void aGenerationChurnPastTheCapFailsTheAdmittedTurn(int failures) {
+    void aGenerationChurnPastTheCapParksTheAdmittedTurn(int failures) {
         Dispatched dispatched = dispatchTransientFailure(failures, failures,
                 new ManagedAgentProperties(),
                 mock(HostedHarnessGenerationException.class), "epoch-1");
         AgentStateStore store = dispatched.store();
 
-        InOrder order = inOrder(store, dispatched.harness());
-        order.verify(dispatched.harness()).cancel("tenant", "session");
-        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("hosted_harness_unavailable_after_admission"),
-                anyString());
-        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong(), anyBoolean());
+        verifyParked(store, "hosted_harness_unavailable_after_admission");
+        verify(dispatched.harness()).recoverManagedFailureCancellation(eq("tenant"),
+                eq("session"), eq("turn"), anyString(), eq("11111111-1111-4111-8111-111111111111"));
     }
 
     // Zero budgets are a supported "no retries" policy, but the exempt
     // waits keep their exemption under it, and a generation change is one
     // of them: the cap floors the budget to one, so an admitted Turn still
-    // re-attaches across a single change and only a run of four fails it
+    // re-attaches across one change and parks after four without progress
     // (review round 1, R1-1).
     @ParameterizedTest(name = "consecutive exempt failures = {0}")
     @CsvSource({"0, false", "3, false", "4, true"})
@@ -356,15 +334,7 @@ class AdmittedTurnRetryTerminalStateTest {
         AgentStateStore store = dispatched.store();
 
         if (terminal) {
-            InOrder order = inOrder(store, dispatched.harness());
-            order.verify(dispatched.harness()).cancel("tenant", "session");
-            order.verify(store).failTurn(eq("tenant"), eq("session"),
-                    eq("turn"), anyString(),
-                    eq("hosted_harness_unavailable_after_admission"),
-                    anyString());
-            verify(store, never()).scheduleTurnRetry(anyString(),
-                    anyString(), anyString(), anyString(), anyLong(),
-                    anyBoolean());
+            verifyParked(store, "hosted_harness_unavailable_after_admission");
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong(), eq(true));
@@ -386,6 +356,12 @@ class AdmittedTurnRetryTerminalStateTest {
             int retryCount) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(store.markTurnFailureRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString())).thenReturn(true);
+        when(store.parkTurnForRuntimeRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyLong())).thenReturn(true);
+        when(harness.recoverManagedFailureCancellation(anyString(), anyString(),
+                anyString(), anyString(), eq("11111111-1111-4111-8111-111111111111"))).thenReturn(new Attachment("boot-1"));
         String promptId = "11111111-1111-4111-8111-111111111111";
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 promptId,
@@ -460,16 +436,19 @@ class AdmittedTurnRetryTerminalStateTest {
         verify(harness, never()).cancel(anyString(), anyString());
     }
 
-    // A protocol error on the submit is terminal on the first pass, and the
-    // submission mark it leaves is not an admission: the reply never parsed,
-    // so no epoch is recorded, and the session-scoped cancel would abort
-    // whichever Turn the Harness is actually running on the Session (review
-    // round 6, R6-3). The terminal record still lands — only the reconcile
-    // is skipped.
+    // A malformed submit reply leaves admission unknown. The persisted mark
+    // cannot safely be withdrawn, and session-scoped cancellation must wait
+    // for evidence identifying the original input.
     @Test
     void aProtocolErrorWithoutARecordedAdmissionSkipsTheCancel() {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(store.markTurnFailureRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString())).thenReturn(true);
+        when(store.parkTurnForRuntimeRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyLong())).thenReturn(true);
+        when(harness.recoverManagedFailureCancellation(anyString(), anyString(),
+                anyString(), anyString(), eq("11111111-1111-4111-8111-111111111111"))).thenReturn(new Attachment("boot-1"));
         String promptId = "11111111-1111-4111-8111-111111111111";
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 promptId,
@@ -495,8 +474,15 @@ class AdmittedTurnRetryTerminalStateTest {
                 .thenReturn(Optional.of(claimed));
         DaemonProtocolException protocolError = mock(
                 DaemonProtocolException.class);
+        TurnRecord attempted = new TurnRecord("tenant", "session", "turn", promptId,
+                claimed.input(), claimed.payloadDigest(), "RUNNING", true, null, null,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null, 1, 1, null, 1);
         when(harness.submit(eq("tenant"), eq("session"), eq(promptId),
-                any(), anyString())).thenThrow(protocolError);
+                any(), anyString())).thenAnswer(invocation -> {
+                    when(store.findTurn("tenant", "session", "turn"))
+                            .thenReturn(Optional.of(attempted));
+                    throw protocolError;
+                });
 
         HarnessCoordinator coordinator = new HarnessCoordinator(store,
                 harness, new HarnessEventProjector(),
@@ -512,11 +498,21 @@ class AdmittedTurnRetryTerminalStateTest {
         verify(store).markSubmissionAttempted(eq("tenant"), eq("session"),
                 eq("turn"), anyString());
         verify(harness, never()).cancel(anyString(), anyString());
-        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("hosted_harness_protocol_error"),
-                anyString());
+        verifyParked(store, "hosted_harness_protocol_error");
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyBoolean());
+        verify(harness, never()).cancelOriginalTurn(anyString(), anyString(), anyString());
+    }
+
+    private static void verifyParked(AgentStateStore store, String code) {
+        verify(store).markTurnFailureRecovery(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), argThat(message -> message.startsWith(code + ":")));
+        verify(store).parkTurnForRuntimeRecovery(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(),
+                anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
     }
 
     private static Dispatched dispatchTransientFailure(int retryCount) {
@@ -555,6 +551,12 @@ class AdmittedTurnRetryTerminalStateTest {
             RuntimeException failure, String admittedEpoch) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(store.markTurnFailureRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString())).thenReturn(true);
+        when(store.parkTurnForRuntimeRecovery(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyLong())).thenReturn(true);
+        when(harness.recoverManagedFailureCancellation(anyString(), anyString(),
+                anyString(), anyString(), eq("11111111-1111-4111-8111-111111111111"))).thenReturn(new Attachment("boot-1"));
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
@@ -594,6 +596,8 @@ class AdmittedTurnRetryTerminalStateTest {
         } finally {
             coordinator.close();
         }
+        verify(harness, never()).cancel(anyString(), anyString());
+        verify(harness, never()).recoverManagedFailureCancellation(anyString(), anyString(), anyString(), anyString());
         return new Dispatched(store, harness);
     }
 

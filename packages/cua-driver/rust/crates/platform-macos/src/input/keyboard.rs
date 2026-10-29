@@ -240,7 +240,7 @@ pub(super) fn with_global_modifier_keys<T>(
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
-    let mut active_flags = CGEventFlags::CGEventFlagNull;
+    let mut active_flags = held_flags();
     let mut pressed = Vec::new();
 
     for modifier in modifiers {
@@ -282,9 +282,23 @@ fn post_global_key(
 ) -> anyhow::Result<()> {
     let event = CGEvent::new_keyboard_event(source.clone(), key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent keyboard event creation failed"))?;
-    event.set_flags(flags);
+    event.set_flags(key_event_flags(key_code, flags));
     event.post(tap);
     Ok(())
+}
+
+fn key_event_flags(key_code: u16, modifiers: CGEventFlags) -> CGEventFlags {
+    // Preserve key structure without inheriting physical modifiers from the
+    // event source. Fn (63) is a modifier, not an intrinsically marked key.
+    let intrinsic = match key_code {
+        123..=126 => CGEventFlags::CGEventFlagSecondaryFn | CGEventFlags::CGEventFlagNumericPad,
+        64 | 71 | 79 | 80 | 96..=101 | 103 | 105..=107 | 109 | 111 | 113..=122 => {
+            CGEventFlags::CGEventFlagSecondaryFn
+        }
+        65 | 67 | 69 | 75 | 76 | 78 | 81..=89 | 91 | 92 => CGEventFlags::CGEventFlagNumericPad,
+        _ => CGEventFlags::CGEventFlagNull,
+    };
+    modifiers | intrinsic
 }
 
 fn release_global_modifiers(
@@ -606,10 +620,7 @@ fn post_key(pid: i32, key_code: u16, key_down: bool, flags: CGEventFlags) -> any
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let event = CGEvent::new_keyboard_event(source, key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
-    // HIDSystemState can inherit physically held modifiers. Always overwrite
-    // the event flags, including the empty case, so an unrelated Shift/Caps
-    // state cannot leak into a targeted key press.
-    event.set_flags(flags);
+    event.set_flags(key_event_flags(key_code, flags));
     post_keyboard_event(pid, &event);
     Ok(())
 }
@@ -624,7 +635,7 @@ fn post_key_no_auth(
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let event = CGEvent::new_keyboard_event(source, key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
-    event.set_flags(flags);
+    event.set_flags(key_event_flags(key_code, flags));
     let event_ptr = event.as_ptr() as *mut std::ffi::c_void;
     // attach_auth_message = false → IOHIDPostEvent path → NSMenu fires
     if !crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false) {
@@ -738,6 +749,39 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
 mod tests {
     use super::*;
     use core_graphics::event::CGEventType;
+
+    #[test]
+    fn named_key_flags_match_native_structure_without_inheriting_modifiers() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private).unwrap();
+        let structural = CGEventFlags::CGEventFlagSecondaryFn | CGEventFlags::CGEventFlagNumericPad;
+        for code in 0..128 {
+            let down = CGEvent::new_keyboard_event(source.clone(), code, true).unwrap();
+            let up = CGEvent::new_keyboard_event(source.clone(), code, false).unwrap();
+            // A modifier's down-only bit is state, not key structure.
+            let intrinsic = down.get_flags() & up.get_flags() & structural;
+            for owned in [
+                CGEventFlags::CGEventFlagNull,
+                CGEventFlags::CGEventFlagControl,
+                CGEventFlags::CGEventFlagShift | CGEventFlags::CGEventFlagControl,
+                CGEventFlags::CGEventFlagSecondaryFn,
+                CGEventFlags::CGEventFlagCommand | CGEventFlags::CGEventFlagAlternate,
+            ] {
+                assert_eq!(
+                    key_event_flags(code, owned),
+                    intrinsic | owned,
+                    "code {code}"
+                );
+            }
+        }
+        assert_eq!(
+            key_event_flags(63, flags_for_codes(&[63])),
+            CGEventFlags::CGEventFlagSecondaryFn
+        );
+        assert_eq!(
+            key_event_flags(63, flags_for_codes(&[])),
+            CGEventFlags::CGEventFlagNull
+        );
+    }
 
     #[test]
     fn synthesized_line_breaks_coalesce_crlf_and_preserve_unicode() {
@@ -963,4 +1007,42 @@ mod tests {
         assert!(!is_screen_sharing_bundle_id("com.apple.screensharing"));
         assert!(!is_screen_sharing_bundle_id("com.microsoft.rdc.macos"));
     }
+}
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> Result<u32, String> {
+        key_name_to_code(key)
+            .map(u32::from)
+            .map_err(|error| error.to_string())
+    }
+    fn transition(&self, code: u32, down: bool, held: &[u32]) -> Result<(), String> {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "Could not create a keyboard event source".to_owned())?;
+        let event = CGEvent::new_keyboard_event(source, code as u16, down)
+            .map_err(|_| "Could not create a keyboard event".to_owned())?;
+        event.set_flags(key_event_flags(code as u16, flags_for_codes(held)));
+        event.post(core_graphics::event::CGEventTapLocation::HID);
+        Ok(())
+    }
+}
+
+fn flags_for_codes(codes: &[u32]) -> CGEventFlags {
+    codes
+        .iter()
+        .fold(CGEventFlags::CGEventFlagNull, |flags, code| {
+            flags
+                | match code {
+                    55 | 54 => CGEventFlags::CGEventFlagCommand,
+                    56 | 60 => CGEventFlags::CGEventFlagShift,
+                    58 | 61 => CGEventFlags::CGEventFlagAlternate,
+                    59 | 62 => CGEventFlags::CGEventFlagControl,
+                    63 => CGEventFlags::CGEventFlagSecondaryFn,
+                    _ => CGEventFlags::CGEventFlagNull,
+                }
+        })
+}
+
+pub(super) fn held_flags() -> CGEventFlags {
+    flags_for_codes(&cua_driver_core::desktop_keyboard::held_codes())
 }

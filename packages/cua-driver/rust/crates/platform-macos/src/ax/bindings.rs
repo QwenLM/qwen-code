@@ -13,9 +13,11 @@
 use core_foundation::{
     array::CFArrayRef,
     base::{CFRelease, CFRetain, CFTypeID, CFTypeRef},
+    data::{CFData, CFDataRef},
     string::CFStringRef,
 };
 use std::os::raw::{c_int, c_void};
+use std::time::{Duration, Instant};
 
 // ── AXUIElement opaque type ──────────────────────────────────────────────────
 
@@ -705,13 +707,21 @@ pub fn focused_window_id_of_pid(pid: i32) -> Option<u32> {
 }
 
 pub fn app_window_id_of_pid(pid: i32) -> Option<u32> {
+    app_window_id_of_pid_with_readiness(pid, None)
+}
+
+pub(crate) fn app_window_id_of_pid_with_readiness(
+    pid: i32,
+    readiness_deadline: Option<std::time::Instant>,
+) -> Option<u32> {
     unsafe {
         let app = AXUIElementCreateApplication(pid);
         if app.is_null() {
             return None;
         }
         let _ = AXUIElementSetMessagingTimeout(app, 2.0);
-        super::enablement::ensure_chromium_ax_enabled(pid, app);
+        super::enablement::ensure_chromium_ax_enabled(pid, app, readiness_deadline);
+        let _ = AXUIElementSetMessagingTimeout(app, 2.0);
         for attribute in ["AXFocusedWindow", "AXMainWindow"] {
             let selection = copy_element_attr_with_status(app, attribute);
             if let Some(window) = selection.value {
@@ -747,17 +757,123 @@ pub fn app_window_id_of_pid(pid: i32) -> Option<u32> {
 }
 
 unsafe fn app_target_window_id(window: AXUIElementRef) -> Option<u32> {
+    app_target_window_id_with_proven_root(window, None)
+}
+
+pub(crate) unsafe fn app_target_window_id_with_proven_root(
+    window: AXUIElementRef,
+    proven_root: Option<(i32, u32)>,
+) -> Option<u32> {
     let _ = AXUIElementSetMessagingTimeout(window, 2.0);
     let (sheets, complete) = super::sheets::copy_attached_sheets(&[window]);
     if !complete || sheets.len() > 1 {
         return None;
     }
-    if let Some(id) = sheets.first().and_then(|sheet| sheet.window_id) {
-        if crate::windows::window_info_by_id(id).is_some() {
-            return Some(id);
+    if let Some(sheet) = sheets.first() {
+        if let Some(id) = sheet.window_id {
+            if let Some(info) = crate::windows::window_info_by_id(id) {
+                if proven_root.is_none_or(|(pid, _)| info.pid == pid) {
+                    return Some(id);
+                }
+            }
+        }
+        if proven_root.is_some() {
+            return None;
         }
     }
+    if let Some((pid, id)) = proven_root {
+        return crate::windows::window_info_by_id(id)
+            .filter(|info| info.pid == pid)
+            .map(|_| id);
+    }
     ax_get_window_id(window).filter(|id| crate::windows::window_info_by_id(*id).is_some())
+}
+
+type CreateWithRemoteToken = unsafe extern "C" fn(CFDataRef) -> AXUIElementRef;
+
+fn remote_token_creator() -> Option<CreateWithRemoteToken> {
+    static CREATOR: std::sync::OnceLock<Option<CreateWithRemoteToken>> = std::sync::OnceLock::new();
+    *CREATOR.get_or_init(|| unsafe {
+        let symbol = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"_AXUIElementCreateWithRemoteToken".as_ptr(),
+        );
+        (!symbol.is_null())
+            .then(|| std::mem::transmute::<*mut c_void, CreateWithRemoteToken>(symbol))
+    })
+}
+
+fn remote_window_token(pid: i32, element_id: u64) -> [u8; 20] {
+    let mut token = [0; 20];
+    token[..4].copy_from_slice(&pid.to_ne_bytes());
+    token[8..12].copy_from_slice(&0x636f636fi32.to_ne_bytes());
+    token[12..].copy_from_slice(&element_id.to_ne_bytes());
+    token
+}
+
+unsafe fn set_remote_probe_timeout(element: AXUIElementRef, deadline: Instant) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    !remaining.is_zero()
+        && AXUIElementSetMessagingTimeout(
+            element,
+            remaining.min(Duration::from_millis(50)).as_secs_f32(),
+        ) == kAXErrorSuccess
+}
+
+/// Recover one omitted AXWindow with exact process and SPI window identity.
+/// The caller owns the returned retain and must restore its normal AX timeout.
+pub(crate) unsafe fn copy_remote_window_for_id(
+    pid: i32,
+    window_id: u32,
+    caller_deadline: Option<Instant>,
+) -> Option<AXUIElementRef> {
+    let probe_deadline = Instant::now() + Duration::from_millis(300);
+    let deadline = caller_deadline.map_or(probe_deadline, |limit| limit.min(probe_deadline));
+    if Instant::now() >= deadline || pid <= 0 || window_id == 0 {
+        return None;
+    }
+    let info = crate::windows::window_info_by_id(window_id)?;
+    if info.pid != pid || info.layer != 0 {
+        return None;
+    }
+    match crate::windows::window_on_current_space_by_id(window_id) {
+        Some(false) => {}
+        Some(true) if !info.is_on_screen => {}
+        _ => return None,
+    }
+    let create = remote_token_creator()?;
+    for element_id in 0..2000 {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let token = CFData::from_buffer(&remote_window_token(pid, element_id));
+        let element = create(token.as_concrete_TypeRef());
+        if element.is_null() {
+            continue;
+        }
+        let mut owner = 0;
+        let mut mapped_window = 0;
+        let exact = core_foundation::base::CFGetTypeID(element as CFTypeRef)
+            == AXUIElementGetTypeID()
+            && set_remote_probe_timeout(element, deadline)
+            && copy_string_attr(element, "AXRole").as_deref() == Some("AXWindow")
+            && set_remote_probe_timeout(element, deadline)
+            && AXUIElementGetPid(element, &mut owner) == kAXErrorSuccess
+            && owner == pid
+            && set_remote_probe_timeout(element, deadline)
+            && _AXUIElementGetWindow(element, &mut mapped_window) == kAXErrorSuccess
+            && mapped_window == window_id
+            && Instant::now() < deadline;
+        if exact
+            && crate::windows::window_info_by_id(window_id)
+                .is_some_and(|current| current.pid == pid && current.layer == 0)
+            && Instant::now() < deadline
+        {
+            return Some(element);
+        }
+        CFRelease(element as CFTypeRef);
+    }
+    None
 }
 
 /// The returned menu-bar item owns its retain. Only an explicitly selected
@@ -1082,14 +1198,19 @@ pub unsafe fn set_bool_attr_true(element: AXUIElementRef, attr_name: &str) -> AX
     AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_true.as_CFTypeRef())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessibilityOptIn {
+    ManualAccessibility,
+    EnhancedUserInterface,
+    NotAccepted,
+}
+
 /// Signal to a Chromium/Electron application root that a real assistive client
 /// is present so it materializes its full web-content accessibility tree.
 ///
-/// Returns `true` when an attribute write was accepted — meaning the app was
-/// flipped from "tree off" to "tree building" and the caller should let the
-/// tree settle before walking. Returns `false` when the app does not support
-/// either attribute (native Cocoa apps such as Finder / Calculator / TextEdit),
-/// in which case no settle delay is warranted.
+/// Distinguishes the modern Chromium opt-in from the legacy fallback. An
+/// accepted write does not prove web-content readiness; callers decide whether
+/// their observation budget permits waiting. Native apps commonly reject both.
 ///
 /// `AXManualAccessibility` is the modern opt-in with no screen-reader side
 /// effects; `AXEnhancedUserInterface` is the legacy fallback some Electron
@@ -1099,18 +1220,24 @@ pub unsafe fn set_bool_attr_true(element: AXUIElementRef, attr_name: &str) -> AX
 /// # Safety
 ///
 /// `app_element` must be a valid, live application `AXUIElementRef`.
-pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool {
+pub(crate) unsafe fn enable_chromium_accessibility(
+    app_element: AXUIElementRef,
+) -> AccessibilityOptIn {
     let manual = set_bool_attr_true(app_element, "AXManualAccessibility");
     if manual == kAXErrorSuccess {
-        return true;
+        return AccessibilityOptIn::ManualAccessibility;
     }
     if manual != kAXErrorAttributeUnsupported {
         // A transient error (e.g. timeout / app busy) rather than a hard
         // "this app has no such attribute" — don't bother with the legacy
         // fallback, and don't claim enablement happened.
-        return false;
+        return AccessibilityOptIn::NotAccepted;
     }
-    set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess
+    if set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess {
+        AccessibilityOptIn::EnhancedUserInterface
+    } else {
+        AccessibilityOptIn::NotAccepted
+    }
 }
 
 /// Get the CGWindowID of an AX window element.
@@ -1163,6 +1290,25 @@ pub unsafe fn copy_ax_windows_with_status(element: AXUIElementRef) -> CopiedAXEl
 mod tests {
     use super::*;
     use core_foundation::{boolean::CFBoolean, number::CFNumber};
+
+    #[test]
+    fn remote_window_token_matches_the_native_unpadded_spi_layout() {
+        let token = remote_window_token(0x12345678, 0x0123456789abcdef);
+        assert_eq!(token.len(), 20);
+        assert_eq!(
+            i32::from_ne_bytes(token[0..4].try_into().unwrap()),
+            0x12345678
+        );
+        assert_eq!(token[4..8], [0, 0, 0, 0]);
+        assert_eq!(
+            i32::from_ne_bytes(token[8..12].try_into().unwrap()),
+            0x636f636f
+        );
+        assert_eq!(
+            u64::from_ne_bytes(token[12..20].try_into().unwrap()),
+            0x0123456789abcdef
+        );
+    }
 
     #[test]
     fn stringish_value_coerces_cfstring_cfnumber_and_cfboolean() {

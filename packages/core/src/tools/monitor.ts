@@ -97,6 +97,9 @@ const STRUCTURAL_ENVELOPE_TAGS = new Set([
   'event-count',
   'summary',
   'result',
+  // Wrappers of a scheduled task's gate output (services/cron-gate.ts).
+  'gate-output',
+  'gate-stderr',
 ]);
 
 const STRUCTURAL_TAG_REGEX = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)>/g;

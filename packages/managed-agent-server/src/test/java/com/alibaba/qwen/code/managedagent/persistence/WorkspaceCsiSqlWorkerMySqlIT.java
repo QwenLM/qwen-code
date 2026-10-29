@@ -446,7 +446,12 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'"
                         + " AND state = 'RETURNED'", Integer.class)).isPositive();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'"
-                        + " AND state = 'OPEN'", Integer.class)).isZero();
+                        + " AND state = 'OPEN'", Integer.class))
+                        .as(() -> "Unfinished original CSI reads: " + jdbc.queryForList(
+                                "SELECT result_json FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ' AND state = 'OPEN'")
+                                + "; session heads: " + jdbc.queryForList(
+                                "SELECT writer_generation, writer_lease_until, activation_epoch, activation_expires_at, journal_revision FROM ma_session_head"))
+                        .isZero();
                 assertThat(nativeReads.get()).isGreaterThanOrEqualTo(7);
                 String schema;
                 try (var connection = source.getConnection()) {
@@ -456,7 +461,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(33);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(40);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

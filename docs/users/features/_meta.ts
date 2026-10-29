@@ -2,6 +2,7 @@ export default {
   commands: 'Commands',
   'cross-session-protocol': 'Cross-Session Protocol',
   'code-review': 'Code Review',
+  'autofix-pr': 'Autofix a Pull Request',
   'followup-suggestions': 'Followup Suggestions',
   'tool-use-summaries': 'Tool-Use Summaries',
   'markdown-rendering': 'Markdown Rendering',

@@ -94,7 +94,7 @@ class WorkspaceRuntimeResolutionPivotTest {
         assertThat(before.getCwdRelative()).isEqualTo("services/api");
         assertThat(before.getContextRevision()).isEqualTo(1);
 
-        OperationRecord admitted = store.beginCwdChangeOperation(TENANT,
+        OperationRecord admitted = com.alibaba.qwen.code.managedagent.LegacyCwdOperations.seed(jdbc, store, TENANT,
                 sessionId, ACTOR, "digest-of-actor-a", "cwd-1",
                 "cwd-digest", "services/b", 1).operation();
         OperationRecord claimed = store.claimOperation(TENANT, sessionId,

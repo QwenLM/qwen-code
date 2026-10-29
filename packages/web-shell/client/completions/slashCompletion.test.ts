@@ -6,6 +6,7 @@ import { getTranslator } from '../i18n';
 import {
   getSlashCommandCompletionResult,
   getSlashCommandArgumentHint,
+  getImplicitTabCompletion,
   slashCompletionSource,
 } from './slashCompletion';
 
@@ -68,6 +69,73 @@ describe('getSlashCommandArgumentHint', () => {
 });
 
 describe('getSlashCommandCompletionResult', () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'keeps Skill names separate from built-in syntax in %s',
+    (language) => {
+      for (const [name, argument] of [
+        ['agents', ''],
+        ['theme', ''],
+        ['export', ''],
+        ['language', ''],
+        ['extensions', ''],
+        ['context', 'd'],
+        ['copy', 'c'],
+        ['tools', 'd'],
+        ['stats', 'm'],
+        ['mcp', 'd'],
+        ['memory', 's'],
+        ['skills', ''],
+      ]) {
+        const commands: CommandInfo[] = [
+          { name: name!, description: 'Published Skill', source: 'skill' },
+        ];
+        const skills = [{ name: 'review', description: 'Review' }];
+        const text = `/${name} ${argument}`;
+        expect(
+          getSlashCommandCompletionResult(
+            text,
+            text.length,
+            commands,
+            skills,
+            language,
+          ),
+        ).toBeNull();
+        expect(
+          getImplicitTabCompletion(`/${name} `, commands, language),
+        ).toBeNull();
+        expect(
+          getSlashCommandArgumentHint(`/${name}`, commands, language),
+        ).toBeNull();
+        const source = slashCompletionSource(
+          () => commands,
+          () => skills,
+          () => language,
+        );
+        const state = EditorState.create({ doc: text });
+        expect(
+          source(new CompletionContext(state, text.length, true)),
+        ).toBeNull();
+      }
+    },
+  );
+
+  it('retains a Skill own argument hint without interpreting its arguments as built-ins', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'context',
+        description: 'Skill',
+        source: 'skill',
+        argumentHint: '<topic>',
+      },
+    ];
+    expect(getSlashCommandArgumentHint('/context', commands, 'en')).toBe(
+      '<topic>',
+    );
+    expect(
+      getSlashCommandArgumentHint('/context detail', commands, 'en'),
+    ).toBeNull();
+  });
+
   it('returns top-level command items for the custom slash panel', () => {
     const commands: CommandInfo[] = [
       {
