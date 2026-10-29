@@ -337,35 +337,38 @@ function main(argv) {
       )
     : [];
 
-  // When the round's own snapshot is beside the artifact directory, the report
+  // With the round's own snapshot, the report
   // has to cite the head it verified — not merely some 40-hex token, which a
   // base OID satisfies. A snapshot that exists but cannot be read is reported
   // rather than silently downgrading the check.
   let expectedHead = null;
   let snapshotWarning = null;
+  let snapshotPath = join(dir, 'context.json');
   const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-  if (prNumber) {
-    const snapshotPath = join(
+  if (!existsSync(snapshotPath) && prNumber) {
+    snapshotPath = join(
       dirname(resolve(dir)),
       'verify-context',
       `pr${prNumber}.json`,
     );
-    if (existsSync(snapshotPath)) {
-      try {
-        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
-        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
-          expectedHead = snapshot.headRefOid;
-        }
-      } catch {
-        snapshotWarning =
-          'the verify-context snapshot is unreadable; the head-OID check fell back to presence-only';
+  }
+  if (existsSync(snapshotPath)) {
+    try {
+      const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+      if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+        expectedHead = snapshot.headRefOid;
+      } else {
+        snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
       }
+    } catch {
+      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
     }
   }
 
   const result = checkArtifacts({ files, evidence, expectedHead });
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
+  if (expectedHead) lines.push(`  head source: ${snapshotPath}`);
   for (const warning of result.warnings) lines.push(`  warn  ${warning}`);
   for (const error of result.errors) lines.push(`  error ${error}`);
   const counts = result.counts
