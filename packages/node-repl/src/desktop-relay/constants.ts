@@ -23,7 +23,7 @@ export const DESKTOP_RELAY_LABEL = 'com.qwencode.desktop-relay';
 export const DESKTOP_RELAY_SERVER_NAME = 'desktop-node-repl';
 
 /** Same version as the standalone runtime and its SDK dependency. */
-export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.26.0';
+export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.27.0';
 
 /**
  * The daemon drops `/acp` frames above 10 MB; leave room for the

@@ -55,7 +55,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(harness.supportsPublicChildAgents()).thenReturn(true);
         when(harness.supportsPlanMode()).thenReturn(true);
         when(harness.supportsLifecycle(anyString())).thenReturn(true);
-        when(warmer.supportsWorkspaceCwdChange(workspace)).thenReturn(true);
+        when(warmer.supportsWorkspaceContextChange(workspace)).thenReturn(true);
         when(warmer.supportsWorkspaceClose(workspace)).thenReturn(true);
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
@@ -75,7 +75,7 @@ class ManagedAgentSessionCapabilitiesTest {
                 service.listWebShellSessions("tenant", "actor", null, 10).data().getFirst());
         assertThat(views).allSatisfy(view -> {
             assertThat(view.capabilities().workspaceTurns()).isEqualTo(!child);
-            assertThat(view.capabilities().cwdChange()).isEqualTo(!child);
+            assertThat(view.capabilities().cwdChange()).isFalse();
             assertThat(view.capabilities().approvalModeChange()).isEqualTo(!child && owner);
             assertThat(view.planModeSupported()).isEqualTo(!child && owner);
             assertThat(view.capabilities().sessionClose()).isEqualTo(owner);
@@ -129,7 +129,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(harness.supportsApprovalSelection()).thenReturn(true);
         when(harness.supportsPlanMode()).thenReturn(true);
         when(harness.supportsLifecycle(anyString())).thenReturn(true);
-        when(warmer.supportsWorkspaceCwdChange(workspace)).thenReturn(true);
+        when(warmer.supportsWorkspaceContextChange(workspace)).thenReturn(true);
         when(warmer.supportsWorkspaceClose(workspace)).thenReturn(true);
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
@@ -148,7 +148,7 @@ class ManagedAgentSessionCapabilitiesTest {
         var views = service.listWebShellSessions("tenant", "actor", null, 10).data();
         assertThat(views.getFirst().capabilities().approvalModeChange()).isTrue();
         var view = views.getLast();
-        assertThat(view.capabilities().cwdChange()).isTrue();
+        assertThat(view.capabilities().cwdChange()).isFalse();
         assertThat(view.capabilities().sessionClose()).isTrue();
         assertThat(view.planModeSupported()).isFalse();
         assertThat(service.getWebShellSession("tenant", "actor", "excluded")

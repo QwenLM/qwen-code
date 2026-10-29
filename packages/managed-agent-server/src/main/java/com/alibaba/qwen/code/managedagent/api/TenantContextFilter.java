@@ -8,6 +8,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -33,7 +34,7 @@ public class TenantContextFilter extends OncePerRequestFilter {
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
 
-    public TenantContextFilter(ObjectMapper objectMapper) {
+    public TenantContextFilter(@Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
     }
 

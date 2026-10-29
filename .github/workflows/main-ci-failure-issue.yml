@@ -27,6 +27,7 @@ on:
       - 'SDK Python'
       - 'Qwen Code CI'
       - 'Desktop Checks'
+      - 'tui-parity'
     types: ['completed']
     # PR approval runs can finish after merge and still need a failure report.
 
@@ -47,7 +48,7 @@ jobs:
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}

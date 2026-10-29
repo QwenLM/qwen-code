@@ -29,6 +29,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -144,6 +145,7 @@ class SurfaceAdmissionAcceptanceTest {
     private MockMvc mvc;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -371,6 +373,15 @@ class SurfaceAdmissionAcceptanceTest {
     void belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
             throws Exception {
         switch (entry.ruleClass()) {
+            case SESSION_WORKTREE -> {
+                expect(entry, null, 401, "actor_required");
+                if (entry.template().endsWith("/options")) {
+                    expect(entry, STRANGER, 404, "workspace_not_found");
+                    expect(entry, READER, 403, "workspace_forbidden");
+                } else {
+                    expect(entry, STRANGER, 404, "worktree_not_found");
+                }
+            }
             case SESSION_EXTENSION_READER -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, "session_not_found");
@@ -487,12 +498,9 @@ class SurfaceAdmissionAcceptanceTest {
                     expect(entry, OPERATOR, 409, "workspace_unavailable");
                     expect(entry, OWNER_RANK, 409, "workspace_unavailable");
                 }
-                // The anonymous answer is pinned on every cell: the cwd
-                // routes name the missing principal up front, the rest
-                // stay invisible so an unauthenticated caller learns
-                // nothing about the bound Session.
-                boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
-                        || entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+                // Anonymous requests follow each operation family's
+                // declared identity and visibility rules.
+                boolean actorRequired = entry.capabilities().contains(Capability.MCP_MANAGEMENT)
                         || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
                         || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)
                         || entry.capabilities().contains(Capability.USER_MESSAGE_QUERY)
@@ -759,17 +767,6 @@ class SurfaceAdmissionAcceptanceTest {
                 + " WHERE tenant_id = ? AND workspace_id = X'7773'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
-        mvc.perform(post("/api/agent/web-shell/v1/sessions/cwd/change")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .principal(actor(tenant, OWNER))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionId\":\"" + bound
-                                + "\",\"idempotencyKey\":\"" + nextKey()
-                                + "\",\"cwdRelative\":\"sub\","
-                                + "\"expectedContextRevision\":1}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("workspace_unavailable"));
         // Action respond by the recorded owner is admitted.
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
                         + pendingAction + "/responses")
@@ -792,17 +789,6 @@ class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"idempotencyKey\":\"" + nextKey()
                                 + "\"}"))
                 .andExpect(status().isAccepted());
-        // The legacy arm of cwd is bound-only: a domain refusal.
-        mvc.perform(post("/v1/agents/sessions/" + legacy + "/cwd")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", nextKey())
-                        .principal(actor(tenant, OWNER))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"cwd_relative\":\"sub\","
-                                + "\"expected_context_revision\":1}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code")
-                        .value("unsupported_feature"));
         // The legacy arm of respond: the recorded owner answers. The
         // carrying Session is fresh: an accepted response parks an
         // ACTION_RESPONSE operation that must not shadow later probes.
@@ -1515,6 +1501,7 @@ class SurfaceAdmissionAcceptanceTest {
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
         variables.put("workspaceId", "ws");
+        variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
         variables.put("packageDigest", digest());
@@ -1570,6 +1557,10 @@ class SurfaceAdmissionAcceptanceTest {
         if (path.startsWith("/internal/managed-session-store/")
                 && "GET".equals(entry.method())) {
             query.add("workspaceId=ws");
+        }
+        if (path.endsWith("/transactions:lookup")) {
+            query.add("operation=session.create");
+            query.add("commandId=command-genesis");
         }
         if (!query.isEmpty()) {
             path += "?" + String.join("&", query);
@@ -1630,6 +1621,7 @@ class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";
@@ -1666,12 +1658,6 @@ class SurfaceAdmissionAcceptanceTest {
             case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
                     : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
                             + "\"idempotencyKey\":\"" + nextKey() + "\"}";
-            case SESSION_CWD_CHANGE -> publicSurface
-                    ? "{\"cwd_relative\":\"probe\","
-                            + "\"expected_context_revision\":1}"
-                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
-                            + nextKey() + "\",\"cwdRelative\":\"probe\","
-                            + "\"expectedContextRevision\":1}";
             case SESSION_CONTEXT_COMPRESSION -> publicSurface
                     ? "{\"expected_compaction_revision\":0}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
@@ -1944,7 +1930,8 @@ class SurfaceAdmissionAcceptanceTest {
         @Primary
         com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector
                 acceptanceProjector(
-                        ManagedToolResultStore store, JdbcTemplate jdbc,
+                        ManagedToolResultStore store,
+                        @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                         org.springframework.beans.factory.ObjectProvider<
                                 ToolPublicationDataStore> publications,
                         com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader reader,
@@ -1963,8 +1950,9 @@ class SurfaceAdmissionAcceptanceTest {
          * writer credential flows through the same code the service mounts.
          */
         @Bean
-        ToolPublicationStore acceptancePublicationGrants(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationStore acceptancePublicationGrants(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ManagedSessionStore sessions) {
             return new ToolPublicationStore(jdbc, manager, sessions,
                     mock(ToolExecutionRepository.class),
@@ -1979,8 +1967,9 @@ class SurfaceAdmissionAcceptanceTest {
          * artifact route family — live in this boot.
          */
         @Bean
-        ToolPublicationDataStore acceptancePublicationData(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationDataStore acceptancePublicationData(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ManagedSessionStore sessions,
                 ToolPublicationObjectStore acceptanceObjects) {
@@ -1998,8 +1987,9 @@ class SurfaceAdmissionAcceptanceTest {
          * beans.
          */
         @Bean
-        ToolPublicationController acceptanceToolPublication(JdbcTemplate jdbc,
-                PlatformTransactionManager manager,
+        ToolPublicationController acceptanceToolPublication(
+                @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ToolPublicationDataStore acceptancePublicationData,
                 ManagedSessionStore sessions,

@@ -49,7 +49,7 @@ import {
   NO_FOLLOW,
   readGateCursor,
   readState,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   sameRepository,
@@ -58,6 +58,12 @@ import {
   type AutofixPrState,
 } from './state.js';
 import { remoteRef } from './worktree.js';
+import {
+  assertNoFixInFlight,
+  fixInFlight,
+  freshAttempt,
+  readFixMarker,
+} from './fix.js';
 
 const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
@@ -355,7 +361,10 @@ export type SnapshotEvent =
       id: string;
       author: string;
       url: string;
-    };
+    }
+  /** Gate only: a background fix whose session ended before its round
+   * went on; the next round handles its items again. */
+  | { type: 'abandoned_fix'; startedAt: string | null };
 
 export interface Snapshot {
   action: 'stop' | 'resync' | 'fix' | 'wait';
@@ -1818,7 +1827,7 @@ function runGate(args: SnapshotArgs): void {
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   const existing = readGateCursor(paths.gatePath);
   const state = readState(paths.statePath);
   let target: { host: string; owner: string; repo: string };
@@ -1889,6 +1898,15 @@ function runGate(args: SnapshotArgs): void {
     writeStdoutLine(JSON.stringify({ action: 'stop', events: [stale] }));
     return;
   }
+  // A fix agent working in the worktree: nothing reaches a round until its
+  // attempt ends, so a fire costs no turn, and the cursor keeps what changed
+  // meanwhile for the round after it (Section 6.14).
+  const ownFix = state !== null && sameRepository(state, target);
+  if (ownFix && fixInFlight(paths)) {
+    // The watch is running: `status` must not read it as left behind.
+    if (session !== '') markChecked(paths.checkedPath);
+    return;
+  }
 
   setGhHost(target.host);
   ensureAuthenticated();
@@ -1907,6 +1925,9 @@ function runGate(args: SnapshotArgs): void {
     },
     deadline,
   );
+  // When this run finished reading the PR: a round's snapshot that began
+  // to read later saw everything it may report.
+  const readAt = Date.now();
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {
       version: 1,
@@ -1938,17 +1959,81 @@ function runGate(args: SnapshotArgs): void {
     writeStdoutLine(JSON.stringify({ action: 'stop', events: [restale] }));
     return;
   }
+  // An attempt opened while GitHub was asked. Read once: a marker written
+  // between two reads would be reported as one its session left behind.
+  const marker = ownFix ? readFixMarker(paths) : null;
+  if (freshAttempt(marker)) {
+    if (session !== '') markChecked(paths.checkedPath);
+    return;
+  }
+  // Only the watch's own gate spends the one report of an abandoned
+  // attempt: a probe run by hand, or a Managed automation's, wakes no round.
+  const reported = withAbandonedFix(result, session !== '' ? marker : null, {
+    headSha: pr.headRefOid,
+    isDraft: pr.isDraft,
+    url: pr.url,
+  });
+  const { snapshot } = reported;
+  // A run that reports wakes a round: when it finished reading the PR says
+  // whether a round's snapshot saw what it reported (`fix-start`). A quiet
+  // run, which may still move the cursor, wakes none.
+  const next = snapshot
+    ? { ...reported.cursor, reportedAt: new Date(readAt).toISOString() }
+    : reported.cursor;
   // The cursor lands before the output: a probe that prints and then dies
   // would otherwise report the same transitions on the next fire.
-  if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {
+  if (JSON.stringify(next) !== JSON.stringify(existing)) {
     mkdirSync(dirname(paths.gatePath), { recursive: true });
-    writeGateCursor(paths.gatePath, result.cursor);
+    writeGateCursor(paths.gatePath, next);
   }
   // `status` reads when the watch's own task last checked the PR from this
   // file, which `cleanup` removes with the watch; a gate with no session is
   // no watch's, and shares only the cursor.
   if (session !== '') markChecked(paths.checkedPath);
-  if (result.snapshot) writeStdoutLine(JSON.stringify(result.snapshot));
+  if (snapshot) writeStdoutLine(JSON.stringify(snapshot));
+}
+
+/**
+ * The gate's output with a marker its session left behind reported, once:
+ * the events that woke the abandoned attempt's round were reported then,
+ * and only a round that runs now handles them again. (A fresh marker never
+ * gets here.)
+ */
+export function withAbandonedFix(
+  result: { snapshot: Snapshot | null; cursor: AutofixPrGateCursor },
+  marker: ReturnType<typeof readFixMarker>,
+  base: Pick<Snapshot, 'headSha' | 'isDraft' | 'url'> | null = null,
+): { snapshot: Snapshot | null; cursor: AutofixPrGateCursor } {
+  if (!marker) return result;
+  const key = marker.attempt?.attempt ?? `unreadable@${marker.mtimeMs}`;
+  if (result.cursor.reportedAbandonedFix === key) return result;
+  const cursor = { ...result.cursor, reportedAbandonedFix: key };
+  const event: SnapshotEvent = {
+    type: 'abandoned_fix',
+    startedAt: marker.attempt?.startedAt ?? null,
+  };
+  const { snapshot } = result;
+  if (snapshot) {
+    return {
+      snapshot: {
+        ...snapshot,
+        action: snapshot.action === 'wait' ? 'fix' : snapshot.action,
+        events: [...snapshot.events, event],
+      },
+      cursor,
+    };
+  }
+  return {
+    snapshot: {
+      headSha: base?.headSha ?? cursor.headSha ?? '',
+      isDraft: base?.isDraft ?? false,
+      url: base?.url ?? '',
+      action: 'fix',
+      events: [event],
+      truncated: [],
+    },
+    cursor,
+  };
 }
 
 export function runSnapshot(args: SnapshotArgs): void {
@@ -1956,13 +2041,16 @@ export function runSnapshot(args: SnapshotArgs): void {
     runGate(args);
     return;
   }
-  const state = requireState(
-    autofixPrPaths(repoRoot(), args.pr).statePath,
-    args.pr,
-  );
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
+  const state = requireState(paths.statePath, args.pr);
   assertWatching(state, args.task);
+  // The snapshot file is the one the agent working now reads.
+  assertNoFixInFlight(paths, args.pr);
   setGhHost(state.host);
   ensureAuthenticated();
+  // When this snapshot began to read the PR: the gate's runs that read it
+  // later may have reported what it does not hold (`fix-start`).
+  const readAt = new Date().toISOString();
   const { pr } = fetchPrData(state, roundReplyCheck(state));
   // Asked only when the API disagrees with the watch: whether the branch
   // moved, or the API has yet to see the head `sync` or `push` recorded.
@@ -1974,14 +2062,19 @@ export function runSnapshot(args: SnapshotArgs): void {
   // with any history: the snapshot goes to a file the round reads, and the
   // line says what to do and where it is.
   const snapshot = buildSnapshot(pr, state, branchHead);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
   // A body is written as its lines, and a long line folded: `read_file`
   // pages a file by lines and cuts what one read returns at 25,000
   // characters, and GitHub takes bodies of 65,536.
+  // With the task whose round took it: only that round's fix may run in
+  // the background (`fix-start`).
   atomicWriteFileSync(
     paths.snapshotPath,
     `${JSON.stringify(
-      snapshot,
+      {
+        ...snapshot,
+        readAt,
+        ...(args.task === undefined ? {} : { task: args.task }),
+      },
       (key, value: unknown) =>
         key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
       2,
@@ -2028,7 +2121,8 @@ export function roundReplyCheck(
   return {
     known: (id) => seen.has(id),
     strict,
-    cachePath: autofixPrPaths(repoRoot(), state.prNumber).repliesPath,
+    cachePath: autofixPrPaths(resolveWatchRoot(state.prNumber), state.prNumber)
+      .repliesPath,
   };
 }
 

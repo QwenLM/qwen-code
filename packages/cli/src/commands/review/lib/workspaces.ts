@@ -607,6 +607,26 @@ function dependencyEdges(packages: WorkspacePackage[]): Map<string, string[]> {
 }
 
 /**
+ * `dirs` and every workspace they depend on, transitively, sorted — what
+ * their code can import by package name. The forward half only: unlike
+ * `buildSetFor`, no consumer joins it.
+ */
+export function dependencyClosure(
+  dirs: string[],
+  packages: WorkspacePackage[],
+): string[] {
+  const dependsOn = dependencyEdges(packages);
+  const closure = new Set<string>();
+  const add = (dir: string): void => {
+    if (closure.has(dir)) return;
+    closure.add(dir);
+    for (const d of dependsOn.get(dir) ?? []) add(d);
+  };
+  dirs.forEach(add);
+  return [...closure].sort();
+}
+
+/**
  * The affected workspaces plus everything that depends on them, transitively —
  * the set a change can actually break.
  *

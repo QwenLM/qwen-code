@@ -2885,6 +2885,12 @@ export async function runNonInteractive(
         const roundOptions: SendMessageOptions = {
           type: sendType,
           modelOverride,
+          workflowModeEligible:
+            isFirstTurn &&
+            sendType === SendMessageType.UserQuery &&
+            !goalTurn &&
+            !options.continueInterrupted &&
+            !isSlashCommand(input),
           // The prompt, or the interrupted turn it continues, is a turn the
           // Mods hear once UserPromptSubmit admits it.
           ...(modSession &&

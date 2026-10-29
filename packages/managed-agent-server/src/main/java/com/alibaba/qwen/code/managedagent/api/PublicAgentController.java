@@ -1,13 +1,11 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CompressSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
@@ -28,6 +26,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
+import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.validation.Valid;
 import org.apache.commons.lang3.StringUtils;
@@ -99,15 +98,22 @@ public class PublicAgentController {
         if (selection == null && request.extensionPins() != null) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Extension packages require a bound Workspace.");
         }
+        var worktree = SessionWorktreeService.parse(request.worktree(), false);
+        if (selection == null && worktree != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Session worktrees require a bound Workspace.");
+        }
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
                         request.agentRevision(), null, request.metadata(),
                         request.input())
-                : service.createWorkspaceSession(tenant.tenantId(),
+                : worktree == null ? service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input(), selection, null, null, request.skills(), null, request.extensionPins());
+                        request.metadata(), request.input(), selection, null, null, request.skills(), null, request.extensionPins())
+                : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
+                        request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
+                        selection, null, null, request.skills(), null, request.extensionPins(), worktree);
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
@@ -204,17 +210,6 @@ public class PublicAgentController {
             @Valid @RequestBody CompressSessionRequest request) {
         return ResponseEntity.accepted().body(compressions.admitPublic(tenant.tenantId(),
                 tenant.actorId(), sessionId, idempotencyKey, request.expectedCompactionRevision()));
-    }
-
-    @PostMapping("/{sessionId}/cwd")
-    public ResponseEntity<PublicCwdOperation> changeCwd(TenantContext tenant,
-            @PathVariable String sessionId,
-            @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @Valid @RequestBody ChangeCwdRequest request) {
-        return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
-                tenant.tenantId(), tenant.actorId(), sessionId,
-                idempotencyKey, request.cwdRelative(),
-                request.expectedContextRevision()));
     }
 
     @PostMapping("/{sessionId}/events")

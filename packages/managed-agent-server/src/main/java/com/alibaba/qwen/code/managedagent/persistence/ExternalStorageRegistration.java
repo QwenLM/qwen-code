@@ -11,10 +11,18 @@ public record ExternalStorageRegistration(ExternalStorageIdentity identity, Stor
     }
 
     public record ExternalStorageIdentity(String providerId, String physicalKey, long registrationRevision) {
+        /**
+         * The largest integer both sides of the wire represent exactly (2^53-1):
+         * above it a JSON number may round, so a revision would stop identifying
+         * one registration.
+         */
+        public static final long MAX_REGISTRATION_REVISION = 9_007_199_254_740_991L;
+
         public ExternalStorageIdentity {
             identifier(providerId);
             identifier(physicalKey);
-            if (registrationRevision <= 0) {
+            if (registrationRevision < 1
+                    || registrationRevision > MAX_REGISTRATION_REVISION) {
                 throw invalid();
             }
         }

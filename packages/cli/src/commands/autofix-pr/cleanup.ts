@@ -29,12 +29,15 @@ import {
   keepHistory,
   readState,
   repoRoot,
+  resolveWatchRoot,
+  trustAnchor,
   requireState,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 import {
   remoteRef,
   untrustedGitfile,
@@ -64,14 +67,16 @@ export function unsavedWork(
   paths: AutofixPrPaths,
   prHeads: string[] | null,
   liveHead: () => string | null = () => null,
+  trustRoot: string = repoRoot(),
 ): string | null {
   const hasWorktree = existsSync(paths.worktreePath);
   if (hasWorktree) {
-    // The clone's main worktree: the watch's files sit in its `.qwen/tmp`.
-    const root = dirname(dirname(dirname(paths.worktreePath)));
+    // Trust is anchored to the genuine clone, never to the watch's root
+    // worktree: a sibling checkout's `.git` can be rewritten by code that ran
+    // inside it, so it must not vouch for a watch nested in it.
     const untrusted =
-      untrustedGitfile(paths.worktreePath, root) ??
-      untrustedSubmodules(paths.worktreePath, root);
+      untrustedGitfile(paths.worktreePath, trustRoot) ??
+      untrustedSubmodules(paths.worktreePath, trustRoot);
     // Not read: git would take the config of a git directory the tree holds.
     if (untrusted !== null) return untrusted;
     // Inside a directory that is not a worktree of its own, git finds the
@@ -145,7 +150,7 @@ export function runCleanup(
   force: boolean,
   takeOver = false,
 ): void {
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   if (
     existsSync(paths.worktreePath) &&
@@ -155,6 +160,8 @@ export function runCleanup(
       `cannot remove ${paths.worktreePath} from inside it; run cleanup from ${root}.`,
     );
   }
+  // With --force too: the worktree is the one a fix agent works in now.
+  assertNoFixInFlight(paths, prNumber);
   let state: AutofixPrState | null;
   try {
     state = readState(paths.statePath);
@@ -185,6 +192,7 @@ export function runCleanup(
       paths,
       state ? [state.lastKnownHeadSha, ...state.pushedShas] : null,
       () => (state ? livePrHead(state, prNumber) : null),
+      state ? trustAnchor(state) : repoRoot(),
     );
     if (reason) {
       // The watch has ended all the same. A round of it that still runs —
@@ -197,6 +205,7 @@ export function runCleanup(
           if (!current) return;
           // Taken over meanwhile: the watch is the new owner's, and goes on.
           assertStoppable(current);
+          assertNoFixInFlight(paths, prNumber);
           const { watch: _ended, ...rest } = current;
           // Ended under this session, as a stop of its own would.
           writeState(paths.statePath, {
@@ -258,11 +267,14 @@ export function runCleanup(
   // Under the lock, the ownership checked again: taken over while the
   // checks above asked the remote, the watch is the new owner's, and no
   // helper of it can start between the check and the removal.
+  // Removed without the lock: checked once more just before.
+  if (!state || force) assertNoFixInFlight(paths, prNumber);
   const history =
     state && !force
       ? withWatchLock(paths, prNumber, () => {
           const current = requireState(paths.statePath, prNumber);
           assertStoppable(current);
+          assertNoFixInFlight(paths, prNumber);
           return remove(current);
         })
       : remove(state);
