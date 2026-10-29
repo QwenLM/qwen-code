@@ -54,6 +54,7 @@ class WorkspaceCreationStoreTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
+        properties.getRuntimeBroker().setStateDirectory(Files.createDirectory(temp.resolve("runtime")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         registry = new ManagedWorkspaceRegistry(jdbc);
         guard = new WorkspaceStorageGuard(jdbc, new DataSourceTransactionManager(source), properties,
@@ -393,7 +394,9 @@ class WorkspaceCreationStoreTest {
         assertThat(guard.createdStorageRoot("tenant", storage(created.workspaceId()))).isEqualTo(project.getParent());
         assertThat(Files.readString(project.resolve("README.md"))).isEqualTo("existing content");
         assertThat(Files.exists(project.resolve(".qwen-managed-storage.json"))).isFalse();
-        assertThat(Files.exists(project.getParent().resolve(".qwen-managed-storage.json"))).isTrue();
+        assertThat(Files.exists(project.getParent().resolve(".qwen-managed-storage.json"))).isFalse();
+        assertThat(Files.exists(Path.of(properties.getRuntimeBroker().getStateDirectory())
+                .resolve("imported-projects").resolve(storage(created.workspaceId())).resolve(".qwen-managed-storage.json"))).isTrue();
         properties.getRuntimeBroker().setLocalDirectoryImportEnabled(false);
         assertThat(new WorkspaceCreationRoots(jdbc, properties).resolve("tenant", storage(created.workspaceId()), false))
                 .isEqualTo(project.getParent());
@@ -448,7 +451,7 @@ class WorkspaceCreationStoreTest {
     }
 
     @Test
-    void refusesPrivateSymlinkMissingAndForeignDirectoriesWithoutGrantingAccess() throws Exception {
+    void refusesPrivateSymlinkAndMissingDirectoriesWithoutGrantingAccess() throws Exception {
         Path project = localProject("project");
         Path privateState = Files.createDirectory(project.getParent().resolve("private-state"));
         properties.getRuntimeBroker().setStateDirectory(privateState.toString());
@@ -464,8 +467,6 @@ class WorkspaceCreationStoreTest {
             assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Invalid", "bad-" + UUID.randomUUID(), null, null, path))
                     .hasFieldOrPropertyWithValue("code", "invalid_local_directory");
         }
-        Files.writeString(project.getParent().resolve(".qwen-managed-storage.json"), "foreign marker");
-        assertThatThrownBy(() -> importProject(project, "foreign")).isInstanceOf(RuntimeException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access", Integer.class)).isZero();
     }
 
