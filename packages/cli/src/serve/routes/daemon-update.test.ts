@@ -578,6 +578,28 @@ describe('daemon update routes', () => {
     expect(mocks.npm).not.toHaveBeenCalled();
   });
 
+  it('keeps non-global installations manual even with a managed launcher', async () => {
+    await stubManagedLauncher();
+    mocks.installation.mockReturnValue({
+      isGlobal: false,
+      packageManager: 'pnpm',
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+    });
+    const response = await request(await makeApp())
+      .get('/daemon/update')
+      .expect(200);
+    expect(response.body).toMatchObject({
+      state: 'available',
+      canInstall: false,
+      instructions: ['npm install -g @qwen-code/qwen-code@2.0.0'],
+    });
+    await request(await makeApp())
+      .post('/daemon/update/prepare')
+      .send({})
+      .expect(409);
+    expect(mocks.npm).not.toHaveBeenCalled();
+  });
+
   it('requires operator authentication for mutations', async () => {
     const untrusted = await makeApp({ trusted: false });
     for (const action of ['prepare', 'restart'])

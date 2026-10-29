@@ -833,16 +833,16 @@ launcher; clients cannot supply a version or command.
   begins or during process replacement are not guaranteed to recover.
 
 Web Shell automatically checks and prepares available supported updates in the
-background, and displays its version-adjacent update button only when ready.
-When an update is available but cannot be installed automatically, the same
-button instead opens a popover with the manual instructions from the check and
-never prepares or restarts. Preparation and readiness survive workspace runtime
+background, and displays its version-adjacent update button when a prepared
+update is ready or when an available update carries manual instructions. In the
+manual-instructions state the button opens a popover with the instructions from
+the check and never prepares or restarts. Preparation and readiness survive workspace runtime
 reloads. Ordinary daemon shutdown discards the prepared download. Activation
 failures keep the daemon running and report `error`; the next check after the
 one-minute error cache can prepare a new download for retry. Disabling automatic
 updates removes readiness and cleans the download before a restart can begin.
-Clicking the update button explicitly restarts the entire daemon and interrupts
-its active sessions.
+Clicking the button in the ready state explicitly restarts the entire daemon
+and interrupts its active sessions.
 
 ### `GET /daemon/status`
 
