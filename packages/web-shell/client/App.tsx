@@ -336,6 +336,9 @@ import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import {
   McpAppHostContext,
   McpAppMessagesContext,
+  McpAppModelContextContext,
+  GENERATED_UI_CONTEXT_TAG_KIND,
+  type McpAppModelContext,
   McpAppVisibilityContext,
 } from './mcpAppHostContext';
 import { GeneratedUiRuntimeProvider } from './generated-ui/GeneratedUiRuntimeProvider';
@@ -12950,6 +12953,9 @@ export function App({
       }
       return sendPrompt(text, undefined, undefined, {
         source: 'mcp-app',
+        ...(submission.inputAnnotations
+          ? { inputAnnotations: submission.inputAnnotations }
+          : {}),
         isCurrent,
         beforeAdmission: async () => {
           assertCurrent();
@@ -12962,6 +12968,12 @@ export function App({
               throw new DOMException('Session client changed', 'AbortError');
             }
             submission.onDispatched();
+            // A card's values attached to the composer are now sent with
+            // this message; keep the next message from repeating them.
+            for (const annotation of submission.inputAnnotations ?? []) {
+              if (annotation.reference.kind === GENERATED_UI_CONTEXT_TAG_KIND)
+                editorRef.current?.removeTag(annotation.reference.id);
+            }
           } catch (error) {
             throw new PromptDispatchCancelledError('Cancelled before sending', {
               cause: error,
@@ -12974,12 +12986,41 @@ export function App({
     },
     [getComposerWorkspaceCwd, isGoalGateBlocked, sendPrompt, t],
   );
+  const mcpAppModelContext = useMemo<McpAppModelContext | undefined>(
+    () =>
+      connection.sessionId
+        ? {
+            sessionId: connection.sessionId,
+            attach: ({ id, title, text }) => {
+              if (connectionRef.current.sessionId !== connection.sessionId)
+                return;
+              // One removable tag per card, replaced as its values change and
+              // sent with whatever the user types next.
+              editorRef.current?.addTags(
+                [
+                  {
+                    id,
+                    kind: GENERATED_UI_CONTEXT_TAG_KIND,
+                    // Tags with a kind display their value.
+                    value: t('mcpApp.generatedUi.contextTag', { title }),
+                    serialized: text,
+                    removable: true,
+                  },
+                ],
+                { placement: 'top' },
+              );
+            },
+          }
+        : undefined,
+    [connection.sessionId, t],
+  );
   const mcpAppMessages = useMcpAppMessages({
     enabled: connection.status === 'connected' && !connection.runtimeStopped,
     sessionId: connection.sessionId,
     clientId: connection.clientId,
     captureOwner: () => sessionOwnerGuard.capture({ includeRecovery: true }),
     submit: submitMcpAppMessage,
+    translate: t,
   });
 
   const enqueuePrompt = useCallback(
@@ -21690,6 +21731,7 @@ export function App({
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
         <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
+        <McpAppModelContextContext.Provider value={mcpAppModelContext}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
@@ -25075,6 +25117,7 @@ export function App({
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
+        </McpAppModelContextContext.Provider>
         </McpAppMessagesContext.Provider>
       </I18nProvider>
       </BrandProvider>
