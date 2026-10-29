@@ -24708,17 +24708,20 @@ export function App({
                           onReturnToInput={handleReturnToEditor}
                           // The pill filters composer tasks itself; it also
                           // counts background agents, which the
-                          // pre-filtered list would have dropped. While a
-                          // background agent is still running the pill gets
-                          // the full snapshot even when the environment
-                          // panel replaces it, so active agents stay
-                          // visible in the shipped entry.
+                          // pre-filtered list would have dropped. The full
+                          // snapshot reaches the pill only while a
+                          // background agent is still running in the
+                          // shipped entry, where the environment panel
+                          // replaces the footer task list; the empty chat
+                          // and headerless embeds keep the pre-filtered
+                          // composer tasks, so agents never reach them.
                           tasks={
                             isChatEmptyState ||
-                            !environmentTasksReplacementEnabled ||
-                            hasActiveBackgroundAgent(sessionTasks)
-                              ? sessionTasks
-                              : []
+                            !environmentTasksReplacementEnabled
+                              ? backgroundTasks
+                              : hasActiveBackgroundAgent(sessionTasks)
+                                ? sessionTasks
+                                : []
                           }
                           hideSettings={
                             hideSettings || !workspaceContextActive
