@@ -24,6 +24,8 @@
 
 默认 transcript 从接受 1–1000 的事件 limit 切换为每页 1–100 条消息；省略时仍默认为 100。原有 101–1000 的 limit 请求现在会收到参数错误，应改为向更早 Item 分页。已移除的 `view` 选择参数不再解释；保留现有 JSON 未知属性处理，不新增全局严格反序列化策略。客户端应按新契约省略该参数。
 
+默认 `/transcript/query` 游标从正十进制事件序号改为不透明消息游标。此前发出的十进制游标返回 `400 invalid_message_cursor`，替代旧的 `invalid_cursor` 错误码；升级后应丢弃保存的十进制游标，从首个消息页重新读取。公开 Items 的数字 `after` 及 SSE 的 `afterSequence` 保留既有数字语义。
+
 transcript 响应的续接序号为消息投影实际完成的 `covered_sequence`，不能使用公开事件 tail。客户端通过 SSE 接收后续变化。导出在初始成员上界内正向读取，不承诺正文不可变。初始投影落后于已提交事件时，沿用直接分页器明确且可重试的 pending 响应，不静默导出为空或缺失历史。
 
 现有消费者确需时，可以暂时保留名称含 snapshot coverage 的响应字段，但不暗示存在保留版本。必须按响应区分其含义：transcript 使用本页实际 `covered_sequence` 续接 SSE；导出及公开 Item 分页使用首请求固定的 `throughSequence` 成员上界，后续页不得推进。不新增替代表、持久化分页存储或进程内历史缓存。

@@ -188,7 +188,8 @@ class WorkspaceCsiRetainedArtifactsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"missing-marker", "extra-owner", "wrong-id"})
+    @ValueSource(strings = {"missing-marker", "extra-owner", "wrong-id",
+            "wrong-body-scope", "zero-body-ordinal", "wrong-body-digest"})
     void refusesUnprovenOrReferencedReleasedBodies(String fault) throws Exception {
         largeBody(70_000);
         String oldBody = jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id=?", String.class, "foreign");
@@ -201,6 +202,22 @@ class WorkspaceCsiRetainedArtifactsTest {
                     + " SELECT session_scope_key,'ARTIFACT',?,1,resource_key,tenant_id,session_id,resource_id,0 FROM ma_resource WHERE resource_key=?",
                     "a".repeat(64), oldBody);
             case "wrong-id" -> jdbc.update("UPDATE ma_resource SET resource_id='unproven' WHERE resource_key=?", oldBody);
+            case "wrong-body-scope", "zero-body-ordinal", "wrong-body-digest" -> {
+                var original = jdbc.queryForMap("SELECT resource_id,session_scope_key FROM ma_resource WHERE resource_key=?", oldBody);
+                String[] identity = ((String) original.get("resource_id")).split(":", -1);
+                assertThat(identity).hasSize(4);
+                switch (fault) {
+                    case "wrong-body-scope" -> identity[1] = "g".repeat(64);
+                    case "zero-body-ordinal" -> identity[2] = "0";
+                    case "wrong-body-digest" -> identity[3] = (identity[3].startsWith("0") ? "1" : "0")
+                            + identity[3].substring(1);
+                    default -> throw new AssertionError(fault);
+                }
+                String id = String.join(":", identity);
+                String key = ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
+                assertThat(jdbc.update("UPDATE ma_resource SET resource_key=?,resource_id=? WHERE resource_key=?",
+                        key, id, oldBody)).isEqualTo(1);
+            }
             default -> throw new AssertionError(fault);
         }
         assertThat(fixture.readReferences(expected).blockers()).as(fault).isNotEmpty();

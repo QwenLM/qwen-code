@@ -106,6 +106,8 @@ class ManagedMessageSnapshotRemovalTest {
         assertThat(currentBody).isNotEqualTo(oldBody);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
                 Long.class, oldBody)).isZero();
+        assertThat(jdbc.queryForObject("SELECT retention_until FROM ma_resource WHERE resource_key = ?",
+                Long.class, oldBody)).isNotNull().isLessThanOrEqualTo(ToolPublicationRetentionStore.now(jdbc));
 
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         String nativeId = "native-snapshot-manifest";
@@ -121,7 +123,6 @@ class ManagedMessageSnapshotRemovalTest {
                         + " owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create)"
                         + " VALUES (?, 'NATIVE_SNAPSHOT', ?, 1, ?, ?, ?, ?, 0)",
                 scope, ManagedSchemaKeys.key(scope, nativeId), nativeKey, TENANT, session, nativeId);
-        jdbc.update("UPDATE ma_resource SET retention_until = 0 WHERE resource_key = ?", oldBody);
         jdbc.update("UPDATE ma_resource SET retention_until = 0 WHERE resource_key = ?", currentBody);
 
         assertThat(new ManagedProjectionResourceCollector(jdbc, manager).runOnce()).isTrue();
