@@ -2180,6 +2180,7 @@ export function createDaemonSessionActions({
           session.setConfigOption('reasoning_effort', value, opts),
           'Set reasoning effort timed out',
           mutation,
+          false,
         );
         const nextReasoning = mapReasoningControls(result.configOptions);
         const confirmed =
@@ -2203,10 +2204,11 @@ export function createDaemonSessionActions({
           actionToken > appliedReasoningActionToken
         ) {
           appliedReasoningActionToken = actionToken;
+          // Check freshness before enqueueing: our own readback can start
+          // before React applies this update. Later observations enqueue after it.
           setConnection((current) => {
             if (
               !isOwner(current) ||
-              !mutation.isCurrent() ||
               sourceModelGeneration !== modelMutationGeneration ||
               current.currentModel !== sourceModel
             ) {
@@ -2260,6 +2262,11 @@ export function createDaemonSessionActions({
         );
       } finally {
         mutation.finish();
+        if (isOwner() && getConnection().workflowModeStatus !== undefined) {
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
         completePersistedAction?.();
         if (pendingPersistedReasoningAction === persistedAction) {
           pendingPersistedReasoningAction = undefined;

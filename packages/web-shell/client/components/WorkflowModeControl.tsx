@@ -128,6 +128,7 @@ export function WorkflowModeControl({
       <PopoverContent
         side="top"
         align="start"
+        collisionPadding={8}
         className="max-w-[calc(100vw-2rem)] text-xs"
         aria-label={messages.label}
       >

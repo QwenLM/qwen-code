@@ -6681,6 +6681,56 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it.each([
+    ['ready', false],
+    ['ready', true],
+    ['unsupported', false],
+    ['unsupported', true],
+  ] as const)(
+    'applies confirmed reasoning before its own %s config reconciliation (deferred=%s)',
+    async (workflowModeStatus, deferConnectionUpdates) => {
+      const session = createMockSession('session-a');
+      const readback = createDeferred<DaemonSessionContextStatus>();
+      session.context.mockReturnValueOnce(readback.promise);
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions('medium'),
+        persisted: true,
+      });
+      const { actions, getConnection, flushConnectionUpdates } =
+        createActionsHarness({
+          deferConnectionUpdates,
+          connection: {
+            status: 'connected',
+            sessionId: 'session-a',
+            currentModel: 'qwen3.8-max',
+            providers: workspaceProvidersStatus('low'),
+            workflowModeStatus,
+          },
+          session,
+        });
+
+      await actions.setReasoningEffort('medium', { persist: true });
+
+      expect(session.context).toHaveBeenCalledTimes(1);
+      flushConnectionUpdates();
+      expect(getConnection().reasoning).toMatchObject({
+        enabled: true,
+        effort: 'medium',
+      });
+      readback.reject(new Error('readback offline'));
+      await vi.waitFor(() => {
+        flushConnectionUpdates();
+        expect(getConnection().workflowModeStatus).toBe('unknown');
+      });
+      await actions.clearSession();
+      flushConnectionUpdates();
+      expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+        enabled: true,
+        effort: 'medium',
+      });
+    },
+  );
+
   it('drops the connection session context through the real clearSession action', async () => {
     const session = createMockSession('session-a');
     const { actions, getConnection } = createActionsHarness({
@@ -7049,6 +7099,7 @@ function createActionsHarness(
     addNotice?: ReturnType<typeof vi.fn>;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
+    deferConnectionUpdates?: boolean;
     onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
@@ -7082,6 +7133,7 @@ function createActionsHarness(
     status: 'connected',
     workspaceCwd: '/workspace',
   };
+  const connectionUpdates: Array<() => void> = [];
   const replaceConnection = (next: DaemonConnectionState) => {
     connection = next;
   };
@@ -7161,8 +7213,12 @@ function createActionsHarness(
     onPromptRemoved: opts.onPromptRemoved,
     onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
     setConnection: (update) => {
-      connection = typeof update === 'function' ? update(connection) : update;
-      opts.onConnectionChange?.(connection);
+      const apply = () => {
+        connection = typeof update === 'function' ? update(connection) : update;
+        opts.onConnectionChange?.(connection);
+      };
+      if (opts.deferConnectionUpdates) connectionUpdates.push(apply);
+      else apply();
     },
     setPromptStatus,
     setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
@@ -7174,6 +7230,9 @@ function createActionsHarness(
   });
   return {
     actions,
+    flushConnectionUpdates: () => {
+      for (const apply of connectionUpdates.splice(0)) apply();
+    },
     sessionConfigGeneration,
     activePromptsRef,
     settledPromptsRef,
