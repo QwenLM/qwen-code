@@ -3647,6 +3647,10 @@ exit 1`;
     // Exceeds the measured completion gap, so a merely slow loop is not
     // doubled; the detection bound it implies is stated at the definition.
     expect(workflow).toContain("SHEPHERD_STALE_MINUTES: '240'");
+    // The wedge cutoff is a SEPARATE constant: sharing the staleness threshold
+    // made one number decide both "the lane went quiet" and "this queued run is
+    // dead", which dispatches a rescue beside a tick that is merely waiting.
+    expect(workflow).toContain("SHEPHERD_WEDGED_HOURS: '24'");
     expect(workflow).toContain('240-270');
     expect(workflow).toContain('repository_dispatch:');
     expect(workflow).toContain("- 'shepherd-rescue'");
@@ -3717,7 +3721,12 @@ exit 1`;
       JSON.stringify(parse(workflow).on.repository_dispatch.types),
     );
     expect(declared).toEqual(['shepherd-rescue']);
-    const replay = ({ runs, dispatchFails = false, stale = '240' }) => {
+    const replay = ({
+      runs,
+      dispatchFails = false,
+      stale = '240',
+      wedged = '24',
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'shepherd-watch-'));
       try {
         // `runs: null` is the unreadable arm (no fixture at all); `runs: []`
@@ -3760,6 +3769,7 @@ set -eo pipefail
 WATCHDOG_MODE='true'
 NOW_EPOCH='${NOW}'
 SHEPHERD_STALE_MINUTES='${stale}'
+SHEPHERD_WEDGED_HOURS='${wedged}'
 REPO='QwenLM/qwen-code'
 # exported, not just set: the stub is a child process and reads it from the
 # environment, exactly as the step env supplies it in production.
@@ -3861,10 +3871,10 @@ ACTIONS_TOKEN='workflow-token-value'
     expect(queuedTick.dispatch).toBe('');
     expect(queuedTick.log).toContain('a live run is queued or running');
 
-    // …but a queued run OLDER than the threshold is the wedge this file
-    // documents at ZOMBIE_QUEUED_MINUTES: created, never started, 81 of them
-    // still queued two months later. Counting it forever silenced the lane in
-    // the one dead state it exists for.
+    // A tick queued 300 minutes in a SATURATED pool is not lost: it passed the
+    // gate and will start, and the last completion is old because it is waiting.
+    // Cutting it at the staleness threshold dispatched a rescue beside it — the
+    // round-3 defect, reintroduced above a different line.
     expect(
       replay({
         runs: [
@@ -3872,10 +3882,43 @@ ACTIONS_TOKEN='workflow-token-value'
           tick({
             status: 'queued',
             conclusion: null,
-            createdAt: at(600),
-            updatedAt: at(600),
+            createdAt: at(300),
+            updatedAt: at(300),
           }),
         ],
+      }).dispatch,
+    ).toBe('');
+
+    // Past a DAY it is the wedge this file documents at ZOMBIE_QUEUED_MINUTES:
+    // created, never started, 81 of them still queued two months later. Counting
+    // that forever silenced the lane in the one dead state it exists for.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          tick({
+            status: 'queued',
+            conclusion: null,
+            createdAt: at(1500),
+            updatedAt: at(1500),
+          }),
+        ],
+      }).dispatch,
+    ).toContain('-f event_type=shepherd-rescue');
+
+    // The cutoff is the env value, not a hardcoded day.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          tick({
+            status: 'queued',
+            conclusion: null,
+            createdAt: at(300),
+            updatedAt: at(300),
+          }),
+        ],
+        wedged: '1',
       }).dispatch,
     ).toContain('-f event_type=shepherd-rescue');
 

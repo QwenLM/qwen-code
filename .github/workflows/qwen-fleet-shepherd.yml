@@ -231,6 +231,16 @@ env:
   # pool wait for the watch and the rescue to be scheduled. Slower detection is
   # the price of never firing on a merely slow loop.
   SHEPHERD_STALE_MINUTES: '240'
+  # How long a `queued` run may sit before it stops counting as in flight. This
+  # MUST NOT reuse the threshold above: the two answer opposite questions, and
+  # sharing one number reintroduces the duplicate-tick defect. A tick queued
+  # 300 minutes in a saturated pool is not lost — it passed the concurrency gate
+  # and will start, and the last completion is old BECAUSE it is waiting; cutting
+  # it at 240 dispatched a rescue beside it. The wedge this file documents at
+  # ZOMBIE_QUEUED_MINUTES is a different order of magnitude entirely (runs
+  # created 2026-08-19 were still queued seventy days later), so a day separates
+  # the two populations with room to spare on both sides.
+  SHEPHERD_WEDGED_HOURS: '24'
 
 jobs:
   shepherd:
@@ -321,11 +331,11 @@ jobs:
           #
           #   live lane, in_progress            -> IN FLIGHT, defer
           #   live lane, queued, younger than
-          #     SHEPHERD_STALE_MINUTES          -> IN FLIGHT, defer
+          #     SHEPHERD_WEDGED_HOURS           -> IN FLIGHT, defer
           #   live lane, completed, !cancelled  -> PROGRESS, resets the clock
           #   live lane, pending                -> neither (see below)
           #   live lane, queued and older than
-          #     SHEPHERD_STALE_MINUTES          -> neither (wedged)
+          #     SHEPHERD_WEDGED_HOURS           -> neither (wedged)
           #   watch / dry manual                -> neither, ever
           #
           # The three non-completed states are NOT interchangeable, and getting
@@ -338,13 +348,19 @@ jobs:
           #   * `pending` has NOT passed the gate. It waits behind the holder and
           #     the next arrival cancels it, so it can never make progress on its
           #     own and must not suppress the rescue.
-          #   * a `queued` run older than the threshold is the wedge this file
-          #     documents at ZOMBIE_QUEUED_MINUTES: created, never started, 81 of
-          #     them still queued two months later. Counting it forever is what
-          #     round 3's fix did, and it silenced the lane in exactly the dead
-          #     state the lane exists for. Age is the only separator available
-          #     here, and the threshold is already above the measured normal
-          #     queue wait, so an ordinary slow tick is never mistaken for one.
+          #   * a `queued` run older than SHEPHERD_WEDGED_HOURS is the wedge this
+          #     file documents at ZOMBIE_QUEUED_MINUTES: created, never started,
+          #     81 of them still queued two months later. Counting it forever is
+          #     what round 3's fix did, and it silenced the lane in exactly the
+          #     dead state the lane exists for.
+          #
+          # The wedge cutoff is a DAY, not SHEPHERD_STALE_MINUTES. Reusing the
+          # staleness threshold made one number answer two opposite questions:
+          # a tick queued 300 minutes in a saturated pool would be declared dead
+          # at 240 while the last completion was old precisely because it was
+          # waiting, and the rescue ran beside it. The two populations are orders
+          # of magnitude apart — measured queue waits are 120-135 minutes, the
+          # documented wedge is seventy days — so they get separate constants.
           #
           # Completion, not success: a shepherd that fails on every tick is
           # broken, not starved, and re-dispatching it each watch would multiply
@@ -373,7 +389,7 @@ jobs:
             # `-e` plus `empty` makes an empty ARRAY a failure: jq -r '@tsv' over
             # [] would print "0<TAB>0<TAB>" and hand the decision three zeroes,
             # approving a rescue on no evidence.
-            if ! WATCH_STATE="$(jq -er --arg now "${NOW_EPOCH}" --arg stale "${SHEPHERD_STALE_MINUTES}" '
+            if ! WATCH_STATE="$(jq -er --arg now "${NOW_EPOCH}" --arg wedge "${SHEPHERD_WEDGED_HOURS}" '
               if length == 0 then empty
               else
                 ([ .[] | select(.displayTitle == "shepherd tick"
@@ -385,7 +401,7 @@ jobs:
                         .status == "in_progress"
                         or (.status == "queued"
                             and ((($now | tonumber) - (.createdAt | fromdateiso8601))
-                                 < (($stale | tonumber) * 60))))) | length),
+                                 < (($wedge | tonumber) * 3600))))) | length),
                     ([ $rescues[] | select(.status != "completed") ] | length),
                     ([ $lane[]
                        | select(.status == "completed" and .conclusion != "cancelled")
