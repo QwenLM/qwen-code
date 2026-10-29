@@ -55,8 +55,9 @@ const gateConstant = (name) =>
 
 describe('EventTransport broker gates CI', () => {
   it('uses the HZ runner proxy only for distribution downloads', () => {
-    expect(step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY)
-      .toContain("startsWith(runner.name, 'ecs-qwen-hz')");
+    expect(
+      step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY,
+    ).toContain("startsWith(runner.name, 'ecs-qwen-hz')");
   });
 
   it('runs the gate profile and checks that the gate class ran', () => {

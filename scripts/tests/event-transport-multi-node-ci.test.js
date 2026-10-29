@@ -43,8 +43,9 @@ const scriptDefault = (name) =>
 
 describe('EventTransport multi-node gates CI', () => {
   it('uses the HZ runner proxy only for distribution downloads', () => {
-    expect(step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY)
-      .toContain("startsWith(runner.name, 'ecs-qwen-hz')");
+    expect(
+      step('Start the RocketMQ LiteTopic cluster').env.RMQ_DOWNLOAD_PROXY,
+    ).toContain("startsWith(runner.name, 'ecs-qwen-hz')");
   });
 
   it('runs the gate profile with every coordinate the gate requires', () => {
