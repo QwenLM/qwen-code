@@ -11,7 +11,8 @@ import { ToolNames } from '../tools/tool-names.js';
 import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
   isWrappedSystemReminderPart,
-  stripSystemReminderBlocks,
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
 } from '../core/environmentContext.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import {
@@ -515,6 +516,11 @@ function transformPart(
     nextPart.text.length > maxTextChars
   ) {
     stats.textPartsTruncated++;
+    // Cut, a reminder would lose its closing tag and read as open over the
+    // text after it, so it is replaced whole.
+    if (isWrappedSystemReminderPart(nextPart)) {
+      return { ...nextPart, text: OMITTED_REMINDER_TEXT };
+    }
     // Spread rather than rebuilding a bare `{ text }` so sibling properties
     // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
     // pipeline keys reasoning parts off those flags (#10380).
@@ -525,6 +531,8 @@ function transformPart(
   }
   return nextPart;
 }
+
+const OMITTED_REMINDER_TEXT = `${SYSTEM_REMINDER_OPEN}\n[reminder omitted for compaction]\n${SYSTEM_REMINDER_CLOSE}`;
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {
   let end = maxTextChars;
@@ -774,12 +782,16 @@ function userMessageTexts(history: Content[]): string[] {
     if (content.role !== 'user') continue;
     const parts = content.parts ?? [];
     const typed = typedPartFlags(parts);
-    const typedText = stripSystemReminderBlocks(
-      parts
-        .filter((part, index) => typed[index] && isUserTextPart(part))
-        .map((part) => part.text)
-        .join('\n'),
-    ).trim();
+    const typedText = parts
+      .filter(
+        (part, index) =>
+          typed[index] &&
+          isUserTextPart(part) &&
+          !isWrappedSystemReminderPart(part),
+      )
+      .map((part) => stripLeadingSystemReminders(part.text!))
+      .join('\n')
+      .trim();
     // Tool traffic, reminders, hook context and the memory snapshot ride the
     // turn too, but are neither typed nor attached.
     const attached = parts.filter(
@@ -857,6 +869,25 @@ function isInjectedContext(part: Part): boolean {
     (typeof part.text === 'string' &&
       isUserPromptSubmitContextPartText(part.text))
   );
+}
+
+/**
+ * `text` without the complete `<system-reminder>` blocks at its start, which is
+ * where IDE context is prepended into the prompt's own part. A tag anywhere
+ * else is the user's, kept and escaped with the rest of the quote.
+ */
+function stripLeadingSystemReminders(text: string): string {
+  let rest = text;
+  for (;;) {
+    const start = rest.trimStart();
+    if (!start.startsWith(SYSTEM_REMINDER_OPEN)) return rest;
+    const close = start.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) return rest;
+    rest = start.slice(close + SYSTEM_REMINDER_CLOSE.length);
+  }
 }
 
 function isAttachmentFailureNotice(part: Part): boolean {

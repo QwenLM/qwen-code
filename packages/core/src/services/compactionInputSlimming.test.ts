@@ -879,6 +879,31 @@ describe('compactionInputSlimming', () => {
         expect(parts[1]).toBe(prompt);
       });
 
+      it.each([500, 4_000])(
+        'replaces a long reminder whole at a %i-character cap, keeping it closed (R3-2)',
+        (maxTextChars) => {
+          const [reminder] = slimCompactionInput(
+            [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: `<system-reminder>\n${'r'.repeat(8_000)}\n</system-reminder>`,
+                  },
+                  markTypedPrompt({ text: 'please fix the parser bug' }),
+                ],
+              },
+            ],
+            undefined,
+            { maxTextChars, preserveUserText: true },
+          ).slimmedHistory[0]!.parts!;
+
+          expect(reminder!.text).toBe(
+            '<system-reminder>\n[reminder omitted for compaction]\n</system-reminder>',
+          );
+        },
+      );
+
       it('caps hook context and the memory snapshot on a turn with no mark', () => {
         const prompt = { text: 'explain what this does' };
         const parts = slim([
@@ -1323,6 +1348,53 @@ describe('compactionInputSlimming', () => {
       const [quote] = quotesIn(blockText(condensed[0]!));
       expect(quote).toContain('&lt;system-reminder');
       expect(quote).not.toContain('<system-reminder');
+    });
+
+    it.each([
+      [
+        'an unclosed tag',
+        'here is the log: <system-reminder> why does it fail?',
+      ],
+      [
+        'a closed block in the middle',
+        'what does <system-reminder>x</system-reminder> do in qwen-code?',
+      ],
+    ])(
+      'keeps a reminder tag the user wrote, as %s, and the words after it (R3-3)',
+      (_label, typed) => {
+        const history: Content[] = [
+          { role: 'user', parts: [markTypedPrompt({ text: typed })] },
+          ...toolRound(1, 20_000),
+          { role: 'model', parts: [{ text: 'done' }] },
+        ];
+
+        const condensed = condenseToUserMessages(history, 12_000)!;
+
+        const [quote] = quotesIn(blockText(condensed[0]!));
+        expect(quote).toContain(typed.slice(0, typed.indexOf('<')));
+        expect(quote).toContain(typed.slice(typed.lastIndexOf('>') + 1));
+        expect(quote).not.toMatch(/<system-reminder>|<\/system-reminder>/);
+      },
+    );
+
+    it('drops the context block prepended to the prompt part', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            markTypedPrompt({
+              text: '<system-reminder>\nOpen file: a.ts\n</system-reminder>\n\nfix this',
+            }),
+          ],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const [quote] = quotesIn(blockText(condensed[0]!));
+      expect(quote).toBe('fix this');
     });
 
     /** The text of each quote in a condensed block, in order. */
