@@ -59,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
+        /** @description Default view: Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. Explicit view=messages instead returns at most100 current ma_message Items using tenant/Session keyset pagination, independent of published snapshots. Bodies are live per page. coveredSequence and lastSequence are the projection sequence included by this read, so the client resumes SSE there and does not skip an unprojected tail. Only bounded lifecycle events for the selected Turns accompany the Items. An older cursor pins direction, scope, sequence membership and projection generation;409 message_projection_changed requires reloading history. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -806,7 +806,7 @@ export interface paths {
         put?: never;
         /**
          * Read one immutable public Session snapshot page for reading exports
-         * @description Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.
+         * @description Default view: Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page. Explicit view=messages instead reads live message-table pages forward. The first read captures a finite membership bound; later body/status changes are allowed and no persistent snapshot is created or selected. snapshotThroughSequence then names that membership bound, not frozen content. If the initial message projection lags committed events,503 message_projection_pending asks the caller to retry instead of returning incomplete history. Projection-generation changes invalidate the cursor.
          */
         post: operations["webShellExportSession"];
         delete?: never;
@@ -1059,6 +1059,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/worktrees/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Options a main Session worktree */
+        post: operations["webShellSessionWorktreeOptions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/worktrees/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query a main Session worktree */
+        post: operations["webShellSessionWorktreeQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/worktrees/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Inspect a main Session worktree */
+        post: operations["webShellSessionWorktreeInspect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/worktrees/cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cleanup a main Session worktree */
+        post: operations["webShellSessionWorktreeCleanup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/transcript/items/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read recent published Session items and page toward older items
+         * @description Default view: Requires current Session read authorization on every page. The first page returns at most limit Items from the newest published snapshot, in chronological order. nextCursor pages toward older Items in that same signed, retained snapshot. snapshotThroughSequence identifies its coverage, which may lag the current Session head; an empty page with zero coverage does not certify an empty Session because no published snapshot may be available. This page does not contain live tail events or current approval/task state; use the existing transcript, event and state APIs for those. A newer snapshot does not change an existing cursor. Forward export cursors cannot be used here and backward cursors cannot be used for exports. No journal replay, writer acquisition or local cache is involved. Explicit view=messages instead reads current message-table Items backward without any published snapshot, using the same scoped keyset and projection-generation rules as messages-view transcript reads. snapshotThroughSequence then names the initial sequence membership bound; bodies can change between pages. This mode does not return lifecycle events or claim fixed snapshot content.
+         */
+        post: operations["webShellRecentTranscriptItems"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1156,6 +1244,11 @@ export interface components {
             cursor?: string | null;
             /** @default 100 */
             limit?: number | null;
+            /**
+             * @description Select direct live message-table pages. Omit to retain the existing snapshot/event view. Message view accepts limit1..100; cursors bind scope, direction, membership range and projection generation, not frozen bodies.
+             * @enum {string|null}
+             */
+            view?: "messages" | null;
         };
         WebShellStreamRequest: {
             /** Format: uuid */
@@ -1190,6 +1283,10 @@ export interface components {
             skills?: components["schemas"]["SessionCreationSkill"][];
             /** @description Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime. */
             extensionPins?: components["schemas"]["ManagedExtensionPackagePin"][];
+            /** @description Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch. */
+            worktree?: {
+                baseRef?: string;
+            };
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -1292,6 +1389,7 @@ export interface components {
             /** @description Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection. */
             lifecycleOperation?: components["schemas"]["WebShellLifecycleOperation"];
             recovery?: components["schemas"]["SessionRecovery"];
+            worktree?: components["schemas"]["WebShellSessionWorktree"] | null;
         };
         WebShellSessionCapabilities: {
             /**
@@ -2098,18 +2196,22 @@ export interface components {
             skills: components["schemas"]["WebShellSkill"][];
         };
         WebShellWorkspaceFileQueryRequest: {
-            workspaceId: string;
-            cwdRelative: string;
+            workspaceId?: string;
+            cwdRelative?: string;
             directory: string;
             query?: string;
             expectedScopeRevision?: string;
-        };
+            /** Format: uuid */
+            sessionId?: string;
+        } & (unknown | unknown);
         WebShellWorkspaceFileReadRequest: {
-            workspaceId: string;
-            cwdRelative: string;
+            workspaceId?: string;
+            cwdRelative?: string;
             path: string;
             expectedScopeRevision: string;
-        };
+            /** Format: uuid */
+            sessionId?: string;
+        } & (unknown | unknown);
         WebShellWorkspaceFileEntry: {
             path: string;
             name: string;
@@ -2310,7 +2412,10 @@ export interface components {
             items: components["schemas"]["WebShellItem"][];
             nextCursor?: string | null;
             hasMore: boolean;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description In explicit messages view, this is the fixed sequence membership upper bound; row bodies are live, not frozen snapshot content.
+             */
             snapshotThroughSequence: number;
         };
         WebShellExportRequest: {
@@ -2319,6 +2424,11 @@ export interface components {
             cursor?: string | null;
             /** @default 100 */
             limit?: number | null;
+            /**
+             * @description Select direct live message-table pages. Omit to retain the existing snapshot/event view. Message view accepts limit1..100; cursors bind scope, direction, membership range and projection generation, not frozen bodies.
+             * @enum {string|null}
+             */
+            view?: "messages" | null;
         };
         /** @description Durable Turn input or cancellation admission. The operation identifies the saved command and remains stable across idempotent retries. */
         WebShellTurnAdmission: {
@@ -2523,6 +2633,52 @@ export interface components {
         WebShellWorkspaceFileUploadQueryRequest: {
             /** Format: uuid */
             uploadId: string;
+        };
+        WebShellSessionWorktree: {
+            id: string;
+            sessionId: string;
+            workspaceId: string;
+            branch: string;
+            baseCommit: string;
+            cwdRelative: string;
+            operationId: string;
+            /** @enum {string} */
+            state: "preparing" | "ready" | "failed" | "blocked" | "removing" | "removed";
+            revision: number;
+            errorCode?: string | null;
+        };
+        WebShellSessionWorktreeOptions: {
+            supported: boolean;
+            reason?: string | null;
+            baseCommit?: string | null;
+            /** @description Source checkout branch independent of base ref; HEAD when detached, null when unavailable. */
+            currentBranch?: string | null;
+            branches: string[];
+        };
+        WebShellSessionWorktreePage: {
+            data: components["schemas"]["WebShellSessionWorktree"][];
+        };
+        WebShellSessionWorktreeInspection: {
+            worktree: components["schemas"]["WebShellSessionWorktree"];
+            canCleanup: boolean;
+            cleanupBlocker?: string | null;
+        };
+        WebShellSessionWorktreeOptionsRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            baseRef?: string;
+        };
+        WebShellSessionWorktreeQueryRequest: {
+            workspaceId: string;
+        };
+        WebShellSessionWorktreeInspectRequest: {
+            workspaceId: string;
+            worktreeId: string;
+        };
+        WebShellSessionWorktreeCleanupRequest: {
+            workspaceId: string;
+            worktreeId: string;
+            idempotencyKey: string;
         };
     };
     responses: {
@@ -2738,7 +2894,17 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+            /** @description Message projection is not ready for a complete stream handoff; retry the read. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
     webShellStreamEvents: {
@@ -4220,7 +4386,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Immutable public item snapshot page. */
+            /** @description Chronological Item page: published snapshot by default, or live messages when explicitly selected. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4235,6 +4401,15 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["CursorExpired"];
             413: components["responses"]["PayloadTooLarge"];
+            /** @description Message projection has not caught up; retry the export. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
     webShellQueryUserMessages: {
@@ -4645,11 +4820,13 @@ export interface operations {
     webShellWorkspaceFilesUpload: {
         parameters: {
             query: {
-                workspaceId: string;
-                cwdRelative: string;
+                workspaceId?: string;
+                cwdRelative?: string;
                 path: string;
                 expectedScopeRevision: string;
                 uploadId: string;
+                /** @description Exactly one locator: Session ID, or Workspace ID plus cwdRelative. */
+                sessionId?: string;
             };
             header?: never;
             path?: never;
@@ -4724,6 +4901,161 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellSessionWorktreeOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeOptionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktreeOptions"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellSessionWorktreeQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktreePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellSessionWorktreeInspect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeInspectRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktreeInspection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellSessionWorktreeCleanup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionWorktreeCleanupRequest"];
+            };
+        };
+        responses: {
+            /** @description Session worktree result. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionWorktree"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellRecentTranscriptItems: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExportRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded recent published Item page. Items are chronological within each page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellExportPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["CursorExpired"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Message projection is not ready for a complete stream handoff; retry the read. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }

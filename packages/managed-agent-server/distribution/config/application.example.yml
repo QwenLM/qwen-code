@@ -7,8 +7,9 @@
 #   cp config/application.example.yml config/application.yml
 #   chmod 600 config/application.yml
 #
-# bin/qwen-managed-agent-server and bin/qwen-managed-agent-operator-recovery
-# export SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml
+# bin/qwen-managed-agent-server, bin/qwen-managed-agent-operator-recovery and
+# bin/qwen-managed-agent-admin export
+# SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml
 # when that file exists and the variable is unset. No option is added to the
 # command's positional arguments.
 #

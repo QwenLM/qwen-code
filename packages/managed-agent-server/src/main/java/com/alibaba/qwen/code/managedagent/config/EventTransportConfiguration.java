@@ -101,14 +101,14 @@ public class EventTransportConfiguration {
     }
 
     @Bean
-    public TransportConsumerStore transportConsumerStore(JdbcTemplate jdbc) {
+    public TransportConsumerStore transportConsumerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         return new TransportConsumerStore(jdbc);
     }
 
     @Bean(destroyMethod = "close")
     public LiteTopicPublicEventTransport liteTopicPublicEventTransport(
             Producer producer, ClientServiceProvider provider,
-            ManagedAgentProperties properties, ObjectMapper objectMapper,
+            ManagedAgentProperties properties, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             TransportConsumerStore store) {
         return new LiteTopicPublicEventTransport(producer, provider,
                 properties.getEventTransport().getTopic(), objectMapper,
@@ -188,7 +188,7 @@ public class EventTransportConfiguration {
      * Owner reconciliation runs on its own thread: it calls the broker, and
      * must never delay the one-thread default scheduler's recovery ticks.
      */
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler eventTransportScheduler(
             ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("event-transport-")

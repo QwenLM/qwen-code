@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -30,8 +31,8 @@ public class WorkspaceExecutionStore {
     private final ResidentWorkspaces residents;
 
     @Autowired
-    public WorkspaceExecutionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
+    public WorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
             com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
@@ -212,6 +213,9 @@ public class WorkspaceExecutionStore {
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
+        if (!cancellation && !committedStop && authority == null && !legacyClose) {
+            requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
+        }
         var resident = residents.find(binding);
         if (resident == null) {
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -313,6 +317,24 @@ public class WorkspaceExecutionStore {
         if (grants.getFirst() != 2) {
             throw unavailable();
         }
+    }
+
+    private static void requireWorktreeAncestorsReady(JdbcTemplate jdbc, String tenantId, String sessionId) {
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        String current = sessionId;
+        while (visited.add(current)) {
+            SessionWorktreeStore.requireReady(jdbc, tenantId, current);
+            var parents = jdbc.query("SELECT parent_session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                    (row, index) -> row.getString(1), tenantId, current);
+            if (parents.size() != 1) {
+                throw unavailable();
+            }
+            if (parents.getFirst() == null) {
+                return;
+            }
+            current = parents.getFirst();
+        }
+        throw unavailable();
     }
 
     static byte[] inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
@@ -432,6 +454,9 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean beginRewind(ContextBinding binding, RuntimeSessionRecord session) {
+        if (storageGuard != null) {
+            storageGuard.requireOwnedRoot(binding.getTenantId(), binding.getStorageId());
+        }
         return Boolean.TRUE.equals(transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             String key = storageKey(binding);
@@ -561,8 +586,9 @@ public class WorkspaceExecutionStore {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
-            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CHILD_WORKSPACE' AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
-                    Long.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, binding.getTenantId(), maintenanceId));
+            WorkspaceOperations.Kind kind = WorkspaceMaintenanceRecovery.kind(jdbc, binding, maintenanceId);
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
+                    Long.class, WorkspaceOperations.key(kind, binding.getTenantId(), maintenanceId), kind.name());
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
                 throw unavailable();
             }

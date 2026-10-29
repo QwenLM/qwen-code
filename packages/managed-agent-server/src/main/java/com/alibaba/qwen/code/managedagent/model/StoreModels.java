@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
 import java.util.Arrays;
@@ -290,7 +291,10 @@ public final class StoreModels {
     }
 
     public record SessionPage(List<SessionRecord> sessions,
-            boolean hasMore) {
+            boolean hasMore, Map<String, SessionWorktreeStore.Descriptor> worktrees) {
+        public SessionPage(List<SessionRecord> sessions, boolean hasMore) {
+            this(sessions, hasMore, Map.of());
+        }
     }
 
     /** The fields of a Turn that its public view shows, without its input. */
@@ -317,6 +321,9 @@ public final class StoreModels {
     }
 
     public record SnapshotPage(List<ItemRecord> items, boolean hasMore, String nextCursor, long coveredSequence) {}
+
+    public record MessagePage(List<ItemRecord> items, List<EventRecord> events,
+            boolean hasMore, String nextCursor, long coveredSequence, long throughSequence) {}
 
     public record SnapshotRecord(String tenantId, String sessionId,
             long version, long coveredSequence, List<ItemRecord> items,
