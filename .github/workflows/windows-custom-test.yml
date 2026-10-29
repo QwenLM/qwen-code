@@ -1,0 +1,41 @@
+name: Windows 10 compatible test build
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - custom-qwen38-agent
+permissions:
+  contents: read
+jobs:
+  windows-test:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Enable pnpm
+        shell: pwsh
+        run: corepack enable
+      - name: Install dependencies
+        shell: pwsh
+        run: corepack pnpm install --frozen-lockfile
+      - name: Build Qwen Code
+        shell: pwsh
+        run: npm run build
+      - name: Bundle Windows test files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path windows-test | Out-Null
+          Copy-Item -Recurse packages/cli/dist windows-test/cli-dist
+          Copy-Item -Recurse packages/core/dist windows-test/core-dist
+          Copy-Item -Recurse .qwen windows-test/.qwen
+          Copy-Item package.json windows-test/package.json
+      - name: Upload Windows test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-custom-windows-test
+          path: windows-test/
+          if-no-files-found: error
