@@ -31,7 +31,7 @@ on:
         default: false
 
 concurrency:
-  group: '${{ github.workflow }}'
+  group: '${{ github.workflow }}-ecs-smoke'
   cancel-in-progress: false
 
 jobs:
