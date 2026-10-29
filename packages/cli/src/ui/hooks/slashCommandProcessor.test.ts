@@ -339,10 +339,13 @@ describe('useSlashCommandProcessor', () => {
   it.each([
     ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],
     ['owned builtin restore', 'restore', CommandKind.BUILT_IN, true, true],
+    ['direct builtin logout', 'logout', CommandKind.BUILT_IN, false, false],
+    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true],
+    ['same-name logout file command', 'logout', CommandKind.FILE, true, false],
     ['same-name file command', 'restore', CommandKind.FILE, true, false],
     ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
   ] as const)(
-    'scopes the restore submission idle exception: %s',
+    'scopes the restore/logout submission idle exception: %s',
     async (_label, name, kind, suppliesOwner, expectedIdle) => {
       const observedIdle = vi.fn();
       const isCurrentSubmission = vi.fn(() => true);

@@ -274,9 +274,16 @@ export const useAuthCommand = (
   // -- Dialog open / close / cancel ----------------------------------------
 
   const openAuthDialog = useCallback(() => {
+    if (!config.getAuthType()) {
+      setAuthState(AuthState.Unauthenticated);
+      setPendingAuthType(undefined);
+      setAuthError(null);
+      setIsAuthenticating(false);
+      onAuthChange?.();
+    }
     openedViaCommandRef.current = true;
     setIsAuthDialogOpen(true);
-  }, []);
+  }, [config, onAuthChange]);
 
   const closeAuthDialog = useCallback(() => {
     openedViaCommandRef.current = false;

@@ -64,6 +64,7 @@ vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
 import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { getActiveOpenTuiTheme, getOpenTuiTheme } from './theme-parity.js';
@@ -114,6 +115,134 @@ describe('OpenTuiBanner', () => {
     expect(text).toContain('>_ Qwen Code');
     expect(text).toContain('qwen3-coder-plus');
     expect(text).toContain('qwen-code');
+  });
+
+  it('refreshes live subscription identity and model, and hides the plan after logout', () => {
+    let authType: AuthType | undefined = AuthType.USE_OPENAI;
+    let model = 'previous-model';
+    let plan: 'plus' | 'pro' | undefined;
+    const config = fakeConfig({
+      getContentGeneratorConfig: () => ({ authType, model }),
+      getModelDisplayName: () => model,
+      getSubscriptionPlan: () => plan,
+    });
+    const settings = fakeSettings();
+    const ui = render(<OpenTuiBanner config={config} settings={settings} />);
+    expect(ui.container.textContent).toContain('API Key | previous-model');
+    authType = AuthType.QWEN_SUBSCRIPTION;
+    model = 'qwen3.8-max';
+    plan = 'pro';
+    ui.rerender(<OpenTuiBanner config={config} settings={settings} />);
+    expect(ui.container.textContent).toContain(
+      'Qwen Pro | [Qwen Subscription] qwen3.8-max',
+    );
+    expect(ui.container.textContent).not.toContain('previous-model');
+    plan = 'plus';
+    ui.rerender(<OpenTuiBanner config={config} settings={settings} />);
+    expect(ui.container.textContent).toContain(
+      'Qwen Plus | [Qwen Subscription] qwen3.8-max',
+    );
+    expect(ui.container.textContent).not.toContain('Qwen Pro');
+    model = 'next-model';
+    ui.rerender(<OpenTuiBanner config={config} settings={settings} />);
+    expect(ui.container.textContent).toContain(
+      '[Qwen Subscription] next-model',
+    );
+    authType = undefined;
+    ui.rerender(<OpenTuiBanner config={config} settings={settings} />);
+    expect(ui.container.textContent).not.toContain('Qwen Plus');
+    expect(ui.container.textContent).not.toContain('[Qwen Subscription]');
+    ui.unmount();
+  });
+
+  it('shows the subscription provider without inventing an unknown plan', () => {
+    const ui = render(
+      <OpenTuiBanner
+        config={fakeConfig({
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+          }),
+          getModelDisplayName: () => 'qwen3.8-max',
+        })}
+        settings={fakeSettings()}
+      />,
+    );
+    expect(ui.container.textContent).toContain(
+      '[Qwen Subscription] qwen3.8-max',
+    );
+    expect(ui.container.textContent).not.toContain('Qwen Pro');
+    expect(ui.container.textContent).not.toContain('Qwen Plus');
+    ui.unmount();
+  });
+
+  it.each([undefined, 'Custom subtitle'])(
+    'shows the fixed usage tip and omits only the default subscription spacer (%s)',
+    (customBannerSubtitle) => {
+      const config = fakeConfig({
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen3.8-max',
+        }),
+        getModelDisplayName: () => 'qwen3.8-max',
+        getSubscriptionPlan: () => 'pro',
+      });
+      const ui = render(
+        <OpenTuiBanner
+          config={config}
+          settings={fakeSettings({ customBannerSubtitle })}
+        />,
+      );
+      expect(ui.container.textContent).toContain(
+        'Tip: Run /usage to see your plan usage.',
+      );
+      const rows = [
+        ...ui.container.querySelector('[data-bordercolor]')!.children,
+      ].map((element) => element.textContent);
+      expect(rows[0]).toContain('>_ Qwen Code');
+      expect(rows[customBannerSubtitle ? 2 : 1]).toContain(
+        'Qwen Pro | [Qwen Subscription]',
+      );
+      if (customBannerSubtitle) expect(rows[1]).toBe(customBannerSubtitle);
+      ui.unmount();
+    },
+  );
+
+  it.each([
+    { hideTips: true, screenReader: false },
+    { hideTips: false, screenReader: true },
+  ])(
+    'respects subscription tip visibility (%j)',
+    ({ hideTips, screenReader }) => {
+      const config = fakeConfig({
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen3.8-max',
+        }),
+        getScreenReader: () => screenReader,
+      });
+      const ui = render(
+        <OpenTuiBanner config={config} settings={fakeSettings({ hideTips })} />,
+      );
+      expect(ui.container.textContent).not.toContain(
+        'Tip: Run /usage to see your plan usage.',
+      );
+      ui.unmount();
+    },
+  );
+
+  it('keeps the default spacer and no subscription usage tip for other providers', () => {
+    const ui = render(
+      <OpenTuiBanner config={fakeConfig()} settings={fakeSettings()} />,
+    );
+    const rows = [
+      ...ui.container.querySelector('[data-bordercolor]')!.children,
+    ];
+    expect(rows[1].textContent).toBe(' ');
+    expect(ui.container.textContent).not.toContain(
+      'Tip: Run /usage to see your plan usage.',
+    );
+    ui.unmount();
   });
 
   it('outlines the info panel with the palette’s default border colour', () => {

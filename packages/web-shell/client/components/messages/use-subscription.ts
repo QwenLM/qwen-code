@@ -69,23 +69,15 @@ const COPY = {
 };
 
 function membership(info: DaemonSubscriptionUserInfo): QwenSubscriptionState {
-  if (info.member_type === 'plus' || info.member_type === 'pro') {
-    return {
-      status: 'ready',
-      email: info.email,
-      plan: info.member_type === 'plus' ? 'Plus' : 'Pro',
-    };
-  }
-  if (info.member_type === 'free' || info.member_type === 'go') {
-    return {
-      status: 'purchase-required',
-      email: info.email,
-      plan: info.member_type === 'free' ? 'Free' : 'Go',
-    };
-  }
-  throw Object.assign(new Error('invalid_response'), {
-    body: { code: 'invalid_response', errorStage: 'userinfo' },
-  });
+  const memberType = info.member_type.toLowerCase();
+  return {
+    status:
+      memberType === 'plus' || memberType === 'pro'
+        ? 'ready'
+        : 'purchase-required',
+    email: info.email,
+    plan: memberType.charAt(0).toUpperCase() + memberType.slice(1),
+  };
 }
 
 function errorDetails(error: unknown): {
@@ -250,8 +242,9 @@ export function useSubscription(
     const cancelFlow = (id: string) => {
       void transport.cancelSubscriptionLogin(id).catch(() => undefined);
     };
+    let openedUrl = '';
     startPurchase.current = async () => {
-      openUrl(plansUrl.current);
+      if (!openedUrl) openUrl(plansUrl.current);
       const purchase = new AbortController();
       const deadline = setTimeout(() => purchase.abort(), 120_000);
       const purchaseSignal = AbortSignal.any([signal, purchase.signal]);
@@ -319,7 +312,6 @@ export function useSubscription(
         return;
       }
       flowId = flow.id;
-      let openedUrl = '';
       while (flow.status === 'waiting') {
         if (flow.authorizationUrl) {
           setState({

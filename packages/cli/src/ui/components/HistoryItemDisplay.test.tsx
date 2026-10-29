@@ -937,6 +937,25 @@ describe('<HistoryItemDisplay />', () => {
   });
 });
 
+it.each([
+  ['free', 'Free'],
+  ['lite', 'Lite'],
+  ['PRO', 'Pro'],
+  ['pLuS', 'Plus'],
+  ['future-plan', 'Future-plan'],
+])('uses backend membership %s as %s in the summary', (member_type, plan) => {
+  const text = subscriptionSuccessMessage(
+    {
+      sub: 'synthetic',
+      name: 'Builder',
+      email: 'builder@example.com',
+      member_type,
+    },
+    'server-model',
+  );
+  expect(text).toContain(`Qwen ${plan} is active`);
+});
+
 it.each([true, false])(
   'renders subscription styling only with an explicit presentation flag (%s)',
   async (subscriptionPresentation) => {

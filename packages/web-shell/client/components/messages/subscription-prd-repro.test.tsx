@@ -43,7 +43,8 @@ it('keeps plans and account switching available after a no-membership recheck', 
   );
   const button = (label: string) =>
     [...container!.querySelectorAll('button')].find(
-      (item) => item.textContent === label,
+      (item) =>
+        item.getAttribute('aria-label') === label || item.textContent === label,
     );
   expect(button('Check again')).toBeDefined();
   expect(button('Sign out')).toBeDefined();

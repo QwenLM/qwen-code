@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => ({
     setState: vi.fn(),
   },
   embeddedProps: { current: null as CapturedProps | null },
+  subscriptionProps: { current: null as CapturedProps | null },
   connectionError: { current: undefined as string | undefined },
   errorNotifications: { current: 0 },
 }));
@@ -55,7 +56,6 @@ const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
   getSubscriptionConfig: vi.fn(),
   activateSubscription: vi.fn(),
-  reloadModelProviders: vi.fn(),
   setSessionModel: vi.fn(),
   getRewindSnapshots: vi.fn<
     (sessionId: string) => Promise<{
@@ -96,12 +96,16 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
       return {
         listWorkspaceSessionsPage: sdkMocks.listWorkspaceSessionsPage,
         activateSubscription: sdkMocks.activateSubscription,
-        reloadModelProviders: sdkMocks.reloadModelProviders,
         updateSessionMetadata: vi.fn(async () => ({})),
         deleteSessionsData: vi.fn(async () => ({})),
       };
     }
     getSubscriptionConfig = sdkMocks.getSubscriptionConfig;
+    startSubscriptionLogin = vi.fn();
+    getSubscriptionLogin = vi.fn();
+    cancelSubscriptionLogin = vi.fn();
+    getSubscriptionUserInfo = vi.fn();
+    signOutSubscription = vi.fn(async () => ({}));
     setSessionModel = sdkMocks.setSessionModel;
     getRewindSnapshots = sdkMocks.getRewindSnapshots;
     rewindSession = sdkMocks.rewindSession;
@@ -112,60 +116,9 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
 vi.mock('@qwen-code/web-shell', async () => {
   const { useEffect, useMemo, useRef, useState } = await import('react');
   return {
-    QwenSubscriptionPanel: ({
-      onOpenExternal,
-      onOtherProviders,
-      onClose,
-      onActivate,
-      onActivated,
-      onModelSelectionRequired,
-    }: {
-      onActivate: (signal: AbortSignal) => Promise<void>;
-      onActivated: () => void;
-      onModelSelectionRequired?: (message: string, signal: AbortSignal) => void;
-      onOpenExternal: (url: string) => void;
-      onOtherProviders: () => void;
-      onClose: () => void;
-    }) => {
-      const [paid, setPaid] = useState(false);
-      const recovery = useRef(new AbortController());
-      useEffect(() => () => recovery.current.abort(), []);
-      const callbacks = useRef({ onActivate, onActivated });
-      callbacks.current = { onActivate, onActivated };
-      useEffect(() => {
-        if (!paid) return;
-        const controller = new AbortController();
-        void callbacks.current.onActivate(controller.signal).then(() => {
-          if (!controller.signal.aborted) callbacks.current.onActivated();
-        });
-        return () => controller.abort();
-      }, [paid]);
-      return (
-        <div data-testid="subscription-real">
-          <button
-            onClick={() =>
-              onOpenExternal(
-                'https://pre4-chat.qwen.ai/authorize?user_code=123&client=qwen-code',
-              )
-            }
-          >
-            Open browser
-          </button>
-          <button onClick={onOtherProviders}>Other providers</button>
-          <button onClick={onClose}>Cancel</button>
-          <button onClick={() => setPaid(true)}>Confirm paid membership</button>
-          <button
-            onClick={() =>
-              onModelSelectionRequired?.(
-                'Run /model to choose another model.',
-                recovery.current.signal,
-              )
-            }
-          >
-            Return to model command
-          </button>
-        </div>
-      );
+    QwenSubscriptionPanel: (props: CapturedProps) => {
+      mocks.subscriptionProps.current = props;
+      return <div data-testid="subscription-real" />;
     },
     WebShellWithProviders: (props: CapturedProps) => {
       mocks.embeddedProps.current = props;
@@ -217,6 +170,14 @@ vi.mock('./hooks/useVSCode.js', () => ({
 
 const mounted: RenderedApp[] = [];
 
+async function sendLegacySubscriptionEvent() {
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { type: 'qwenSubscriptionAuth' } }),
+    );
+  });
+}
+
 async function renderApp(): Promise<CapturedProps> {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -261,9 +222,6 @@ beforeEach(() => {
   sdkMocks.getSubscriptionConfig
     .mockReset()
     .mockResolvedValue({ enabled: false });
-  sdkMocks.reloadModelProviders
-    .mockReset()
-    .mockResolvedValue({ status: 'applied' });
   sdkMocks.activateSubscription.mockReset().mockResolvedValue({
     authType: 'qwen-subscription',
     modelId: 'qwen3.8-max',
@@ -284,99 +242,57 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
-  it('prefers real OAuth capability and opens authorization in the VS Code host', async () => {
-    vi.stubEnv('NODE_ENV', 'development');
-    sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
-    const props = await renderApp();
-    await act(async () =>
-      callback<(command: { command: string; input: string }) => boolean>(
-        props,
-        'onSlashCommand',
-      )({ command: 'auth', input: '' }),
-    );
-    expect(
-      document.querySelector('[data-testid="subscription-real"]'),
-    ).not.toBeNull();
-    expect(
-      document.querySelector('[data-testid="subscription-preview"]'),
-    ).toBeNull();
-    const buttons = [
-      ...document.querySelectorAll('[data-testid="subscription-real"] button'),
-    ] as HTMLButtonElement[];
-    act(() => buttons[0].click());
-    expect(postMessagesOfType('openExternalUrl')).toEqual([
-      {
-        type: 'openExternalUrl',
-        data: {
-          url: 'https://pre4-chat.qwen.ai/authorize?user_code=123&client=qwen-code',
-        },
-      },
-    ]);
-    expect(postMessagesOfType('authSucceeded')).toHaveLength(0);
-    act(() => buttons[1].click());
-    expect(postMessagesOfType('auth')).toHaveLength(1);
-    expect(
-      document.querySelector('[data-testid="subscription-real"]'),
-    ).toBeNull();
-  });
-  it('returns to the shell for /model without claiming successful model activation', async () => {
-    sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
-    const props = await renderApp();
-    await act(async () =>
-      callback<(command: { command: string; input: string }) => boolean>(
-        props,
-        'onSlashCommand',
-      )({ command: 'auth', input: '' }),
-    );
-    const recovery = [...document.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Return to model command',
-    )!;
-    await act(async () => recovery.click());
-    expect(
-      document.querySelector('[data-testid="subscription-real"]'),
-    ).toBeNull();
-    expect(sdkMocks.activateSubscription).not.toHaveBeenCalled();
-    expect(sdkMocks.reloadModelProviders).toHaveBeenCalledOnce();
-    expect(postMessagesOfType('authSucceeded')).toHaveLength(0);
-  });
+  it.each([true, false])(
+    'shows subscription slash entries only when bootstrap capability is %s',
+    async (subscriptionEnabled) => {
+      await renderApp();
+      await act(async () =>
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'webShellBootstrap',
+              data: {
+                baseUrl: 'http://localhost:4141',
+                workspaceCwd: '/workspace',
+                sessionId: 'session-1',
+                hostKind: 'panel',
+                subscriptionEnabled,
+              },
+            },
+          }),
+        ),
+      );
+      const commands = mocks.embeddedProps.current![
+        'additionalSlashCommands'
+      ] as Array<{ name: string }>;
+      for (const name of ['logout', 'upgrade']) {
+        expect(commands.some((command) => command.name === name)).toBe(
+          subscriptionEnabled,
+        );
+      }
+    },
+  );
 
-  it('does not dismiss a new auth view when an old model refresh finishes', async () => {
-    sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
-    let finish!: (value: { status: string }) => void;
-    sdkMocks.reloadModelProviders.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
-    const props = await renderApp();
-    const openAuth = () =>
-      act(async () =>
-        callback<(command: { command: string; input: string }) => boolean>(
+  it.each(['logout', 'upgrade'])(
+    'handles subscription /%s in the native host',
+    async (command) => {
+      const props = await renderApp();
+      let handled: boolean | undefined;
+      await act(async () => {
+        handled = callback<
+          (input: { command: string; input: string }) => boolean
+        >(
           props,
           'onSlashCommand',
-        )({ command: 'auth', input: '' }),
+        )({ command, input: '' });
+      });
+      expect(handled).toBe(true);
+      expect(mocks.vscode.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: command }),
       );
-    const clickButton = async (label: string) => {
-      const button = [...document.querySelectorAll('button')].find(
-        (item) => item.textContent === label,
-      )!;
-      await act(async () => button.click());
-    };
-    await openAuth();
-    await clickButton('Return to model command');
-    await clickButton('Cancel');
-    await openAuth();
-    await act(async () => finish({ status: 'applied' }));
-    expect(
-      document.querySelector('[data-testid="subscription-real"]'),
-    ).not.toBeNull();
-    expect(document.body.textContent).not.toContain(
-      'Run /model to choose another model.',
-    );
-  });
-
-  it('automatically activates the workspace after membership confirmation and returns to chat', async () => {
+    },
+  );
+  it('keeps subscription authorization out of the sidebar on a legacy selection event', async () => {
     sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
     const props = await renderApp();
     await act(async () =>
@@ -385,44 +301,216 @@ describe('EmbeddedApp host wiring', () => {
         'onSlashCommand',
       )({ command: 'auth', input: '' }),
     );
-    const confirm = [...document.querySelectorAll('button')].find(
-      (item) => item.textContent === 'Confirm paid membership',
-    )!;
-    await act(async () => {
-      confirm.click();
-      await Promise.resolve();
-    });
-    expect(sdkMocks.activateSubscription).toHaveBeenCalledWith({
-      signal: expect.any(AbortSignal),
-    });
-    expect(sdkMocks.setSessionModel).toHaveBeenCalledWith(
-      'session-1',
-      'qwen3.8-max(qwen-subscription)',
-    );
+    await sendLegacySubscriptionEvent();
     expect(
       document.querySelector('[data-testid="subscription-real"]'),
     ).toBeNull();
   });
 
-  it('opens real OAuth from unauthenticated onboarding', async () => {
-    sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
+  it('shows selected Qwen in the sidebar with VS Code theme tokens and host-owned activation', async () => {
     await renderApp();
-    act(() =>
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      ),
+    );
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('img[alt="Qwen Code"]')).not.toBeNull();
+    expect(document.body.textContent).toContain(
+      'Connect a model provider to start coding with Qwen.',
+    );
+    expect(
+      [...document.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Get Started',
+      ),
+    ).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'Supports Coding Plan, ModelStudio API Key, and OpenAI-compatible providers.',
+    );
+    const panel = mocks.subscriptionProps.current!;
+    expect(panel.style).toMatchObject({
+      '--background': 'var(--vscode-sideBar-background)',
+    });
+    const controller = new AbortController();
+    let activation!: Promise<void>;
+    await act(async () => {
+      activation = callback<(signal: AbortSignal) => Promise<void>>(
+        panel,
+        'onActivate',
+      )(controller.signal);
+    });
+    const request = postMessagesOfType('qwenSubscriptionActivate')[0]!.data as {
+      flowId: string;
+      requestId: string;
+    };
+    expect(request.flowId).toBe('flow-a');
+    expect(sdkMocks.activateSubscription).not.toHaveBeenCalled();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionActivationResult', data: request },
+        }),
+      ),
+    );
+    await expect(activation).resolves.toBeUndefined();
+  });
+
+  it('returns a signed-in account to the existing composer after the host closes a model failure', async () => {
+    await renderApp();
+    await act(async () => {
       window.dispatchEvent(
         new MessageEvent('message', {
           data: { type: 'authState', data: { authenticated: false } },
         }),
-      ),
-    );
-    const button = [...document.querySelectorAll('button')].find(
-      (item) => item.textContent === 'Get Started',
-    )!;
-    await act(async () => button.click());
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      );
+    });
     expect(
       document.querySelector('[data-testid="subscription-real"]'),
     ).not.toBeNull();
-    expect(postMessagesOfType('auth')).toHaveLength(0);
+    expect(
+      mocks.subscriptionProps.current?.onModelSelectionRequired,
+    ).toBeUndefined();
+    mocks.embeddedProps.current = null;
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'flow-a' } },
+        }),
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'authState', data: { authenticated: true } },
+        }),
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(mocks.embeddedProps.current).not.toBeNull();
+    expect(document.body.textContent).not.toContain('Signed in successfully');
+    expect(sdkMocks.setSessionModel).not.toHaveBeenCalled();
   });
+
+  it('returns a Qwen login error to the Get Started button without clearing it', async () => {
+    await renderApp();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      ),
+    );
+    await act(async () =>
+      callback<(message: string) => void>(
+        mocks.subscriptionProps.current!,
+        'onAuthError',
+      )('Could not authorize Qwen.'),
+    );
+    expect(postMessagesOfType('qwenSubscriptionError')).toEqual([
+      {
+        type: 'qwenSubscriptionError',
+        data: { flowId: 'flow-a', message: 'Could not authorize Qwen.' },
+      },
+    ]);
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'flow-a' } },
+        }),
+      );
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authError',
+            data: { message: 'Could not authorize Qwen.' },
+          },
+        }),
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe('Could not authorize Qwen.');
+    expect(alert?.previousElementSibling?.textContent).toBe('Get Started');
+  });
+
+  it('ignores stale close events and keeps the current sidebar flow', async () => {
+    await renderApp();
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      ),
+    );
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionClosed', data: { flowId: 'stale' } },
+        }),
+      ),
+    );
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    await act(async () =>
+      callback<() => void>(
+        mocks.subscriptionProps.current!,
+        'onOtherProviders',
+      )(),
+    );
+    expect(postMessagesOfType('qwenSubscriptionOtherProviders')).toEqual([
+      { type: 'qwenSubscriptionOtherProviders', data: { flowId: 'flow-a' } },
+    ]);
+  });
+
+  it.each(['auth', 'Get Started'])(
+    'opens the native provider picker from %s even when subscription OAuth is enabled',
+    async (entry) => {
+      sdkMocks.getSubscriptionConfig.mockResolvedValue({ enabled: true });
+      const props = await renderApp();
+      if (entry === 'auth') {
+        await act(async () =>
+          callback<(command: { command: string; input: string }) => boolean>(
+            props,
+            'onSlashCommand',
+          )({ command: 'auth', input: '' }),
+        );
+      } else {
+        await act(async () =>
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: { type: 'authState', data: { authenticated: false } },
+            }),
+          ),
+        );
+        const button = [...document.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Get Started',
+        );
+        expect(button).toBeDefined();
+        await act(async () => button!.click());
+      }
+      expect(postMessagesOfType('auth')).toEqual([
+        { type: 'auth', data: { subscriptionEnabled: true } },
+      ]);
+      expect(
+        document.querySelector('[data-testid="subscription-real"]'),
+      ).toBeNull();
+      expect(sdkMocks.activateSubscription).not.toHaveBeenCalled();
+    },
+  );
+
   it('waits for capability before opening auth and never falls back to a preview', async () => {
     let resolve!: (value: { enabled: boolean }) => void;
     sdkMocks.getSubscriptionConfig.mockReturnValue(
@@ -442,10 +530,15 @@ describe('EmbeddedApp host wiring', () => {
       document.querySelector('[data-testid="subscription-real"]'),
     ).toBeNull();
     await act(async () => resolve({ enabled: true }));
+    expect(postMessagesOfType('auth')).toHaveLength(1);
     expect(
       document.querySelector('[data-testid="subscription-real"]'),
-    ).not.toBeNull();
-    expect(postMessagesOfType('auth')).toHaveLength(0);
+    ).toBeNull();
+    await sendLegacySubscriptionEvent();
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).toBeNull();
+    expect(postMessagesOfType('auth')).toHaveLength(1);
   });
 
   it('shows the existing error on capability failure and allows another attempt', async () => {
@@ -466,9 +559,11 @@ describe('EmbeddedApp host wiring', () => {
         'onSlashCommand',
       )({ command: 'auth', input: '' });
     });
+    expect(postMessagesOfType('auth')).toHaveLength(1);
+    await sendLegacySubscriptionEvent();
     expect(
       document.querySelector('[data-testid="subscription-real"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 

@@ -39,33 +39,24 @@ export function subscriptionAuthorizationUrl(
 export type SubscriptionState =
   | { status: 'waiting' }
   | { status: 'error' | 'timeout' | 'query-error'; message: string }
-  | { status: 'ready'; plan: 'Plus' | 'Pro' }
+  | { status: 'ready'; plan: string }
   | {
       status: 'purchase-required';
-      plan: 'Free' | 'Go';
+      plan: string;
       message?: string;
       canCheckAgain?: boolean;
     };
 
 function membershipState(info: SubscriptionUserInfo): SubscriptionState {
-  switch (info.member_type) {
-    case 'plus':
-      return { status: 'ready', plan: 'Plus' };
-    case 'pro':
-      return { status: 'ready', plan: 'Pro' };
-    case 'free':
-      return { status: 'purchase-required', plan: 'Free' };
-    case 'go':
-      return { status: 'purchase-required', plan: 'Go' };
-    default:
-      throw new SubscriptionOAuthError(
-        'invalid_response',
-        undefined,
-        undefined,
-        undefined,
-        'userinfo',
-      );
-  }
+  const memberType = info.member_type.toLowerCase();
+  const plan = memberType.charAt(0).toUpperCase() + memberType.slice(1);
+  return {
+    status:
+      memberType === 'plus' || memberType === 'pro'
+        ? 'ready'
+        : 'purchase-required',
+    plan,
+  };
 }
 
 function authenticationError(
@@ -212,8 +203,9 @@ export function useSubscription({
       setState(next);
       return next;
     };
+    let authorizationStarted = false;
     startPurchase.current = async () => {
-      if (!suppressBrowserLaunch) {
+      if (!suppressBrowserLaunch && !authorizationStarted) {
         void openBrowserSecurely(plansUrl.current).catch(() => undefined);
       }
       const purchase = new AbortController();
@@ -267,6 +259,7 @@ export function useSubscription({
         saved ??
         (await activeSession.signIn((device) => {
           signal.throwIfAborted();
+          authorizationStarted = true;
           const url = subscriptionAuthorizationUrl(device);
           setDeviceAuth({ ...device, verification_uri_complete: url });
           if (!suppressBrowserLaunch) {

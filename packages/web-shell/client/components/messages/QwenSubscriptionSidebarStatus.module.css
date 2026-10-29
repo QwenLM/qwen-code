@@ -1,0 +1,83 @@
+.content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.content p {
+  margin: 0;
+}
+
+.message,
+.actions {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.success {
+  color: var(--success-color);
+}
+
+.error,
+.content > p[role='alert'] {
+  color: var(--error-color);
+}
+
+.muted,
+.description,
+.content > p[role='status'] {
+  color: var(--muted-foreground);
+}
+
+.actionGroup,
+.linkGroup {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.content .action,
+.content > button {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: 32px;
+  padding: 6px 12px;
+  font: inherit;
+  font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.description {
+  font-size: 12px;
+}
+
+.content .link {
+  display: block;
+  width: 100%;
+  height: auto;
+  padding: 0;
+  color: var(
+    --vscode-textLink-foreground,
+    var(--link-color, var(--agent-blue-500))
+  );
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

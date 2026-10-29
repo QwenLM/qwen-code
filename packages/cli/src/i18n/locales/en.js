@@ -3035,4 +3035,15 @@ export default {
   'Could not open your browser. Visit {{url}}':
     'Could not open your browser. Visit {{url}}',
   'Qwen subscription plans: {{url}}': 'Qwen subscription plans: {{url}}',
+  'Sign out of your Qwen account': 'Sign out of your Qwen account',
+  'No active Qwen Subscription session. Use /auth to change providers.':
+    'No active Qwen Subscription session. Use /auth to change providers.',
+  'Wait for the current response to finish before signing out.':
+    'Wait for the current response to finish before signing out.',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    'You are signed out, but the saved authentication selection could not be cleared.',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    'Signed out of Qwen. Use /auth to sign in with another account.',
+  'Tip: Run /usage to see your plan usage.':
+    'Tip: Run /usage to see your plan usage.',
 };

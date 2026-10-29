@@ -102,41 +102,51 @@ it('uses the preproduction browser URL without exposing the device code', () => 
   );
 });
 
-it('opens authorization then Free plans using real userinfo and polls', async () => {
-  mocks.getUserInfo.mockResolvedValueOnce(null);
-  mocks.signIn.mockImplementation(async (onDevice) => {
-    onDevice(device);
-    return free;
-  });
-  const { result, unmount } = renderHook(() => useSubscription());
-  await flush();
-  expect(result.current.email).toBe(free.email);
-  expect(result.current.state).toEqual({
-    status: 'purchase-required',
-    plan: 'Free',
-  });
-  expect(result.current.canCheckAgain).toBe(false);
-  expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
-    'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-  ]);
-  act(() => result.current.openPlans());
-  expect(mocks.browser).toHaveBeenCalledTimes(3);
-  expect(mocks.browser).toHaveBeenLastCalledWith(
-    'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-  );
-  expect(mocks.signIn).toHaveBeenCalledOnce();
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(5000);
-  });
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
-  const signal: AbortSignal = mocks.signIn.mock.calls[0][1];
-  unmount();
-  expect(signal.aborted).toBe(true);
-  const calls = mocks.getUserInfo.mock.calls.length;
-  await vi.advanceTimersByTimeAsync(10000);
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(calls);
-});
+it.each([
+  ['free', 'Free'],
+  ['FREE', 'Free'],
+  ['LiTe', 'Lite'],
+  ['go', 'Go'],
+  ['lite', 'Lite'],
+  ['enterprise', 'Enterprise'],
+  ['VIP', 'Vip'],
+])(
+  'opens only authorization for fresh %s membership and keeps polling',
+  async (member_type, plan) => {
+    mocks.getUserInfo.mockResolvedValueOnce(null);
+    mocks.signIn.mockImplementation(async (onDevice) => {
+      onDevice(device);
+      return { ...free, member_type };
+    });
+    const { result, unmount } = renderHook(() => useSubscription());
+    await flush();
+    expect(result.current.email).toBe(free.email);
+    expect(result.current.state).toEqual({
+      status: 'purchase-required',
+      plan,
+    });
+    expect(result.current.canCheckAgain).toBe(false);
+    expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+      'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    ]);
+    act(() => result.current.openPlans());
+    expect(mocks.browser).toHaveBeenCalledTimes(2);
+    expect(mocks.browser).toHaveBeenLastCalledWith(
+      'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+    );
+    expect(mocks.signIn).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
+    const signal: AbortSignal = mocks.signIn.mock.calls[0][1];
+    unmount();
+    expect(signal.aborted).toBe(true);
+    const calls = mocks.getUserInfo.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(calls);
+  },
+);
 
 it('resumes saved membership without requesting another device code', async () => {
   const { result, unmount } = renderHook(() =>
@@ -213,12 +223,14 @@ it('stops on query failure, then can discover a purchased plan without reauthori
   unmount();
 });
 
-it('does not treat an unknown membership as Free or open plans', async () => {
+it('displays an unknown membership by its returned name', async () => {
   mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'unknown' });
   const { result, unmount } = renderHook(() => useSubscription());
   await flush();
-  expect(result.current.state.status).toBe('query-error');
-  expect(mocks.browser).not.toHaveBeenCalled();
+  expect(result.current.state).toEqual({
+    status: 'purchase-required',
+    plan: 'Unknown',
+  });
   unmount();
 });
 
@@ -334,6 +346,34 @@ it('recovers a first userinfo failure using saved credentials and starts purchas
   unmount();
 });
 
+it('does not reopen plans when the first membership query after authorization is retried', async () => {
+  mocks.getUserInfo.mockResolvedValueOnce(null).mockResolvedValue(free);
+  mocks.signIn.mockImplementation(async (onDevice) => {
+    onDevice(device);
+    throw new SubscriptionOAuthError(
+      'network_error',
+      undefined,
+      undefined,
+      undefined,
+      'userinfo',
+    );
+  });
+  const { result, unmount } = renderHook(() => useSubscription());
+  await flush();
+  expect(result.current.state.status).toBe('query-error');
+  act(() => result.current.checkAgain());
+  await flush();
+  expect(result.current.state.status).toBe('purchase-required');
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(3);
+  expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+  ]);
+  unmount();
+});
+
 it('keeps exchange invalid_grant distinct from refresh session expiry', async () => {
   mocks.getUserInfo.mockResolvedValue(null);
   mocks.signIn.mockRejectedValue(
@@ -442,7 +482,7 @@ it('activates a paid account, hides private errors, and permits retry', async ()
   hook.unmount();
 });
 
-it.each(['plus', 'pro'] as const)(
+it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
   'automatically activates restored %s membership once',
   async (member_type) => {
     mocks.getUserInfo.mockResolvedValue({ ...free, member_type });

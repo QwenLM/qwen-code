@@ -5,6 +5,27 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import type {
+  NativeSubscriptionActionOptions,
+  NativeSubscriptionActionResult,
+} from '../handlers/native-subscription-auth.js';
+
+const subscriptionMocks = vi.hoisted(() => ({
+  pickModel: vi.fn<() => Promise<string | undefined>>(),
+  cancelModelPicker: vi.fn(),
+  run: vi.fn<
+    (
+      options: NativeSubscriptionActionOptions,
+    ) => Promise<NativeSubscriptionActionResult>
+  >(),
+  callback: undefined as
+    | ((action?: 'logout' | 'upgrade') => Promise<void>)
+    | undefined,
+}));
+vi.mock('../handlers/native-subscription-auth.js', () => ({
+  runNativeSubscriptionAction: subscriptionMocks.run,
+}));
 
 const {
   mockConfigChangeHandlers,
@@ -198,6 +219,11 @@ vi.mock('./preAuthHostGateProbe.js', () => ({
 }));
 
 vi.mock('vscode', () => ({
+  CancellationTokenSource: class {
+    token = {};
+    cancel = subscriptionMocks.cancelModelPicker;
+    dispose = vi.fn();
+  },
   ExtensionMode: {
     Production: 1,
     Development: 2,
@@ -224,6 +250,7 @@ vi.mock('vscode', () => ({
     },
   },
   window: {
+    showQuickPick: subscriptionMocks.pickModel,
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
@@ -354,6 +381,11 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
 vi.mock('./MessageHandler.js', () => ({
   MessageHandler: class {
     setAuthInteractiveHandler = vi.fn();
+    setSubscriptionAuthHandler = vi.fn(
+      (callback: (action?: 'logout' | 'upgrade') => Promise<void>) => {
+        subscriptionMocks.callback = callback;
+      },
+    );
     setCurrentConversationId = vi.fn();
     getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
@@ -2273,6 +2305,486 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       },
       'initializeAgentConnection',
     ).mockResolvedValue(undefined);
+  });
+
+  describe('native subscription host ownership', () => {
+    beforeEach(() => {
+      subscriptionMocks.run.mockReset();
+      subscriptionMocks.pickModel.mockReset();
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    async function setup(sessionId: string | null = 'session-a') {
+      const attached = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context: createSessionStateContext(
+          sessionId
+            ? { [WEB_SHELL_SESSION_KEY_PREFIX + '/workspace-a']: sessionId }
+            : {},
+        ),
+      });
+      await attached.messageHandler?.({ type: 'webShellReady' });
+      attached.postMessage.mockClear();
+      return attached;
+    }
+
+    function stubActivation(
+      options: Pick<NativeSubscriptionActionOptions, 'transport'>,
+    ) {
+      const client = options.transport as DaemonClient;
+      const workspace = client.workspaceByCwd('/workspace-a');
+      const workspaceByCwd = vi
+        .spyOn(client, 'workspaceByCwd')
+        .mockReturnValue(workspace);
+      const activate = vi
+        .spyOn(workspace, 'activateSubscription')
+        .mockResolvedValue({
+          authType: 'qwen-subscription',
+          modelId: 'qwen3.8-max',
+          runtimeSync: { status: 'applied' },
+        });
+      const setModel = vi
+        .spyOn(client, 'setSessionModel')
+        .mockResolvedValue({});
+      return { workspaceByCwd, activate, setModel };
+    }
+
+    async function openSidebar(sessionId: string | null = 'session-a') {
+      const attached = await setup(sessionId);
+      await subscriptionMocks.callback!();
+      const event = attached.postMessage.mock.calls
+        .map(
+          ([message]) => message as { type: string; data: { flowId: string } },
+        )
+        .find((message) => message.type === 'qwenSubscriptionAuth');
+      expect(event?.data.flowId).toBeTypeOf('string');
+      const owner = (
+        attached.provider as unknown as {
+          subscriptionRuntime: { client: DaemonClient };
+        }
+      ).subscriptionRuntime;
+      const calls = stubActivation({ transport: owner.client });
+      return { ...attached, flowId: event!.data.flowId, calls };
+    }
+
+    it('opens selected Qwen authorization in the sidebar and activates through its captured owner', async () => {
+      const attached = await openSidebar();
+      expect(subscriptionMocks.run).not.toHaveBeenCalled();
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionActivate',
+        data: {
+          flowId: attached.flowId,
+          requestId: 'request',
+          modelId: 'qwen3.8-max',
+        },
+      });
+      expect(attached.calls.workspaceByCwd).toHaveBeenCalledWith(
+        '/workspace-a',
+      );
+      expect(attached.calls.activate).toHaveBeenCalledWith({
+        signal: expect.any(AbortSignal),
+        modelId: 'qwen3.8-max',
+      });
+      expect(attached.calls.setModel).toHaveBeenCalledWith(
+        'session-a',
+        'qwen3.8-max(qwen-subscription)',
+      );
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'authSuccess',
+      });
+      expect(
+        (attached.provider as unknown as { authState: boolean }).authState,
+      ).toBe(true);
+    });
+
+    it('clears the host auth cache when the sidebar signs out', async () => {
+      const attached = await openSidebar();
+      (attached.provider as unknown as { authState: boolean }).authState = true;
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionSignedOut',
+        data: { flowId: attached.flowId },
+      });
+      expect(
+        (attached.provider as unknown as { authState: boolean }).authState,
+      ).toBe(false);
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'authState',
+        data: { authenticated: false },
+      });
+    });
+
+    it('keeps failed sidebar activation visible and never binds the model or reports success', async () => {
+      const attached = await openSidebar();
+      attached.calls.activate.mockResolvedValue({
+        authType: 'qwen-subscription',
+        modelId: 'qwen3.8-max',
+        runtimeSync: { status: 'failed' },
+      });
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId: attached.flowId, requestId: 'request' },
+      });
+      expect(attached.calls.setModel).not.toHaveBeenCalled();
+      expect(attached.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'qwenSubscriptionActivationResult',
+          data: expect.objectContaining({ error: true }),
+        }),
+      );
+      expect(attached.postMessage).not.toHaveBeenCalledWith({
+        type: 'authSuccess',
+      });
+      expect(attached.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'qwenSubscriptionClosed' }),
+      );
+    });
+
+    it('sends a sidebar login failure to onboarding without a trailing cancellation', async () => {
+      const attached = await openSidebar();
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionError',
+        data: {
+          flowId: attached.flowId,
+          message: '无法申请授权链接，请重新登录。',
+        },
+      });
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'authError',
+        data: { message: '无法申请授权链接，请重新登录。' },
+      });
+      expect(attached.postMessage).not.toHaveBeenCalledWith({
+        type: 'authCancelled',
+      });
+    });
+
+    it.each([
+      'session',
+      'workspace',
+      'dispose',
+      'cancel',
+      'command-auth',
+      'webview-auth',
+      'no-folder',
+    ] as const)('ignores late sidebar activation after %s', async (change) => {
+      const attached = await openSidebar();
+      let finish!: () => void;
+      attached.calls.activate.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = () =>
+              resolve({
+                authType: 'qwen-subscription',
+                modelId: 'qwen3.8-max',
+                runtimeSync: { status: 'applied' },
+              });
+          }),
+      );
+      const pending = attached.messageHandler?.({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId: attached.flowId, requestId: 'request' },
+      });
+      await vi.waitFor(() =>
+        expect(attached.calls.activate).toHaveBeenCalledOnce(),
+      );
+      if (change === 'session')
+        await attached.messageHandler?.({
+          type: 'webShellSessionChanged',
+          data: { workspaceCwd: '/workspace-a', sessionId: 'session-b' },
+        });
+      else if (change === 'workspace')
+        await daemonMocks.instances[0].start('', '/workspace-b');
+      else if (change === 'no-folder') {
+        setWorkspaceFolders([]);
+        await attached.messageHandler?.({ type: 'webShellReady' });
+      } else if (change === 'dispose') attached.provider.dispose();
+      else if (change === 'command-auth')
+        await attached.provider.startInteractiveAuth();
+      else if (change === 'webview-auth')
+        await attached.messageHandler?.({
+          type: 'auth',
+          data: { subscriptionEnabled: true },
+        });
+      else
+        await attached.messageHandler?.({
+          type: 'qwenSubscriptionCancel',
+          data: { flowId: attached.flowId },
+        });
+      finish();
+      await pending;
+      expect(attached.calls.setModel).not.toHaveBeenCalled();
+      expect(attached.postMessage).not.toHaveBeenCalledWith({
+        type: 'authSuccess',
+      });
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'qwenSubscriptionClosed',
+        data: { flowId: attached.flowId },
+      });
+    });
+
+    it('ignores an activation message for another sidebar flow', async () => {
+      const attached = await openSidebar();
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId: 'stale', requestId: 'request' },
+      });
+      expect(attached.calls.activate).not.toHaveBeenCalled();
+    });
+
+    it.each(
+      [null, 'session-a'].flatMap((sessionId) =>
+        [
+          'subscription_models_unavailable',
+          'subscription_model_unavailable',
+        ].map((code) => ({ sessionId, code })),
+      ),
+    )(
+      'returns $sessionId to the composer after $code without choosing a model',
+      async ({ sessionId, code }) => {
+        const attached = await openSidebar(sessionId);
+        attached.calls.activate.mockRejectedValueOnce({
+          body: { code, modelId: 'old-model', models: ['qwen3.8-plus'] },
+        });
+        await attached.messageHandler?.({
+          type: 'qwenSubscriptionActivate',
+          data: { flowId: attached.flowId, requestId: 'request' },
+        });
+        expect(subscriptionMocks.pickModel).not.toHaveBeenCalled();
+        expect(attached.calls.activate).toHaveBeenCalledOnce();
+        expect(attached.calls.setModel).not.toHaveBeenCalled();
+        expect(attached.postMessage).toHaveBeenCalledWith({
+          type: 'qwenSubscriptionClosed',
+          data: { flowId: attached.flowId },
+        });
+        expect(attached.postMessage).toHaveBeenCalledWith({
+          type: 'authState',
+          data: { authenticated: true },
+        });
+        expect(
+          (attached.provider as unknown as { authState: boolean }).authState,
+        ).toBe(true);
+        expect(attached.postMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'qwenSubscriptionActivationResult' }),
+        );
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authSuccess',
+        });
+      },
+    );
+
+    it.each(['subscription_required', 'subscription_query_failed'])(
+      'keeps %s in the subscription flow',
+      async (code) => {
+        const attached = await openSidebar();
+        attached.calls.activate.mockRejectedValueOnce({ body: { code } });
+        await attached.messageHandler?.({
+          type: 'qwenSubscriptionActivate',
+          data: { flowId: attached.flowId, requestId: 'request' },
+        });
+        expect(attached.postMessage).toHaveBeenCalledWith({
+          type: 'qwenSubscriptionActivationResult',
+          data: {
+            flowId: attached.flowId,
+            requestId: 'request',
+            error: true,
+            body: { code, modelId: undefined },
+          },
+        });
+        expect(attached.postMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'qwenSubscriptionClosed' }),
+        );
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authState',
+          data: { authenticated: true },
+        });
+      },
+    );
+
+    it.each(['session', 'workspace', 'cancel'])(
+      'ignores a late model failure after %s',
+      async (change) => {
+        const attached = await openSidebar();
+        let fail!: () => void;
+        attached.calls.activate.mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              fail = () =>
+                reject({ body: { code: 'subscription_models_unavailable' } });
+            }),
+        );
+        const pending = attached.messageHandler?.({
+          type: 'qwenSubscriptionActivate',
+          data: { flowId: attached.flowId, requestId: 'request' },
+        });
+        await vi.waitFor(() =>
+          expect(attached.calls.activate).toHaveBeenCalledOnce(),
+        );
+        if (change === 'session')
+          await attached.messageHandler?.({
+            type: 'webShellSessionChanged',
+            data: { workspaceCwd: '/workspace-a', sessionId: 'session-b' },
+          });
+        else if (change === 'workspace')
+          await daemonMocks.instances[0].start('', '/workspace-b');
+        else
+          await attached.messageHandler?.({
+            type: 'qwenSubscriptionCancel',
+            data: { flowId: attached.flowId },
+          });
+        fail();
+        await pending;
+        expect(attached.calls.setModel).not.toHaveBeenCalled();
+        expect(subscriptionMocks.pickModel).not.toHaveBeenCalled();
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authState',
+          data: { authenticated: true },
+        });
+      },
+    );
+
+    it.each(['logout', 'upgrade'] as const)(
+      'runs public %s action in the native controller',
+      async (action) => {
+        const attached = await setup();
+        subscriptionMocks.run.mockResolvedValue({
+          kind: action === 'logout' ? 'signed-out' : 'upgrade-opened',
+        });
+        await attached.provider.startSubscriptionAction(action);
+        expect(subscriptionMocks.run).toHaveBeenCalledWith(
+          expect.objectContaining({ action, signal: expect.any(AbortSignal) }),
+        );
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authSuccess',
+        });
+        if (action === 'logout')
+          expect(attached.postMessage).toHaveBeenCalledWith({
+            type: 'authState',
+            data: { authenticated: false },
+          });
+      },
+    );
+
+    it('preserves a pending logout and refuses a concurrent upgrade action', async () => {
+      const attached = await setup();
+      let finish!: (result: NativeSubscriptionActionResult) => void;
+      subscriptionMocks.run.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const pending = attached.provider.startSubscriptionAction('logout');
+      const previousSignal = subscriptionMocks.run.mock.calls[0]![0].signal;
+      subscriptionMocks.run.mockResolvedValueOnce({ kind: 'upgrade-opened' });
+      await attached.provider.startSubscriptionAction('upgrade');
+      expect(previousSignal.aborted).toBe(false);
+      expect(subscriptionMocks.run).toHaveBeenCalledOnce();
+      finish({ kind: 'signed-out' });
+      await pending;
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'authState',
+        data: { authenticated: false },
+      });
+      expect(attached.postMessage).not.toHaveBeenCalledWith({
+        type: 'authSuccess',
+      });
+    });
+
+    it('allows a palette action while a newly opened provider is still bootstrapping', async () => {
+      const attached = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context: createSessionStateContext({}),
+      });
+      subscriptionMocks.run.mockResolvedValue({ kind: 'upgrade-opened' });
+      let failure: unknown;
+      const pending = attached.provider
+        .startSubscriptionAction('upgrade')
+        .catch((error: unknown) => {
+          failure = error;
+        });
+      await attached.messageHandler?.({ type: 'webShellReady' });
+      await pending;
+      expect(failure).toBeUndefined();
+      expect(subscriptionMocks.run).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'upgrade' }),
+      );
+    });
+
+    it.each(['dispose', 'no-folder'] as const)(
+      'releases a pending palette action on bootstrap %s',
+      async (reason) => {
+        const attached = await setupAttachedProvider({
+          captureMessageHandler: true,
+          context: createSessionStateContext({}),
+        });
+        const pending = attached.provider
+          .startSubscriptionAction('upgrade')
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        if (reason === 'dispose') attached.provider.dispose();
+        else {
+          setWorkspaceFolders([]);
+          await attached.messageHandler?.({ type: 'webShellReady' });
+        }
+        expect(await pending).toBeInstanceOf(Error);
+        expect(subscriptionMocks.run).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['cancelled', 'upgrade-opened', 'signed-out'] as const)(
+      'reports native %s without a success event or sidebar transition',
+      async (kind) => {
+        const attached = await setup();
+        subscriptionMocks.run.mockResolvedValue({ kind });
+        const result = await subscriptionMocks.callback!('upgrade');
+        expect(result).toBeUndefined();
+        expect(attached.postMessage).toHaveBeenCalledWith(
+          kind === 'signed-out'
+            ? { type: 'authState', data: { authenticated: false } }
+            : { type: 'authCancelled' },
+        );
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authSuccess',
+        });
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'qwenSubscriptionAuth',
+        });
+      },
+    );
+
+    it.each(['session', 'workspace', 'dispose'] as const)(
+      'ignores a late account action after %s changes',
+      async (change) => {
+        const attached = await setup();
+        let finish!: (result: NativeSubscriptionActionResult) => void;
+        subscriptionMocks.run.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        );
+        const pending = subscriptionMocks.callback!('logout');
+        const signal = subscriptionMocks.run.mock.calls[0]![0].signal;
+        if (change === 'session') {
+          await attached.messageHandler?.({
+            type: 'webShellSessionChanged',
+            data: { workspaceCwd: '/workspace-a', sessionId: 'session-b' },
+          });
+        } else if (change === 'workspace') {
+          await daemonMocks.instances[0].start('', '/workspace-b');
+        } else {
+          attached.provider.dispose();
+        }
+        expect(signal.aborted).toBe(true);
+        finish({ kind: 'signed-out' });
+        await expect(pending).resolves.toBeUndefined();
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authState',
+          data: { authenticated: false },
+        });
+      },
+    );
   });
 
   it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {

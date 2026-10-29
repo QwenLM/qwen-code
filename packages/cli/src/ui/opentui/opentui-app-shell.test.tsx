@@ -50,6 +50,7 @@ import {
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { C } from './theme.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   hasSlashCommandPathSeparator,
@@ -4103,13 +4104,69 @@ it('shows subscription hints and keeps /usage on the normal command dispatcher',
     '  Type your request, or /usage',
   );
   expect(document.body.textContent).toContain(
-    '/usage  /status  /upgrade  /auth',
+    '/usage  /status  /upgrade  /logout',
   );
+  const commands = ['/usage', '/status', '/upgrade', '/logout'];
+  const hints = [...document.querySelectorAll('[data-p]')].find(
+    (element) => element.textContent === 'Try:  ' + commands.join('  '),
+  )!;
+  expect(hints).toBeDefined();
+  const hintStyles = JSON.parse(hints.getAttribute('data-p')!) as {
+    attributes?: number;
+  };
+  expect((hintStyles.attributes ?? 0) & 8).toBe(0);
+  expect([...hints.children].map((element) => element.textContent)).toEqual(
+    commands,
+  );
+  for (const [index, element] of [...hints.children].entries()) {
+    const styles = JSON.parse(element.getAttribute('data-p')!) as {
+      attributes?: number;
+      fg?: string;
+    };
+    expect((styles.attributes ?? 0) & 8).toBe(8);
+    expect(styles.fg).toBe(C.purple);
+    if (index < commands.length - 1) {
+      expect(element.nextSibling?.nodeType).toBe(Node.TEXT_NODE);
+      expect(element.nextSibling?.textContent).toBe('  ');
+    }
+  }
   await submit('/usage');
   expect(mocks.state.handledTexts).toEqual(['/usage']);
   expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /auth',
+    '/usage  /status  /upgrade  /logout',
   );
+});
+
+it('restores hints after re-login and ignores inputs from the previous account session', async () => {
+  const ui = renderApp({
+    config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
+    initialDialog: { dialog: 'auth' },
+    startupHistory: [
+      { id: 1, type: 'user', text: 'old conversation' },
+      { id: 2, type: 'user', text: '/logout' },
+    ],
+    userMessages: ['old conversation', '/logout'],
+  });
+  await settle();
+  const host = mocks.state.host as OpenTuiAppHost;
+  act(() => {
+    host.addItem(
+      { type: 'info', text: 'new login', presentation: 'subscription-success' },
+      Date.now(),
+    );
+    (mocks.state.dialogProps?.['onSubscriptionActivated'] as () => void)();
+    (mocks.state.dialogProps?.['onClose'] as () => void)();
+  });
+  await settle();
+  expect(document.body.textContent).toContain(
+    '/usage  /status  /upgrade  /logout',
+  );
+  act(() => (mocks.state.inputProps?.['onInputActivity'] as () => void)());
+  await settle();
+  expect(document.body.textContent).not.toContain(
+    '/usage  /status  /upgrade  /logout',
+  );
+  ui.unmount();
 });
 
 it('keeps subscription hints dismissed after input activity and response completion', async () => {
@@ -4127,19 +4184,19 @@ it('keeps subscription hints dismissed after input activity and response complet
   const ui = render(<OpenTuiApp {...props} />);
   await settle();
   expect(document.body.textContent).toContain(
-    '/usage  /status  /upgrade  /auth',
+    '/usage  /status  /upgrade  /logout',
   );
   act(() => (mocks.state.inputProps?.['onInputActivity'] as () => void)());
   await settle();
   expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /auth',
+    '/usage  /status  /upgrade  /logout',
   );
   ui.rerender(<OpenTuiApp {...props} streaming />);
   await settle();
   ui.rerender(<OpenTuiApp {...props} streaming={false} />);
   await settle();
   expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /auth',
+    '/usage  /status  /upgrade  /logout',
   );
 });
 
@@ -4157,6 +4214,6 @@ it('does not show subscription hints when startup resumes a saved conversation',
   });
   await settle();
   expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /auth',
+    '/usage  /status  /upgrade  /logout',
   );
 });

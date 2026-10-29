@@ -23,6 +23,8 @@ Available models come from the subscription service without a client model allow
 
 Local clients using the same effective Qwen configuration directory can reuse saved credentials. Remote or isolated daemons may use a different directory. Credentials refresh automatically where possible; sign in again if the session can no longer be refreshed. Development subscription sessions also enable built-in `web_search` through the staging MCP service using the current login token. No separate search key is needed; explicit search settings and permissions still apply. See [Web Search](../../developers/tools/web-search.md).
 
+To switch Qwen accounts in the development terminal, run `/logout`, then select **Qwen Account with Subscription** in the authentication picker and authorize the intended account in your browser. Logout removes the local membership credentials and revokes the refresh token. If remote revocation fails, local logout still takes effect and a warning is shown. Wait for the current response to finish before logging out. API-key configurations are preserved; use `/auth` to switch to an API-key provider without logging out of your membership account.
+
 ## ☁️ Option 1: QwenCloud
 
 The official platform entry. Choose it when your API key comes from 千问AI平台 (China) or QwenCloud (International).

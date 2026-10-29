@@ -24,6 +24,7 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { AuthState } from '../types.js';
 import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 
 const activate = vi.hoisted(() => vi.fn());
@@ -77,7 +78,7 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
     syncAfterAuthRefresh: vi.fn(),
   };
   return {
-    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getAuthType: vi.fn<() => AuthType | undefined>(() => AuthType.USE_OPENAI),
     getUsageStatisticsEnabled: vi.fn(() => false),
     reloadModelProvidersConfig: vi.fn(),
     syncModelSelection: vi.fn(),
@@ -124,6 +125,26 @@ describe('useAuthCommand', () => {
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
     expect(result.current.authError).toBe(null);
+  });
+
+  it('resets authentication UI after logout before opening the picker', () => {
+    const config = createConfig();
+    const onAuthChange = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(
+        createSettings() as never,
+        config as never,
+        vi.fn(),
+        onAuthChange,
+      ),
+    );
+    act(() => result.current.setAuthState(AuthState.Authenticated));
+    config.getAuthType.mockReturnValue(undefined);
+    act(() => result.current.openAuthDialog());
+    expect(result.current.authState).toBe(AuthState.Unauthenticated);
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.pendingAuthType).toBeUndefined();
+    expect(onAuthChange).toHaveBeenCalledOnce();
   });
 
   it('keeps first-time authentication open after saving only a preset image model', async () => {

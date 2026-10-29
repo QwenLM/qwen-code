@@ -1131,7 +1131,8 @@ export const useSlashCommandProcessor = (
                 addItem: addItemWithRecording,
                 isIdleRef:
                   commandToExecute.kind === CommandKind.BUILT_IN &&
-                  commandToExecute.name === 'restore' &&
+                  (commandToExecute.name === 'restore' ||
+                    commandToExecute.name === 'logout') &&
                   isCurrentSubmission
                     ? {
                         get current() {

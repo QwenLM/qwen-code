@@ -20,6 +20,7 @@ import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
 import { QwenSubscriptionFlow } from './QwenSubscriptionPanel';
+import { DialogShell } from '../dialogs/DialogShell';
 import { Checkbox } from '../ui/checkbox';
 import {
   Field,
@@ -59,6 +60,7 @@ type AuthStep =
   | 'advancedConfig';
 
 interface AuthMessageProps {
+  dialog?: boolean;
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
@@ -155,6 +157,7 @@ export function AuthMessage({
   onModelActivated,
   onClose,
   allowAdd = true,
+  dialog = false,
 }: AuthMessageProps) {
   const allowAddRef = useRef(allowAdd);
   allowAddRef.current = allowAdd;
@@ -226,6 +229,8 @@ export function AuthMessage({
   }, [workspaceActions]);
 
   const groups = useMemo(() => catalog?.groups ?? [], [catalog]);
+  const hasSubscriptionEntry = allowAdd && subscriptionEnabled;
+  const groupOffset = hasSubscriptionEntry ? 1 : 0;
   const providers = useMemo(() => {
     const ids =
       groups.find((group: AuthGroup) => group.id === groupId)?.providerIds ??
@@ -564,7 +569,11 @@ export function AuthMessage({
 
   const activate = useCallback(() => {
     if (view === 'groups') {
-      const group = groups[groupIndex];
+      if (hasSubscriptionEntry && groupIndex === 0) {
+        setSubscriptionReal(true);
+        return;
+      }
+      const group = groups[groupIndex - groupOffset];
       if (!group) return;
       if (group.id === 'custom') {
         const customProvider = group.providerIds
@@ -635,6 +644,8 @@ export function AuthMessage({
     currentStep,
     catalog,
     goNext,
+    hasSubscriptionEntry,
+    groupOffset,
     groupIndex,
     groups,
     optionIndex,
@@ -1159,8 +1170,14 @@ export function AuthMessage({
     if (view === 'groups') {
       return (
         <>
-          {allowAdd && subscriptionEnabled && (
-            <QwenSubscriptionEntry onClick={() => setSubscriptionReal(true)} />
+          {hasSubscriptionEntry && (
+            <QwenSubscriptionEntry
+              selected={groupIndex === 0}
+              onClick={() => {
+                setGroupIndex(0);
+                setSubscriptionReal(true);
+              }}
+            />
           )}
           {renderOptions(
             groups.map((group: AuthGroup) => ({
@@ -1168,8 +1185,8 @@ export function AuthMessage({
               label: t(group.label),
               description: t(group.description),
             })),
-            groupIndex,
-            setGroupIndex,
+            groupIndex - groupOffset,
+            (index) => setGroupIndex(index + groupOffset),
           )}
           <div className={styles.terms}>
             <div>{t('auth.termsTitle')}:</div>
@@ -1236,15 +1253,19 @@ export function AuthMessage({
   if (subscriptionReal)
     return (
       <QwenSubscriptionFlow
+        dialog={dialog}
         transport={workspaceActions}
         onActivate={async (signal, modelId) => {
           const owner = sessionOwnerGuard.capture();
-          const result = await workspaceActions.activateSubscription({
-            signal,
-            ...(modelId ? { modelId } : {}),
-          });
-          signal.throwIfAborted();
-          if (!owner.isCurrent()) throw new Error('Session changed.');
+          const result = await workspaceActions
+            .activateSubscription({
+              signal,
+              ...(modelId ? { modelId } : {}),
+            })
+            .finally(() => {
+              signal.throwIfAborted();
+              if (!owner.isCurrent()) throw new Error('Session changed.');
+            });
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
           if (connection.sessionId) {
@@ -1256,28 +1277,13 @@ export function AuthMessage({
           } else {
             onModelActivated?.(`${result.modelId}(qwen-subscription)`);
           }
+          return result.modelId;
         }}
-        onActivated={() => {
-          onMessage(t('subscription.connected'));
-          onClose();
-        }}
-        onModelSelectionRequired={async (message, signal) => {
-          const owner = sessionOwnerGuard.capture();
-          try {
-            await sessionActions.refreshModels();
-          } catch (error) {
-            if (
-              !signal.aborted &&
-              owner.isCurrent() &&
-              error instanceof Error &&
-              error.message !== message
-            )
-              onMessage(error.message, 'error');
-          }
-          if (signal.aborted || !owner.isCurrent()) return;
+        onActivated={(message) => {
           onMessage(message);
           onClose();
         }}
+        onModelsUnavailable={onClose}
         onClose={() => setSubscriptionReal(false)}
         onOtherProviders={() => {
           setSubscriptionReal(false);
@@ -1297,7 +1303,7 @@ export function AuthMessage({
       />
     );
 
-  return (
+  const content = (
     <div className={styles.panel}>
       <div className={styles.steps}>
         {stepItems.map((label, index) => {
@@ -1344,5 +1350,12 @@ export function AuthMessage({
         </button>
       </div>
     </div>
+  );
+  return dialog ? (
+    <DialogShell title={t('auth.title')} size="lg" onClose={onClose}>
+      {content}
+    </DialogShell>
+  ) : (
+    content
   );
 }

@@ -4,27 +4,97 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { I18nProvider, useI18n, type WebShellLanguage } from '../../i18n';
 import type { WebShellTheme } from '../../themeContext';
 import appStyles from '../../App.module.css';
-import styles from './AuthMessage.module.css';
 import { Button } from '../ui/button';
-import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
-import { QwenSubscriptionStatus } from './QwenSubscriptionStatus';
+import type { ReactNode } from 'react';
+import { DialogShell } from '../dialogs/DialogShell';
+import {
+  QwenSubscriptionStatus,
+  type QwenSubscriptionStatusProps,
+} from './QwenSubscriptionStatus';
+import { QwenSubscriptionSidebarStatus } from './QwenSubscriptionSidebarStatus';
+import styles from './AuthMessage.module.css';
+import sidebarStyles from './QwenSubscriptionSidebarStatus.module.css';
 import {
   useSubscription,
   type SubscriptionTransport,
 } from './use-subscription';
 
+function QwenSubscriptionView({
+  dialog = false,
+  children,
+  ...props
+}: QwenSubscriptionStatusProps & {
+  dialog?: boolean;
+  children?: ReactNode;
+}) {
+  const { t } = useI18n();
+  const purchase = props.state.status === 'purchase-required';
+  const Status = dialog
+    ? QwenSubscriptionStatus
+    : QwenSubscriptionSidebarStatus;
+  const content = (
+    <div className={dialog ? styles.panel : sidebarStyles.content}>
+      {dialog && !purchase && (
+        <nav className={styles.steps} aria-label={t('auth.title')}>
+          <button
+            type="button"
+            className={`${styles.stepPill} ${styles.stepPillDone}`}
+            onClick={props.onCancel}
+          >
+            <span className={styles.stepNumber}>1</span>
+            {t('auth.step.group')} · Qwen
+          </button>
+          <span
+            className={`${styles.stepPill} ${styles.stepPillActive}`}
+            aria-current="step"
+          >
+            <span className={styles.stepNumber}>2</span>
+            {t('auth.step.authorization')}
+          </span>
+        </nav>
+      )}
+      <Status {...props} />
+      {children}
+    </div>
+  );
+  return dialog ? (
+    <DialogShell
+      key={purchase ? 'membership' : 'authorization'}
+      title={t(purchase ? 'subscription.title' : 'auth.title')}
+      size="lg"
+      onClose={props.onCancel}
+    >
+      {content}
+    </DialogShell>
+  ) : (
+    content
+  );
+}
+
 type FlowProps = {
+  dialog?: boolean;
   transport: SubscriptionTransport;
   onOpenExternal: (url: string) => void | Promise<void>;
   onClose: () => void;
   onModelSelectionRequired?: (message: string, signal: AbortSignal) => void;
   onOtherProviders: () => void;
-  onActivate?: (signal: AbortSignal, modelId?: string) => Promise<void>;
-  onActivated?: () => void;
+  onActivate?: (
+    signal: AbortSignal,
+    modelId?: string,
+  ) => Promise<string | void>;
+  onActivated?: (message: string) => void;
+  onModelsUnavailable?: () => void;
+  onAuthError?: (message: string) => void;
 };
 
 export function QwenSubscriptionFlow(props: FlowProps) {
@@ -35,6 +105,10 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   const automaticAttempt = useRef<AbortSignal | undefined>(undefined);
   const callbacks = useRef(props);
   callbacks.current = props;
+  useEffect(() => {
+    if (flow.state.status === 'error')
+      callbacks.current.onAuthError?.(flow.state.message);
+  }, [flow.state]);
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string>();
   const [modelSelectionRequired, setModelSelectionRequired] = useState(false);
@@ -49,62 +123,74 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       activation.current?.abort();
     };
   }, [props.transport]);
-  const connect = useCallback(
-    async (modelId?: string) => {
-      const onActivate = callbacks.current.onActivate;
-      const owner = flow.readySignal;
-      if (
-        !onActivate ||
-        !owner ||
-        owner.aborted ||
-        activation.current ||
-        flow.working
-      )
-        return;
-      const controller = new AbortController();
-      activation.current = controller;
-      setConnecting(true);
-      setConnectionError(undefined);
-      try {
-        const signal = AbortSignal.any([owner, controller.signal]);
-        if (modelId) await onActivate(signal, modelId);
-        else await onActivate(signal);
-        if (!owner.aborted && !controller.signal.aborted && mounted.current)
-          callbacks.current.onActivated?.();
-      } catch (error) {
-        if (!owner.aborted && !controller.signal.aborted && mounted.current) {
-          const body = (
-            error as {
-              body?: { code?: string; modelId?: string; models?: unknown };
-            } | null
-          )?.body;
-          if (
-            body?.code === 'subscription_model_unavailable' &&
-            typeof body.modelId === 'string'
-          ) {
-            setConnectionError(
-              t('subscription.modelUnavailable', { model: body.modelId }),
-            );
-            setModelSelectionRequired(true);
-          } else {
-            setModelSelectionRequired(false);
-            setConnectionError(
-              t(
-                body?.code === 'subscription_models_unavailable'
-                  ? 'subscription.modelsUnavailable'
-                  : 'subscription.connectFailed',
-              ),
-            );
-          }
+  const connect = useCallback(async () => {
+    const onActivate = callbacks.current.onActivate;
+    const owner = flow.readySignal;
+    const account = flow.state;
+    if (
+      !onActivate ||
+      account.status !== 'ready' ||
+      !owner ||
+      owner.aborted ||
+      activation.current ||
+      flow.working
+    )
+      return;
+    const controller = new AbortController();
+    activation.current = controller;
+    setConnecting(true);
+    setConnectionError(undefined);
+    try {
+      const signal = AbortSignal.any([owner, controller.signal]);
+      const model = await onActivate(signal);
+      if (!owner.aborted && !controller.signal.aborted && mounted.current)
+        callbacks.current.onActivated?.(
+          t('subscription.connected', {
+            email: account.email,
+            plan: account.plan,
+            model: model ?? '',
+          }),
+        );
+    } catch (error) {
+      if (!owner.aborted && !controller.signal.aborted && mounted.current) {
+        const body = (
+          error as {
+            body?: { code?: string; modelId?: string };
+          } | null
+        )?.body;
+        if (
+          (body?.code === 'subscription_models_unavailable' ||
+            body?.code === 'subscription_model_unavailable') &&
+          callbacks.current.onModelsUnavailable
+        ) {
+          callbacks.current.onModelsUnavailable();
+          return;
         }
-      } finally {
-        if (activation.current === controller) activation.current = null;
-        if (!owner.aborted && !controller.signal.aborted && mounted.current)
-          setConnecting(false);
+        if (
+          body?.code === 'subscription_model_unavailable' &&
+          typeof body.modelId === 'string'
+        ) {
+          setConnectionError(
+            t('subscription.modelUnavailable', { model: body.modelId }),
+          );
+          setModelSelectionRequired(true);
+        } else {
+          setModelSelectionRequired(false);
+          setConnectionError(
+            t(
+              body?.code === 'subscription_models_unavailable'
+                ? 'subscription.modelsUnavailable'
+                : 'subscription.connectFailed',
+            ),
+          );
+        }
       }
-    },
-    [flow.readySignal, flow.working, t],
-  );
+    } finally {
+      if (activation.current === controller) activation.current = null;
+      if (!owner.aborted && !controller.signal.aborted && mounted.current)
+        setConnecting(false);
+    }
+  }, [flow.readySignal, flow.state, flow.working, t]);
   const canActivate = props.onActivate !== undefined;
   useEffect(() => {
     const owner = flow.readySignal;
@@ -121,6 +207,9 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   }, [canActivate, flow.readySignal, flow.working, connect]);
   const close = () => {
     activation.current?.abort();
+    props.onClose();
+  };
+  const selectModel = () => {
     if (
       modelSelectionRequired &&
       flow.state.status === 'ready' &&
@@ -130,27 +219,26 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       props.onModelSelectionRequired
     )
       props.onModelSelectionRequired(connectionError, flow.readySignal);
-    else props.onClose();
   };
   const signOut = async () => {
     if ((await flow.signOut()) && mounted.current) props.onClose();
   };
   return (
-    <div className={styles.panel}>
-      <QwenSubscriptionStatus
-        state={flow.state}
-        onOpenAuthorization={flow.openAuthorization}
-        onOpenPurchase={flow.openPlans}
-        onRetry={flow.retry}
-        onSwitchProvider={() => {
-          activation.current?.abort();
-          props.onOtherProviders();
-        }}
-        onSignOut={() => {
-          void signOut();
-        }}
-        onCancel={close}
-      />
+    <QwenSubscriptionView
+      dialog={props.dialog}
+      state={flow.state}
+      onOpenAuthorization={flow.openAuthorization}
+      onOpenPurchase={flow.openPlans}
+      onRetry={flow.retry}
+      onSwitchProvider={() => {
+        activation.current?.abort();
+        props.onOtherProviders();
+      }}
+      onSignOut={() => {
+        void signOut();
+      }}
+      onCancel={close}
+    >
       {flow.state.status === 'ready' && (
         <>
           {connectionError && <p role="alert">{connectionError}</p>}
@@ -174,49 +262,38 @@ export function QwenSubscriptionFlow(props: FlowProps) {
           >
             {t('subscription.signOut')}
           </Button>
+          {modelSelectionRequired && props.onModelSelectionRequired && (
+            <Button onClick={selectModel}>{t('model.select')}</Button>
+          )}
           <Button variant="outline" onClick={close}>
             {t('subscription.cancel')}
           </Button>
         </>
       )}
-    </div>
+    </QwenSubscriptionView>
   );
 }
 
 export function QwenSubscriptionPanel({
   language,
   theme = 'dark',
+  style,
   ...props
-}: FlowProps & { language: WebShellLanguage; theme?: WebShellTheme }) {
+}: FlowProps & {
+  language: WebShellLanguage;
+  theme?: WebShellTheme;
+  style?: CSSProperties;
+}) {
   return (
     <I18nProvider language={language}>
       <div
         data-web-shell-root
         data-web-shell-shadcn
         className={`${appStyles.app} ${theme === 'light' ? appStyles.themeLight : `${appStyles.themeDark} dark`}`}
-        style={{ padding: 16, overflow: 'auto' }}
+        style={{ padding: 16, overflow: 'auto', ...style }}
       >
-        <SubscriptionMenu {...props} />
+        <QwenSubscriptionFlow {...props} />
       </div>
     </I18nProvider>
-  );
-}
-
-function SubscriptionMenu(props: FlowProps) {
-  const { t, language } = useI18n();
-  const [started, setStarted] = useState(false);
-  return started ? (
-    <QwenSubscriptionFlow {...props} onClose={() => setStarted(false)} />
-  ) : (
-    <div className={styles.panel}>
-      <h2>{t('auth.title')}</h2>
-      <QwenSubscriptionEntry onClick={() => setStarted(true)} />
-      <Button variant="outline" onClick={props.onOtherProviders}>
-        {language === 'en' ? 'Other providers' : '其他提供商'}
-      </Button>
-      <Button variant="outline" onClick={props.onClose}>
-        {t('subscription.cancel')}
-      </Button>
-    </div>
   );
 }

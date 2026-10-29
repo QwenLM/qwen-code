@@ -11,8 +11,8 @@
  * (ASCII logo + info panel), ported back from the pre-batch
  * `feat/opentui-migrate` implementation that the batched merge dropped.
  *
- * Stable by construction: depends only on config/settings/width, so it does not
- * re-render on streaming; resize re-renders without flicker via the erase-free
+ * Memoized on visible account, model and theme values, so streaming does not
+ * rebuild the banner; resize re-renders without flicker via the erase-free
  * painter. Honours the same custom-banner resolution as ink (hideBanner /
  * customAsciiArt / customBannerTitle / customBannerSubtitle) and suppresses in
  * screen-reader mode.
@@ -29,6 +29,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { formatVersionLabel } from '../../utils/version.js';
+import { t } from '../../i18n/index.js';
 import { C, GRADIENT, THEME_REVISION } from './theme.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
@@ -112,13 +113,18 @@ function GradientLogo({ logo }: { logo: string }) {
 }
 
 /**
- * Faithful port of the ink `Header`: a single-border info panel with 4 lines —
- * title(+version), blank spacer (or subtitle), auth|model(+hint), directory —
+ * Faithful port of the ink `Header`: a single-border info panel with title,
+ * optional subtitle/spacer, auth|model(+hint), and directory —
  * laid out two-column (gradient logo + panel) when wide, panel-only when
  * narrow. Same data sources as the original, including the AppHeader
  * custom-banner resolution.
  */
-function buildBanner(config: Config, settings: LoadedSettings, width: number) {
+function buildBanner(
+  config: Config,
+  settings: LoadedSettings,
+  width: number,
+  subscriptionPlan?: 'plus' | 'pro',
+) {
   const versionLabel = formatVersionLabel(config.getCliVersion() ?? 'unknown');
   const cg = config.getContentGeneratorConfig();
   const model = config.getModelDisplayName();
@@ -126,7 +132,7 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
   // auth label (mirrors AppHeader.getAuthDisplayType)
   let authLabel = '';
   try {
-    if (cg?.authType) {
+    if (cg?.authType && cg.authType !== 'qwen-subscription') {
       const matched = findProviderByCredentials(cg.baseUrl, cg.apiKeyEnvKey);
       authLabel =
         (matched && resolveMetadataKey(matched) && matched.label) ||
@@ -135,7 +141,12 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
   } catch {
     authLabel = '';
   }
-  const authModelText = authLabel ? `${authLabel} | ${model}` : model;
+  const authModelText =
+    cg?.authType === 'qwen-subscription'
+      ? `${subscriptionPlan ? `Qwen ${subscriptionPlan.charAt(0).toUpperCase() + subscriptionPlan.slice(1)} | ` : ''}[Qwen Subscription] ${model}`
+      : authLabel
+        ? `${authLabel} | ${model}`
+        : model;
   const hint = ' (/model to change)';
 
   const custom = resolveCustomBanner(settings);
@@ -199,11 +210,10 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
         </text>
         <text fg={C.dim}>{` (${versionLabel})`}</text>
       </box>
-      {/* Subtitle (when set) replaces the blank spacer row so the auth line
-       * keeps its vertical position (ink Header parity). */}
+      {/* Subscription headers omit the default spacer, while custom subtitles remain. */}
       {custom.subtitle ? (
         <text fg={C.dim}>{custom.subtitle}</text>
-      ) : (
+      ) : cg?.authType === 'qwen-subscription' ? null : (
         <text> </text>
       )}
       <box flexDirection="row">
@@ -246,19 +256,52 @@ export interface OpenTuiBannerProps {
 }
 
 /**
- * Renders the header banner, or nothing when suppressed (screen-reader mode or
- * `ui.hideBanner`). Memoized on its inputs so streaming does not re-render it.
+ * Renders the banner and subscription usage tip with their visibility settings.
+ * Memoized on its inputs so streaming does not rebuild the banner.
  */
 export function OpenTuiBanner({ config, settings }: OpenTuiBannerProps) {
   const { width } = useTerminalDimensions();
   const showBanner =
     !config.getScreenReader() && !settings.merged.ui?.hideBanner;
+  const generatorConfig = config.getContentGeneratorConfig();
+  const model = config.getModelDisplayName();
+  const subscriptionPlan =
+    generatorConfig?.authType === 'qwen-subscription'
+      ? config.getSubscriptionPlan?.()
+      : undefined;
   const banner = useMemo(
-    () => (showBanner ? buildBanner(config, settings, width) : null),
+    () =>
+      showBanner
+        ? buildBanner(config, settings, width, subscriptionPlan)
+        : null,
     // The palette is mutated in place and `settings` keeps its identity when
     // `/theme` writes it, so the revision is the only dep that sees a repaint.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showBanner, config, settings, width, THEME_REVISION],
+    [
+      showBanner,
+      config,
+      settings,
+      width,
+      THEME_REVISION,
+      generatorConfig?.authType,
+      generatorConfig?.baseUrl,
+      generatorConfig?.apiKeyEnvKey,
+      model,
+      subscriptionPlan,
+    ],
   );
-  return banner;
+  if (
+    generatorConfig?.authType !== 'qwen-subscription' ||
+    settings.merged.ui?.hideTips ||
+    config.getScreenReader()
+  )
+    return banner;
+  return (
+    <box flexDirection="column">
+      {banner}
+      <text marginLeft={2} marginRight={2} fg={C.dim}>
+        {t('Tip: Run /usage to see your plan usage.')}
+      </text>
+    </box>
+  );
 }

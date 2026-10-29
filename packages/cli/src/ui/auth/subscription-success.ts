@@ -14,7 +14,9 @@ export function subscriptionSuccessMessage(
   return [
     `✓ ${t('Signed in as {{email}}', { email: info.email })}`,
     `✓ ${t('Qwen {{plan}} is active · usage is included with your plan', {
-      plan: info.member_type === 'pro' ? 'Pro' : 'Plus',
+      plan:
+        info.member_type.charAt(0).toUpperCase() +
+        info.member_type.slice(1).toLowerCase(),
     })}`,
     `  ${t('Model: {{model}} · Run /usage to see your plan usage', { model })}`,
   ].join('\n');

@@ -15,7 +15,7 @@ type QwenSubscriptionStatusProps = { onCancel?: () => void } & (
   | {
       status: 'purchase-required';
       email: string;
-      plan: 'Free' | 'Go';
+      plan: string;
       checking?: boolean;
       canCheckAgain?: boolean;
       message?: string;

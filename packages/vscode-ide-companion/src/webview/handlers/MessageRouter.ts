@@ -127,6 +127,12 @@ export class MessageRouter {
    * Also registers the handler on the session handler so
    * "Configure" prompts in session flows trigger the interactive flow.
    */
+  setSubscriptionAuthHandler(
+    handler: (action?: 'logout' | 'upgrade') => Promise<void>,
+  ): void {
+    this.authHandler.setSubscriptionAuthHandler(handler);
+  }
+
   setAuthInteractiveHandler(
     handler: (
       config: import('@qwen-code/qwen-code-core').ProviderConfig,

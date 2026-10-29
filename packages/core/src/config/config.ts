@@ -2941,7 +2941,8 @@ export class Config {
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
-  private contentGenerator!: ContentGenerator;
+  private contentGenerator?: ContentGenerator;
+  private subscriptionPlan?: 'plus' | 'pro';
   private readonly initialAuthType?: AuthType;
   private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
@@ -3103,7 +3104,7 @@ export class Config {
   private activeTodoReminderTurns = new Map<string, number>();
   private activeTodoPlanWriterOwner: string | undefined;
   private llmClient!: LlmClient;
-  private baseLlmClient!: BaseLlmClient;
+  private baseLlmClient?: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
@@ -5836,9 +5837,36 @@ export class Config {
   }
 
   getContentGenerator(): ContentGenerator {
-    return (
-      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
-    );
+    const generator =
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator;
+    if (!generator) throw new Error('Not signed in. Run /auth to sign in.');
+    return generator;
+  }
+
+  getSubscriptionPlan(): 'plus' | 'pro' | undefined {
+    return this.subscriptionPlan;
+  }
+
+  setSubscriptionPlan(plan: 'plus' | 'pro' | undefined): void {
+    this.subscriptionPlan = plan;
+  }
+
+  clearAuth(): void {
+    this.backgroundTaskRegistry.abortAll({
+      notify: false,
+      persistedStatus: 'cancelled',
+    });
+    resetPreloadedContentGenerator(this.contentGenerator);
+    this.baseLlmClient?.clearPerModelGeneratorCache();
+    this.contentGenerator = undefined;
+    this.baseLlmClient = undefined;
+    this.contentGeneratorConfig = { model: '' };
+    this.contentGeneratorConfigSources = {};
+    this.initialResolvedAuthType = undefined;
+    this.subscriptionPlan = undefined;
+    this.modelsConfig.clearAuth();
+    this.toolRegistry?.unregisterTool(ToolNames.WEB_SEARCH);
+    this.notifyModelChangeListeners();
   }
 
   /**

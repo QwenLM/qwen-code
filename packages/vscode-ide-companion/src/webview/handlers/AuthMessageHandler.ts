@@ -37,14 +37,35 @@ export class AuthMessageHandler extends BaseMessageHandler {
     | ((config: ProviderConfig, inputs: ProviderSetupInputs) => Promise<void>)
     | null = null;
 
+  private subscriptionAuthHandler?: (
+    action?: 'logout' | 'upgrade',
+  ) => Promise<void>;
+
+  setSubscriptionAuthHandler(
+    handler: (action?: 'logout' | 'upgrade') => Promise<void>,
+  ): void {
+    this.subscriptionAuthHandler = handler;
+  }
+
   canHandle(messageType: string): boolean {
-    return ['auth', 'getAccountInfo'].includes(messageType);
+    return ['auth', 'logout', 'upgrade', 'getAccountInfo'].includes(
+      messageType,
+    );
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
     switch (message.type) {
       case 'auth':
-        await this.handleAuthInteractive();
+        await this.handleAuthInteractive(
+          (message.data as { subscriptionEnabled?: boolean } | undefined)
+            ?.subscriptionEnabled === true,
+        );
+        break;
+
+      case 'logout':
+      case 'upgrade':
+        if (this.subscriptionAuthHandler)
+          await this.subscriptionAuthHandler(message.type);
         break;
 
       case 'getAccountInfo':
@@ -112,6 +133,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     items: Array<{
       label: string;
       description?: string;
+      detail?: string;
       value: T;
       kind?: vscode.QuickPickItemKind;
     }>,
@@ -167,12 +189,15 @@ export class AuthMessageHandler extends BaseMessageHandler {
    * Handle auth — full interactive auth flow.
    * Dynamically generates provider choices from the shared registry.
    */
-  private async handleAuthInteractive(): Promise<void> {
+  private async handleAuthInteractive(
+    subscriptionEnabled: boolean,
+  ): Promise<void> {
     try {
       // Build grouped provider menu
       const items: Array<{
         label: string;
         description?: string;
+        detail?: string;
         value: string;
         kind?: vscode.QuickPickItemKind;
       }> = [];
@@ -196,6 +221,13 @@ export class AuthMessageHandler extends BaseMessageHandler {
         }
       };
 
+      if (subscriptionEnabled) {
+        items.push({
+          label: 'Qwen Account with Subscription',
+          detail: 'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+          value: AuthType.QWEN_SUBSCRIPTION,
+        });
+      }
       addGroup('QwenCloud', QWENCLOUD_PROVIDERS);
       addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
       addGroup('Third Party', THIRD_PARTY_PROVIDERS);
@@ -216,6 +248,12 @@ export class AuthMessageHandler extends BaseMessageHandler {
         'Choose how to connect',
       );
       if (!selectedId) return;
+      if (selectedId === AuthType.QWEN_SUBSCRIPTION) {
+        if (!this.subscriptionAuthHandler)
+          throw new Error('Subscription authentication is unavailable.');
+        await this.subscriptionAuthHandler();
+        return;
+      }
 
       const provider = ALL_PROVIDERS.find((p) => p.id === selectedId);
       if (!provider) {

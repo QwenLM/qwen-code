@@ -49,7 +49,7 @@ function setup(trusted = true) {
     primary: false,
     trusted,
     removable: true,
-    bridge: {},
+    bridge: { knownClientIds: () => new Set<string>() },
     generationGuard: guard,
     workspaceService: { reloadModelProviders },
   } as unknown as WorkspaceRuntime;
@@ -76,6 +76,19 @@ function setup(trusted = true) {
   });
   return { app, guard, persistSettings, reloadModelProviders };
 }
+it('rejects an unregistered first-login client ID before account activation', async () => {
+  const { app, persistSettings, reloadModelProviders } = setup();
+  const response = await request(app)
+    .post('/workspaces/secondary/auth/subscription')
+    .set('X-Qwen-Client-Id', 'unregistered-vscode-client')
+    .send({});
+  expect(response.status).toBe(400);
+  expect(response.body.code).toBe('invalid_client_id');
+  expect(mocks.userInfo).not.toHaveBeenCalled();
+  expect(persistSettings).not.toHaveBeenCalled();
+  expect(reloadModelProviders).not.toHaveBeenCalled();
+});
+
 it('activates only the selected runtime using workspace-scoped non-secret settings', async () => {
   const { app, persistSettings, reloadModelProviders } = setup();
   const response = await request(app)
@@ -112,7 +125,18 @@ it('activates only the selected runtime using workspace-scoped non-secret settin
     runtimeSync: { status: 'applied' },
   });
 });
-it.each(['free', 'go'])(
+it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'])(
+  'accepts %s membership regardless of casing',
+  async (member_type) => {
+    const { app } = setup();
+    mocks.userInfo.mockResolvedValue({ member_type });
+    const response = await request(app).post(
+      '/workspaces/secondary/auth/subscription',
+    );
+    expect(response.status).toBe(200);
+  },
+);
+it.each(['free', 'lite', 'FREE', 'LITE', 'future-plan'])(
   'rejects %s membership before persisting',
   async (member_type) => {
     const { app, persistSettings, reloadModelProviders } = setup();

@@ -115,6 +115,30 @@ describe('activate', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    [vscode.ExtensionMode.Development, true],
+    [vscode.ExtensionMode.Production, false],
+  ] as const)(
+    'sets subscription command visibility at cold activation for mode %s',
+    async (extensionMode, enabled) => {
+      Object.assign(context, { extensionMode });
+      const execute = vi.mocked(vscode.commands.executeCommand);
+      execute.mockClear();
+      const createEditor = vi.spyOn(
+        ChatProviderRegistry.prototype,
+        'createEditorProvider',
+      );
+      await activate(context);
+      expect(execute).toHaveBeenNthCalledWith(
+        1,
+        'setContext',
+        'qwen-code.subscriptionEnabled',
+        enabled,
+      );
+      expect(createEditor).not.toHaveBeenCalled();
+    },
+  );
+
   it('should show the info message on first activation', async () => {
     const showInformationMessageMock = vi
       .mocked(vscode.window.showInformationMessage)

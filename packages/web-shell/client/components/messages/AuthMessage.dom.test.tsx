@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import styles from './AuthMessage.module.css';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -40,6 +41,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 const { AuthMessage } = await import('./AuthMessage');
+const { SystemMessage } = await import('./SystemMessage');
 const { I18nProvider } = await import('../../i18n');
 
 let root: Root | undefined;
@@ -600,7 +602,47 @@ describe('host model management', () => {
 });
 
 describe('subscription development entry', () => {
-  async function openAuth() {
+  it('localizes the subscription entry using the desktop language', async () => {
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      providers: [
+        {
+          id: 'custom-openai-compatible',
+          label: 'Custom OpenAI',
+          description: '',
+          protocol: 'openai',
+          steps: [],
+        },
+      ],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom Provider',
+          description:
+            'Manually connect a local server, proxy, or unsupported provider',
+          providerIds: ['custom-openai-compatible'],
+        },
+      ],
+    });
+    actions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      plansUrl: 'https://plans.example',
+    });
+    await openAuth(true, 'zh-CN');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.getAttribute('aria-label')).toBe('连接供应商');
+    expect(
+      dialog?.querySelector('button[aria-label="Qwen"]')?.textContent,
+    ).toContain('Qwen 新');
+    expect(dialog?.textContent).toContain('在 chat.qwen.ai 订阅 Plus/Pro');
+    expect(dialog?.textContent).not.toContain('Qwen Account with Subscription');
+    expect(dialog?.textContent).not.toContain('Unlock Qwen Code');
+    expect(dialog?.textContent).toContain('自定义供应商');
+    expect(dialog?.textContent).toContain('手动连接本地服务、代理或其他供应商');
+  });
+
+  async function openAuth(dialog = false, language: 'en' | 'zh-CN' = 'en') {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -609,8 +651,9 @@ describe('subscription development entry', () => {
     const onModelActivated = vi.fn();
     await act(async () => {
       root!.render(
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <AuthMessage
+            dialog={dialog}
             onMessage={onMessage}
             onModelActivated={onModelActivated}
             onClose={onClose}
@@ -621,6 +664,85 @@ describe('subscription development entry', () => {
     });
     return { onClose, onMessage, onModelActivated };
   }
+  it('keeps Qwen authorization in provider step 2 and returns to the provider wizard', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    actions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      plansUrl: 'https://plans.example',
+    });
+    actions.startSubscriptionLogin.mockResolvedValue({
+      id: 'waiting',
+      status: 'waiting',
+      authorizationUrl: 'https://auth.example',
+    });
+    actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
+    await openAuth(true);
+    const entry = [...document.querySelectorAll('button')].find(
+      (item) => item.getAttribute('aria-label') === 'Qwen',
+    );
+    expect(entry).toBeDefined();
+    expect(entry!.classList.contains(styles.optionActive)).toBe(true);
+    expect(document.querySelectorAll(`.${styles.optionActive}`)).toHaveLength(
+      1,
+    );
+    expect(actions.startSubscriptionLogin).not.toHaveBeenCalled();
+    const advance = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent === 'next',
+    );
+    await act(async () => advance!.click());
+    const authorization = document.querySelector('[role="dialog"]');
+    expect(
+      authorization?.querySelector('[aria-current="step"]')?.textContent,
+    ).toContain('2Authorization');
+    const next = [...authorization!.querySelectorAll('button')].find(
+      (item) => item.textContent === 'next',
+    );
+    expect(next?.disabled).toBe(true);
+    const back = [...authorization!.querySelectorAll('button')].find(
+      (item) => item.textContent === 'previous',
+    );
+    await act(async () => back!.click());
+    expect(
+      document.querySelector('[role="dialog"] button[aria-label="Qwen"]'),
+    ).not.toBeNull();
+    expect(
+      document
+        .querySelector('button[aria-label="Qwen"]')
+        ?.classList.contains(styles.optionActive),
+    ).toBe(true);
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(actions.cancelSubscriptionLogin).toHaveBeenCalledWith('waiting');
+  });
+  it('keeps ordinary group clicks and Next aligned when Qwen precedes the groups', async () => {
+    actions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      plansUrl: 'https://plans.example',
+    });
+    await openAuth(true);
+    const find = (text: string) =>
+      [...document.querySelectorAll('button')].find(
+        (button) => button.textContent === text,
+      )!;
+    const custom = [...document.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Custom providers'),
+    )!;
+    await act(async () => custom.click());
+    expect(document.body.textContent).toContain('Review');
+    await act(async () => find('previous').click());
+    expect(
+      document
+        .querySelector('button[aria-label="Qwen"]')
+        ?.classList.contains(styles.optionActive),
+    ).toBe(false);
+    expect(
+      [...document.querySelectorAll(`.${styles.optionActive}`)].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(['CustomCustom providers']);
+    await act(async () => find('next').click());
+    expect(document.body.textContent).toContain('Review');
+    expect(actions.startSubscriptionLogin).not.toHaveBeenCalled();
+  });
   it.each([false, true])(
     'uses the host OAuth session and the correct browser opener (desktop: %s)',
     async (desktop) => {
@@ -640,8 +762,8 @@ describe('subscription development entry', () => {
       const invoke = vi.fn().mockResolvedValue(undefined);
       if (desktop) Object.assign(window, { __TAURI__: { core: { invoke } } });
       await openAuth();
-      const button = [...container!.querySelectorAll('button')].find((item) =>
-        item.textContent?.includes('Qwen Account with Subscription'),
+      const button = [...container!.querySelectorAll('button')].find(
+        (item) => item.getAttribute('aria-label') === 'Qwen',
       )!;
       await act(async () => {
         button.click();
@@ -688,8 +810,8 @@ describe('subscription development entry', () => {
       },
     });
     const completion = await openAuth();
-    const entry = [...container!.querySelectorAll('button')].find((item) =>
-      item.textContent?.includes('Qwen Account'),
+    const entry = [...container!.querySelectorAll('button')].find(
+      (item) => item.getAttribute('aria-label') === 'Qwen',
     )!;
     await act(async () => entry.click());
     expect(
@@ -705,11 +827,19 @@ describe('subscription development entry', () => {
       'qwen3.8-max(qwen-subscription)',
     );
     expect(completion.onModelActivated).not.toHaveBeenCalled();
+    expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
+      '✓ Signed in as user@example.test  \n✓ Qwen Pro is active · usage is included with your plan  \n  Model: qwen3.8-max · Run /usage to see your plan usage',
+    );
   });
 
-  it.each(['plus', 'pro'])(
-    'updates the welcome model before closing after %s activation',
-    async (memberType) => {
+  it.each([
+    ['plus', 'en'],
+    ['pro', 'en'],
+    ['plus', 'zh-CN'],
+    ['pro', 'zh-CN'],
+  ] as const)(
+    'updates the welcome model and appends the CLI summary after %s activation (%s)',
+    async (memberType, language) => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
         plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
@@ -734,100 +864,134 @@ describe('subscription development entry', () => {
               });
           }),
       );
-      const completion = await openAuth();
+      const completion = await openAuth(false, language);
       const entry = [...container!.querySelectorAll('button')].find((item) =>
-        item.textContent?.includes('Qwen Account'),
+        item.textContent?.includes('Qwen'),
       )!;
       await act(async () => entry.click());
       expect(completion.onModelActivated).not.toHaveBeenCalled();
       expect(completion.onClose).not.toHaveBeenCalled();
+      expect(completion.onMessage).not.toHaveBeenCalled();
       await act(async () => finishActivation());
       expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(
         'qwen3.8-max(qwen-subscription)',
       );
       expect(completion.onClose).toHaveBeenCalledOnce();
+      expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
+        language === 'zh-CN'
+          ? `✓ 已登录为 user@example.test  \n✓ Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'} 已生效 · 用量包含在你的套餐中  \n  模型：qwen3.8-max · 运行 /usage 查看套餐用量`
+          : `✓ Signed in as user@example.test  \n✓ Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'} is active · usage is included with your plan  \n  Model: qwen3.8-max · Run /usage to see your plan usage`,
+      );
       expect(
         completion.onModelActivated.mock.invocationCallOrder[0],
       ).toBeLessThan(completion.onClose.mock.invocationCallOrder[0]);
       expect(sessionActions.setModel).not.toHaveBeenCalled();
+      await act(async () => {
+        root!.render(
+          <I18nProvider language={language}>
+            <SystemMessage
+              variant="info"
+              content={completion.onMessage.mock.calls[0][0]}
+            />
+          </I18nProvider>,
+        );
+      });
+      expect(container!.querySelectorAll('br')).toHaveLength(2);
+      expect(container!.textContent).toContain(
+        language === 'zh-CN'
+          ? '模型：qwen3.8-max · 运行 /usage 查看套餐用量'
+          : 'Model: qwen3.8-max · Run /usage to see your plan usage',
+      );
     },
   );
 
-  it('closes authentication for /model without activating a replacement in a fresh session', async () => {
-    actions.getSubscriptionConfig.mockResolvedValue({
-      enabled: true,
-      plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-    });
-    actions.startSubscriptionLogin.mockResolvedValue({
-      id: 'paid',
-      status: 'ready',
-      userInfo: { sub: 'user', email: 'user@example.test', member_type: 'pro' },
-    });
-    actions.activateSubscription.mockRejectedValue({
-      body: {
-        code: 'subscription_model_unavailable',
-        modelId: 'removed',
-        models: ['replacement'],
-      },
-    });
-    const completion = await openAuth();
-    const entry = [...container!.querySelectorAll('button')].find((item) =>
-      item.textContent?.includes('Qwen Account'),
-    )!;
-    await act(async () => entry.click());
-    expect(container!.textContent).toContain('Run /model');
-    expect(container!.textContent).not.toContain('replacement');
-    const cancel = [...container!.querySelectorAll('button')].find(
-      (item) => item.textContent === 'Cancel',
-    )!;
-    await act(async () => cancel.click());
-    expect(completion.onClose).toHaveBeenCalledOnce();
-    expect(sessionActions.refreshModels).toHaveBeenCalledOnce();
-    expect(
-      sessionActions.refreshModels.mock.invocationCallOrder[0],
-    ).toBeLessThan(completion.onClose.mock.invocationCallOrder[0]);
-    expect(completion.onMessage).toHaveBeenCalledWith(
-      'The selected model, removed, is no longer available. Run /model to choose another model.',
-    );
-    expect(completion.onModelActivated).not.toHaveBeenCalled();
-    expect(sessionActions.setModel).not.toHaveBeenCalled();
-  });
-
-  it('does not close a later authentication view after sign-out during model refresh', async () => {
-    actions.getSubscriptionConfig.mockResolvedValue({
-      enabled: true,
-      plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-    });
-    actions.startSubscriptionLogin.mockResolvedValue({
-      id: 'paid',
-      status: 'ready',
-      userInfo: { sub: 'user', email: 'user@example.test', member_type: 'pro' },
-    });
-    actions.activateSubscription.mockRejectedValue({
-      body: { code: 'subscription_model_unavailable', modelId: 'removed' },
-    });
-    let finishRefresh!: () => void;
-    sessionActions.refreshModels.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          finishRefresh = resolve;
-        }),
-    );
-    const completion = await openAuth();
-    const clickButton = async (label: string) => {
-      const button = [...container!.querySelectorAll('button')].find((item) =>
-        item.textContent?.includes(label),
+  it.each([
+    ['subscription_models_unavailable', false],
+    ['subscription_model_unavailable', false],
+    ['subscription_models_unavailable', true],
+    ['subscription_model_unavailable', true],
+  ] as const)(
+    'closes authentication without extra model errors for %s (session: %s)',
+    async (code, hasSession) => {
+      sessionState.sessionId = hasSession ? 'current-session' : undefined;
+      actions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+      });
+      actions.startSubscriptionLogin.mockResolvedValue({
+        id: 'paid',
+        status: 'ready',
+        userInfo: {
+          sub: 'user',
+          email: 'user@example.test',
+          member_type: 'pro',
+        },
+      });
+      actions.activateSubscription.mockRejectedValue({
+        body: {
+          code,
+          modelId: 'removed',
+          models: ['replacement'],
+        },
+      });
+      const completion = await openAuth(true);
+      const entry = [...document.querySelectorAll('button')].find(
+        (item) => item.getAttribute('aria-label') === 'Qwen',
       )!;
-      await act(async () => button.click());
-    };
-    await clickButton('Qwen Account');
-    await clickButton('Cancel');
-    expect(completion.onClose).not.toHaveBeenCalled();
-    await clickButton('Sign out');
-    await act(async () => finishRefresh());
-    expect(completion.onClose).not.toHaveBeenCalled();
-    expect(completion.onMessage).not.toHaveBeenCalled();
-  });
+      await act(async () => entry.click());
+      expect(completion.onClose).toHaveBeenCalledOnce();
+      expect(document.body.textContent).not.toContain('Could not load models');
+      expect(document.body.textContent).not.toContain('Run /model');
+      expect(document.body.textContent).not.toContain('Try again');
+      expect(sessionActions.refreshModels).not.toHaveBeenCalled();
+      expect(actions.signOutSubscription).not.toHaveBeenCalled();
+      expect(completion.onMessage).not.toHaveBeenCalled();
+      expect(completion.onModelActivated).not.toHaveBeenCalled();
+      expect(sessionActions.setModel).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['cancel', 'session-change'])(
+    'ignores a late model loading failure after %s',
+    async (change) => {
+      actions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+      });
+      actions.startSubscriptionLogin.mockResolvedValue({
+        id: 'paid',
+        status: 'ready',
+        userInfo: {
+          sub: 'user',
+          email: 'user@example.test',
+          member_type: 'pro',
+        },
+      });
+      let failActivation!: (error: unknown) => void;
+      actions.activateSubscription.mockImplementation(
+        () =>
+          new Promise((_resolve, reject) => {
+            failActivation = reject;
+          }),
+      );
+      const completion = await openAuth();
+      const clickButton = async (label: string) => {
+        const button = [...container!.querySelectorAll('button')].find((item) =>
+          item.textContent?.includes(label),
+        )!;
+        await act(async () => button.click());
+      };
+      await clickButton('Qwen');
+      if (change === 'cancel') await clickButton('Cancel');
+      expect(completion.onClose).not.toHaveBeenCalled();
+      await act(async () => {
+        if (change === 'session-change') ownerState.version += 1;
+        failActivation({ body: { code: 'subscription_models_unavailable' } });
+      });
+      expect(completion.onClose).not.toHaveBeenCalled();
+      expect(completion.onMessage).not.toHaveBeenCalled();
+    },
+  );
 
   it('cancels an active login when the session owner changes', async () => {
     actions.getSubscriptionConfig.mockResolvedValue({
@@ -840,8 +1004,8 @@ describe('subscription development entry', () => {
     });
     actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
     await openAuth();
-    const button = [...container!.querySelectorAll('button')].find((item) =>
-      item.textContent?.includes('Qwen Account with Subscription'),
+    const button = [...container!.querySelectorAll('button')].find(
+      (item) => item.getAttribute('aria-label') === 'Qwen',
     )!;
     await act(async () => {
       button.click();
@@ -860,9 +1024,7 @@ describe('subscription development entry', () => {
   it('keeps the subscription entry hidden when capability is disabled or unavailable', async () => {
     actions.getSubscriptionConfig.mockRejectedValue(new Error('offline'));
     await openAuth();
-    expect(container!.textContent).not.toContain(
-      'Qwen Account with Subscription',
-    );
+    expect(container!.querySelector('button[aria-label="Qwen"]')).toBeNull();
     expect(container!.textContent).not.toContain('Local Mock');
     expect(actions.startSubscriptionLogin).not.toHaveBeenCalled();
   });

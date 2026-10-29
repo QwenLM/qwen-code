@@ -4,152 +4,76 @@
 
 Related issue: [#15180](https://github.com/QwenLM/qwen-code/issues/15180).
 
-## PRD follow-up (2026-10-29)
+## Scope and availability
 
-This iteration loads every model ID from `GET /compatible-mode/v1/models`, without a client allowlist. The preproduction response contains `qwen3.8-max`, `qwen3.7-flash`, and `qwen3.7-plus`. Prefer a returned `qwen3.8-max` for initial selection, otherwise the first returned model. Keep an existing selection when it disappears and ask the user to choose with `/model`; never silently replace it. Authentication dialogs show this instruction without inline model choices. Escape (CLI) or Cancel (GUI) returns to the composer with credentials intact, even before a session initializes; `/model` opens the existing picker. The CLI startup authentication error must also allow Escape for this specific recovery case. Discovery failures retain credentials and the last successful list. Without a cache, report the failure instead of inventing available models.
+CLI (Ink/OpenTUI), Desktop and VS Code share Core subscription credentials, membership queries and OpenAI Chat inference. `DEV=true` is the existing preproduction capability gate. Production enablement and changes to legacy OAuth are excluded. Product simulation flags, mock transports, preview pages and native debug launchers are removed; regression-test doubles remain.
 
-The catalog belongs to the membership session and is cleared by logout or a new account authorization. Core owns discovery, caching, and registration. CLI `/model` and the existing GUI model refresh update the catalog within the selected workspace runtime, without adding process-global configuration mutation routes. Membership rechecks retain the plans and sign-out actions while disabling duplicate checks.
+Desktop adds Qwen to the existing provider dialog, without a separate onboarding page or persistent subscription button. VS Code retains its native provider picker and opens the shared sidebar subscription flow after Qwen is selected. Native QuickPick account actions handle only logout and upgrade.
 
-Desktop reuses ModelReasoningControls and the ACP settings path. A real Max gateway probe accepted `enable_thinking=false` and enabled `thinking_budget=4096/16384/32768`; disabled responses omitted reasoning_content and enabled responses included it. This verifies parameter acceptance and toggle behavior, not strict enforcement of long reasoning budgets. Other models' capabilities cannot be inferred from their names. This iteration records the approach and evidence without enabling these capabilities for every model. Subscription search is integrated through the staging MCP endpoint; see [Subscription MCP web search](subscription-mcp-web-search.md). `DEV=true` remains the existing preproduction development gate.
+## Authorization, purchase and recovery
 
-Validation covers complete server catalogs, unknown new IDs, failed or empty discovery with and without cache, removed selections without fallback, cancellation and account changes, concurrent recheck/plans actions, and other auth types. Build, typecheck, bundle, focused tests and self-audit precede completion. Public documentation explains development availability and the search boundary; no publication is performed.
+1. Request a device code, display/open its authorization link and poll for tokens. Core enforces the returned `expires_in`; GUI adds no fixed 600-second deadline. Link copying expires with the original grant. Legacy OAuth retains its separate title, countdown and cancellation.
+2. Save the complete token pair, then query identity and `member_type`. A failed initial membership query retains credentials: Check again queries identity without reauthorizing. Browser callbacks are unnecessary.
+3. Normalize case only when displaying plan names; preserve Free, Lite and other returned names. Only case-insensitive Plus/Pro qualifies for activation. Fresh browser authorization already displays plans, so do not automatically open a second tab, including after query recovery. Restoring saved credentials without browser authorization opens plans once.
+4. Purchase waiting checks membership every five seconds, for at most two minutes from its first confirmed unpaid state. Timeout/query failure permits manual Check again while retaining Open plans again and Sign out. Disable duplicate checks during a request.
+5. Closing cancels pending work. Temporary network failures retain credentials. Errors distinguish authorization, exchange, storage, membership, refresh, cleanup and revoke stages without exposing arbitrary response bodies. Only refresh-stage `invalid_grant` means expired refresh credentials. Shared persisted cooldowns enforce Retry-After for device authorization, refresh and userinfo.
+6. Signout deletes local credentials before remote revocation. Remote failure must still synchronize local logout and explain that remote revocation failed; failed local deletion must not announce logout. Cancelling a host view must suppress updates to a replacement owner.
 
-### Thinking controls: proposed follow-up
+## Desktop and sidebar presentation
 
-Reuse `ModelReasoningControls` in the shared Web Shell editor. Desktop and VS Code already send its selection through session actions and ACP `reasoning_effort`; they do not need a separate subscription settings page. Declare capabilities only for models whose gateway behavior has been confirmed, with thinking enabled by default, a supported off state, and low/medium/high choices. The default strength still needs a product decision; the PRD's default-on requirement does not identify a default strength.
+Desktop text follows its language setting, including entry descriptions, New badge, dialog titles, errors and actions. Product/plan names, model IDs, commands and URLs remain literal. The entry label is Qwen in both languages. When available, this first entry is selected by default; highlight, direct click and Next resolve to the same visible selection. Other type indexes account for the leading entry; without subscription capability the first ordinary type remains selected.
 
-At the shared Core request boundary, map off to `enable_thinking: false` and omit `thinking_budget`. Map low/medium/high to `enable_thinking: true` plus `thinking_budget: 4096/16384/32768`. Do not emit OpenAI `reasoning_effort` or nested `chat_template_kwargs` in place of the verified top-level fields. Existing Qwen toggle-only profiles cannot express the three budget levels; add a narrowly scoped subscription mapping and capability validation rather than changing DashScope behavior for other providers.
+Desktop authorization is step 2 of Connect Provider. Previous cancels authorization and returns to selection; Next remains disabled during authorization, membership confirmation or errors. Successful confirmation proceeds automatically. Authorization failure has no Sign in again button. Browser fallback and pending text use provider-description muted colors; the link remains blue. Query failures retain Check again.
 
-Verify desktop switch/strength changes against the emitted request, preserve the selected strength across off/on and session reload, and verify model switching does not carry unsupported capabilities. Gateway acceptance was checked only on Max; per-model support and long-running budget enforcement remain to be confirmed. This follow-up is a design and probe result, not an implemented thinking feature.
+Purchase guidance is a separate accessible dialog, retaining the authorization flow's lifetime. Use the CLI content order, adapted to the desktop locale: heading, unpaid-plan explanation, waiting state, Open plans again, Use Alibaba ModelStudio instead, Sign out and muted descriptions. Omit a duplicate account line, retain monospace text and keep Cancel in a separate footer. Reuse provider option styles: full-width secondary background, 6px radius and blue selected label. Up/Down moves selection without invoking actions; no terminal chevron or browser focus outline. Closing returns to selection without revocation.
 
-## Scope and status
+Sidebar uses VS Code fonts and semantic colors, 13px typography, 1.6 line height, 14px section spacing and wrapping host-themed buttons. Purchase guidance remains English in either host language, as requested; authorization and readiness remain localized. Show signed-in email and actual membership before the purchase heading, explanation and waiting state. Use primary Open plans/retry actions, outlined secondary actions and muted descriptions. Use normal Tab/Shift+Tab and Enter/Space. Authorization errors return below Get Started; purchase/query errors retain recovery inside the flow.
 
-After synchronizing with main, the subscription entry uses the bounded provider menu and includes its New badge in row measurements. OpenTUI preserves the complete submission metadata and returns the admission result while dismissing subscription hints; success styling coexists with canonical history metadata. Existing subscription UI and account/workspace boundaries remain unchanged.
+## Activation, models and ownership
 
-The subscription authorization view is separate from the legacy OAuth progress view, preserving the legacy title, countdown and cancellation behavior. Core owns subscription authorization expiry; the subscription view only renders its state and permits link copying until the grant's original expiresAt deadline. Remove unused initial-checking states and the unused CLI paid-summary branch; the active CLI history summary and GUI paid summary remain unchanged.
+Plus/Pro confirmation automatically activates once per authorization/transport lifetime, whether restored, freshly authorized, recovered by query or discovered by purchase polling. Callback rerenders cannot repeat activation. Pending work shows progress; ordinary failures offer explicit Retry. Cancellation, unmounting and owner replacement suppress late success. Before the first session, update the welcome composer's pending model before closing authentication so its first request cannot restore a previous provider model.
 
-Desktop only adds Qwen sign-in to the existing `/auth` dialog. The separate login onboarding page and persistent subscription button are struck out in the PRD and excluded from development tasks.
+Load all IDs from `GET /compatible-mode/v1/models`, without an allowlist. The recorded preproduction catalog included `qwen3.8-max`, `qwen3.7-flash` and `qwen3.7-plus`. Initially prefer returned `qwen3.8-max`, otherwise the first model. A removed saved choice must not silently fall back. Failed discovery retains credentials and the last successful list; without a cache, report failure rather than inventing models. Clear account-owned caches on logout/new authorization.
 
-CLI (Ink and OpenTUI), VS Code, and Desktop use the new device authorization
-protocol. Real OAuth request handling, credential storage, membership queries,
-and purchase waiting are implemented for opt-in development testing.
-Product Mock entries, simulated purchases, and simulated model lists are removed.
-Unit-test doubles and local synthetic HTTP fixtures remain for regression tests.
+CLI model recovery points to `/model` and permits Escape to the composer even during startup. Desktop and VS Code close subscription authentication on `subscription_models_unavailable` or `subscription_model_unavailable`, retaining credentials and the existing session model, without a dedicated retry/model-picker screen or success announcement. The existing composer handles model loading, selection and refresh.
 
-Development mode can activate models returned by the subscription service through the shared OpenAI Chat pipeline after confirming Plus/Pro membership. After confirming Plus/Pro, the login flow automatically saves the selected workspace configuration and prepares the runtime, then returns to the conversation. There is no separate Connect step; the first conversation request establishes actual gateway availability. Dynamic model discovery and [subscription MCP web search](subscription-mcp-web-search.md) are implemented for development sessions. The discontinued OAuth provider and its inference implementation remain unchanged.
+Account daemon routes are process-global; activation and model refresh address the selected workspace runtime, enforcing trust, generation and lifecycle without fallback to the primary runtime. CLI writes trusted workspace settings, never user settings as a fallback. Cancellation stops pre-commit checks; an admitted install transaction finishes consistently while cancelled views ignore its result.
 
-## Login and purchase flow
+VS Code captures the daemon, canonical workspace and selected session. Sidebar activation uses a flow/request-correlated bridge, explicitly activates the captured workspace, verifies runtime synchronization, then updates only its captured session. Initial onboarding must not send an unregistered Web Shell client ID. Re-bootstrap, session/workspace change, daemon replacement and view disposal abort the owner. Short-lived account clients retain their original daemon address/token so late starts are cancelled on the correct daemon.
 
-1. Request a device code. Display the authorization link and open the browser
-   while polling the token endpoint.
-2. After browser approval, save the token pair and query `/api/oauth/userinfo`
-   for identity and `member_type`. A failed first query retains credentials and offers `Check again` to query identity and membership without reauthorizing; only confirmed Free/Go opens plans. No browser callback to the CLI is required.
-3. Plus/Pro shows the account summary. Free/Go opens the plans page and queries
-   membership every 5 seconds, for at most 120 seconds from the first confirmed Free/Go state and entry into purchase waiting.
-4. Normal purchase waiting shows `Open plans again`. Query failure or timeout
-   shows `Check again` while retaining `Open plans again`.
-   A manual check is disabled while its request is running.
-5. Closing the flow cancels pending work. Sign out clears local credentials before requesting revocation; remote failure reports local signout without confirmed remote revocation, while local cleanup failure is reported separately.
-   Expired access tokens refresh automatically; only `invalid_grant` during refresh means the refresh credentials have expired. Temporary network errors retain credentials and allow another query. Authorization, exchange, credential storage, membership, refresh and signout errors identify their stage without exposing arbitrary backend bodies.
-   A 429 respects Retry-After; device authorization, refresh and userinfo cooldown deadlines are stored with shared credentials so repeated operations do not request early.
+Logout/upgrade commands use native status rows and Done/Retry actions. Check actual daemon capability even when palette availability is enabled by development mode. Cold-start commands wait for bootstrap with bounded timeout and disposal/error cleanup. Do not replace an in-flight account action; uncancellable logout must finish and synchronize its result. Log only safe codes, HTTP status and action names. A browser-open rejection offers Retry.
 
-Use the agreed PRD/PD copy. Do not add a visible countdown, a separate device-code
-label, or an initial membership-query card. GUI uses buttons; terminal keyboard
-hints stay in CLI. Membership status is decided by the backend. Core enforces the device grant's expires_in; GUI adds no fixed 600-second cutoff. CLI retains the timeout box until a keypress. GUI uses `Sign in again` for authorization and reserves `Check again` for identity and membership queries.
+## Protocol and credential security
 
-## Protocol and credential ownership
+| Purpose                | Endpoint                      |
+| ---------------------- | ----------------------------- |
+| Device authorization   | `POST /api/oauth/device/code` |
+| Token exchange/refresh | `POST /api/oauth/token`       |
+| Identity/membership    | `GET /api/oauth/userinfo`     |
+| Revocation             | `POST /api/oauth/revoke`      |
 
-| Purpose                    | Endpoint                      |
-| -------------------------- | ----------------------------- |
-| Device authorization       | `POST /api/oauth/device/code` |
-| Token exchange and refresh | `POST /api/oauth/token`       |
-| Identity and membership    | `GET /api/oauth/userinfo`     |
-| Sign out                   | `POST /api/oauth/revoke`      |
+Preproduction uses auth origin `https://pre-auth.qwen.ai` and OAuth `client_id=qwen-code-cli`. Browser authorization is `https://pre4-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`; the browser client parameter is distinct from OAuth client_id. Plans use `https://pre4-chat.qwen.ai/?memberPlan=qwen_code`, shared by upgrade and purchase actions, without device-code parameters. This website entry was checked against qwen-chat-fe feat/qcode_authorize commit 127d20ad8 on 2026-10-29 and requires a signed-in web account.
 
-The preproduction auth origin is `https://pre-auth.qwen.ai`, with OAuth
-`client_id=qwen-code-cli`. The browser link is
-`https://pre4-chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`.
-The browser's `client` parameter is separate from OAuth `client_id`.
-The plans page is `https://pre4-chat.qwen.ai/?memberPlan=qwen_code`.
-`/upgrade`, post-login purchase, and reopening plans share this URL, including
-the daemon configuration used by desktop clients. Purchase links never reuse
-the device authorization URL or its `user_code` and `client` parameters.
-This entry is confirmed against `qwen-chat-fe` branch `feat/qcode_authorize`,
-commit `127d20ad8` (2026-10-29). The website requires a signed-in web account.
+Core owns private atomic storage, restoration, cross-process refresh locking and revocation. Hosts share sessions only with the same effective `QWEN_HOME`. Subscription storage is separate from legacy OAuth. Refresh replaces the complete token pair; tokens and device codes never enter GUI responses.
 
-`QwenSubscriptionSession` in core owns private atomic credential storage,
-restoration, cross-process refresh locking, and revocation. Clients share the
-session only when they use the same effective `QWEN_HOME`. The new credential
-file is separate from legacy OAuth credentials. Refresh replaces the entire
-returned token pair. Tokens and device codes never enter GUI responses.
+Inference uses the fixed `https://pre-api.qwen.ai/compatible-mode/v1` gateway with OpenAI Chat Completions. Configuration stores the auth selector, model ID, fixed gateway and placeholder credential. Supply Bearer tokens at the transport boundary; preserve proxy/cancellation and reject redirects or other destinations before sending credentials. HTTP work runs outside credential locks. Retry a rejected token once on HTTP 401, comparing current/rejected tokens inside the lock to avoid double rotation. Do not refresh for 403/404/429 or replay a delivered stream. Missing credentials fail without implicit authorization; logout clears cached credentials for later requests.
 
-GUI calls authenticated local daemon `/auth/subscription` routes for capability,
-start, read, cancel, userinfo, and revoke. These are process-global account
-operations, independent of conversation/workspace configuration. Subscription requests use short-lived clients with the originating daemon
-address and token, so workspace transport disposal does not interrupt a late
-start or redirect its cancellation to the new daemon. Closing a view also cancels late start results.
+## Thinking and search
 
-VS Code queries capability when the user starts authentication. While pending,
-it does not open another login flow; failure shows the existing authentication
-error and permits another attempt. Web Shell exposes the entry only after
-capability succeeds. Disabled capability keeps existing provider login available.
+Reuse ModelReasoningControls and the existing session/ACP reasoning settings. For subscription `qwen3.8-max` and `qwen3.8-flash`, off sends top-level `enable_thinking: false` without a budget; low/medium/high sends true with 4096/16384/32768. Existing xhigh/max map to high. Remove competing reasoning/reasoning_effort and nested chat-template thinking switches while preserving unrelated options. Explicit native budgets remain effective; per-request opt-out removes budgets, and mandatory-thinking metadata remains respected. Untouched defaults, unknown models and other providers remain unchanged.
 
-## Development setup
+Max has shared UI capabilities; Flash has request mapping without a new capability declaration. Default strength still requires a product decision. A real Max gateway probe accepted off and all three budgets, with reasoning_content absent when off and present when on. This proves parameter acceptance/toggle behavior, not strict long-running budget enforcement or Flash support. Search has a separate existing design: [Subscription MCP web search](subscription-mcp-web-search.md).
 
-Run `npm run dev` from the repository root. Subscription uses the fixed
-preproduction configuration in `packages/core/src/qwen/oauth-config.ts`:
-OAuth origin `https://pre-auth.qwen.ai`, client ID `qwen-code-cli`, and Web origin
-`https://pre4-chat.qwen.ai`. No OAuth environment overrides or isolated home are
-required. Authorization links include `user_code` and `client=qwen-code`.
-Replace these configuration values with the confirmed production values before
-release.
+## CLI success and account commands
 
-GUI hosts use `DEV=true`, inherited by their local daemon, and the same fixed
-configuration.
-After rebuilding and bundling, stage the VS Code CLI with
-`node packages/vscode-ide-companion/scripts/copy-bundled-cli.js` and launch the
-extension development host. Desktop uses `npm run build:runtime` followed by
-`npm run dev` in `packages/desktop`. Restart an existing daemon to apply its new
-code and environment. Production entry enablement is not part of this setup.
+Both renderers return to chat after activation and append account, confirmed plan and selected-model usage guidance. Synchronize the displayed model from active Config. Show the confirmed Plus/Pro plan without guessing a plan before confirmation. Respect hidden-tip/screen-reader settings, omit the default subscription-header spacer and preserve custom subtitles. Retain complete OpenTUI submission metadata/admission results and canonical history metadata.
 
-## Validation and remaining dependencies
+Subscription input offers `/usage`, `/status`, `/upgrade`, `/logout`, each underlined separately. Usage is existing local CLI statistics, not server remaining quota. Development-only interactive upgrade opens the shared plans URL and retains a copyable URL when opening fails or is suppressed. Development-only interactive logout is restricted to an idle main response. After local logout, cancel background agents/side questions, clear subscription runtime/model/auth caches and selected subscription settings, then return to auth selection. Preserve other providers' API keys and settings; local cleanup failure must not clear the active runtime. Existing `/auth` behavior remains.
 
-Acceptance covers first-query recovery without reauthorization, stage-specific errors, cross-instance Retry-After, device grants shorter and longer than 600 seconds, timeout retention until keypress, remote revocation versus local cleanup failures, both terminal renderers, VS Code capability pending/failure,
-Web Shell connection changes and cancellation, coexisting purchase and Check again
-buttons, credential refresh/revoke, and preservation of existing provider login.
-Focused tests and local HTTP/browser fixtures verify these paths without user
-credentials. Native VS Code/Desktop hosts and real preproduction authorization
-must be verified separately; local fixture results do not establish those results.
+## Development and verification
 
-Before release, confirm server-provided model IDs/defaults, inference and search
-endpoints, token support, quota/error responses, and purchase activation. Complete
-those adapters and end-to-end verification before treating membership login as a
-working model session or updating public docs to announce availability.
+Run `npm run dev` for CLI. GUI daemons inherit `DEV=true` and fixed preproduction configuration in Core oauth-config.ts. After build/bundle, stage VS Code with `node packages/vscode-ide-companion/scripts/copy-bundled-cli.js`; Desktop uses `npm run build:runtime` then `npm run dev` in its package. Restart an existing daemon to load new code/environment. Replace fixed origins with confirmed production configuration before release.
 
-## Subscription inference integration
+Focused coverage includes authorization expiry, recovery without reauthorization, Retry-After, rotation/revoke/cleanup, complete catalogs and removed selections, activation lifetime/ownership, both renderers, default provider selection, localized desktop navigation, sidebar host integration, serialized thinking parameters, streaming and unchanged providers. Use disposable credentials/local HTTP fixtures, never the developer's real account. Keep test plans/results under ignored `.qwen/e2e-tests/`. Build, typecheck, bundle and audit the complete diff before delivery.
 
-Status: local implementation, with verification recorded in the test plan. The preproduction gateway is `https://pre-api.qwen.ai/compatible-mode/v1`; use OpenAI Chat Completions and load the server model catalog. On 2026-10-29, after backend fixes, a real Pro-token OpenAI SDK smoke against this gateway returned HTTP 200 and `OK` for both streaming and non-streaming requests, including usage. Earlier 404/401 failures are retained in the test evidence. This establishes the SDK conversation path; native-host and complete agent/tool workflows still need separate acceptance.
-
-Add a distinct `qwen-subscription` authentication type. Keep legacy OAuth unchanged. Register server-returned subscription models only in development mode and reject arbitrary gateway overrides. Reuse the existing OpenAI Chat pipeline and default compatible provider without automatically enabling DashScope-specific fields, search, or unverified model capabilities. Config and settings contain only an authentication selector, model ID, fixed gateway and a placeholder credential.
-
-The subscription session supplies valid access tokens using its existing credential file, cross-process lock and cooldown. Extract the existing refresh operation so membership and inference share it. A rejected token may be refreshed once before retrying an HTTP 401; compare the rejected token with the current token inside the lock to avoid rotating a token twice. Do not refresh for HTTP 403, 404 or 429, and do not replay a stream after response delivery. Model HTTP work must run outside the credential lock. Inject Bearer credentials at the transport boundary, preserve cancellation/proxy behavior, and reject redirects or other destinations before a credential can leave the fixed gateway.
-
-After confirmed Plus/Pro membership, clients automatically activate a subscription model through existing workspace/session selection infrastructure and return to the conversation after activation succeeds. If the saved model has been removed, users can instead return to the composer for `/model` without a success message; GUI hosts refresh the existing catalog before leaving authentication. Account login routes remain process-global; any new activation route must be selected-runtime scoped, resolve the requested workspace, honor trust and generation lifecycle, and never fall back to the primary runtime. CLI Ink/OpenTUI and GUI hosts share Core credentials, while updating only the selected conversation/workspace. CLI activation writes the trusted workspace scope and never falls back to user settings. Cancellation stops pre-commit checks; once the install transaction starts it finishes consistently, while cancelled views suppress late success callbacks. Missing credentials fail without launching an implicit device flow. Restart restores the selected subscription authentication; signout prevents later requests from reusing a cached access token.
-
-Affected layers: Core subscription configuration/session/transport, authentication and model resolution, CLI/SDK authentication literals, terminal login activation, daemon workspace activation, and shared GUI authentication. Extend focused tests for expiry, concurrent rotation, signout, route ownership, normal/streaming requests and tool-result roundtrips. Keep English/Chinese design synchronized and record baseline and local verification in `.qwen/e2e-tests/qwen-subscription-inference.md`. Build, typecheck, bundle, run focused package tests, then audit and independently review. Search, production enablement, and changes to legacy OAuth remain out of scope. Gateway routing and business error-code contracts remain external dependencies.
-
-## Automatic activation after membership confirmation
-
-Remove the extra Connect confirmation from CLI (Ink/OpenTUI), VS Code, and Desktop. Initial login/restoration, a successful membership-query retry, and purchase polling that discovers Plus/Pro all start activation automatically. Free/Go retains the existing purchase flow.
-
-Each authorization or transport lifetime attempts automatic activation once. Parent rerenders and changing callback identities must not restart it. Pending activation shows progress and does not return to chat early. Failure stays visible with safe copy and an explicit Retry action; no automatic retry loop or reauthorization is introduced. Success uses existing host completion callbacks to close authentication and return to the conversation. CLI authentication completion also synchronizes the displayed model from the active Config so the header/footer show the selected model immediately.
-
-GUI activation must belong to the lifecycle and transport that confirmed membership; a new transport must not consume an old ready state. Cancellation, unmounting and owner changes still suppress late success. Before a first session exists, successful activation also updates the welcome composer's pending model through its existing selection callback, before closing authentication, so the first prompt cannot reapply the old provider's model. Preserve the existing workspace-scoped install transaction, account credentials and daemon routes. Changes are limited to terminal hooks/views, the shared GUI subscription flow and hook, related host tests, localized retry/progress copy and both design versions. Regression coverage includes Plus/Pro, Free/Go, purchase/query recovery, pending/error/retry, callback rerenders, transport changes and cancellation.
-
-## CLI login success and account commands
-
-After confirmed Plus/Pro membership, both CLI renderers automatically activate a subscription model. Successful activation closes authentication and appends the account, plan, and `Model: <selected model> · Run /usage to see your plan usage` summary to the conversation. Ordinary activation failures retain a retry action; removed models only point to `/model` and allow a return to the composer. Cancellation suppresses late success. The normal input uses `Type your request, or /usage` and shows `Try: /usage /status /upgrade /auth` while subscription authentication is selected.
-
-Reuse `/usage` (the existing `/stats` alias) and `/status`. `/usage` continues to show the CLI's local usage statistics; it does not fetch server-side remaining plan quota. Add development-only, interactive `/upgrade` to open the existing Qwen Code plans page, retaining the URL if browser launch is suppressed or fails. Account management continues through the existing `/auth` command, without changing its behavior or adding a separate `/logout` command. This change is CLI-only.
-
-Acceptance: restored paid credentials, new authorization, purchase polling, and query recovery all activate without a second Connect step; activation failure and cancellation cannot show success; normal input is usable; existing usage/status/auth commands remain unchanged and upgrade works through both renderers. Verify with focused tests, build, typecheck, bundle, and the isolated test-script fallback in `.qwen/e2e-tests/subscription-login-success.md`.
+Recorded evidence on 2026-10-29 includes a real Pro-token SDK smoke returning HTTP 200 and OK for streaming/non-streaming with usage. It establishes the SDK conversation path only. Complete native-host OAuth, browser/payment activation, agent/tool workflows, quota/error contracts, per-model thinking support and long-budget enforcement still require acceptance. Local mocks/builds do not establish deployment or production availability.

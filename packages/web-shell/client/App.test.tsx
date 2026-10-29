@@ -2855,7 +2855,23 @@ mockComponent(
 mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
 mockComponent('./components/agents/AgentsManagerPage', 'AgentsManagerPage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
-mockComponent('./components/messages/AuthMessage', 'AuthMessage');
+vi.doMock('./components/messages/AuthMessage', async () => {
+  const React = await import('react');
+  const { DialogShell } = await import('./components/dialogs/DialogShell');
+  const { useI18n } = await import('./i18n');
+  return {
+    AuthMessage: (props: { dialog?: boolean }) => {
+      const { t } = useI18n();
+      return props.dialog
+        ? React.createElement(
+            DialogShell,
+            { title: t('auth.title'), onClose: vi.fn() },
+            React.createElement('div'),
+          )
+        : React.createElement('div');
+    },
+  };
+});
 // Record keyboardActive so app-level tests can assert the overlay is told to
 // grab focus when it becomes topmost (the actual focus lives in the real
 // components, covered by their own unit tests).

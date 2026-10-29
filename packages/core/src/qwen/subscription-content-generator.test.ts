@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../utils/auth-type.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
@@ -116,7 +117,9 @@ it('consumes a multi-chunk SSE stream through the real Chat pipeline', async () 
       { headers: { 'content-type': 'text/event-stream' } },
     ),
   );
-  const stream = await generator().generateContentStream(request, 'prompt');
+  const stream = await generator({
+    reasoning: { effort: 'medium' },
+  }).generateContentStream(request, 'prompt');
   let text = '';
   for await (const chunk of stream) {
     for (const part of chunk.candidates?.[0]?.content?.parts ?? [])
@@ -126,7 +129,151 @@ it('consumes a multi-chunk SSE stream through the real Chat pipeline', async () 
   expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toMatchObject({
     stream: true,
     stream_options: { include_usage: true },
+    enable_thinking: true,
+    thinking_budget: 16384,
   });
+  expect(
+    JSON.parse(fetchMock.mock.calls[0][1]?.body as string),
+  ).not.toHaveProperty('reasoning');
+});
+
+it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+  'sends native thinking budgets for %s',
+  async (model) => {
+    const budgets: Array<[ReasoningEffort, number]> = [
+      ['low', 4096],
+      ['medium', 16384],
+      ['high', 32768],
+      ['xhigh', 32768],
+      ['max', 32768],
+    ];
+    for (const [effort, thinkingBudget] of budgets) {
+      fetchMock.mockResolvedValue(completion());
+      await generator({ model, reasoning: { effort } }).generateContent(
+        { ...request, model },
+        'prompt',
+      );
+      const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+      expect(body).toMatchObject({
+        model,
+        enable_thinking: true,
+        thinking_budget: thinkingBudget,
+      });
+      for (const field of [
+        'reasoning',
+        'reasoning_effort',
+        'chat_template_kwargs',
+        'extra_body',
+      ])
+        expect(body).not.toHaveProperty(field);
+    }
+  },
+);
+
+it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+  'turns thinking off without a budget for %s',
+  async (model) => {
+    fetchMock.mockResolvedValue(completion());
+    const extraBody = {
+      enable_thinking: true,
+      thinking_budget: 50,
+      reasoning_effort: 'high',
+      chat_template_kwargs: { enable_thinking: true, other_option: 'keep' },
+    };
+    const before = structuredClone(extraBody);
+    await generator({
+      model,
+      reasoning: false,
+      extra_body: extraBody,
+    }).generateContent({ ...request, model }, 'prompt');
+    const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+    expect(body).toMatchObject({
+      enable_thinking: false,
+      chat_template_kwargs: { other_option: 'keep' },
+    });
+    for (const field of ['thinking_budget', 'reasoning', 'reasoning_effort'])
+      expect(body).not.toHaveProperty(field);
+    expect(body.chat_template_kwargs).not.toHaveProperty('enable_thinking');
+    expect(extraBody).toEqual(before);
+  },
+);
+
+it('honors per-request thinking opt-out over an enabled session', async () => {
+  fetchMock.mockImplementation(async () => completion());
+  const active = generator({ reasoning: { effort: 'xhigh' } });
+  await active.generateContent(
+    { ...request, config: { thinkingConfig: { includeThoughts: false } } },
+    'side-query',
+  );
+  const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+  expect(body.enable_thinking).toBe(false);
+  for (const field of [
+    'thinking_budget',
+    'reasoning',
+    'reasoning_effort',
+    'chat_template_kwargs',
+  ])
+    expect(body).not.toHaveProperty(field);
+  await active.generateContent(request, 'next-prompt');
+  expect(JSON.parse(fetchMock.mock.lastCall![1]?.body as string)).toMatchObject(
+    {
+      enable_thinking: true,
+      thinking_budget: 32768,
+    },
+  );
+});
+
+it.each([
+  [{ enable_thinking: true, thinking_budget: 50 }, true, 50],
+  [{ enable_thinking: false, thinking_budget: 50 }, false, undefined],
+] as const)(
+  'preserves native thinking overrides %j',
+  async (extraBody, enabled, budget) => {
+    fetchMock.mockResolvedValue(completion());
+    await generator({
+      reasoning: { effort: 'medium' },
+      extra_body: extraBody,
+    }).generateContent(request, 'prompt');
+    const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+    expect(body.enable_thinking).toBe(enabled);
+    expect(body.thinking_budget).toBe(budget);
+    expect(body).not.toHaveProperty('reasoning');
+  },
+);
+
+it('enables thinking without inventing a budget when no strength is set', async () => {
+  fetchMock.mockResolvedValue(completion());
+  await generator({ reasoning: {} }).generateContent(request, 'prompt');
+  const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+  expect(body.enable_thinking).toBe(true);
+  expect(body).not.toHaveProperty('thinking_budget');
+  expect(body).not.toHaveProperty('reasoning');
+});
+
+it('keeps mandatory thinking enabled without an unsupported off switch', async () => {
+  fetchMock.mockResolvedValue(completion());
+  await generator({
+    reasoning: false,
+    thinkingMandatory: true,
+  }).generateContent(request, 'prompt');
+  const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+  expect(body.enable_thinking).toBe(true);
+  expect(body).not.toHaveProperty('thinking_budget');
+});
+
+it('uses the request model to keep subscription fields off unknown models', async () => {
+  fetchMock.mockResolvedValue(completion());
+  await generator({ reasoning: { effort: 'low' } }).generateContent(
+    { ...request, model: 'future-served-model' },
+    'prompt',
+  );
+  const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
+  expect(body).toMatchObject({
+    model: 'future-served-model',
+    reasoning: { effort: 'low' },
+  });
+  expect(body).not.toHaveProperty('enable_thinking');
+  expect(body).not.toHaveProperty('thinking_budget');
 });
 
 it('refreshes the rejected token once on 401, preserving the request body', async () => {
@@ -141,7 +288,10 @@ it('refreshes the rejected token once on 401, preserving the request body', asyn
       ),
     )
     .mockResolvedValueOnce(completion());
-  await generator().generateContent(request, 'prompt');
+  await generator({ reasoning: { effort: 'low' } }).generateContent(
+    request,
+    'prompt',
+  );
   expect(session.getAccessToken).toHaveBeenLastCalledWith(
     expect.any(AbortSignal),
     'synthetic-old',
@@ -153,6 +303,10 @@ it('refreshes the rejected token once on 401, preserving the request body', asyn
   expect(fetchMock.mock.calls[1][1]?.body).toBe(
     fetchMock.mock.calls[0][1]?.body,
   );
+  expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toMatchObject({
+    enable_thinking: true,
+    thinking_budget: 4096,
+  });
 });
 
 it.each([403, 404, 429])(

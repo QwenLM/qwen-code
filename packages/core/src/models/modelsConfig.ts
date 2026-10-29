@@ -268,6 +268,18 @@ export class ModelsConfig {
     return this.currentAuthType;
   }
 
+  clearAuth(): void {
+    this.currentAuthType = undefined;
+    this._generationConfig = {};
+    this.generationConfigSources = {};
+    this.currentRegistryBaseUrl = undefined;
+    this.activeRuntimeModelSnapshotId = undefined;
+    this.hasManualCredentials = false;
+    this.strictModelProviderSelection = false;
+    this.requireCachedQwenCredentialsOnce = false;
+    this.modelRegistry.setSubscriptionModels([]);
+  }
+
   getCurrentRegistryBaseUrl(): string | null | undefined {
     return this.currentRegistryBaseUrl;
   }

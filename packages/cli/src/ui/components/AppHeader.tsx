@@ -5,7 +5,7 @@
  */
 
 import { useMemo } from 'react';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
 import {
   AuthType,
   findProviderByCredentials,
@@ -13,6 +13,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
+import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -81,6 +83,11 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
         <Header
           version={version}
           authDisplayType={authDisplayType}
+          subscriptionPlan={
+            authType === AuthType.QWEN_SUBSCRIPTION
+              ? config.getSubscriptionPlan?.()
+              : undefined
+          }
           model={model}
           workingDirectory={targetDir}
           customAsciiArt={resolvedBanner?.asciiArt}
@@ -88,7 +95,16 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           customBannerSubtitle={resolvedBanner?.subtitle}
         />
       )}
-      {showTips && <Tips />}
+      {showTips &&
+        (authType === AuthType.QWEN_SUBSCRIPTION ? (
+          <Box marginLeft={2} marginRight={2}>
+            <Text color={theme.text.secondary}>
+              {t('Tip: Run /usage to see your plan usage.')}
+            </Text>
+          </Box>
+        ) : (
+          <Tips />
+        ))}
     </Box>
   );
 };

@@ -1495,7 +1495,16 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     return [...new Set([...typed].reverse().concat(pastMessages))].reverse();
   }, [props.userMessages, hostHistory, pastMessages]);
 
-  const hasPriorInput = userMessages.some((text) => text.trim() !== '/auth');
+  const lastSubscriptionLogin = hostHistory.findLastIndex(
+    (item) =>
+      item.type === 'info' && item.presentation === 'subscription-success',
+  );
+  const hasPriorInput =
+    lastSubscriptionLogin < 0
+      ? userMessages.some((text) => text.trim() !== '/auth')
+      : hostHistory
+          .slice(lastSubscriptionLogin + 1)
+          .some((item) => item.type === 'user' && item.text.trim() !== '/auth');
   useEffect(() => {
     if (hasPriorInput || streaming) dismissSubscriptionHints();
   }, [hasPriorInput, streaming, dismissSubscriptionHints]);
@@ -1641,6 +1650,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 settings={settings}
                 commands={commandList}
                 onClose={() => setDialog(null)}
+                onSubscriptionActivated={() =>
+                  setSubscriptionHintsDismissed(false)
+                }
                 notify={notify}
                 fillInput={fillComposer}
                 onSelectSetting={handleSelectSetting}
@@ -1746,7 +1758,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                     {t('Try:')}
                     {'  '}
                     <span attributes={8} fg={C.purple}>
-                      {'/usage  /status  /upgrade  /auth'}
+                      /usage
+                    </span>
+                    {'  '}
+                    <span attributes={8} fg={C.purple}>
+                      /status
+                    </span>
+                    {'  '}
+                    <span attributes={8} fg={C.purple}>
+                      /upgrade
+                    </span>
+                    {'  '}
+                    <span attributes={8} fg={C.purple}>
+                      /logout
                     </span>
                   </text>
                 )}

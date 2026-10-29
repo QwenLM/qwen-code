@@ -101,7 +101,10 @@ export function registerWorkspaceSubscriptionRoutes(
           return;
         }
         assertActive();
-        if (!info || !['plus', 'pro'].includes(info.member_type)) {
+        if (
+          !info ||
+          !['plus', 'pro'].includes(info.member_type.toLowerCase())
+        ) {
           res.status(403).json({ code: 'subscription_required' });
           return;
         }

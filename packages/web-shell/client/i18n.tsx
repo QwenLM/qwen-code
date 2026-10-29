@@ -81,6 +81,16 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'subscription.entryTitle': 'Qwen',
+  'subscription.entryDescription':
+    'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+  'subscription.new': 'New',
+  'subscription.openPlansDescription':
+    'Opens the Qwen Code plans page in your browser',
+  'subscription.switchProviderDescription':
+    'Coding Plan, Token Plan, or Standard API Key',
+  'subscription.signOutDescription':
+    'Disconnect this device from your Qwen account',
   'subscription.title': 'Qwen Subscription',
   'subscription.waiting':
     'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.',
@@ -104,8 +114,8 @@ const EN: Messages = {
     'Could not load models. Your account is still signed in. Please try again.',
   'subscription.connectFailed':
     'Could not connect Qwen Subscription. Please try again.',
-  'subscription.connected':
-    'Qwen Subscription configured. You can start chatting.',
+  'subscription.connected': (v) =>
+    `✓ Signed in as ${v?.email ?? ''}  \n✓ Qwen ${v?.plan ?? ''} is active · usage is included with your plan${v?.model ? `  \n  Model: ${v.model} · Run /usage to see your plan usage` : ''}`,
   'subscription.signedIn': (v) => `Signed in as ${v?.email ?? ''}`,
   'subscription.signedInWithPlan': (v) =>
     `Signed in as ${v?.email ?? ''} (Qwen ${v?.plan ?? ''})`,
@@ -2762,6 +2772,7 @@ const EN: Messages = {
   'local.auth': 'Connect an LLM provider',
   'auth.title': 'Connect a Provider',
   'auth.step.group': 'Type',
+  'auth.step.authorization': 'Authorization',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
   'auth.step.api': 'API',
@@ -4687,7 +4698,25 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
-  'subscription.title': 'Qwen Subscription',
+  'Third-party Providers': '第三方供应商',
+  'Custom Provider': '自定义供应商',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推荐配置：Token Plan 或标准 API Key',
+  'Official recommended setup: Coding Plan, Token Plan, or Standard API Key':
+    '官方推荐配置：Coding Plan、Token Plan 或标准 API Key',
+  'Choose a built-in provider and connect with an API key':
+    '选择内置供应商并使用 API Key 连接',
+  'Manually connect a local server, proxy, or unsupported provider':
+    '手动连接本地服务、代理或其他供应商',
+  'subscription.entryTitle': 'Qwen',
+  'subscription.entryDescription':
+    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和智能体能力',
+  'subscription.new': '新',
+  'subscription.openPlansDescription': '在浏览器中打开 Qwen Code 套餐页',
+  'subscription.switchProviderDescription':
+    'Coding Plan、Token Plan 或标准 API Key',
+  'subscription.signOutDescription': '断开此设备与你的 Qwen 账号的连接',
+  'subscription.title': 'Qwen 订阅',
   'subscription.waiting':
     '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
   'subscription.browserFallback': '如果浏览器未打开，请访问：',
@@ -4707,7 +4736,8 @@ const ZH: Messages = {
     `已选模型 ${vars?.model} 已不可用，请通过 /model 重新选择。`,
   'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
   'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
-  'subscription.connected': '已配置 Qwen 订阅，可以开始对话。',
+  'subscription.connected': (v) =>
+    `✓ 已登录为 ${v?.email ?? ''}  \n✓ Qwen ${v?.plan ?? ''} 已生效 · 用量包含在你的套餐中${v?.model ? `  \n  模型：${v.model} · 运行 /usage 查看套餐用量` : ''}`,
   'subscription.signedIn': (v) => `已登录为 ${v?.email ?? ''}`,
   'subscription.signedInWithPlan': (v) =>
     `已登录为 ${v?.email ?? ''}（Qwen ${v?.plan ?? ''}）`,
@@ -7229,9 +7259,10 @@ const ZH: Messages = {
   'skilldesc.tmuxRealUserTesting': '用 tmux 做真实用户测试并保存日志',
   'skilldesc.triage': '把关和审查 Qwen Code 的 issue 与 PR',
   'local.approvalMode': '切换审批模式',
-  'local.auth': '连接 LLM provider',
-  'auth.title': '连接 Provider',
+  'local.auth': '连接模型供应商',
+  'auth.title': '连接供应商',
   'auth.step.group': '类型',
+  'auth.step.authorization': '授权',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
   'auth.step.api': 'API',

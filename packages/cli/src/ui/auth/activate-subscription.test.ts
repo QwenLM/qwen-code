@@ -36,6 +36,7 @@ function config() {
       .mockResolvedValue({ models: ['qwen3.8-max'], cached: false }),
     syncModelSelection: vi.fn(),
     refreshAuth: vi.fn().mockResolvedValue(undefined),
+    setSubscriptionPlan: vi.fn(),
   } as unknown as Config;
 }
 beforeEach(() => {
@@ -76,17 +77,31 @@ it('uses a token-free install plan and the common selection and refresh callback
     'https://pre-api.qwen.ai/compatible-mode/v1',
   );
   expect(runtime.refreshAuth).toHaveBeenCalledWith('qwen-subscription');
+  expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
 });
-it.each([null, { member_type: 'free' }, { member_type: 'go' }])(
-  'rejects a missing paid membership',
-  async (info) => {
-    mocks.userInfo.mockResolvedValue(info);
-    await expect(
-      activateSubscription(settings, config(), new AbortController().signal),
-    ).rejects.toThrow('Plus or Pro');
-    expect(mocks.apply).not.toHaveBeenCalled();
+it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'])(
+  'activates %s membership without mapping its name',
+  async (member_type) => {
+    mocks.userInfo.mockResolvedValue({ member_type });
+    const runtime = config();
+    await activateSubscription(settings, runtime, new AbortController().signal);
+    expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith(
+      member_type.toLowerCase(),
+    );
   },
 );
+it.each([
+  null,
+  ...['free', 'lite', 'FREE', 'LITE', 'future-plan'].map((member_type) => ({
+    member_type,
+  })),
+])('rejects a missing paid membership', async (info) => {
+  mocks.userInfo.mockResolvedValue(info);
+  await expect(
+    activateSubscription(settings, config(), new AbortController().signal),
+  ).rejects.toThrow('Plus or Pro');
+  expect(mocks.apply).not.toHaveBeenCalled();
+});
 
 it('selects a server model without a fixed allowlist and preserves an existing choice', async () => {
   const runtime = config();

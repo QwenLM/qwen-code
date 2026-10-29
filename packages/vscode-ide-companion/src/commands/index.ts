@@ -19,6 +19,8 @@ export const closeDiffCommand = 'qwenCode.closeDiff';
 export const openChatCommand = 'qwen-code.openChat';
 export const openNewChatTabCommand = 'qwenCode.openNewChatTab';
 export const authCommand = 'qwen-code.auth';
+export const logoutCommand = 'qwen-code.logout';
+export const upgradeCommand = 'qwen-code.upgrade';
 export const focusChatCommand = 'qwen-code.focusChat';
 export const newConversationCommand = 'qwen-code.newConversation';
 export const showLogsCommand = 'qwen-code.showLogs';
@@ -121,6 +123,19 @@ export function registerNewCommands(
       await provider.startInteractiveAuth();
     }),
   );
+
+  for (const action of ['logout', 'upgrade'] as const) {
+    disposables.push(
+      vscode.commands.registerCommand(`qwen-code.${action}`, async () => {
+        const providers = getWebViewProviders();
+        const provider = providers.length
+          ? providers[providers.length - 1]
+          : createWebViewProvider();
+        await provider.show();
+        await provider.startSubscriptionAction(action);
+      }),
+    );
+  }
 
   // Focus Chat: bring the Activity Bar chat view to front.
   disposables.push(

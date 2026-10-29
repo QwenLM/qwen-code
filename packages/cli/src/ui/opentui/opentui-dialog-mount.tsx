@@ -136,6 +136,7 @@ export interface OpenTuiDialogMountProps {
   /** Interactive command registry — drives the help overlay. */
   commands: readonly SlashCommand[];
   onClose: () => void;
+  onSubscriptionActivated?: () => void;
   notify: (text: string) => void;
   /** Writes text into the composer (arena "fill input", slash re-inject). */
   fillInput?: (text: string) => void;
@@ -459,14 +460,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           initialError={request.initialError}
           onClose={onClose}
-          notify={(text, presentation) =>
+          notify={(text, presentation) => {
             reportResult(
               request.openedViaCommand ? '/auth' : null,
               text,
               'info',
               presentation,
-            )
-          }
+            );
+            if (presentation === 'subscription-success')
+              props.onSubscriptionActivated?.();
+          }}
           availableTerminalHeight={props.availableTerminalHeight}
         />
       );

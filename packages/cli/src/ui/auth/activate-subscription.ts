@@ -33,7 +33,8 @@ export async function activateSubscription(
   }
   const info = await new QwenSubscriptionSession().getUserInfo(signal);
   signal.throwIfAborted();
-  if (!info || !['plus', 'pro'].includes(info.member_type)) {
+  const plan = info?.member_type.toLowerCase();
+  if (!info || (plan !== 'plus' && plan !== 'pro')) {
     throw new Error('An active Qwen Plus or Pro subscription is required.');
   }
   const { models } = await config.refreshSubscriptionModels(signal);
@@ -61,5 +62,6 @@ export async function activateSubscription(
       refreshAuth: (authType) => config.refreshAuth(authType),
     },
   );
+  config.setSubscriptionPlan(plan);
   return info;
 }

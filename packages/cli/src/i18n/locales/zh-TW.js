@@ -2604,4 +2604,14 @@ export default {
   'Could not open your browser. Visit {{url}}':
     '無法開啟瀏覽器，請造訪 {{url}}',
   'Qwen subscription plans: {{url}}': 'Qwen 訂閱方案：{{url}}',
+  'Sign out of your Qwen account': '登出 Qwen 帳號',
+  'No active Qwen Subscription session. Use /auth to change providers.':
+    '目前未啟用 Qwen 會員工作階段，請使用 /auth 切換供應商。',
+  'Wait for the current response to finish before signing out.':
+    '請等待目前回覆結束後再登出。',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    '已登出，但無法清除儲存的驗證方式。',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    '已登出 Qwen，請使用 /auth 登入其他帳號。',
+  'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
 };

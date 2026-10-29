@@ -16,6 +16,7 @@ import {
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -1835,6 +1836,9 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
 
   const handleAuthChange = useCallback(() => {
+    if (config.getAuthType() === AuthType.QWEN_SUBSCRIPTION) {
+      setSubscriptionHintsDismissed(false);
+    }
     const model = config.getModel();
     lastNotifiedModelRef.current = model;
     refreshStatic();

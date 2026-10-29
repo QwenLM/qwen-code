@@ -239,6 +239,7 @@ function mount(
   overrides: {
     notify?: (text: string) => void;
     onClose?: () => void;
+    onSubscriptionActivated?: () => void;
     fillInput?: (text: string) => void;
     onSelectSetting?: (name: string, scope: unknown) => void;
     onRestartRequest?: () => void;
@@ -253,6 +254,7 @@ function mount(
       settings={SETTINGS}
       commands={[]}
       onClose={overrides.onClose ?? (() => {})}
+      onSubscriptionActivated={overrides.onSubscriptionActivated}
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
       onSelectSetting={overrides.onSelectSetting}
@@ -315,6 +317,18 @@ const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
 ];
 
 describe('OpenTuiDialogMount routing', () => {
+  it('notifies a fresh member activation without treating ordinary auth notices as login', () => {
+    const activated = vi.fn();
+    const ui = mount(
+      { dialog: 'auth' },
+      { onSubscriptionActivated: activated },
+    );
+    dialogProp('auth', 'notify')('ordinary provider notice');
+    expect(activated).not.toHaveBeenCalled();
+    dialogProp('auth', 'notify')('new member login', 'subscription-success');
+    expect(activated).toHaveBeenCalledOnce();
+    ui.unmount();
+  });
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.dialogProps = {};

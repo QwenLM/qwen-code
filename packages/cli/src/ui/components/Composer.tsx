@@ -69,9 +69,13 @@ export const Composer = ({ footerRef }: ComposerProps) => {
 
   const { subscriptionHintsDismissed } = uiState;
   const { dismissSubscriptionHints } = uiActions;
-  const hasPriorInput = uiState.history.some(
-    (item) => item.type === 'user' && item.text.trim() !== '/auth',
+  const lastSubscriptionLogin = uiState.history.findLastIndex(
+    (item) =>
+      item.type === 'info' && item.presentation === 'subscription-success',
   );
+  const hasPriorInput = uiState.history
+    .slice(lastSubscriptionLogin + 1)
+    .some((item) => item.type === 'user' && item.text.trim() !== '/auth');
   const hasInput = uiState.buffer.text.length > 0;
   useEffect(() => {
     if (subscriptionActive && (hasInput || hasPriorInput || isStreaming)) {
@@ -210,8 +214,22 @@ export const Composer = ({ footerRef }: ComposerProps) => {
               {t('Try:')}
               {'  '}
             </Text>
-            <Text color={theme.text.link} underline>
-              {'/usage  /status  /upgrade  /auth'}
+            <Text>
+              <Text color={theme.text.link} underline>
+                /usage
+              </Text>
+              {'  '}
+              <Text color={theme.text.link} underline>
+                /status
+              </Text>
+              {'  '}
+              <Text color={theme.text.link} underline>
+                /upgrade
+              </Text>
+              {'  '}
+              <Text color={theme.text.link} underline>
+                /logout
+              </Text>
             </Text>
           </Box>
         )}
