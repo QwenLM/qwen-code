@@ -1260,18 +1260,43 @@ describe('e2e workflow', () => {
       expect(gateIndex).toBeLessThan(names.indexOf('Install dependencies'));
     });
 
-    it('keeps the gate on every pool-routed job', () => {
+    it('keeps the self-hosted contract on every pool-routed job', () => {
       // A new pool-routed leg without the gate reddens here instead of on a
-      // saturated host; the hosted legs stay ungated on fresh VMs.
+      // saturated host; the hosted legs stay ungated on fresh VMs. The same
+      // holds for the Node preflight (nodejs.org may be unreachable through
+      // the pool's egress proxy) and the ownership heal (docker shards leave
+      // root-owned files on the runners).
       const poolJobs = Object.entries(yml.jobs).filter(([, job]) =>
         String(job['runs-on'] ?? '').includes('ecs-qwen'),
       );
       expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
       for (const [id, job] of poolJobs) {
-        const gate = (job.steps ?? []).find(
+        const steps = job.steps ?? [];
+        const gate = steps.find(
           (step) => step.name === 'Disk floor gate (self-hosted)',
         );
         expect(gate, id).toBeDefined();
+        const heal = steps.find(
+          (step) => step.name === 'Restore workspace ownership',
+        );
+        expect(heal?.if, id).toBe("${{ runner.environment == 'self-hosted' }}");
+        const poolNode = steps.find(
+          (step) => step.name === 'Use pre-installed Node.js (self-hosted)',
+        );
+        expect(poolNode, id).toBeDefined();
+        const hostedNode = steps.find(
+          (step) =>
+            typeof step.name === 'string' &&
+            step.name.startsWith('Set up Node.js'),
+        );
+        expect(hostedNode?.if, id).toBe(
+          "${{ runner.environment == 'github-hosted' }}",
+        );
+        const npmCache = steps.find(
+          (step) =>
+            step.name === 'Configure persistent npm cache (self-hosted)',
+        );
+        expect(npmCache, id).toBeDefined();
       }
     });
   });
