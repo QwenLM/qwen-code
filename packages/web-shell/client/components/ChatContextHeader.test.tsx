@@ -383,6 +383,8 @@ describe('ChatContextHeader session title single-click rename', () => {
     const input = findRenameInput();
     expect(input).not.toBeNull();
     expect(input?.value).toBe('Session title');
+    expect(input?.maxLength).toBe(256);
+    expect(input?.getAttribute('aria-label')).toBe('Rename: Session title');
     expect(document.activeElement).toBe(input);
     expect(rename).not.toHaveBeenCalled();
   });

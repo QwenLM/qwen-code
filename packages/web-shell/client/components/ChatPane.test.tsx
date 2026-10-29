@@ -4268,6 +4268,8 @@ describe('ChatPane pane title single-click rename', () => {
     const input = findRenameInput();
     expect(input).not.toBeNull();
     expect(input?.value).toBe('Refactor core');
+    expect(input?.maxLength).toBe(256);
+    expect(input?.getAttribute('aria-label')).toBe('Rename: Refactor core');
     expect(document.activeElement).toBe(input);
     expect(renameSession).not.toHaveBeenCalled();
   });
