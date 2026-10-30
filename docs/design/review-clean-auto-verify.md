@@ -361,7 +361,9 @@ Four defects found in review of the first implementation, all fixed here:
   spawn and the preparation, which is exactly where a queued handoff goes stale:
   the round would verify whatever the PR advanced to and publish that report as
   evidence for a review of a different commit. The skill treats exit 5 as the end
-  of the round, never as a reason to retry without the flag.
+  of the round, never as a reason to retry without the flag. The gate also sits
+  ahead of the clean-head tree gate (#15913), so a moved head is refused before
+  the preparation attests anything about the tree.
 - **A clean approval needs evidence at the CURRENT head.** Dismissing a stale
   approval on push is an optional repository policy, so `reviewDecision` can read
   `APPROVED` for a head nobody reviewed. The judgement now requires an approval

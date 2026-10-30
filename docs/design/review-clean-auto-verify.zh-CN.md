@@ -309,7 +309,8 @@ watch 的 PR 每个周期多一次调用。
   建目录或执行任何东西之前。只在派生前检查会留下「派生到 prepare 之间」这段窗口，
   而那正是排队中的交接变陈旧的地方：那一轮会去验证 PR 已经推进到的 commit，并把
   这份报告当作另一个 commit 的评审证据发布。skill 把 exit 5 当作本轮终止，绝不是
-  「去掉旗标重试」的理由。
+  「去掉旗标重试」的理由。这道闸也排在 clean-head 工作树闸（#15913）之前，因此
+  head 漂移会在 prepare 对工作树作出任何 attest 之前就被拒绝。
 - **干净批准需要当前 head 的证据。** push 时 dismiss 陈旧批准是仓库的可选策略，
   因此 `reviewDecision` 可能对一个没人评审过的 head 仍读作 `APPROVED`。判定现在
   要求存在 `commit.oid` 等于该 head 的批准，并在 reviews 连接读不出、或其中没有
