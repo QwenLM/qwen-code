@@ -3378,7 +3378,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       text?: string;
       usage?: (promptTokens: number) => {
         promptTokenCount: number;
-        candidatesTokenCount: number;
+        candidatesTokenCount?: number;
       };
     } = {},
   ) {
@@ -3620,6 +3620,20 @@ describe('issue #7960: compression side-query output budget vs small windows', (
 
     const result = await compressChars(182_000, 45_000);
 
+    expectCompressed(result);
+  });
+
+  it('keeps an unclosed snapshot when only the prompt count is reported', async () => {
+    // The output count is then a local estimate, not the server's, so the
+    // usage cannot show that the output stopped at the end of the window.
+    mockVllmBackend(WINDOW, false, {
+      text: '<state_snapshot><overall_goal>port the parser</overall_goal>',
+      usage: () => ({ promptTokenCount: WINDOW - 100 }),
+    });
+
+    const result = await compressChars(40_000, 12_000);
+
+    expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
     expectCompressed(result);
   });
 
