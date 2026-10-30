@@ -1065,12 +1065,24 @@ jobs:
       - name: 'Check that every non-Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
 
+      - name: 'Verify ordinary and enabled embedding hosts'
+        working-directory: 'packages/managed-agent-server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          set -euo pipefail
+          managed_version="$(mvn --batch-mode --no-transfer-progress help:evaluate -Dexpression=project.version -q -DforceStdout -Dstyle.color=never)"
+          mvn --batch-mode --no-transfer-progress -pl server -am -DskipTests -Dgpg.skip=true install
+          mvn --batch-mode --no-transfer-progress -f verification/src/test/embedding-host/pom.xml -Dmanaged-agent.version="${managed_version}" -Dtest=EmbeddingHostTest -DfailIfNoTests=true test
+          mvn --batch-mode --no-transfer-progress -f verification/src/test/embedding-host/pom.xml -Dmanaged-agent.version="${managed_version}" -Dtest=EnabledHostTest -DfailIfNoTests=true -Pembedded test
+
       - name: 'Upload Maven test reports on failure'
         if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'sdk-java-test-reports-mysql-integration-java-21'
           path: |
+            packages/managed-agent-server/verification/src/test/embedding-host/target/surefire-reports/*
             packages/managed-agent-server/verification/target/surefire-reports/*.txt
             packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream
             packages/managed-agent-server/verification/target/failsafe-reports/*.txt
