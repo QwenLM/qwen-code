@@ -111,8 +111,8 @@ export interface ReviewContext {
   authorLogin: string;
   state: string;
   baseRefName: string;
-  /** Branch name on GitHub. Aone: `sourceBranch` — a bare SHA under
-   *  AGit-Flow, rendered as `base ← <sha>`. */
+  /** Branch name on GitHub. Aone: trimmed `sourceBranch`, which is a bare SHA
+   *  under AGit-Flow and a branch name under branch-based flow. */
   headRefName: string;
   headRefOid: string;
   /** Absent where the platform reports no diff stats (Aone). */
@@ -130,7 +130,7 @@ export interface ReviewContext {
  * and computed locally from the fetched diff when absent.
  */
 export interface FetchMeta {
-  /** The head SHA. */
+  /** The head SHA; empty when the platform cannot resolve it safely. */
   headRefOid: string;
   /**
    * The head's branch name, when the platform has one (GitHub). AGit-Flow
