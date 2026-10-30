@@ -978,6 +978,9 @@ describe('ShellExecutionService', () => {
         'yes | head -c 100000000',
         () => {
           ptyData('1234567890discarded');
+
+          // The qwen-bun-pty backend has already killed the tree and closed
+          // the fd when it emits this; no onExit follows.
           expect(() => mockPtyProcess.emit('error', limitError)).not.toThrow();
         },
         { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
@@ -1097,6 +1100,8 @@ describe('ShellExecutionService', () => {
     });
 
     it('resumes a flow-control-paused pty before signalling its group', async () => {
+      // XOFF can leave the master unread, and macOS finishes the exit of a
+      // child killed with output undrained only once it is read again.
       await cancelPty();
 
       expect(mockPtyProcess.resume).toHaveBeenCalledTimes(1);
@@ -2792,12 +2797,15 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('does not report a held stdout when only stderr stays open past the drain', async () => {
+      // A helper that silenced its stdout but kept stderr: what the caller
+      // reads from stdout is complete.
       const { result } = await simulateExecution(
         'stderr-held',
         (cp) => {
           emitOut('before');
           cp.stdout?.emit('end');
           cp.emit('exit', 0, null);
+          // No 'close': the helper holds stderr.
         },
         { streamStdout: true },
       );

@@ -221,6 +221,14 @@ export interface ShellExecutionResult {
    * clean-exit signal of 0 is normalized to null at the service boundary.
    */
   signal: number | null;
+
+  /**
+   * An error object if the process failed to spawn. Also set when a spawned
+   * process was terminated by a pty resource limit (bounded hold / write
+   * queue): then exitCode and signal stay null and no native exit is
+   * fabricated.
+   */
+
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
@@ -250,7 +258,17 @@ export interface ShellExecutionResult {
     | 'qwen-bun-pty'
     | 'child_process'
     | 'none';
+  /**
+   * True when output was discarded at the maxBufferedOutputBytes bound, so
+   * `output` is a retained prefix rather than the whole stream.
+   */
   outputCaptureLimitExceeded?: boolean;
+  /**
+   * `streamStdout` only: the process exited, but its stdout was still open
+   * when the post-exit drain ran out — something it started in the
+   * background still holds it, and what that prints is not in the result.
+   * A held stderr alone does not set it.
+   */
   stdoutHeldAfterExit?: boolean;
 }
 
@@ -1238,8 +1256,14 @@ export class ShellExecutionService {
               const { buf, flags } = this.ordered();
               if (buf.length === 0) return buf;
               const encoding = getCachedEncodingForBuffer(buf);
-              const utf8Compatible =
-                encoding === 'utf8' || encoding === 'utf-8';
+              let utf8Compatible = encoding === 'utf8' || encoding === 'utf-8';
+              if (!utf8Compatible) {
+                try {
+                  new TextDecoder(encoding);
+                } catch {
+                  utf8Compatible = true;
+                }
+              }
               const MAX_ORPHAN_SKIP = 8;
               let skip = 0;
               while (skip < flags.length) {
@@ -1596,6 +1620,9 @@ export class ShellExecutionService {
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
         if (rawCapture || streamStdout) {
+          // streamStdout reads the stdout end too: the drain reports a
+          // stdout still held, not a held stderr.
+
           child.stdout?.on('end', () => {
             stdoutEnded = true;
           });
@@ -2427,6 +2454,8 @@ export class ShellExecutionService {
                 }
               }),
           );
+
+          // Observe rejection in the same turn, before exit needs to drain it.
           processingChain = processingChain.catch((error) => {
             try {
               debugLogger.warn(
@@ -2459,6 +2488,13 @@ export class ShellExecutionService {
             // EIO is expected when the PTY process exits - ignore it
             return;
           }
+
+          // The qwen-bun-pty backend terminates a command itself when its
+          // bounded write queue is exhausted and reports a stable structured
+          // reason. Converge the execution on that error — a visible failure
+          // carrying no fabricated exit code — instead of the crash path
+          // below; the backend has already killed
+          // the child and closed the master fd, so no onExit will follow.
           const limitCode = getErrnoCode(err);
           if (limitCode === 'QWEN_PTY_WRITE_LIMIT') {
             settleResult(null, null, err);
@@ -2556,6 +2592,11 @@ export class ShellExecutionService {
           this.activePtys.delete(ptyProcess.pid);
         };
 
+        // Resolves the execution exactly once — with the real native exit
+        // status on the natural path, or with a structured resource-failure
+        // error and NO exit code when the PTY backend terminated the command
+        // itself (the exit code is never fabricated).
+
         let settled = false;
         const finalizeResult = async (
           exitCode: number | null,
@@ -2578,6 +2619,10 @@ export class ShellExecutionService {
 
             try {
               if (isStreamingRawContent) {
+                // Re-decode the captured buffer with proper encoding detection.
+                // The streaming decoder used the first-chunk heuristic which
+                // can misdetect when early output is ASCII-only but later
+                // output is in a different encoding (e.g. GBK).
                 const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
                 const decodedOutput = new TextDecoder(finalEncoding).decode(
                   finalBuffer,
@@ -3132,6 +3177,11 @@ export class ShellExecutionService {
             }
           } else {
             try {
+              // A flow-control pause (XOFF) can leave the master unread; on
+              // macOS a child killed with output undrained only finishes
+              // exiting once the master is read again, so `exited` would
+              // never flip. Resume first — a no-op when not paused.
+
               ptyProcess.resume();
             } catch {
               // Best effort: the kill below must still run.
@@ -3205,6 +3255,8 @@ export class ShellExecutionService {
     } catch (e) {
       const error = e as Error;
       if (!ptySpawned && getErrnoCode(error) === 'QWEN_PTY_ACTIVE_LIMIT') {
+        // Capacity refusal did not run a command. Keep the failure explicit,
+        // with no native status, and never bypass the cap via fallback.
         return {
           pid: undefined,
           result: Promise.resolve({
