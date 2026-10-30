@@ -315,8 +315,8 @@ export interface SendMessageOptions {
   onPromptAdmitted?: () => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
-   * place of running UserPromptSubmit again. It is spent by the UserQuery with
-   * the prompt id it was issued for; any other use throws.
+   * place of running UserPromptSubmit again. It is spent by the UserQuery or
+   * Retry with the prompt id it was issued for; any other use throws.
    */
   promptAdmission?: UserPromptAdmission;
   /** A UserQuery running beside an active turn, without replacing its state. */
@@ -324,9 +324,15 @@ export interface SendMessageOptions {
   /**
    * The host already recorded this UserQuery's user message, started its todo
    * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them.
+   * a prompt, so the client does none of them. On a Retry, the host started
+   * the todo work chain.
    */
   userTurnRecordedByHost?: boolean;
+  /**
+   * The rewindable identity a Retry's request carries in history: that of the
+   * attempt it replaces. Spent by the first request.
+   */
+  historyPromptId?: string;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
   /**
@@ -3741,7 +3747,8 @@ export class LlmClient {
     const owner = captureHookExecutionOwner(this.config);
     if (
       !issued ||
-      messageType !== SendMessageType.UserQuery ||
+      (messageType !== SendMessageType.UserQuery &&
+        messageType !== SendMessageType.Retry) ||
       issued.promptId !== promptId ||
       issued.sessionId !== this.config.getSessionId() ||
       issued.owner?.runtimeId !== owner?.runtimeId ||
@@ -3811,12 +3818,14 @@ export class LlmClient {
       !options.isConcurrentSideQuery &&
       isTopLevelSession();
     const onPromptAdmitted = options?.onPromptAdmitted;
+    const historyPromptId = options?.historyPromptId;
     if (
       options &&
       (options.humanInput ||
         onWorkflowIntentApplied ||
         options.workflowModeEligible ||
-        onPromptAdmitted)
+        onPromptAdmitted ||
+        historyPromptId !== undefined)
     ) {
       options = {
         ...options,
@@ -3824,6 +3833,7 @@ export class LlmClient {
         onWorkflowIntentApplied: undefined,
         workflowModeEligible: undefined,
         onPromptAdmitted: undefined,
+        historyPromptId: undefined,
       };
     }
     const startsInteraction =
@@ -4519,10 +4529,12 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      this.config.startActiveTodoWorkChain(
-        prompt_id,
-        this.activeTodoWorkChainPromptId,
-      );
+      if (!options?.userTurnRecordedByHost) {
+        this.config.startActiveTodoWorkChain(
+          prompt_id,
+          this.activeTodoWorkChainPromptId,
+        );
+      }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (
       messageType === SendMessageType.Cron ||
@@ -4908,9 +4920,15 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        // Only a first-party user prompt opens a rewindable identity. Re-entry
-        // stays unmarked, so a replaced identified turn fails closed.
-        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        // Only a first-party user prompt opens a rewindable identity, or a
+        // retry the host gives the identity of the attempt it replaces.
+        // Other re-entry stays unmarked, so a replaced identified turn fails
+        // closed.
+        messageType === SendMessageType.UserQuery
+          ? prompt_id
+          : messageType === SendMessageType.Retry
+            ? historyPromptId
+            : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
         options?.toolCallPreparations,
