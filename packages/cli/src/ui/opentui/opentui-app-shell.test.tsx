@@ -90,6 +90,7 @@ import { projectHistoryToStreamEvents } from './item-projection.js';
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
+    modBand: undefined as unknown,
     handleResults: [] as unknown[],
     loadCommandsOverride: null as null | (() => Promise<readonly unknown[]>),
     loadRejects: false,
@@ -291,6 +292,21 @@ vi.mock('./opentui-dialog-mount.js', () => ({
     const request = props['request'] as { dialog: string };
     return `dialog:${request.dialog}`;
   },
+}));
+vi.mock('./mod-band.js', () => ({
+  OpenTuiModBand: ({
+    band,
+    maxRows,
+  }: {
+    band?: { tree: { children?: string[] } };
+    maxRows: number;
+  }) =>
+    band ? (
+      <span>{`mod-band:${band.tree.children?.[0]}:${maxRows}`}</span>
+    ) : null,
+}));
+vi.mock('../hooks/use-mod-band.js', () => ({
+  useModBand: () => mocks.state.modBand,
 }));
 vi.mock('./input-prompt.js', () => ({
   OpenTuiInputPrompt: (props: Record<string, unknown>) => {
@@ -744,6 +760,33 @@ describe('OpenTuiApp shell wiring', () => {
       }
     },
   );
+
+  it('draws the Mods band above the composer and hides it behind a dialog', async () => {
+    mocks.state.modBand = {
+      tree: { type: 'Text', children: ['forecast'] },
+      owner: 'token-weather',
+      revision: 1,
+    };
+    try {
+      renderApp();
+      await settle();
+      // The band sits between the queued messages and the prompt input.
+      const text = document.body.textContent ?? '';
+      expect(text.indexOf('mod-band:forecast:13')).toBeGreaterThan(-1);
+      expect(text.indexOf('mod-band:forecast:13')).toBeLessThan(
+        text.indexOf('input-prompt'),
+      );
+      mocks.state.handleResult = {
+        kind: 'open_dialog',
+        request: { dialog: 'help' },
+      } satisfies OpenTuiDispatchOutcome;
+      await submit('/help');
+      expect(screen.getByText('dialog:help')).toBeTruthy();
+      expect(screen.queryByText(/mod-band:/)).toBeNull();
+    } finally {
+      mocks.state.modBand = undefined;
+    }
+  });
 
   it('renders the composer inside the error boundary by default', async () => {
     renderApp();

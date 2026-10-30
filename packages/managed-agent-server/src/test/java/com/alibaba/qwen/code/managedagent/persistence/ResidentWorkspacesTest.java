@@ -240,6 +240,29 @@ class ResidentWorkspacesTest {
     }
 
     @Test
+    void executionAndCloseUseTheExactLaterReservationInsteadOfTheFirstRevision() {
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 2, tenant_id = 'tenant' WHERE storage_kind = 'CSI'");
+        var session = create("later-cycle").sessionId();
+        var original = ready(residents.request(context));
+        var record = active(original, session);
+        assertThat(storage.inspect(mapping.registration()).revision()).isEqualTo(3);
+        authority.claim(context, record);
+        authority.assertHeld(context, record);
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 5");
+        assertThatThrownBy(() -> authority.assertHeld(context, record)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 3");
+        var releasing = bindings.beginSessionRelease(runtimeSessions, executions, record);
+        authority.release(context, releasing);
+        bindings.completeSessionRelease(runtimeSessions, releasing);
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE session_id = ?", session);
+        Boolean closed = transaction.execute(status -> residents.verifyClosed(jdbc, "tenant", session));
+        assertThat(closed).isTrue();
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 5");
+        assertThatThrownBy(() -> transaction.execute(status -> residents.verifyClosed(jdbc, "tenant", session)))
+                .isInstanceOf(RuntimeBrokerException.class);
+    }
+
+    @Test
     void aPreparedDispatchCannotCrossTheDurableSessionCloseFence() {
         var session = create("original").sessionId();
         var original = ready(residents.request(context));
@@ -402,12 +425,14 @@ class ResidentWorkspacesTest {
     private RuntimeBindingRecord ready(RuntimeProvisionRequest request) {
         var created = bindings.findOrCreate(request);
         var claimed = bindings.claimOperation(created.getBindingId(), "owner", Duration.ofMinutes(5));
-        storage.reserve(mapping.registration(), bindings, claimed, UUID.randomUUID().toString());
+        var reservation = storage.reserve(mapping.registration(), bindings, claimed, UUID.randomUUID().toString());
         var seed = claimed.getProvisionSeed();
         var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         var ready = bindings.compareAndSet(claimed, claimed.withAttestation(lease,
-                new RuntimeResourceHandle("kubernetes-workspace", 1, Map.of("dataFixture", true)), Instant.now(), Instant.now()));
+                new RuntimeResourceHandle("kubernetes-workspace", 1, Map.of("dataFixture", true, "storage",
+                        Map.of("reservationRevision", Long.toString(reservation.revision()), "reservationId", reservation.reservationId()))),
+                Instant.now(), Instant.now()));
         bindings.releaseOperation(ready.getBindingId(), "owner", ready.getOperationGeneration());
         return bindings.findById(ready.getBindingId());
     }

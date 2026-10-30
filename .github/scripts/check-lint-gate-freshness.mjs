@@ -3,9 +3,9 @@
  * Fail a PR's Lint & Static lane when the base branch changed the lint gate
  * after this branch last incorporated it.
  *
- * The lane checks out refs/pull/N/head — the branch alone, a deliberate
- * trade-off recorded above the Checkout step in ci.yml (GitHub rebuilds the
- * merge ref asynchronously and can serve it stale for minutes). A green run
+ * The lane checks out the event PR head SHA — the branch alone, not the
+ * merge ref, which GitHub rebuilds asynchronously and can serve stale for
+ * minutes. A green run
  * therefore proves "the branch passes the gate AS THE BRANCH DEFINES IT",
  * not as the base defines it. When the base changes the gate between branch
  * point and merge, the branch keeps validating with the old gate: #11117

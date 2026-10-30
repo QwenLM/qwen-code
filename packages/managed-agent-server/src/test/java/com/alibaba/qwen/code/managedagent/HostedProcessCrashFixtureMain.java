@@ -146,7 +146,7 @@ public final class HostedProcessCrashFixtureMain {
         if (Files.exists(saved)) {
             sessionId = Files.readString(saved);
         } else {
-            JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
+            JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
                     + " 'Workspace', ?, ?, 'ACTIVE')", tenant,

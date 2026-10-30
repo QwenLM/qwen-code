@@ -315,6 +315,113 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it.each([false, true])(
+    'refreshes a preparing empty worktree session until ready (home: %s) and keeps attachments unavailable during preparation',
+    async (home) => {
+      vi.useFakeTimers();
+      const worktree = {
+        id: 'worktree-a',
+        sessionId: 's1',
+        workspaceId: 'ws-a',
+        state: 'preparing' as const,
+        branch: 'worktree-managed-a',
+        baseCommit: 'a'.repeat(40),
+        cwdRelative: '.qwen-managed-session-worktrees/a',
+        operationId: 'op-a',
+        revision: 1,
+      };
+      let current = summary('s1', {
+        phase: 'created',
+        activeTurnId: undefined,
+        worktree,
+        workspace: {
+          workspaceId: 'ws-a',
+          cwdRelative: worktree.cwdRelative,
+          state: 'changing',
+        },
+        capabilities: {
+          canSend: false,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+      });
+      mocks.client.getSession.mockImplementation(async () => current);
+      mocks.client.getTranscript.mockResolvedValue({
+        events: [],
+        lastEventId: 0,
+      });
+      await render('s1', 'en', provider, home ? null : undefined);
+      expect(container.textContent).toContain('Preparing worktree');
+      if (home) {
+        expect(container.textContent).not.toContain(worktree.branch);
+        expect(container.textContent).not.toContain('Base commit');
+      }
+      expect(mocks.editorProps!.attachmentsEnabled).toBe(false);
+      expect(mocks.editorProps!.fileReferenceActions).toBeUndefined();
+      current = {
+        ...current,
+        worktree: { ...worktree, state: 'ready', revision: 2 },
+        workspace: { ...current.workspace!, state: 'ready' },
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+      };
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        await flush();
+      });
+      if (home) {
+        expect(container.querySelector('[data-managed-worktree]')).toBeNull();
+        expect(container.textContent).not.toContain(worktree.branch);
+      } else {
+        expect(container.textContent).toContain('Worktree ready');
+        expect(container.textContent).toContain(worktree.branch);
+      }
+      expect(mocks.editorProps!.attachmentsEnabled).toBe(true);
+      expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['blocked', 'failed'] as const)(
+    'keeps %s worktree attention visible in Home without branch details',
+    async (state) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false },
+          worktree: {
+            id: 'worktree-a',
+            sessionId: 's1',
+            workspaceId: 'ws-a',
+            state,
+            branch: 'worktree-managed-a',
+            baseCommit: 'a'.repeat(40),
+            cwdRelative: '.qwen-managed-worktrees/a',
+            operationId: 'operation-a',
+            revision: 1,
+            errorCode: 'worktree_identity_conflict',
+          },
+        }),
+      );
+      await render('s1', 'en', provider, null);
+      const status = container.querySelector(
+        `[data-managed-worktree="${state}"]`,
+      )!;
+      expect(status.textContent).toContain(
+        state === 'blocked'
+          ? 'Worktree needs attention'
+          : 'Worktree preparation failed',
+      );
+      expect(status.textContent).toContain('worktree_identity_conflict');
+      expect(status.textContent).not.toContain('worktree-managed-a');
+      expect(status.textContent).not.toContain('Base commit');
+      expect(mocks.editorProps!.disabled).toBe(true);
+    },
+  );
+
   it('leaves MCP management to Plugins and refreshes the selected composer catalog on return', async () => {
     const query = vi.fn();
     const list = vi.fn(async (id: string) => ({
@@ -1100,7 +1207,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
     expect(query).toHaveBeenCalledWith(
-      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      { sessionId: 's1', directory: '.', query: '' },
       expect.objectContaining({ clientId: expect.any(String) }),
     );
   });
@@ -2107,7 +2214,7 @@ describe('ManagedSessionsPage', () => {
       await act(async () =>
         slot
           .querySelector<HTMLButtonElement>(
-            '[aria-label="New task: Project B"]',
+            '[aria-label="New session: Project B"]',
           )!
           .click(),
       );

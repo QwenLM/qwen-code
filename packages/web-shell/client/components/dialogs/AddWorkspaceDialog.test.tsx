@@ -53,7 +53,9 @@ const submitButton = () =>
   )!;
 const browseButton = () =>
   Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
-    (button) => button.textContent === 'Browse…',
+    (button) =>
+      button.textContent === 'Browse…' ||
+      button.textContent === 'Choosing directory…',
   )!;
 
 function typeInto(target: HTMLInputElement, value: string) {
@@ -82,6 +84,616 @@ function submit() {
 }
 
 describe('AddWorkspaceDialog', () => {
+  describe('directory picker lifecycle', () => {
+    function deferredPick() {
+      let resolve!: (path: string | undefined) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<string | undefined>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    }
+
+    function rerender(node: React.ReactNode) {
+      act(() => {
+        root!.render(<I18nProvider language="en">{node}</I18nProvider>);
+      });
+    }
+
+    it('passes a signal and fills the path without registering until Add', async () => {
+      const pending = deferredPick();
+      let signal: AbortSignal | undefined;
+      const onPick = vi.fn((opts?: { signal?: AbortSignal }) => {
+        signal = opts?.signal;
+        return pending.promise;
+      });
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      mount(
+        <AddWorkspaceDialog onClose={vi.fn()} onAdd={onAdd} onPick={onPick} />,
+      );
+
+      act(() => browseButton().click());
+      expect(input().disabled).toBe(true);
+      expect(browseButton().disabled).toBe(true);
+      expect(onAdd).not.toHaveBeenCalled();
+      await act(async () => pending.resolve('/daemon/project'));
+
+      expect(input().value).toBe('/daemon/project');
+      expect(input().disabled).toBe(false);
+      expect(onAdd).not.toHaveBeenCalled();
+      expect(signal).toBeInstanceOf(AbortSignal);
+      await act(async () => submitButton().click());
+      expect(onAdd).toHaveBeenCalledExactlyOnceWith('/daemon/project', true);
+    });
+
+    it('disables Add while a picker is pending even when a path is already filled', async () => {
+      const pending = deferredPick();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      mount(
+        <AddWorkspaceDialog
+          initialPath="/daemon/original"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onPick={() => pending.promise}
+        />,
+      );
+
+      act(() => browseButton().click());
+      expect(submitButton().disabled).toBe(true);
+      await act(async () => submitButton().click());
+      expect(onAdd).not.toHaveBeenCalled();
+      await act(async () => pending.resolve('/daemon/selected'));
+      expect(submitButton().disabled).toBe(false);
+      await act(async () => submitButton().click());
+      expect(onAdd).toHaveBeenCalledExactlyOnceWith('/daemon/selected', true);
+    });
+
+    it('ignores a same-frame form submission while a picker is pending', async () => {
+      const pending = deferredPick();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      mount(
+        <AddWorkspaceDialog
+          initialPath="/daemon/original"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onPick={() => pending.promise}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        input().form!.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      });
+      expect(onAdd).not.toHaveBeenCalled();
+      await act(async () => pending.resolve('/daemon/selected'));
+      await act(async () => submitButton().click());
+      expect(onAdd).toHaveBeenCalledExactlyOnceWith('/daemon/selected', true);
+    });
+
+    it.each(['undefined', 'AbortError'] as const)(
+      'keeps the dialog usable after picker cancellation via %s',
+      async (outcome) => {
+        const onPick = vi
+          .fn()
+          .mockImplementationOnce(() =>
+            outcome === 'undefined'
+              ? Promise.resolve(undefined)
+              : Promise.reject(new DOMException('Dismissed', 'AbortError')),
+          )
+          .mockResolvedValue('/daemon/next');
+        const onAdd = vi.fn();
+        mount(
+          <AddWorkspaceDialog
+            initialPath="/daemon/original"
+            onClose={vi.fn()}
+            onAdd={onAdd}
+            onPick={onPick}
+          />,
+        );
+
+        await act(async () => browseButton().click());
+        expect(input().value).toBe('/daemon/original');
+        expect(input().disabled).toBe(false);
+        expect(alert()).toBeNull();
+        expect(onAdd).not.toHaveBeenCalled();
+        await act(async () => browseButton().click());
+        expect(input().value).toBe('/daemon/next');
+        expect(onAdd).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['Cancel', 'Escape'] as const)(
+      'aborts the picker when dismissed with %s before the parent unmounts',
+      async (dismiss) => {
+        const pending = deferredPick();
+        let signal: AbortSignal | undefined;
+        const onPick = (opts?: { signal?: AbortSignal }) => {
+          signal = opts?.signal;
+          return pending.promise;
+        };
+        const onClose = vi.fn();
+        const onAdd = vi.fn();
+        mount(
+          <AddWorkspaceDialog
+            initialPath="/daemon/original"
+            onClose={onClose}
+            onAdd={onAdd}
+            onPick={onPick}
+          />,
+        );
+        act(() => browseButton().click());
+        act(() => {
+          if (dismiss === 'Cancel') {
+            Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+              .find((button) => button.textContent === 'Cancel')!
+              .click();
+          } else {
+            document.dispatchEvent(
+              new KeyboardEvent('keydown', {
+                key: 'Escape',
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+          }
+        });
+        expect(onClose).toHaveBeenCalledOnce();
+        await act(async () => pending.resolve('/daemon/late'));
+        expect(input().value).toBe('/daemon/original');
+        expect(onAdd).not.toHaveBeenCalled();
+        expect(signal?.aborted).toBe(true);
+      },
+    );
+
+    it('aborts on unmount and consumes a late rejected result', async () => {
+      const pending = deferredPick();
+      let signal: AbortSignal | undefined;
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={(opts?: { signal?: AbortSignal }) => {
+            signal = opts?.signal;
+            return pending.promise;
+          }}
+        />,
+      );
+      act(() => browseButton().click());
+      act(() => root!.unmount());
+      root = null;
+      await act(async () => pending.reject(new Error('Late failure')));
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(signal?.aborted).toBe(true);
+    });
+
+    it.each([
+      ['location', 'resolve'],
+      ['location', 'reject'],
+      ['connection', 'resolve'],
+      ['connection', 'reject'],
+    ] as const)(
+      'invalidates a picker on %s change and ignores its late %s while another is pending',
+      async (change, outcome) => {
+        const oldPick = deferredPick();
+        const nextPick = deferredPick();
+        const signals: Array<AbortSignal | undefined> = [];
+        const onPick = vi.fn((opts?: { signal?: AbortSignal }) => {
+          signals.push(opts?.signal);
+          return signals.length === 1 ? oldPick.promise : nextPick.promise;
+        });
+        const onAdd = vi.fn();
+        const connection = {};
+        const renderDialog = (changed: boolean) => (
+          <AddWorkspaceDialog
+            initialPath="/daemon/original"
+            onClose={vi.fn()}
+            onAdd={onAdd}
+            onPick={onPick}
+            selectedLocation={
+              changed && change === 'location' ? 'https://other.example' : ''
+            }
+            pickerTarget={changed && change === 'connection' ? {} : connection}
+          />
+        );
+        mount(renderDialog(false));
+        act(() => browseButton().click());
+        rerender(renderDialog(true));
+        expect(input().disabled).toBe(false);
+        expect(browseButton().disabled).toBe(false);
+        act(() => browseButton().click());
+        await act(async () => {
+          if (outcome === 'resolve') oldPick.resolve('/wrong-daemon/project');
+          else oldPick.reject(new Error('Old daemon failed'));
+        });
+        expect(input().value).toBe('/daemon/original');
+        expect(input().disabled).toBe(true);
+        expect(browseButton().disabled).toBe(true);
+        expect(alert()).toBeNull();
+        expect(onAdd).not.toHaveBeenCalled();
+        expect(signals[0]?.aborted).toBe(true);
+        expect(signals[1]?.aborted).toBe(false);
+
+        await act(async () => nextPick.resolve('/current-daemon/project'));
+        expect(input().value).toBe('/current-daemon/project');
+        expect(input().disabled).toBe(false);
+        expect(onAdd).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['parent folder', 'suggestion'] as const)(
+      'locks the %s path writer while a host picker is pending',
+      async (writer) => {
+        vi.useFakeTimers();
+        try {
+          const pending = deferredPick();
+          const onAdd = vi.fn().mockResolvedValue(undefined);
+          mount(
+            <AddWorkspaceDialog
+              browseDirectories
+              pickerUsesHostUi
+              initialPath="/daemon/original"
+              onClose={vi.fn()}
+              onAdd={onAdd}
+              onPick={() => pending.promise}
+              onSuggest={async () => ({
+                dir: '/daemon/',
+                sep: '/',
+                suggestions: [{ name: 'other', path: '/daemon/other' }],
+                truncated: false,
+              })}
+            />,
+          );
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(
+            document.querySelector('[role="option"]')?.textContent,
+          ).toContain('other');
+          await act(async () => browseButton().click());
+          expect(document.body.style.pointerEvents).toBe('');
+          if (writer === 'parent folder') {
+            const parent = document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Parent folder"]',
+            )!;
+            act(() => parent.click());
+            expect.soft(parent.disabled).toBe(true);
+          } else {
+            const option = document.querySelector('[role="option"]');
+            if (option) {
+              act(() =>
+                option.dispatchEvent(
+                  new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                  }),
+                ),
+              );
+            }
+            expect.soft(document.querySelector('[role="listbox"]')).toBeNull();
+          }
+          expect.soft(input().value).toBe('/daemon/original');
+          expect(document.querySelector('[role="status"]')).toBeNull();
+          expect(submitButton().disabled).toBe(true);
+          expect(onAdd).not.toHaveBeenCalled();
+
+          await act(async () => pending.resolve('/daemon/original'));
+          expect.soft(input().value).toBe('/daemon/original');
+          expect(document.activeElement).toBe(browseButton());
+          expect(document.activeElement).not.toBe(input());
+          expect(
+            document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Parent folder"]',
+            )!.disabled,
+          ).toBe(false);
+          await act(async () => submitButton().click());
+          expect(onAdd).toHaveBeenCalledExactlyOnceWith(
+            '/daemon/original',
+            true,
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each(
+      (['host', 'native'] as const).flatMap((picker) =>
+        (['cancel', 'same path', 'new path', 'error'] as const).map(
+          (outcome) => [picker, outcome] as const,
+        ),
+      ),
+    )(
+      'preserves only the unchanged folder list scroll after a %s picker returns %s',
+      async (picker, outcome) => {
+        vi.useFakeTimers();
+        try {
+          const pending = deferredPick();
+          const onAdd = vi.fn();
+          mount(
+            <AddWorkspaceDialog
+              browseDirectories
+              pickerUsesHostUi={picker === 'host'}
+              initialPath="/daemon/original"
+              onClose={vi.fn()}
+              onAdd={onAdd}
+              onPick={() => pending.promise}
+              onSuggest={async (path) => ({
+                dir: path,
+                sep: '/',
+                suggestions: Array.from({ length: 24 }, (_, index) => ({
+                  name: `folder-${index}`,
+                  path: `${path}/folder-${index}`,
+                })),
+                truncated: false,
+              })}
+            />,
+          );
+          const list = () =>
+            document.querySelector<HTMLUListElement>('[role="listbox"]')!;
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(list().children).toHaveLength(24);
+          list().scrollTop = 180;
+          await act(async () => browseButton().click());
+          expect(list()).toBeNull();
+          expect(input().getAttribute('aria-expanded')).toBe('false');
+          expect(input().hasAttribute('aria-controls')).toBe(false);
+
+          await act(async () => {
+            if (outcome === 'error') pending.reject(new Error('picker failed'));
+            else
+              pending.resolve(
+                outcome === 'cancel'
+                  ? undefined
+                  : outcome === 'same path'
+                    ? '/daemon/original'
+                    : '/daemon/selected',
+              );
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(list().children).toHaveLength(24);
+          expect(list().scrollTop).toBe(outcome === 'new path' ? 0 : 180);
+          expect(input().value).toBe(
+            outcome === 'new path' ? '/daemon/selected' : '/daemon/original',
+          );
+          expect(onAdd).not.toHaveBeenCalled();
+
+          // Navigating later must not reuse the picker snapshot for new results.
+          type('/daemon/another');
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(list().children).toHaveLength(24);
+          expect(list().scrollTop).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps an invocation alive across inline callback rerenders on the same target', async () => {
+      const pending = deferredPick();
+      let signal: AbortSignal | undefined;
+      const onAdd = vi.fn();
+      const target = {};
+      const renderDialog = (
+        onPick: (opts?: {
+          signal?: AbortSignal;
+        }) => Promise<string | undefined>,
+      ) => (
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onPick={onPick}
+          pickerTarget={target}
+        />
+      );
+      mount(
+        renderDialog((opts) => {
+          signal = opts?.signal;
+          return pending.promise;
+        }),
+      );
+      act(() => browseButton().click());
+      const nextPicker = vi.fn().mockResolvedValue('/daemon/second');
+      rerender(renderDialog(nextPicker));
+      expect(input().disabled).toBe(true);
+      expect(signal?.aborted).toBe(false);
+      await act(async () => pending.resolve('/daemon/first'));
+      expect(input().value).toBe('/daemon/first');
+      expect(nextPicker).not.toHaveBeenCalled();
+      await act(async () => browseButton().click());
+      expect(input().value).toBe('/daemon/second');
+      expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['host', 'resolve'],
+      ['host', 'cancel'],
+      ['native', 'resolve'],
+      ['native', 'cancel'],
+    ] as const)(
+      'keeps the %s picker pointer boundary correct through %s',
+      async (picker, outcome) => {
+        const pending = deferredPick();
+        mount(
+          <AddWorkspaceDialog
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            onPick={() => pending.promise}
+            pickerUsesHostUi={picker === 'host'}
+          />,
+        );
+        expect(document.body.style.pointerEvents).toBe('none');
+
+        await act(async () => browseButton().click());
+        expect(document.body.style.pointerEvents).toBe(
+          picker === 'host' ? '' : 'none',
+        );
+        await act(async () =>
+          pending.resolve(outcome === 'resolve' ? '/daemon/picked' : undefined),
+        );
+        expect(document.body.style.pointerEvents).toBe('none');
+        expect(input().value).toBe(
+          outcome === 'resolve' ? '/daemon/picked' : '',
+        );
+      },
+    );
+
+    it('parks unclaimed host-picker focus on the busy panel and restores Browse after settling', async () => {
+      const pending = deferredPick();
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={() => pending.promise}
+          pickerUsesHostUi
+        />,
+      );
+
+      await act(async () => {
+        browseButton().focus();
+        browseButton().click();
+      });
+      const pendingPanel = document.querySelector('[data-web-shell-dialog]')!;
+      expect.soft(document.activeElement).toBe(pendingPanel);
+      expect.soft(pendingPanel.getAttribute('aria-busy')).toBe('true');
+      expect(browseButton().textContent).toBe('Choosing directory…');
+      await act(async () => pending.resolve('/daemon/picked'));
+      const settledPanel = document.querySelector('[data-web-shell-dialog]')!;
+      expect(settledPanel.getAttribute('aria-busy')).not.toBe('true');
+      expect(document.activeElement).toBe(browseButton());
+      expect(input().value).toBe('/daemon/picked');
+    });
+
+    it.each(['plain', 'service selector'] as const)(
+      'preserves the %s dialog scroll position and restores Browse instead of its first field',
+      async (configuration) => {
+        const pending = deferredPick();
+        mount(
+          <AddWorkspaceDialog
+            initialPath="/daemon/original"
+            displayNameEnabled
+            executionMode={
+              configuration === 'service selector' ? 'daemon' : undefined
+            }
+            onExecutionModeChange={
+              configuration === 'service selector' ? vi.fn() : undefined
+            }
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            onPick={() => pending.promise}
+            pickerUsesHostUi
+          />,
+        );
+        input().form!.parentElement!.scrollTop = 120;
+        await act(async () => {
+          browseButton().focus();
+          browseButton().click();
+        });
+        expect.soft(input().form!.parentElement!.scrollTop).toBe(120);
+        await act(async () => pending.resolve('/daemon/picked'));
+        expect.soft(input().form!.parentElement!.scrollTop).toBe(120);
+        expect(document.activeElement).toBe(browseButton());
+        expect(document.activeElement).not.toBe(input());
+        expect(input().value).toBe('/daemon/picked');
+      },
+    );
+
+    it('leaves focus with a host picker that claims it during the handoff', async () => {
+      const pending = deferredPick();
+      const onClose = vi.fn();
+      function HostPicker() {
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            {open && <input id="host-picker-focus" autoFocus />}
+            <AddWorkspaceDialog
+              onClose={onClose}
+              onAdd={vi.fn()}
+              pickerUsesHostUi
+              onPick={() => {
+                setOpen(true);
+                return pending.promise;
+              }}
+            />
+          </>
+        );
+      }
+      mount(<HostPicker />);
+
+      await act(async () => browseButton().click());
+      const hostInput =
+        document.querySelector<HTMLInputElement>('#host-picker-focus')!;
+      expect(document.activeElement).toBe(hostInput);
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => pending.resolve(undefined));
+    });
+
+    it('does not dismiss Add Workspace when the host picker receives outside pointer and focus events', async () => {
+      const pending = deferredPick();
+      const onClose = vi.fn();
+      let signal: AbortSignal | undefined;
+      mount(
+        <>
+          <input id="host-picker-outside" />
+          <AddWorkspaceDialog
+            onClose={onClose}
+            onAdd={vi.fn()}
+            pickerUsesHostUi
+            onPick={(opts) => {
+              signal = opts?.signal;
+              return pending.promise;
+            }}
+          />
+        </>,
+      );
+      await act(async () => browseButton().click());
+      const hostInput = document.querySelector<HTMLInputElement>(
+        '#host-picker-outside',
+      )!;
+      act(() => {
+        hostInput.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true }),
+        );
+        hostInput.focus();
+      });
+      expect(document.activeElement).toBe(hostInput);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(signal?.aborted).toBe(false);
+      await act(async () => pending.resolve('/daemon/picked'));
+      expect(input().value).toBe('/daemon/picked');
+    });
+
+    it('replaces a same-frame invocation and ignores its result without releasing the new busy state', async () => {
+      const oldPick = deferredPick();
+      const nextPick = deferredPick();
+      const signals: Array<AbortSignal | undefined> = [];
+      const onPick = vi.fn((opts?: { signal?: AbortSignal }) => {
+        signals.push(opts?.signal);
+        return signals.length === 1 ? oldPick.promise : nextPick.promise;
+      });
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+      act(() => {
+        browseButton().click();
+        browseButton().click();
+      });
+      expect(onPick).toHaveBeenCalledTimes(2);
+      await act(async () => oldPick.resolve('/daemon/stale'));
+      expect(input().value).toBe('');
+      expect(input().disabled).toBe(true);
+      expect(signals[0]?.aborted).toBe(true);
+      expect(signals[1]?.aborted).toBe(false);
+      await act(async () => nextPick.resolve('/daemon/current'));
+      expect(input().value).toBe('/daemon/current');
+      expect(input().disabled).toBe(false);
+    });
+  });
+
   it('offers the owning service before directory registration without submitting on a mode change', async () => {
     const onAdd = vi.fn();
     const onExecutionModeChange = vi.fn();
@@ -1089,7 +1701,7 @@ describe('AddWorkspaceDialog', () => {
       });
 
       expect(alert()?.textContent).toContain(
-        'Unable to open the system folder picker',
+        'Unable to open the folder picker',
       );
 
       // No blur timer is pending here — pickDirectory cancels it right
@@ -1297,6 +1909,170 @@ describe('AddWorkspaceDialog', () => {
       await Promise.resolve();
     });
   }
+
+  it.each([false, true])(
+    'guards Git parent picking and preserves native/host modality (host=%s)',
+    async (host) => {
+      let resolve!: (value: string | undefined) => void;
+      const pending = new Promise<string | undefined>((done) => {
+        resolve = done;
+      });
+      let signal: AbortSignal | undefined;
+      const onPick = vi.fn((opts?: { signal?: AbortSignal }) => {
+        signal = opts?.signal;
+        return pending;
+      });
+      const start = vi.fn();
+      const onAdd = vi.fn();
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onPick={onPick}
+          pickerUsesHostUi={host}
+          gitClone={{ start, poll: vi.fn(), cancel: vi.fn() }}
+        />,
+      );
+      await selectGitSource();
+      typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+      typeInto(gitTargetInput(), '/old/repo');
+      act(() => {
+        browseButton().click();
+        document
+          .querySelector('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal!.aborted).toBe(false);
+      expect(start).not.toHaveBeenCalled();
+      expect(onAdd).not.toHaveBeenCalled();
+      expect(document.body.style.pointerEvents).toBe(host ? '' : 'none');
+      expect(
+        document
+          .querySelector('[data-web-shell-dialog]')
+          ?.getAttribute('aria-busy'),
+      ).toBe('true');
+      expect(gitUrlInput().disabled).toBe(true);
+      expect(gitTargetInput().disabled).toBe(true);
+      expect(browseButton().disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+      expect(
+        document.querySelector<HTMLButtonElement>('#add-workspace-source')!
+          .disabled,
+      ).toBe(true);
+
+      await act(async () => resolve('/selected-parent'));
+      expect(gitTargetInput().value).toBe('/selected-parent/repo');
+      expect(gitUrlInput().disabled).toBe(false);
+      expect(browseButton().disabled).toBe(false);
+      expect(submitButton().disabled).toBe(false);
+      expect(document.body.style.pointerEvents).toBe('none');
+      expect(
+        document
+          .querySelector('[data-web-shell-dialog]')
+          ?.hasAttribute('aria-busy'),
+      ).toBe(false);
+      if (host) expect(document.activeElement).toBe(browseButton());
+      expect(start).not.toHaveBeenCalled();
+      expect(onAdd).not.toHaveBeenCalled();
+    },
+  );
+
+  it('aborts a Git parent pick on close and ignores its late selection', async () => {
+    let resolve!: (value: string) => void;
+    let signal: AbortSignal | undefined;
+    const pending = new Promise<string>((done) => {
+      resolve = done;
+    });
+    const onClose = vi.fn();
+    const start = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        onClose={onClose}
+        onAdd={vi.fn()}
+        pickerUsesHostUi
+        onPick={(opts) => {
+          signal = opts?.signal;
+          return pending;
+        }}
+        gitClone={{ start, poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/old/repo');
+    act(() => browseButton().click());
+    const cancel = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Cancel')!;
+    act(() => cancel.click());
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => resolve('/late'));
+    expect(gitTargetInput().value).toBe('/old/repo');
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('invalidates a Git parent pick when cloning is withdrawn', async () => {
+    let resolve!: (value: string) => void;
+    let signal: AbortSignal | undefined;
+    const pending = new Promise<string>((done) => {
+      resolve = done;
+    });
+    const onPick = (opts?: { signal?: AbortSignal }) => {
+      signal = opts?.signal;
+      return pending;
+    };
+    const controls = { start: vi.fn(), poll: vi.fn(), cancel: vi.fn() };
+    const render = (enabled: boolean) => (
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onPick={onPick}
+        pickerUsesHostUi
+        gitClone={enabled ? controls : undefined}
+      />
+    );
+    mount(render(true));
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/old/repo');
+    act(() => browseButton().click());
+    act(() =>
+      root!.render(<I18nProvider language="en">{render(false)}</I18nProvider>),
+    );
+    expect(signal?.aborted).toBe(true);
+    await act(async () => resolve('/late'));
+    expect(input().value).toBe('');
+    act(() =>
+      root!.render(<I18nProvider language="en">{render(true)}</I18nProvider>),
+    );
+    await selectGitSource();
+    expect(gitTargetInput().value).toBe('/old/repo');
+    expect(controls.start).not.toHaveBeenCalled();
+  });
+
+  it('treats AbortError from a Git parent picker as cancellation', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        pickerUsesHostUi
+        onPick={async () => {
+          throw new DOMException('Cancelled', 'AbortError');
+        }}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitTargetInput(), '/old/repo');
+    await act(async () => browseButton().click());
+    expect(alert()).toBeNull();
+    expect(gitTargetInput().value).toBe('/old/repo');
+    expect(browseButton().disabled).toBe(false);
+  });
 
   it('hides the Git source when the daemon does not advertise cloning', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
