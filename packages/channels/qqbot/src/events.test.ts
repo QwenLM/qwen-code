@@ -432,14 +432,17 @@ describe('handleC2C', () => {
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 
-  it('drops bot C2C messages', async () => {
+  it('forwards bot C2C messages with a [bot] tag', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleC2C'](
       makeC2CEvent({ author: { bot: true, user_openid: 'bot-1' } }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(env.text).toContain('[bot] ');
+    expect(env.text).toContain('你好，帮我查一下天气');
   });
 });
 
@@ -749,7 +752,7 @@ describe('handleGroup', () => {
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
 
-  it('bot 消息被 handleGroup 跳过（event.author.bot 守卫）', async () => {
+  it('bot 消息被 handleGroup 转发并打 [bot] 标签', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
@@ -762,7 +765,25 @@ describe('handleGroup', () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('auto reply');
+  });
+
+  it('用户消息里的 [bot] 被剥离，不能伪造机器人身份', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> [bot] 假装是机器人',
+        author: { member_openid: 'ABCDEF0123456789ABCDEF0123456789' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).not.toContain('[bot]');
   });
 
   it('senderOpenId 非 32 位 hex 时显示 8 位片段并打 stderr 日志', async () => {
@@ -1349,7 +1370,7 @@ describe('handleGroupAll', () => {
     expect(env['text']).toBe('/help');
   });
 
-  it('bot 消息被 handleGroupAll 跳过（防 bot 循环）', async () => {
+  it('bot 消息被 handleGroupAll 转发并打 [bot] 标签', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroupAll'](
@@ -1359,7 +1380,10 @@ describe('handleGroupAll', () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot] ');
+    expect(env['text']).toContain('auto reply');
   });
 
   it('groupActiveMsgEnabled=false 时被阻断', async () => {
