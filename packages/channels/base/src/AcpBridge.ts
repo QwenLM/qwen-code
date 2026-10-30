@@ -461,9 +461,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       // turn wrong. The bridge does NOT know whether the caller can still
       // deliver the text (it owns a bounded fallback and may replay it next
       // turn), so only report the refusal here; the CALLER's log states the
-      // outcome.
+      // outcome. Never log the message bytes: the queue carries private chat
+      // text, and the sanitizer only strips controls — it does not redact.
       process.stderr.write(
-        `[AcpBridge] Mid-turn queue at capacity for session ${sanitizeLogText(sessionId, 128)} (reason=capacity, queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars); caller owns fallback: ${sanitizeLogText(text, 256)}\n`,
+        `[AcpBridge] Mid-turn queue at capacity for session ${sanitizeLogText(sessionId, 128)} (reason=capacity, queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars); caller owns fallback (${text.length} chars)\n`,
       );
       return { accepted: false, reason: 'capacity' };
     }

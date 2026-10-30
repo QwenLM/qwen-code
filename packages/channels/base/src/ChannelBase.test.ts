@@ -24344,8 +24344,9 @@ describe('ChannelBase', () => {
           MID_TURN_QUEUE_MAX_MESSAGES,
         );
 
+        const canary = 'SECRET_CANARY_12345';
         await ch.handleInbound(
-          envelope({ text: 'one too many', messageId: 'm-full-21' }),
+          envelope({ text: canary, messageId: 'm-full-21' }),
         );
 
         expect(collectBuffers(ch).get(sessionId)).toHaveLength(
@@ -24358,6 +24359,8 @@ describe('ChannelBase', () => {
           'inject: could not queue mid-turn message (capacity)',
         );
         expect(logged).toContain('refusing message');
+        // The refusal log reports metadata, never the user's message bytes.
+        expect(logged).not.toContain(canary);
         // A message past the bound is refused VISIBLY, not just logged: the
         // sender must learn their message was not delivered.
         expect(ch.threadMessages).toEqual([
@@ -24371,7 +24374,7 @@ describe('ChannelBase', () => {
         await running;
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
         expect(bridge.prompt.mock.calls[1]?.[1]).toContain('fallback 0');
-        expect(bridge.prompt.mock.calls[1]?.[1]).not.toContain('one too many');
+        expect(bridge.prompt.mock.calls[1]?.[1]).not.toContain(canary);
         resolvers[1]?.('second done');
         await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
       } finally {

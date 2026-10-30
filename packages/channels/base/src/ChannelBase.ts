@@ -7496,8 +7496,10 @@ export abstract class ChannelBase {
                 (fallbackEntries.length > 0 &&
                   fallbackChars + promptText.length > MID_TURN_QUEUE_MAX_CHARS);
               if (overBound) {
+                // Metadata only: the refused text is the user's private
+                // message and the sanitizer does not redact it.
                 process.stderr.write(
-                  `[${this.name}] inject: could not queue mid-turn message (capacity) and the fallback buffer is full; refusing message from ${envelope.senderId} for session ${sessionId}: ${sanitizeLogText(promptText, 256)}\n`,
+                  `[${this.name}] inject: could not queue mid-turn message (capacity) and the fallback buffer is full; refusing message from ${envelope.senderId} for session ${sessionId} (${promptText.length} chars)\n`,
                 );
                 await this.notifyInjectRefused(
                   envelope,

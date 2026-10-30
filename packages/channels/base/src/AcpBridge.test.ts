@@ -551,6 +551,37 @@ describe('AcpBridge', () => {
     }
   });
 
+  it('does not log the rejected message text when the queue is at capacity', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (let index = 0; index < MID_TURN_QUEUE_MAX_MESSAGES; index += 1) {
+        expect(bridge.queueMidTurnMessage('s-1', `m${index}`)).toStrictEqual({
+          accepted: true,
+        });
+      }
+      const canary = 'SECRET_CANARY_12345';
+      expect(bridge.queueMidTurnMessage('s-1', canary)).toStrictEqual({
+        accepted: false,
+        reason: 'capacity',
+      });
+
+      const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+      // The refusal is still diagnosable from metadata...
+      expect(logged).toContain('Mid-turn queue at capacity');
+      expect(logged).toContain('reason=capacity');
+      expect(logged).toContain('caller owns fallback');
+      // ...but the private message bytes never reach the process log.
+      expect(logged).not.toContain(canary);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('settles undrained mid-turn messages at the turn boundary instead of leaking them', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
