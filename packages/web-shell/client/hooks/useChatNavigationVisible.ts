@@ -13,13 +13,16 @@ export function useChatNavigationVisible(
     }
     const container = element.closest('[data-history-viewport]') ?? element;
     const update = () => {
+      const style = getComputedStyle(element);
       const minWidth =
         Number.parseFloat(
-          getComputedStyle(element).getPropertyValue(
-            '--chat-regular-content-width',
-          ),
+          style.getPropertyValue('--chat-regular-content-width'),
         ) || 1000;
-      setVisible(container.getBoundingClientRect().width >= minWidth);
+      // Reserve 64px gutters so hover-expanded ticks stay clear of the text.
+      setVisible(
+        style.getPropertyValue('--chat-content-width').trim() !== '100%' &&
+          container.getBoundingClientRect().width >= minWidth + 128,
+      );
     };
     update();
     const resize =

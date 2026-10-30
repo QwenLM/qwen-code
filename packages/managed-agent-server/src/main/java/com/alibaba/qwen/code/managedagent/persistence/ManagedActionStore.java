@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,12 +36,13 @@ import java.util.UUID;
 import java.util.function.Function;
 
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class ManagedActionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
 
-    public ManagedActionStore(JdbcTemplate jdbc, AgentStateStore sessions) {
+    public ManagedActionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, AgentStateStore sessions) {
         this.jdbc = jdbc;
         this.sessions = sessions;
     }
@@ -259,7 +261,21 @@ public class ManagedActionStore {
                 require(text(option.path("label")));
             }
             if (options.has("inputRef")) {
-                resource(options.path("inputRef"), "managed-tool-input", resources);
+                String inputKind = options.path("inputRef").path("kind").asText();
+                boolean command = options.path("v").asLong() == 3 && "managed-extension-command-input".equals(inputKind);
+                resource(options.path("inputRef"), command ? inputKind : "managed-tool-input", resources);
+                if (command) {
+                    JsonNode continuation = read(new String(resource(options.path("continuationRef"),
+                            "hosted-approval-continuation", resources).bytes(), StandardCharsets.UTF_8));
+                    JsonNode step = continuation.path("commandStep");
+                    String toolName = "shell".equals(step.path("toolName").asText()) ? "run_shell_command" : "read_file";
+                    int ordinal = continuation.path("approvalOrdinal").asInt(-1);
+                    require(ordinal >= 0 && ordinal < continuation.path("calls").size()
+                            && options.path("inputRef").equals(step.path("inputRef"))
+                            && toolName.equals(options.path("toolName").asText())
+                            && id.equals(continuation.path("actionId").asText())
+                            && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
+                }
             }
             if (options.path("v").asLong() == 3) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);

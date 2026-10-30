@@ -13,8 +13,23 @@
  * image reaching the model goes through the prompt-side vision bridge.
  */
 
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { createRestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import {
+  foldLiveEvent,
+  snapshotCanonicalHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
+
 import {
   ApprovalMode,
   CoreToolScheduler,
@@ -24,9 +39,7 @@ import {
   SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type {
-  Config,
   ServerLlmStreamEvent,
-  ToolCallRequestInfo,
   SendMessageOptions,
   ToolCallConfirmationDetails,
   VisionBridgeModelSelection,
@@ -42,9 +55,10 @@ import {
   type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
 } from './live-session.js';
-import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
@@ -60,6 +74,30 @@ const visionMocks = vi.hoisted(() => ({
 }));
 
 const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+const checkpointControl = vi.hoisted(() => ({
+  held: false,
+  release: null as (() => void) | null,
+  update: null as
+    | ((phase: 'resolved' | 'reentered' | 'repeated') => void)
+    | null,
+  afterWrite: null as (() => Promise<void>) | null,
+  afterMkdir: null as (() => Promise<void>) | null,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+      const result = await actual.mkdir(...args);
+      await checkpointControl.afterMkdir?.();
+      return result;
+    },
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      await actual.writeFile(...args);
+      await checkpointControl.afterWrite?.();
+    },
+  };
+});
 const schedulerControl = vi.hoisted(() => ({
   finish: null as (() => Promise<void>) | null,
 }));
@@ -91,6 +129,75 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
+        if (
+          calls.some(
+            (call) => (call.args as { __foreground?: boolean })?.__foreground,
+          )
+        ) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request, index) => ({
+              status: 'executing',
+              request,
+              pid: 4300 + index,
+              promoteAbortController: new AbortController(),
+            })),
+          );
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'success', request })),
+          );
+        } else if (checkpointControl.held) {
+          const waiting = () =>
+            calls.map((request) => ({
+              status: 'awaiting_approval',
+              request,
+              confirmationDetails: {
+                type: 'info',
+                title: 'Edit a',
+                onConfirm: async () => {},
+              },
+            }));
+          const publish = () => this.opts.onToolCallsUpdate?.(waiting());
+          checkpointControl.update = (phase) => {
+            if (phase === 'repeated') {
+              publish();
+              return;
+            }
+            this.opts.onToolCallsUpdate?.(
+              calls.map((request) => ({ status: 'scheduled', request })),
+            );
+            if (phase === 'reentered') publish();
+          };
+          const released = new Promise<void>((resolve) => {
+            checkpointControl.release = resolve;
+          });
+          publish();
+          await released;
+          this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          await this.opts.onAllToolCallsComplete(
+            calls.map((request) => ({
+              status: 'success',
+              request,
+              response: {
+                resultDisplay: 'done',
+                responseParts: [
+                  {
+                    functionResponse: {
+                      name: request.name,
+                      id: request.callId,
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            })),
+          );
+          return;
+        }
         const failure = calls.find(
           (c) => (c.args as { __scheduleFailure?: string })?.__scheduleFailure,
         )?.args as { __scheduleFailure: string } | undefined;
@@ -247,6 +354,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
               __modOutput?: string;
+              __restoreResult?: Record<string, unknown>;
+              __rewritten?: boolean;
             };
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
@@ -254,7 +363,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                 ...c,
                 callId: c.callId,
                 name: c.name ?? 'test_tool',
-                args: c.args ?? {},
+                args: a.__rewritten
+                  ? { ...a, modified_by_user: true }
+                  : (c.args ?? {}),
               },
               // A No/Esc cancellation leaves the scheduler with a cancelled
               // call — the send loop must see it as terminal to stop.
@@ -269,9 +380,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                       name: c.name ?? 'test_tool',
                       id: c.callId,
                       response:
-                        a.__modOutput !== undefined
+                        a.__restoreResult ??
+                        (a.__modOutput !== undefined
                           ? { output: a.__modOutput }
-                          : { ok: true },
+                          : { ok: true }),
                     },
                   },
                 ],
@@ -284,6 +396,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             };
           }),
         );
+        if (
+          calls.some(
+            (call) => (call.args as { __foreground?: boolean })?.__foreground,
+          )
+        ) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({
+              status: 'executing',
+              request,
+              pid: 9999,
+            })),
+          );
+        }
       }
     },
   };
@@ -574,6 +699,7 @@ describe('livePromptEvents', () => {
         promptId: 'same-id',
         submittedPrompt: '@owned.txt',
         humanInput: { text: 'original' },
+        workflowModeEligible: true,
         retry: {
           content,
           modelOverride: 'skill-model',
@@ -604,6 +730,25 @@ describe('livePromptEvents', () => {
     ...overrides,
   });
 
+  function expectMentionCanonicalSource(events: readonly OpenTuiStreamEvent[]) {
+    const cards = events.filter(
+      (event) => 'id' in event && event.id === 'client-read-1',
+    );
+    expect(cards).toHaveLength(3);
+    const source = cards[0].canonicalHistoryItem;
+    expect(source).toEqual({
+      id: expect.any(Number),
+      type: 'tool_group',
+      tools: atMocks.result.toolDisplays,
+    });
+    expect(source!.id).toBeLessThan(0);
+    for (const event of cards) {
+      expect(event.historyId).toBe(source!.id);
+      expect(event.canonicalHistoryItem).toBe(source);
+    }
+    return { historyId: source!.id, canonicalHistoryItem: source! };
+  }
+
   /** An attached image, as the composer hands it to the stream. */
   const imagePart = {
     inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
@@ -618,6 +763,11 @@ describe('livePromptEvents', () => {
     visionMocks.run.mockReset();
     modMocks.get.mockReset();
     schedulerControl.finish = null;
+    checkpointControl.held = false;
+    checkpointControl.release = null;
+    checkpointControl.update = null;
+    checkpointControl.afterWrite = null;
+    checkpointControl.afterMkdir = null;
   });
 
   it('seeds prompt ids past claims in the resumed transcript', () => {
@@ -715,6 +865,33 @@ describe('livePromptEvents', () => {
     expect(options).toEqual({ type: SendMessageType.UserQuery });
   });
 
+  it('hands the turn hooks the admission and every event of its streams', async () => {
+    const events = [
+      { type: 'content', value: 'hi' },
+      {
+        type: 'finished',
+        value: { reason: undefined, usageMetadata: undefined },
+      },
+    ];
+    const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+      (args[3] as { onPromptAdmitted?: () => void }).onPromptAdmitted?.();
+      yield* events;
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const onPromptAdmitted = vi.fn();
+    const onStreamEvent = vi.fn();
+
+    await drain(
+      livePromptEvents(config, 'hello', new AbortController().signal, {
+        onPromptAdmitted,
+        onStreamEvent,
+      }),
+    );
+
+    expect(onPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onStreamEvent.mock.calls.map(([event]) => event)).toEqual(events);
+  });
+
   it('shares one initialization promise across callers', async () => {
     const initialize = vi.fn(async () => {});
     const config = { initialize } as unknown as Config;
@@ -745,7 +922,8 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    expect(initializeMods).toHaveBeenCalledOnce();
+    // OpenTUI offers the band above the prompt.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt']);
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -845,7 +1023,7 @@ describe('livePromptEvents', () => {
   });
 
   it.each(['already initialized', 'client ready'])(
-    'still initializes Mods after a recoverable host re-entry: %s',
+    'accepts only successful host re-entry: %s',
     async (state) => {
       const initializeMods = vi.fn().mockResolvedValue(undefined);
       const failStartup = vi.fn();
@@ -865,9 +1043,85 @@ describe('livePromptEvents', () => {
         }),
       } as unknown as Config;
 
-      await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
-      expect(initializeMods).toHaveBeenCalledOnce();
-      expect(failStartup).not.toHaveBeenCalled();
+      if (state === 'already initialized') {
+        await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
+        expect(initializeMods).toHaveBeenCalledOnce();
+        expect(failStartup).not.toHaveBeenCalled();
+      } else {
+        await expect(ensureConfigInitialized(config)).rejects.toThrow(
+          'Background recovery failed',
+        );
+        expect(initializeMods).not.toHaveBeenCalled();
+        expect(failStartup).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it.each(['helper', 'failed elsewhere', 'succeeded elsewhere'])(
+    'preserves the real staged Workflow mode startup outcome: %s',
+    async (owner) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'opentui-startup-'));
+      vi.stubEnv('QWEN_CODE_MODELS_DEV', 'off');
+      vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+      const initializeMods = vi.fn();
+      const failStartup = vi.fn();
+      modMocks.get.mockReturnValue({ initialize: initializeMods, failStartup });
+      try {
+        await Storage.runWithRuntimeBaseDir(root, undefined, async () => {
+          const config = new Config({
+            cwd: root,
+            targetDir: root,
+            debugMode: false,
+            model: 'test-model',
+            chatRecording: true,
+            workflowsEnabled: false,
+            workflowMode: owner !== 'succeeded elsewhere',
+            usageStatisticsEnabled: false,
+            overrideExtensions: [],
+            bareMode: true,
+            safeMode: true,
+            trustedFolder: true,
+            disableAllHooks: true,
+          });
+          const send = vi.spyOn(config.getGeminiClient(), 'sendMessageStream');
+          try {
+            let failure: unknown;
+            if (owner !== 'helper') {
+              failure = await config
+                .initialize()
+                .catch((error: unknown) => error);
+            }
+            const startup = ensureConfigInitialized(config);
+            expect(ensureConfigInitialized(config)).toBe(startup);
+            if (owner === 'succeeded elsewhere') {
+              await expect(startup).resolves.toBeUndefined();
+              expect(initializeMods).toHaveBeenCalledOnce();
+              expect(failStartup).not.toHaveBeenCalled();
+            } else {
+              failure ??= await startup.catch((error: unknown) => error);
+              expect(failure).toMatchObject({
+                message: 'Workflow mode is unavailable in this session',
+              });
+              await expect(startup).rejects.toBe(failure);
+              await expect(ensureConfigInitialized(config)).rejects.toBe(
+                failure,
+              );
+              await expect(
+                drain(livePromptEvents(config, 'hello')),
+              ).rejects.toBe(failure);
+              expect(initializeMods).not.toHaveBeenCalled();
+              expect(failStartup).toHaveBeenCalledExactlyOnceWith(failure);
+            }
+            expect(config.getGeminiClient().isInitialized()).toBe(true);
+            expect(send).not.toHaveBeenCalled();
+          } finally {
+            await config.shutdown({ shutdownTelemetry: false });
+          }
+        });
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
     },
   );
 
@@ -1148,6 +1402,29 @@ describe('livePromptEvents', () => {
     );
   });
 
+  it('forwards fresh-mode eligibility once without inventing human provenance', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mode-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'ordinary recalled input', undefined, {
+        workflowModeEligible: true,
+      }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      workflowModeEligible: true,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('workflowModeEligible');
+  });
+
   it('forwards multimodal part lists unchanged', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);
@@ -1170,6 +1447,269 @@ describe('livePromptEvents', () => {
     // No mention occurs in the typed text, so the attachment payload stays intact.
     expect(atMocks.calls).toEqual([]);
   });
+
+  it('runs a restored client tool without starting a model continuation', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    });
+    const events = await drain(
+      livePromptEvents(config, [], undefined, {
+        promptId: 'restored-tool',
+        toolCall: { name: 'test_tool', args: { owned: true } },
+      }),
+    );
+    expect(recordToolResult).not.toHaveBeenCalled();
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'tool-start')).toHaveLength(
+      1,
+    );
+    expect(events.filter((event) => event.type === 'tool-result')).toEqual([
+      expect.objectContaining({ display: 'done' }),
+    ]);
+    expect(events.filter((event) => event.type === 'tool-end')).toEqual([
+      expect.objectContaining({ success: true }),
+    ]);
+    expect(events.some((event) => event.type === 'user')).toBe(false);
+  });
+
+  it('keeps cancelled client tools out of model history and queued input', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    });
+    const drainSteering = vi.fn(() => steering('next user turn'));
+    const events = await drain(
+      livePromptEvents(config, [], undefined, {
+        toolCall: { name: 'test_tool', args: { __cancelled: true } },
+        drainSteering,
+      }),
+    );
+
+    expect(recordToolResult).not.toHaveBeenCalled();
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+    expect(drainSteering).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'tool-end')).toEqual([
+      expect.objectContaining({ success: false, summary: 'cancelled' }),
+    ]);
+  });
+
+  it.each(['success', 'cancelled', 'successor', 'rewritten'] as const)(
+    'pairs an actual initialTool completion only with its captured restore owner: %s',
+    async (mode) => {
+      const directory = await mkdtemp(
+        path.join(tmpdir(), 'restore-live-caller-'),
+      );
+      const config = makeFakeConfig({
+        targetDir: directory,
+        cwd: directory,
+        usageStatisticsEnabled: false,
+        disableAllHooks: true,
+      });
+      const client = new LlmClient(config);
+      const chat = new LlmChat(config);
+      chat.setTools([]);
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.spyOn(client, 'isInitialized').mockReturnValue(true);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(client);
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue(client);
+      vi.spyOn(config, 'initialize').mockResolvedValue();
+      const sends = vi.spyOn(client, 'sendMessageStream');
+      const recordToolResult = vi.fn();
+      vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+        recordToolResult,
+      } as unknown as ChatRecordingService);
+      const args = {
+        __cancelled: mode === 'cancelled',
+        __rewritten: mode === 'rewritten',
+        __restoreResult:
+          mode === 'cancelled'
+            ? { error: 'ACTUAL_CANCELLED_RESULT' }
+            : { output: 'ACTUAL_LOCAL_REPLAY_RESULT' },
+      };
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'original-call', name: 'test_tool', args } },
+          ],
+        },
+      ]);
+      const binding = createRestoreToolResponseBinding(
+        config,
+        'test_tool',
+        args,
+      )!;
+      let current = true;
+      try {
+        for await (const event of livePromptEvents(config, [], undefined, {
+          toolCall: {
+            name: 'test_tool',
+            args,
+            restoreResponseBinding: binding,
+          },
+          isCurrentTurn: () => current,
+        })) {
+          if (mode === 'successor' && event.type === 'tool-end')
+            current = false;
+        }
+        const history = client.getHistoryShallow();
+        if (mode === 'successor') expect(history).toHaveLength(1);
+        else {
+          expect(binding.executionCallId).toMatch(/^test_tool-/);
+          expect(history).toHaveLength(2);
+          expect(history[0].parts?.[0].functionCall?.args).toEqual(args);
+          expect(history[1].parts).toEqual([
+            {
+              functionResponse: {
+                id: 'original-call',
+                name: 'test_tool',
+                response: args.__restoreResult,
+              },
+            },
+          ]);
+        }
+        expect(sends).not.toHaveBeenCalled();
+        expect(recordToolResult).not.toHaveBeenCalled();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['healthy', 'aborted'] as const)(
+    'checks the actual abort signal during a held restore publication: %s',
+    async (mode) => {
+      const directory = await mkdtemp(
+        path.join(tmpdir(), 'restore-abort-owner-'),
+      );
+      const config = makeFakeConfig({
+        targetDir: directory,
+        cwd: directory,
+        usageStatisticsEnabled: false,
+        disableAllHooks: true,
+      });
+      const client = new LlmClient(config);
+      const chat = new LlmChat(config);
+      chat.setTools([]);
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.spyOn(client, 'isInitialized').mockReturnValue(true);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(client);
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue(client);
+      vi.spyOn(config, 'initialize').mockResolvedValue();
+      const sends = vi.spyOn(client, 'sendMessageStream');
+      const args = { __restoreResult: { output: 'ACTUAL_NEW_LOCAL_RESULT' } };
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'logical-old', name: 'test_tool', args } },
+          ],
+        },
+      ]);
+      const tail = chat.peekLastHistoryEntry();
+      const revision = chat.getHistoryReplacementRevision();
+      const addHistory = vi.spyOn(client, 'addHistory');
+      let enter!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const publish = vi.fn();
+      const restoreToolBranch = vi.fn(
+        async (
+          input: Parameters<ChatRecordingService['restoreToolBranch']>[0],
+        ) => {
+          enter();
+          await held;
+          if (!input.isCurrent()) return false;
+          publish(input);
+          return true;
+        },
+      );
+      const recorder = {
+        restoreToolBranch,
+        recordToolResult: vi.fn(),
+      } as unknown as ChatRecordingService;
+      vi.spyOn(config, 'getChatRecordingService').mockReturnValue(recorder);
+      const binding = createRestoreToolResponseBinding(
+        config,
+        'test_tool',
+        args,
+        {
+          recorder,
+          truncatedCount: 0,
+        },
+      )!;
+      const controller = new AbortController();
+      let run: Promise<OpenTuiStreamEvent[]> | undefined;
+      try {
+        // A real interrupt aborts the signal while this turn's seq stays current.
+        // Do not emulate it by returning false from isCurrentTurn.
+        run = drain(
+          livePromptEvents(config, [], controller.signal, {
+            toolCall: {
+              name: 'test_tool',
+              args,
+              restoreResponseBinding: binding,
+            },
+            isCurrentTurn: () => true,
+          }),
+        );
+        await Promise.race([
+          entered,
+          run.then(() => {
+            throw new Error('Restore did not enter held durable publication');
+          }),
+        ]);
+        expect(restoreToolBranch).toHaveBeenCalledOnce();
+        expect(restoreToolBranch.mock.calls[0][0].isCurrent()).toBe(true);
+        expect(addHistory).not.toHaveBeenCalled();
+        if (mode === 'aborted') controller.abort();
+        expect(controller.signal.aborted).toBe(mode === 'aborted');
+        expect(chat.peekLastHistoryEntry()).toBe(tail);
+        expect(chat.getHistoryReplacementRevision()).toBe(revision);
+        release();
+        await run;
+        expect(sends).not.toHaveBeenCalled();
+        expect(recorder.recordToolResult).not.toHaveBeenCalled();
+        if (mode === 'aborted') {
+          expect(publish).not.toHaveBeenCalled();
+          expect(addHistory).not.toHaveBeenCalled();
+          expect(client.getHistoryShallow()).toHaveLength(1);
+        } else {
+          expect(publish).toHaveBeenCalledOnce();
+          expect(addHistory).toHaveBeenCalledOnce();
+          expect(client.getHistoryShallow()[1].parts).toEqual([
+            {
+              functionResponse: {
+                id: 'logical-old',
+                name: 'test_tool',
+                response: args.__restoreResult,
+              },
+            },
+          ]);
+        }
+      } finally {
+        release();
+        try {
+          if (run) await run;
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it('passes the per-turn modelOverride through send options', async () => {
     const sendMessageStream = vi.fn(function* () {});
@@ -1264,16 +1804,29 @@ describe('livePromptEvents', () => {
     });
     // ink renders the read through handleAtCommand's addItem as a tool_group;
     // here it is the same card, already settled.
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-start',
           id: 'client-read-1',
+          ...canonical,
           tool: 'Read File(s)',
           title: 'src/a.ts',
         },
-        { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
-        { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
+        {
+          type: 'tool-result',
+          id: 'client-read-1',
+          ...canonical,
+          display: 'FILE BODY',
+        },
+        {
+          type: 'tool-end',
+          id: 'client-read-1',
+          ...canonical,
+          success: true,
+          summary: 'ok',
+        },
       ]),
     );
   });
@@ -1300,16 +1853,19 @@ describe('livePromptEvents', () => {
     );
 
     expect(sendMessageStream).not.toHaveBeenCalled();
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-result',
           id: 'client-read-1',
+          ...canonical,
           display: 'Error reading files (missing.ts): no such file',
         },
         {
           type: 'tool-end',
           id: 'client-read-1',
+          ...canonical,
           success: false,
           summary: 'error',
         },
@@ -1583,10 +2139,12 @@ describe('livePromptEvents', () => {
         recordMidTurnUserMessage,
       });
       const restoreSteering = vi.fn();
+      const onAcceptedSteering = vi.fn();
       const events = await drain(
         livePromptEvents(config, 'start', undefined, {
           drainSteering: () => [entry],
           restoreSteering,
+          onAcceptedSteering,
         }),
       );
       expect(sendMessageStream).toHaveBeenCalledTimes(2);
@@ -1597,6 +2155,7 @@ describe('livePromptEvents', () => {
       expect(restoreSteering).toHaveBeenCalledOnce();
       expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
       expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+      expect(onAcceptedSteering).not.toHaveBeenCalled();
       expect(events.filter((item) => item.type === 'user')).toEqual([]);
     },
   );
@@ -1635,11 +2194,13 @@ describe('livePromptEvents', () => {
         recordMidTurnUserMessage,
       });
       const restoreSteering = vi.fn();
+      const onAcceptedSteering = vi.fn();
       const events: OpenTuiStreamEvent[] = [];
       const pending = (async () => {
         for await (const event of livePromptEvents(config, 'start', undefined, {
           drainSteering: () => [entry],
           restoreSteering,
+          onAcceptedSteering,
         })) {
           events.push(event);
         }
@@ -1664,6 +2225,7 @@ describe('livePromptEvents', () => {
         { type: 'user', text: entry.text, sentToModel: false },
       ]);
       expect(restoreSteering).not.toHaveBeenCalled();
+      expect(onAcceptedSteering).toHaveBeenCalledExactlyOnceWith([entry.text]);
     },
   );
 
@@ -1789,9 +2351,11 @@ describe('livePromptEvents', () => {
         ...(mixed ? valid.content : []),
       ]);
       expect(restoreSteering.mock.calls).toEqual(mixed ? [[[valid]]] : []);
+      const canonical = expectMentionCanonicalSource(events);
       expect(events).toContainEqual({
         type: 'tool-result',
         id: 'client-read-1',
+        ...canonical,
         display: 'missing.ts could not be read',
       });
       expect(events.filter((event) => event.type === 'user')).toEqual([]);
@@ -1858,16 +2422,29 @@ describe('livePromptEvents', () => {
       { text: '--- Content from src/a.ts ---\nFILE BODY' },
     ]);
     // The read the model received shows up as the settled card ink renders.
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-start',
           id: 'client-read-1',
+          ...canonical,
           tool: 'Read File(s)',
           title: 'src/a.ts',
         },
-        { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
-        { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
+        {
+          type: 'tool-result',
+          id: 'client-read-1',
+          ...canonical,
+          display: 'FILE BODY',
+        },
+        {
+          type: 'tool-end',
+          id: 'client-read-1',
+          ...canonical,
+          success: true,
+          summary: 'ok',
+        },
       ]),
     );
   });
@@ -2298,16 +2875,19 @@ describe('livePromptEvents', () => {
     expect(restoreSteering).not.toHaveBeenCalled();
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(events.filter((event) => event.type === 'user')).toEqual([]);
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-result',
           id: 'client-read-1',
+          ...canonical,
           display: 'Error reading files (missing.ts): no such file',
         },
         {
           type: 'tool-end',
           id: 'client-read-1',
+          ...canonical,
           success: false,
           summary: 'error',
         },
@@ -2723,6 +3303,49 @@ describe('livePromptEvents', () => {
     expect(secondEcho).toBeGreaterThan(warn);
   });
 
+  it('publishes actual executing shell PID/controllers, excluding queued and non-shell calls, then clears the owner', async () => {
+    let requests = 0;
+    const send = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      if (++requests === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'shell-owner',
+            name: 'run_shell_command',
+            args: { __foreground: true },
+          },
+        };
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'not-shell', name: 'read_file', args: {} },
+        };
+      } else yield { type: 'finished', value: {} };
+    });
+    const onExecutingShells = vi.fn();
+    await drain(
+      livePromptEvents(createFakeConfig(send), 'q', undefined, {
+        onExecutingShells,
+      }),
+    );
+    const snapshots = onExecutingShells.mock.calls.map(([calls]) => calls);
+    expect(snapshots[0]).toEqual([]);
+    expect(snapshots).toContainEqual([
+      {
+        callId: 'shell-owner',
+        pid: 4300,
+        promoteAbortController: expect.any(AbortController),
+      },
+    ]);
+    expect(snapshots.at(-1)).toEqual([]);
+    expect(snapshots.flat().some((call) => call.pid === 9999)).toBe(false);
+    expect(snapshots.flat().some((call) => call.callId === 'not-shell')).toBe(
+      false,
+    );
+  });
+
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
@@ -2873,6 +3496,38 @@ describe('livePromptEvents', () => {
       { type: 'tool-queued', id: 'q1', queued: true },
       { type: 'tool-queued', id: 'q1', queued: false },
     ]);
+  });
+
+  it('tells the turn when every tool of a round was declined', async () => {
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'c9',
+          name: 'run_shell_command',
+          args: { __cancelApproval: true },
+        },
+      };
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory: vi.fn(),
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
+    const onToolsCancelled = vi.fn();
+
+    await drain(livePromptEvents(config, 'q', undefined, { onToolsCancelled }));
+
+    expect(onToolsCancelled).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledOnce();
   });
 
   it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
@@ -3273,4 +3928,224 @@ describe('approval-mode helpers', () => {
     expect(selectAutoApprovals(ApprovalMode.AUTO, waiting)).toEqual([]);
     expect(selectAutoApprovals(ApprovalMode.PLAN, waiting)).toEqual([]);
   });
+});
+
+describe('live checkpoint producer and approval ownership', () => {
+  beforeEach(() => {
+    resetPromptCountForTesting();
+    atMocks.calls.length = 0;
+    atMocks.result = { processedQuery: null, shouldProceed: true };
+    atMocks.hang = null;
+    atMocks.abortAfter = null;
+    visionMocks.run.mockReset();
+    modMocks.get.mockReset();
+  });
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  };
+
+  async function scenario(options: {
+    enabled?: boolean;
+    clientInitiated?: boolean;
+    port?: boolean;
+    boundary?: 'mkdir' | 'write';
+    invalidate?:
+      | 'approval resolved'
+      | 'same call reentered'
+      | 'session changed'
+      | 'turn changed'
+      | 'aborted';
+  }) {
+    const directory = await mkdtemp(
+      path.join(tmpdir(), 'qwen-live-checkpoint-'),
+    );
+    const abort = new AbortController();
+    let session = 'session-1';
+    let current = true;
+    const stream = oneToolBatchStream({
+      callId: 'edit-1',
+      name: 'replace',
+      args: { file_path: '/owned/a.ts', old_string: 'A', new_string: 'B' },
+      ...{
+        isClientInitiated: options.clientInitiated ?? false,
+        prompt_id: 'session-1########0',
+      },
+    });
+    const config = createFakeConfig(stream);
+    const storageRead = vi.fn(() => directory);
+    Object.assign(config, {
+      getSessionId: () => session,
+      getProjectRoot: () => directory,
+      getFileCheckpointingEnabled: () => options.enabled !== false,
+      storage: { getProjectTempCheckpointsDir: storageRead },
+    });
+    Object.assign(config.getGeminiClient(), {
+      getHistoryShallow: () => [{ role: 'user', parts: [{ text: 'edit' }] }],
+    });
+    let items: readonly LiveHistoryItem[] = [];
+    const observed: OpenTuiStreamEvent[] = [];
+    const snapshot = vi.fn(() => {
+      expect(observed.at(-1)?.type).toBe('confirm');
+      const cards = items.filter((item) => item.kind === 'tool');
+      expect(cards).toHaveLength(1);
+      expect(cards[0].canonicalHistoryItem).toMatchObject({
+        type: 'tool_group',
+        tools: [
+          {
+            args: {
+              file_path: '/owned/a.ts',
+              old_string: 'A',
+              new_string: 'B',
+            },
+          },
+        ],
+      });
+      expect(cards[0].canonicalPending).toBe(true);
+      return snapshotCanonicalHistory(
+        items.filter((item) => !item.canonicalPending),
+      );
+    });
+    const enteredWrite = deferred();
+    const releaseWrite = deferred();
+    checkpointControl.held = true;
+    const expectedWrite =
+      options.enabled !== false &&
+      !options.clientInitiated &&
+      options.port !== false;
+    if (expectedWrite) {
+      const atBoundary = async () => {
+        enteredWrite.resolve();
+        await releaseWrite.promise;
+      };
+      if (options.boundary === 'mkdir')
+        checkpointControl.afterMkdir = atBoundary;
+      else checkpointControl.afterWrite = atBoundary;
+    }
+    const gen = livePromptEvents(config, 'edit', abort.signal, {
+      isCurrentTurn: () => current,
+      ...(options.port === false
+        ? {}
+        : { checkpointHistory: { allocateId: () => -1, snapshot } }),
+    });
+    const fold = (event: OpenTuiStreamEvent) => {
+      observed.push(event);
+      items = foldLiveEvent(items, event);
+    };
+    let resumed: Promise<IteratorResult<OpenTuiStreamEvent>> | undefined;
+    try {
+      for (;;) {
+        const step = await gen.next();
+        expect(step.done).toBe(false);
+        if (step.done) throw new Error('Scheduler never reached approval');
+        fold(step.value);
+        if (step.value.type === 'confirm') break;
+      }
+      // Exactly the real for-await contract: all prior source events and
+      // confirm are folded before the generator resumes its writer.
+      resumed = gen.next();
+      if (expectedWrite) {
+        checkpointControl.update?.('repeated');
+        await Promise.race([
+          enteredWrite.promise,
+          resumed.then(() => {
+            throw new Error(
+              'Writer did not reach the actual async write boundary',
+            );
+          }),
+        ]);
+        switch (options.invalidate) {
+          case 'approval resolved':
+            checkpointControl.update?.('resolved');
+            break;
+          case 'same call reentered':
+            checkpointControl.update?.('reentered');
+            break;
+          case 'session changed':
+            session = 'session-2';
+            break;
+          case 'turn changed':
+            current = false;
+            break;
+          case 'aborted':
+            abort.abort();
+            break;
+          default:
+            break;
+        }
+        releaseWrite.resolve();
+      }
+      // A no-write route can otherwise be waiting for the next scheduler event.
+      if (!expectedWrite) checkpointControl.release?.();
+      const next = await resumed;
+      if (!next.done) fold(next.value);
+      const filesBeforeCleanup = await readdir(directory);
+      const json = filesBeforeCleanup.filter((name) => name.endsWith('.json'));
+      if (
+        options.enabled === false ||
+        options.clientInitiated ||
+        options.port === false
+      ) {
+        expect(snapshot).not.toHaveBeenCalled();
+        expect(storageRead).not.toHaveBeenCalled();
+        expect(filesBeforeCleanup).toEqual([]);
+      } else if (
+        options.invalidate &&
+        options.invalidate !== 'approval resolved'
+      ) {
+        expect(snapshot).toHaveBeenCalledOnce();
+        expect(filesBeforeCleanup).toEqual([]);
+      } else {
+        expect(snapshot).toHaveBeenCalledOnce();
+        expect(json).toHaveLength(1);
+        expect(
+          JSON.parse(await readFile(path.join(directory, json[0]), 'utf8')),
+        ).toMatchObject({
+          history: [],
+          toolCall: {
+            name: 'replace',
+            args: { old_string: 'A', new_string: 'B' },
+          },
+          promptId: 'session-1########0',
+          filePath: '/owned/a.ts',
+        });
+      }
+    } finally {
+      releaseWrite.resolve();
+      checkpointControl.afterWrite = null;
+      checkpointControl.afterMkdir = null;
+      checkpointControl.release?.();
+      // Drain/return the same generator; never start a replacement attempt.
+      if (resumed) await resumed.catch(() => {});
+      await gen.return(undefined);
+      checkpointControl.held = false;
+      checkpointControl.update = null;
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  it('captures after the actual queued tool source is folded', () =>
+    scenario({}));
+  it('does not read storage or capture when disabled', () =>
+    scenario({ enabled: false }));
+  it('does not checkpoint a client-initiated edit', () =>
+    scenario({ clientInitiated: true }));
+  it('keeps the pre-existing caller without a checkpoint port working', () =>
+    scenario({ port: false }));
+  it('retains the captured restore point when approval completes during the write', () =>
+    scenario({ invalidate: 'approval resolved' }));
+  it('does not publish when aborted while the real mkdir awaits', () =>
+    scenario({ invalidate: 'aborted', boundary: 'mkdir' }));
+  it.each([
+    'same call reentered',
+    'session changed',
+    'turn changed',
+    'aborted',
+  ] as const)(
+    'does not publish after async temporary write when %s',
+    (invalidate) => scenario({ invalidate }),
+  );
 });

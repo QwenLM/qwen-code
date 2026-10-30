@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -30,7 +31,7 @@ public class ManagedMcpManagementService {
     private final ObjectMapper json;
 
     public ManagedMcpManagementService(ManagedAgentService sessions, AgentStateStore store,
-            HarnessConnector harness, ObjectMapper json) {
+            HarnessConnector harness, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.sessions = sessions;
         this.store = store;
         this.harness = harness;

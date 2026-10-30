@@ -10,8 +10,10 @@
 // resumes without losing its cursor or work in progress.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { realpathNearestExisting } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   currentUser,
@@ -28,19 +30,26 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   currentSessionId,
+  ghNotFound,
   historyPath,
   isBranchName,
   isCommandSafeName,
+  cloneWorktreeRoots,
+  findWatchRoot,
+  vouchedScanRoots,
   readHistory,
   readState,
   repoRoot,
+  watchRoot,
   requireState,
   sameRepository,
   withWatchLock,
+  writeAnchor,
   writeState,
   type AutofixPrHistory,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 import { networkGit } from './worktree.js';
 
 export interface PrView {
@@ -194,9 +203,15 @@ function authorCanPush(slug: string, author: string, viewer: string): boolean {
       '.permission',
     );
     return permission === 'admin' || permission === 'write';
-  } catch {
-    // Not a collaborator (404), or an account GitHub will not describe.
-    return false;
+  } catch (err) {
+    // Not a collaborator: GitHub answers 404. Anything else — a rate
+    // limit, the network — says nothing of the author, and must not pass
+    // for a no: a resume would end a watch over it.
+    if (ghNotFound(err)) return false;
+    const text = `${(err as Error).message}\n${String((err as { stderr?: unknown }).stderr ?? '')}`;
+    throw new Error(
+      `could not ask GitHub whether ${author} can push to ${slug}; try again: ${text.trim().split('\n').at(-1) ?? ''}`,
+    );
   }
 }
 
@@ -212,10 +227,164 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       viewer: state.viewer,
       prAuthor: state.prAuthor,
       sessionId: state.sessionId,
+      host: state.host,
+      preparedAt: state.preparedAt ?? null,
       authorCanPush: state.authorCanPush ?? false,
       ...extra,
     }),
   );
+}
+
+/**
+ * What the user's own copy of the watch's head branch holds, as the report
+ * says it: commits the PR does not have, uncommitted work in a checkout of
+ * that copy, and whether any of it could not be read — never a "no" that
+ * only means git could not answer. Only a local branch whose upstream is the
+ * head branch on the push remote counts as that copy.
+ */
+function localCopy(
+  state: Pick<
+    AutofixPrState,
+    'headRefName' | 'pushTarget' | 'lastKnownHeadSha'
+  >,
+): {
+  localUnpushedCommits: number;
+  localUncommittedChanges: boolean;
+  localWorkUnknown: boolean;
+} {
+  const upstream = gitOpt(
+    'for-each-ref',
+    '--format=%(upstream:short)',
+    `refs/heads/${state.headRefName}`,
+  );
+  if (upstream !== `${state.pushTarget}/${state.headRefName}`) {
+    return {
+      localUnpushedCommits: 0,
+      localUncommittedChanges: false,
+      localWorkUnknown: false,
+    };
+  }
+  // A head this clone does not have — pushed from another one — is unreadable
+  // here, and a zero would read as "nothing unpushed".
+  const unpushed = gitOpt(
+    'rev-list',
+    '--count',
+    `refs/heads/${state.headRefName}`,
+    '--not',
+    state.lastKnownHeadSha,
+  );
+  const checkouts = worktreeCheckouts(state.headRefName);
+  const work = checkouts?.map(checkoutHoldsWork) ?? null;
+  return {
+    localUnpushedCommits: unpushed === null ? 0 : Number(unpushed),
+    localUncommittedChanges: work?.some((held) => held === true) ?? false,
+    localWorkUnknown:
+      unpushed === null || work === null || work.some((held) => held === null),
+  };
+}
+
+/**
+ * Paths of this clone's worktrees that have `branch` checked out: the copies
+ * the user may be working in, or null when git cannot list them.
+ */
+function worktreeCheckouts(branch: string): string[] | null {
+  // `-z` keeps a path git would otherwise C-quote, which `git -C` then
+  // cannot open. Git before 2.36 has no `-z`; the line form still answers,
+  // and a path it quotes reads as unknown rather than as no work.
+  const z = gitOpt('worktree', 'list', '--porcelain', '-z');
+  if (z !== null) return parseWorktrees(z.split('\0'), branch);
+  const plain = gitOpt('worktree', 'list', '--porcelain');
+  return plain === null ? null : parseWorktrees(plain.split('\n'), branch);
+}
+
+/** `git worktree list --porcelain` records, split into fields. */
+function parseWorktrees(fields: string[], branch: string): string[] {
+  const paths: string[] = [];
+  let worktree: string | null = null;
+  for (const field of fields) {
+    if (field === '') {
+      worktree = null;
+    } else if (field.startsWith('worktree ')) {
+      worktree = field.slice('worktree '.length);
+    } else if (worktree !== null && field === `branch refs/heads/${branch}`) {
+      paths.push(worktree);
+    }
+  }
+  return paths;
+}
+
+/**
+ * Whether a checkout holds work git reports, or null when git cannot read it.
+ * The flags override `status.showUntrackedFiles` and submodule `ignore`
+ * settings, as this directory's other scans do. Only `.qwen` is the watch's:
+ * anything beside its `tmp` directory under there is the user's work.
+ */
+function checkoutHoldsWork(path: string): boolean | null {
+  const status = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+    '--ignore-submodules=none',
+  );
+  if (status === null) return null;
+  const lines = status.split('\n').filter((line) => line !== '');
+  const onlyWatchDir = (line: string) =>
+    line.startsWith('??') && isUnderQwen(line.slice(3));
+  if (lines.some((line) => !onlyWatchDir(line))) return true;
+  if (lines.length === 0) return false;
+  // Only `.qwen` is untracked: ask what it holds besides the watch's `tmp`.
+  const userFiles = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--exclude-standard',
+    '--',
+    '.qwen',
+    ':(exclude).qwen/tmp',
+  );
+  if (userFiles === null) return null;
+  return userFiles.trim() !== '';
+}
+
+/** A porcelain path at or under `.qwen`. */
+function isUnderQwen(file: string): boolean {
+  return file === '.qwen' || file.startsWith('.qwen/');
+}
+
+/**
+ * The clone's remote for the PR's repository and the target its head is
+ * pushed to, from `git remote -v` — never from a state file, which the code
+ * a round runs can reach.
+ */
+function remotesFor(
+  host: string,
+  owner: string,
+  repo: string,
+  headOwner: string,
+  headName: string,
+): { remote: string; pushTarget: string } {
+  const remoteV = git('remote', '-v');
+  const remote = onlyRemote(remoteV, owner, repo, host);
+  if (!remote) {
+    throw new Error(
+      `no single git remote here serves ${host}/${owner}/${repo}; autofix needs a clone of the PR's repository.`,
+    );
+  }
+  // The brief names it in the fix agent's merge command.
+  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
+    throw new Error(
+      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
+    );
+  }
+  return {
+    remote,
+    pushTarget: pushTargetFor(remoteV, host, headOwner, headName),
+  };
 }
 
 export interface PrepareArgs {
@@ -226,14 +395,130 @@ export interface PrepareArgs {
   takeOver?: boolean;
 }
 
+/**
+ * A daemon session runs the fix agent's commands only inside the session's own
+ * working directory or a worktree that session owns, so a worktree outside it
+ * can be created but never used: no test, no commit, no push. Refuse before a
+ * fresh start creates anything, and before a resume reports that same
+ * worktree as ready.
+ */
+function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
+  if (process.env['QWEN_CODE_SERVE'] !== '1') return;
+  const sessionDir = realpathNearestExisting(process.cwd());
+  if (isWithinRoot(realpathNearestExisting(worktreePath), sessionDir)) return;
+  throw new Error(
+    `${worktreePath} is outside this session's working directory ` +
+      `(${sessionDir}): the daemon runs the fix agent's commands only there, ` +
+      `so a watch here could never run its checks, commit or push. Prepare the ` +
+      `PR from ${root}, where the worktree is inside the session's directory.`,
+  );
+}
+
+/**
+ * Reconcile a PR's history across the clone on a fresh prepare (a new watch or
+ * a relocation). Several worktrees may hold a history — one per hop, including
+ * the destination's own when a watch returns to a root it left — so the settled
+ * lists (handled comments, posted replies, spent checks/reruns) are unioned
+ * across every copy: a first-match would import a stale copy and re-answer what
+ * a later hop handled, and skipping the destination's copy would lose what a
+ * later hop settled on a return. The pending lists (holds, deferred runs,
+ * announced posts) are settlement state, not a union: they come from the most
+ * recently written copy, and a hold whose floor was already spent is dropped,
+ * so a relocation never resurrects a hold a later watch spent (`keepHistory`
+ * avoids merging these back for the same reason). Only JSON metadata is read;
+ * no git command runs in a discovered worktree.
+ */
+function reconcileHistory(
+  prNumber: number,
+  repository: { host: string; owner: string; repo: string },
+  local: AutofixPrHistory | null,
+  localRoot: string,
+): AutofixPrHistory | null {
+  const union = (a: string[] = [], b: string[] = []) => [
+    ...new Set([...a, ...b]),
+  ];
+  const copies: Array<{ history: AutofixPrHistory; mtimeMs: number }> = [];
+  const consider = (h: AutofixPrHistory | null, path: string) => {
+    if (!h || !sameRepository(h, repository)) return;
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      // An unreadable mtime only loses the recency tie-break.
+    }
+    copies.push({ history: h, mtimeMs });
+  };
+  consider(local, historyPath(autofixPrPaths(localRoot, prNumber), repository));
+  const exclude = realpathNearestExisting(localRoot);
+  for (const root of vouchedScanRoots(cloneWorktreeRoots())) {
+    if (realpathNearestExisting(root) === exclude) continue;
+    const path = historyPath(autofixPrPaths(root, prNumber), repository);
+    let h: AutofixPrHistory | null = null;
+    try {
+      h = readHistory(path);
+    } catch {
+      continue;
+    }
+    consider(h, path);
+  }
+  if (copies.length === 0) return null;
+  let merged: AutofixPrHistory = { ...copies[0]!.history };
+  for (const { history } of copies.slice(1)) {
+    merged = {
+      ...merged,
+      handledCommentIds: union(
+        merged.handledCommentIds,
+        history.handledCommentIds,
+      ),
+      postedCommentIds: union(
+        merged.postedCommentIds,
+        history.postedCommentIds,
+      ),
+      handledChecks: union(merged.handledChecks, history.handledChecks),
+      rerunChecks: union(merged.rerunChecks, history.rerunChecks),
+    };
+  }
+  const newest = copies.reduce((a, b) =>
+    b.mtimeMs > a.mtimeMs ? b : a,
+  ).history;
+  const settledFloors = new Set(merged.rerunChecks ?? []);
+  return {
+    ...merged,
+    // The conflict marker is a scalar settlement, not an accumulating list:
+    // the most recent copy wins, so a stale main-root marker cannot override a
+    // newer linked-root settlement (which would re-fix a conflict already left
+    // to a human).
+    handledConflictSha: newest.handledConflictSha ?? null,
+    heldChecks: (newest.heldChecks ?? []).filter(
+      (hold) => !settledFloors.has(hold.replace(/^\d+:/, '')),
+    ),
+    deferredRuns: newest.deferredRuns ?? [],
+    pendingPosts: newest.pendingPosts ?? [],
+  };
+}
+
 export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
-  const root = repoRoot();
+  // Resume the watch wherever the clone holds it; a fresh one roots at the
+  // session's own worktree. assertSessionCanRunWorktree below still refuses a
+  // resolved worktree outside the session's working directory.
+  const root = findWatchRoot(args.pr) ?? watchRoot();
   const paths = autofixPrPaths(root, args.pr);
+
+  // A resume hands back the same worktree, so both refusals come before the
+  // state is read: a symlinked parent would put the worktree somewhere else,
+  // and a daemon session runs commands only inside its own directory.
+  const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
+  if (redirected !== null) {
+    throw new Error(
+      `refusing to prepare ${paths.worktreePath}: ${redirected} is a symlink.`,
+    );
+  }
+  assertSessionCanRunWorktree(root, paths.worktreePath);
 
   // State is keyed by PR number alone, and one clone can reach several
   // repositories with a PR of that number.
@@ -248,29 +533,103 @@ export function runPrepare(args: PrepareArgs): void {
   };
   let existing = readState(paths.statePath);
   let tookOver = false;
+  let recreated = false;
+  let wasEnded: AutofixPrState['ended'];
+  const takesOver = (state: AutofixPrState) =>
+    args.takeOver === true && state.sessionId !== currentSessionId();
   if (existing) {
     sameWatch(existing);
-    // A /clear or /resume gives the session a new id while its scheduled
-    // task goes on: the user hands the watch, history and budgets kept, to
-    // the session that asks. The other session's helpers refuse from then on.
-    if (args.takeOver && existing.sessionId !== currentSessionId()) {
-      existing = withWatchLock(paths, args.pr, () => {
-        const current = requireState(paths.statePath, args.pr);
-        const moved = { ...current, sessionId: currentSessionId() };
-        writeState(paths.statePath, moved);
-        return moved;
-      });
-      tookOver = true;
-    }
-    assertOwnedBySession(existing);
+    // A fix agent works in the worktree now, for whichever session.
+    assertNoFixInFlight(paths, args.pr);
     // The recorded path goes stale when the clone moves; this one does not.
     if (existsSync(paths.worktreePath)) {
+      // A /clear or /resume gives the session a new id while its scheduled
+      // task goes on: the user hands the watch, history and budgets kept,
+      // to the session that asks. The other session's helpers refuse from
+      // then on.
+      if (!takesOver(existing)) assertOwnedBySession(existing);
+      // The state file sits beside the worktree, in reach of the code a
+      // round runs: whether the PR's author can push — which decides
+      // whether the PR may be watched at all — is asked of GitHub again,
+      // not read back from it. Asked first: a failure leaves the watch with
+      // the session that has it.
+      ensureAuthenticated();
+      const live = JSON.parse(
+        gh(
+          'pr',
+          'view',
+          String(args.pr),
+          '-R',
+          args.repo,
+          '--json',
+          'author,headRepository,headRepositoryOwner,headRefOid',
+        ),
+      ) as Pick<
+        PrView,
+        'author' | 'headRepository' | 'headRepositoryOwner' | 'headRefOid'
+      >;
+      if (!live.headRepository || !live.headRepositoryOwner) {
+        throw new Error(
+          `PR #${args.pr}'s head repository no longer exists; nothing can be pushed to it.`,
+        );
+      }
+      const canPush = authorCanPush(
+        args.repo,
+        live.author?.login ?? '',
+        currentUser(),
+      );
+      // So are the remote a round merges from and the push target: this
+      // clone must serve the repository the file names.
+      const remotes = remotesFor(
+        host,
+        owner,
+        repoName,
+        live.headRepositoryOwner.login,
+        live.headRepository.name,
+      );
+      existing = withWatchLock(paths, args.pr, () => {
+        const current = requireState(paths.statePath, args.pr);
+        if (takesOver(current)) tookOver = true;
+        else assertOwnedBySession(current);
+        assertNoFixInFlight(paths, args.pr);
+        // An attempt whose session left it behind is no longer anyone's.
+        if (tookOver) clearAbandonedFix(paths);
+        // A start resumes a watch `cleanup` ended keeping its worktree: the
+        // user asked for it, and the start's confirmation said what the
+        // worktree holds. Read here, under the lock that also clears it.
+        wasEnded = current.ended;
+        const { ended: _resumed, ...rest } = current;
+        const next = {
+          ...rest,
+          sessionId: currentSessionId(),
+          authorCanPush: canPush,
+          ...remotes,
+        };
+        // Re-confirm the anchor from the current cwd; this also re-establishes
+        // it under a new main after a clone move (`git worktree repair`).
+        writeAnchor(current, current.prNumber, repoRoot());
+        if (JSON.stringify(next) !== JSON.stringify(current)) {
+          writeState(paths.statePath, next);
+        }
+        return next;
+      });
       report(
         { ...existing, worktreePath: paths.worktreePath },
-        { resumed: true, ...(tookOver ? { tookOver } : {}) },
+        {
+          resumed: true,
+          // Against the PR's head now, not the one the watch last synced:
+          // a commit the user has since pushed is not unpushed.
+          ...localCopy({ ...existing, lastKnownHeadSha: live.headRefOid }),
+          ...(tookOver ? { tookOver } : {}),
+          ...(wasEnded ? { wasEnded } : {}),
+        },
       );
       return;
     }
+    // A removed worktree is made again below, once the PR has been checked:
+    // a take-over moves the watch only then, so a refusal leaves it with the
+    // session that has it.
+    if (!args.takeOver) assertOwnedBySession(existing);
   }
 
   ensureAuthenticated();
@@ -291,32 +650,21 @@ export function runPrepare(args: PrepareArgs): void {
   if (refusal) throw new Error(refusal);
   const headOwner = pr.headRepositoryOwner!.login;
   const headName = pr.headRepository!.name;
+  // Asked before anything is fetched or made: a refusal leaves nothing
+  // behind.
+  const canPush = authorCanPush(args.repo, pr.author?.login ?? '', viewer);
 
-  const remoteV = git('remote', '-v');
-  const remote = onlyRemote(remoteV, owner, repoName, host);
-  if (!remote) {
-    throw new Error(
-      `no single git remote here serves ${host}/${args.repo}; autofix needs a clone of the PR's repository.`,
-    );
-  }
-  // The brief names it in the fix agent's merge command.
-  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
-    throw new Error(
-      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
-    );
-  }
-  const pushTarget = pushTargetFor(remoteV, host, headOwner, headName);
+  const { remote, pushTarget } = remotesFor(
+    host,
+    owner,
+    repoName,
+    headOwner,
+    headName,
+  );
 
   // One start at a time: two sessions starting the same PR would both pass
   // the leftover checks, and the one whose `worktree add` failed would roll
   // back the worktree and branch the other just made.
-  // Before anything is made under `.qwen/tmp`, the lock's directory included.
-  const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
-  if (redirected !== null) {
-    throw new Error(
-      `refusing to create ${paths.worktreePath}: ${redirected} is a symlink.`,
-    );
-  }
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, args.pr, () => {
     // What was read before the lock may have moved since: another session
@@ -324,7 +672,15 @@ export function runPrepare(args: PrepareArgs): void {
     existing = readState(paths.statePath);
     if (existing) {
       sameWatch(existing);
-      assertOwnedBySession(existing);
+      // The state written below names this session.
+      if (takesOver(existing)) tookOver = true;
+      else assertOwnedBySession(existing);
+      assertNoFixInFlight(paths, args.pr);
+      if (tookOver) clearAbandonedFix(paths);
+      recreated = true;
+      // A watch `stop` ended keeping its worktree, the worktree removed
+      // since: the start resumes it all the same, and says so.
+      if (existing.ended) wasEnded = existing.ended;
     }
     // Never discard what an earlier watch left: only `cleanup` knows when that
     // is safe. The one exception is a branch whose worktree was removed and
@@ -400,6 +756,18 @@ export function runPrepare(args: PrepareArgs): void {
     if (history && !sameRepository(history, { host, owner, repo: repoName })) {
       history = null;
     }
+    // A fresh prepare (a new watch or a relocation) reconciles the PR's history
+    // across the clone, including the destination's own copy, so neither a
+    // first move nor a return hop forgets what an earlier watch handled or
+    // settled. A resume (`existing`) keeps the running watch's state as it is.
+    if (!existing) {
+      history = reconcileHistory(
+        args.pr,
+        { host, owner, repo: repoName },
+        history,
+        root,
+      );
+    }
     const state: AutofixPrState = {
       version: 1,
       sessionId: currentSessionId(),
@@ -415,8 +783,9 @@ export function runPrepare(args: PrepareArgs): void {
       worktreePath: paths.worktreePath,
       viewer,
       prAuthor: pr.author?.login ?? '',
-      authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
+      authorCanPush: canPush,
       lastKnownHeadSha: headSha,
+      preparedAt: new Date().toISOString(),
       // A watch whose worktree was removed keeps its history, so it does not
       // answer the same comments again, and keeps its budgets. A new watch of
       // a PR watched before starts from what that one posted and handled.
@@ -445,38 +814,31 @@ export function runPrepare(args: PrepareArgs): void {
             pendingPosts: existing.pendingPosts,
             deferredRuns: existing.deferredRuns,
             heldChecks: existing.heldChecks,
+            // The task `resume` starts again, and what is left for a person.
+            watch: existing.watch,
+            needsHuman: existing.needsHuman,
           }
         : {}),
     };
+    // Record the clone this watch is confirmed against, in the anchor store
+    // outside the workspace (defense-in-depth; see `anchorStoreRoot`).
+    writeAnchor({ host, owner, repo: repoName }, args.pr, repoRoot());
     writeState(paths.statePath, state);
     return state;
   });
 
-  // Commits on the user's own copy of the branch that the PR does not have
-  // yet: the worktree starts from the PR head and never sees them. Only a
-  // local branch tracking the head on the push remote is that copy; a fork's
-  // `main` is not the user's `main`.
-  const upstream = gitOpt(
-    'for-each-ref',
-    '--format=%(upstream:short)',
-    `refs/heads/${pr.headRefName}`,
-  );
-  const localUnpushed =
-    upstream === `${pushTarget}/${pr.headRefName}`
-      ? gitOpt(
-          'rev-list',
-          '--count',
-          `refs/heads/${pr.headRefName}`,
-          '--not',
-          state.lastKnownHeadSha,
-        )
-      : null;
+  // Work in the user's own copy of the head branch: the worktree starts from
+  // the PR head and never sees it, and the watch's push races the user's.
   report(state, {
     resumed: false,
+    // The watch was there and keeps what it recorded: only its worktree is
+    // new. A start that is cancelled must not clean it up.
+    ...(recreated ? { recreated } : {}),
+    ...(wasEnded ? { wasEnded } : {}),
     url: pr.url,
     isDraft: pr.isDraft,
     isCrossRepository: pr.isCrossRepository,
-    localUnpushedCommits: localUnpushed === null ? 0 : Number(localUnpushed),
+    ...localCopy(state),
     ...(tookOver ? { tookOver } : {}),
   });
 }

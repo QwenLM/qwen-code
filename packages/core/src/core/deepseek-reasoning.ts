@@ -27,6 +27,7 @@ const LEGACY_MODELS = new Set([
 
 function getDeepSeekEndpoint(
   baseUrl: string | undefined,
+  model: string | undefined,
 ): 'official' | 'maas' | undefined {
   let hostname: string;
   try {
@@ -40,7 +41,11 @@ function getDeepSeekEndpoint(
     hostname.endsWith('.maas.aliyuncs.com') ||
     /^(?:dashscope(?:-intl|-us)?|cn-hongkong\.dashscope)\.aliyuncs\.com$/.test(
       hostname,
-    )
+    ) ||
+    (/^deepseek-v4\.1-flash(?:-1017)?$/i.test(model ?? '') &&
+      (hostname.endsWith('.alibaba-inc.com') ||
+        hostname.endsWith('.aliyun-inc.com') ||
+        hostname.endsWith('.alicloudapi.com')))
   )
     return 'maas';
   return undefined;
@@ -49,8 +54,8 @@ function getDeepSeekEndpoint(
 export function getBuiltinDeepSeekReasoning(
   config: Partial<ContentGeneratorConfig>,
 ): ResolvedReasoning | undefined {
-  const endpoint = getDeepSeekEndpoint(config.baseUrl);
   const model = config.model?.toLowerCase() ?? '';
+  const endpoint = getDeepSeekEndpoint(config.baseUrl, model);
   if (
     config.authType !== AuthType.USE_OPENAI ||
     !endpoint ||
@@ -91,7 +96,7 @@ export function normalizeDeepSeekReasoningEffort(
   // MaaS does not specify xhigh; keep max for legacy models and follow the
   // current official mapping for the newer Flash aliases.
   if (effort === 'xhigh')
-    return (builtin && getDeepSeekEndpoint(baseUrl) === 'official') ||
+    return (builtin && getDeepSeekEndpoint(baseUrl, model) === 'official') ||
       (FLASH_MODELS.has(model?.toLowerCase() ?? '') &&
         model?.toLowerCase() !== 'deepseek-v4-flash')
       ? 'high'
@@ -107,7 +112,7 @@ export function applyDeepSeekReasoningEffort<T extends object>(
   const body = request as Record<string, unknown>;
   const model = typeof body['model'] === 'string' ? body['model'] : undefined;
   if (
-    getDeepSeekEndpoint(baseUrl) !== 'official' &&
+    getDeepSeekEndpoint(baseUrl, model) !== 'official' &&
     !getBuiltinDeepSeekReasoning({
       authType: AuthType.USE_OPENAI,
       model,

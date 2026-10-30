@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -173,12 +174,12 @@ public class SessionLifecycleCoordinator {
     public SessionLifecycleCoordinator(AgentStateStore store,
             ManagedSessionStore sessionStore, HarnessConnector harness,
             RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
-            ObjectMapper objectMapper,
+            @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             ChildLifecycleAdmissions childCloses,
             ManagedAgentService sessions,
             ObjectProvider<RuntimeBrokerService> brokerProviders,
-            ExecutorService executor,
-            Clock clock, ManagedAgentProperties properties,
+            @Qualifier("managedAgentExecutor") ExecutorService executor,
+            @Qualifier("managedAgentClock") Clock clock, ManagedAgentProperties properties,
             com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore childWorkspaces) {
         this.childWorkspaces = childWorkspaces;
         this.store = store;
@@ -215,7 +216,7 @@ public class SessionLifecycleCoordinator {
         });
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recoverOperations() {
         for (OperationTarget target : store.findDeliverableOperations(
@@ -248,7 +249,14 @@ public class SessionLifecycleCoordinator {
             }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.RejectedExecutionException stopped) {
             // The coordinator is shutting down; the claim's lease lets the
-            // recovery scan re-drive this operation after restart.
+            // recovery scan re-drive this operation after restart, once a
+            // scan tick has room under its page limit.
+            LOG.warn("Managed Session operation abandoned at shutdown;"
+                            + " the lease re-drives it when a recovery scan"
+                            + " tick has room under its page limit"
+                            + " tenant={} session={} operation={} leaseMs={}",
+                    tenantId, sessionId, operationId,
+                    leaseDuration.toMillis());
             return;
         }
         Boolean harnessConfirmed = null;

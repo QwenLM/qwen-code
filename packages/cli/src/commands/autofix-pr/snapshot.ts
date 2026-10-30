@@ -17,7 +17,13 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -35,12 +41,15 @@ import {
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
   autofixPrPaths,
   checkAttemptKey,
+  ghNotFound,
+  isRegularFile,
+  NO_FOLLOW,
   readGateCursor,
   readState,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   sameRepository,
@@ -49,6 +58,12 @@ import {
   type AutofixPrState,
 } from './state.js';
 import { remoteRef } from './worktree.js';
+import {
+  assertNoFixInFlight,
+  fixInFlight,
+  freshAttempt,
+  readFixMarker,
+} from './fix.js';
 
 const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
@@ -346,7 +361,10 @@ export type SnapshotEvent =
       id: string;
       author: string;
       url: string;
-    };
+    }
+  /** Gate only: a background fix whose session ended before its round
+   * went on; the next round handles its items again. */
+  | { type: 'abandoned_fix'; startedAt: string | null };
 
 export interface Snapshot {
   action: 'stop' | 'resync' | 'fix' | 'wait';
@@ -1478,6 +1496,8 @@ export interface ReplyCheck {
 }
 
 function readReplyCache(path: string): Record<string, string | null> {
+  // A cache is asked again when missing: a FIFO in its place would block.
+  if (!isRegularFile(path)) return {};
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
@@ -1515,6 +1535,7 @@ function markOrphanReplies(
     atomicWriteFileSync(
       check.cachePath,
       `${JSON.stringify({ ...readReplyCache(check.cachePath), [id]: parent })}\n`,
+      NO_FOLLOW,
     );
   };
   const deadline = check.strict
@@ -1560,10 +1581,8 @@ function markOrphanReplies(
           '.in_reply_to_id',
         ).trim();
       } catch (err) {
-        // gh's own words for a missing comment, not the command line,
-        // which names the repository and the comment.
-        const stderr = (err as { stderr?: unknown }).stderr;
-        if (/\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '')) {
+        // A missing comment.
+        if (ghNotFound(err)) {
           first.replyUnknown = true;
           continue;
         }
@@ -1744,6 +1763,63 @@ export interface SnapshotArgs {
   /** With `--gate`: the session whose scheduled task runs this gate, as
    * `prepare` reported it. */
   session?: string;
+  /** The task, as `schedule` minted it: with `--gate`, the task whose gate
+   * this is; without, the task that woke the round. */
+  task?: string;
+}
+
+/** Creates or touches `path`; a link is not followed. */
+function markChecked(path: string): void {
+  try {
+    const now = new Date();
+    if (lstatSync(path, { throwIfNoEntry: false }) === undefined) {
+      writeFileSync(path, '', { flag: 'wx' });
+    } else if (lstatSync(path).isFile()) {
+      utimesSync(path, now, now);
+    }
+  } catch {
+    // A check that ran is not undone by a time that did not move.
+  }
+}
+
+/**
+ * Why a CLI watch's task no longer drives the watch, or null. Its gate names
+ * the session and the task it was made for. A take-over moves the watch to
+ * another session; a later `schedule` replaces the task, a copy of it in a
+ * second process of the same session included; `cleanup` ends the watch.
+ * Such a gate must move no cursor: what it reported would reach a session
+ * that no longer acts on it. It wakes that session once per fire instead, and
+ * the round deletes the task. A gate with no session — a Managed automation,
+ * or a probe run by hand — is no watch's task.
+ */
+function staleTask(
+  state: AutofixPrState | null,
+  target: { host: string; owner: string; repo: string },
+  session: string,
+  task: string | undefined,
+): Record<string, string> | null {
+  if (session === '') return null;
+  const named = { gateSession: session, ...(task ? { gateTask: task } : {}) };
+  // Gone, stopped by a cleanup that kept its worktree, or — for a task made
+  // by `schedule` — no task recorded at all.
+  if (
+    !state ||
+    !sameRepository(state, target) ||
+    state.ended ||
+    (task && !state.watch)
+  ) {
+    return { type: 'watch_ended', ...named };
+  }
+  // A task with no id predates task ids: once one is recorded, it is not
+  // the one recorded either.
+  const recorded = state.watch?.task;
+  if (
+    state.sessionId !== session ||
+    (recorded !== undefined && recorded !== task)
+  ) {
+    return { type: 'watched_elsewhere', session: state.sessionId, ...named };
+  }
+  return null;
 }
 
 function runGate(args: SnapshotArgs): void {
@@ -1751,7 +1827,7 @@ function runGate(args: SnapshotArgs): void {
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   const existing = readGateCursor(paths.gatePath);
   const state = readState(paths.statePath);
   let target: { host: string; owner: string; repo: string };
@@ -1814,18 +1890,21 @@ function runGate(args: SnapshotArgs): void {
   // task names its session: the environment cannot, as a Managed
   // automation runs its gate as a session of its own.
   const session = args.session ?? '';
-  if (
-    state &&
-    sameRepository(state, target) &&
-    session !== '' &&
-    state.sessionId !== session
-  ) {
-    writeStdoutLine(
-      JSON.stringify({
-        action: 'stop',
-        events: [{ type: 'watched_elsewhere', session: state.sessionId }],
-      }),
-    );
+  if (args.task !== undefined && session === '') {
+    throw new TypeError('--task names a task of a watch; pass its --session');
+  }
+  const stale = staleTask(state, target, session, args.task);
+  if (stale) {
+    writeStdoutLine(JSON.stringify({ action: 'stop', events: [stale] }));
+    return;
+  }
+  // A fix agent working in the worktree: nothing reaches a round until its
+  // attempt ends, so a fire costs no turn, and the cursor keeps what changed
+  // meanwhile for the round after it (Section 6.14).
+  const ownFix = state !== null && sameRepository(state, target);
+  if (ownFix && fixInFlight(paths)) {
+    // The watch is running: `status` must not read it as left behind.
+    if (session !== '') markChecked(paths.checkedPath);
     return;
   }
 
@@ -1846,6 +1925,9 @@ function runGate(args: SnapshotArgs): void {
     },
     deadline,
   );
+  // When this run finished reading the PR: a round's snapshot that began
+  // to read later saw everything it may report.
+  const readAt = Date.now();
   const cursor: AutofixPrGateCursor = {
     ...(existing ?? {
       version: 1,
@@ -1867,28 +1949,91 @@ function runGate(args: SnapshotArgs): void {
   });
   // A take-over while GitHub was asked: what this gate saw is the new
   // owner's to report.
-  const owner = readState(paths.statePath);
-  if (
-    owner &&
-    sameRepository(owner, target) &&
-    session !== '' &&
-    owner.sessionId !== session
-  ) {
-    writeStdoutLine(
-      JSON.stringify({
-        action: 'stop',
-        events: [{ type: 'watched_elsewhere', session: owner.sessionId }],
-      }),
-    );
+  const restale = staleTask(
+    readState(paths.statePath),
+    target,
+    session,
+    args.task,
+  );
+  if (restale) {
+    writeStdoutLine(JSON.stringify({ action: 'stop', events: [restale] }));
     return;
   }
+  // An attempt opened while GitHub was asked. Read once: a marker written
+  // between two reads would be reported as one its session left behind.
+  const marker = ownFix ? readFixMarker(paths) : null;
+  if (freshAttempt(marker)) {
+    if (session !== '') markChecked(paths.checkedPath);
+    return;
+  }
+  // Only the watch's own gate spends the one report of an abandoned
+  // attempt: a probe run by hand, or a Managed automation's, wakes no round.
+  const reported = withAbandonedFix(result, session !== '' ? marker : null, {
+    headSha: pr.headRefOid,
+    isDraft: pr.isDraft,
+    url: pr.url,
+  });
+  const { snapshot } = reported;
+  // A run that reports wakes a round: when it finished reading the PR says
+  // whether a round's snapshot saw what it reported (`fix-start`). A quiet
+  // run, which may still move the cursor, wakes none.
+  const next = snapshot
+    ? { ...reported.cursor, reportedAt: new Date(readAt).toISOString() }
+    : reported.cursor;
   // The cursor lands before the output: a probe that prints and then dies
   // would otherwise report the same transitions on the next fire.
-  if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {
+  if (JSON.stringify(next) !== JSON.stringify(existing)) {
     mkdirSync(dirname(paths.gatePath), { recursive: true });
-    writeGateCursor(paths.gatePath, result.cursor);
+    writeGateCursor(paths.gatePath, next);
   }
-  if (result.snapshot) writeStdoutLine(JSON.stringify(result.snapshot));
+  // `status` reads when the watch's own task last checked the PR from this
+  // file, which `cleanup` removes with the watch; a gate with no session is
+  // no watch's, and shares only the cursor.
+  if (session !== '') markChecked(paths.checkedPath);
+  if (snapshot) writeStdoutLine(JSON.stringify(snapshot));
+}
+
+/**
+ * The gate's output with a marker its session left behind reported, once:
+ * the events that woke the abandoned attempt's round were reported then,
+ * and only a round that runs now handles them again. (A fresh marker never
+ * gets here.)
+ */
+export function withAbandonedFix(
+  result: { snapshot: Snapshot | null; cursor: AutofixPrGateCursor },
+  marker: ReturnType<typeof readFixMarker>,
+  base: Pick<Snapshot, 'headSha' | 'isDraft' | 'url'> | null = null,
+): { snapshot: Snapshot | null; cursor: AutofixPrGateCursor } {
+  if (!marker) return result;
+  const key = marker.attempt?.attempt ?? `unreadable@${marker.mtimeMs}`;
+  if (result.cursor.reportedAbandonedFix === key) return result;
+  const cursor = { ...result.cursor, reportedAbandonedFix: key };
+  const event: SnapshotEvent = {
+    type: 'abandoned_fix',
+    startedAt: marker.attempt?.startedAt ?? null,
+  };
+  const { snapshot } = result;
+  if (snapshot) {
+    return {
+      snapshot: {
+        ...snapshot,
+        action: snapshot.action === 'wait' ? 'fix' : snapshot.action,
+        events: [...snapshot.events, event],
+      },
+      cursor,
+    };
+  }
+  return {
+    snapshot: {
+      headSha: base?.headSha ?? cursor.headSha ?? '',
+      isDraft: base?.isDraft ?? false,
+      url: base?.url ?? '',
+      action: 'fix',
+      events: [event],
+      truncated: [],
+    },
+    cursor,
+  };
 }
 
 export function runSnapshot(args: SnapshotArgs): void {
@@ -1896,13 +2041,16 @@ export function runSnapshot(args: SnapshotArgs): void {
     runGate(args);
     return;
   }
-  const state = requireState(
-    autofixPrPaths(repoRoot(), args.pr).statePath,
-    args.pr,
-  );
-  assertOwnedBySession(state);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
+  const state = requireState(paths.statePath, args.pr);
+  assertWatching(state, args.task);
+  // The snapshot file is the one the agent working now reads.
+  assertNoFixInFlight(paths, args.pr);
   setGhHost(state.host);
   ensureAuthenticated();
+  // When this snapshot began to read the PR: the gate's runs that read it
+  // later may have reported what it does not hold (`fix-start`).
+  const readAt = new Date().toISOString();
   const { pr } = fetchPrData(state, roundReplyCheck(state));
   // Asked only when the API disagrees with the watch: whether the branch
   // moved, or the API has yet to see the head `sync` or `push` recorded.
@@ -1914,18 +2062,24 @@ export function runSnapshot(args: SnapshotArgs): void {
   // with any history: the snapshot goes to a file the round reads, and the
   // line says what to do and where it is.
   const snapshot = buildSnapshot(pr, state, branchHead);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
   // A body is written as its lines, and a long line folded: `read_file`
   // pages a file by lines and cuts what one read returns at 25,000
   // characters, and GitHub takes bodies of 65,536.
+  // With the task whose round took it: only that round's fix may run in
+  // the background (`fix-start`).
   atomicWriteFileSync(
     paths.snapshotPath,
     `${JSON.stringify(
-      snapshot,
+      {
+        ...snapshot,
+        readAt,
+        ...(args.task === undefined ? {} : { task: args.task }),
+      },
       (key, value: unknown) =>
         key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
       2,
     )}\n`,
+    NO_FOLLOW,
   );
   const { events, ...rest } = snapshot;
   writeStdoutLine(
@@ -1967,7 +2121,8 @@ export function roundReplyCheck(
   return {
     known: (id) => seen.has(id),
     strict,
-    cachePath: autofixPrPaths(repoRoot(), state.prNumber).repliesPath,
+    cachePath: autofixPrPaths(resolveWatchRoot(state.prNumber), state.prNumber)
+      .repliesPath,
   };
 }
 
@@ -2002,6 +2157,11 @@ export const snapshotCommand: CommandModule = {
         type: 'string',
         describe:
           "With --gate: the session whose scheduled task runs the gate (prepare's sessionId); a watch another session took over answers stop",
+      })
+      .option('task', {
+        type: 'string',
+        describe:
+          "The scheduled task's id (schedule's task): with --gate, a watch another task drives answers stop; without, a round woken by another task is refused",
       }),
   handler: (argv) => {
     runSnapshot({
@@ -2010,6 +2170,7 @@ export const snapshotCommand: CommandModule = {
       host: argv['host'] as string | undefined,
       gate: Boolean(argv['gate']),
       session: argv['session'] as string | undefined,
+      task: argv['task'] as string | undefined,
     });
   },
 };

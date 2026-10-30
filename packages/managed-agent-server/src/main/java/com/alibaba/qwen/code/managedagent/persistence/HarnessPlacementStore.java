@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -20,13 +21,14 @@ import java.util.Objects;
 
 /** Durable ownership; an endpoint disappearing never authorizes another writer. */
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class HarnessPlacementStore {
     public static final String RELEASE_DOMAIN = "hosted_harness_release";
     private static final String COLUMNS = "tenant_id, session_id, workspace_id, harness_instance_id, "
             + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state";
     private final JdbcTemplate jdbc;
 
-    public HarnessPlacementStore(JdbcTemplate jdbc) {
+    public HarnessPlacementStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 

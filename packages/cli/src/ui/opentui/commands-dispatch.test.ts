@@ -242,6 +242,70 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each(['unchanged', 'changed'] as const)(
+    'keeps command history current across an await when history is %s',
+    async (kind) => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let before: readonly HistoryItem[] | undefined;
+      let after: readonly HistoryItem[] = [];
+      const recordSlashCommand = vi.fn();
+      const config = makeFakeConfig({});
+      config.getChatRecordingService = () =>
+        ({ recordSlashCommand }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const host = createFakeHost();
+      host.addItem({ type: 'info', text: 'before-await' }, 1);
+      const command = stub({
+        name: 'history-getter',
+        action: async (context) => {
+          before = context.ui.history;
+          await held;
+          after = context.ui.history;
+          context.ui.addItem({ type: 'info', text: 'own-result' }, 3);
+        },
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command],
+      );
+      const pending = dispatcher.handle('/history-getter');
+      try {
+        await vi.waitFor(() => expect(before).toBeDefined());
+        expect(before).toEqual(host.getHistory());
+        if (kind === 'changed')
+          host.addItem({ type: 'info', text: 'after-await' }, 2);
+        const expected = [...host.getHistory()];
+        release();
+        expect(await pending).toEqual({ kind: 'handled' });
+        expect(after).toEqual(expected);
+        expect(after.every((item, index) => item === expected[index])).toBe(
+          true,
+        );
+        expect(
+          host.items.filter(
+            (item) => 'text' in item && item.text === 'own-result',
+          ),
+        ).toHaveLength(1);
+        expect(
+          recordSlashCommand.mock.calls.find(
+            ([value]) => value.phase === 'result',
+          )?.[0].outputHistoryItems,
+        ).toEqual([{ type: 'info', text: 'own-result' }]);
+      } finally {
+        release();
+        try {
+          await pending;
+        } finally {
+          dispatcher.dispose();
+        }
+      }
+    },
+  );
   it.each([
     ['startup', 'Error'],
     ['startup', 'string'],
@@ -574,6 +638,198 @@ describe('mustDeferDuringStreaming (ink AppContainer mid-turn gate)', () => {
   });
 });
 
+describe('command registry owner publication', () => {
+  it.each(['session', 'target'] as const)(
+    'keeps the healthy registry after a held load (%s)',
+    async (change) => {
+      loadInteractiveCommandsMock.mockReset();
+      const config = makeFakeConfig({
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      let session = config.getSessionId();
+      let target = config.getTargetDir();
+      const sessionRead = vi
+        .spyOn(config, 'getSessionId')
+        .mockImplementation(() => session);
+      const targetRead = vi
+        .spyOn(config, 'getTargetDir')
+        .mockImplementation(() => target);
+      const oldAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'OLD_REGISTRY_ACTION',
+        }),
+      );
+      const healthyAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'HEALTHY_REGISTRY_ACTION',
+        }),
+      );
+      const oldCommands = [stub({ name: 'registry-owned', action: oldAction })];
+      const healthyCommands = [
+        stub({ name: 'registry-owned', action: healthyAction }),
+      ];
+      let releaseOld!: (commands: SlashCommand[]) => void;
+      const held = new Promise<SlashCommand[]>((resolve) => {
+        releaseOld = resolve;
+      });
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        healthyCommands,
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      loadInteractiveCommandsMock
+        .mockReturnValueOnce(held)
+        .mockResolvedValue(healthyCommands);
+      const pending = dispatcher.loadCommands().catch(() => undefined);
+      try {
+        expect(loadInteractiveCommandsMock).toHaveBeenCalledExactlyOnceWith(
+          config,
+          undefined,
+          services.settings,
+        );
+        if (change === 'session') session = 'healthy-successor-session';
+        else target = '/owned/healthy-successor-workspace';
+        await dispatcher.loadCommands();
+        expect(await gateway.dispatch('/registry-owned')).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'info',
+          text: 'HEALTHY_REGISTRY_ACTION',
+        });
+        host.items.length = 0;
+        releaseOld(oldCommands);
+        await pending;
+        expect(await gateway.dispatch('/registry-owned')).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'info',
+          text: 'HEALTHY_REGISTRY_ACTION',
+        });
+        expect(dispatcher.commands).toEqual(healthyCommands);
+        expect(oldAction).not.toHaveBeenCalled();
+        expect(healthyAction).toHaveBeenCalledTimes(2);
+      } finally {
+        releaseOld(healthyCommands);
+        await pending;
+        dispatcher.dispose();
+        sessionRead.mockRestore();
+        targetRead.mockRestore();
+      }
+    },
+  );
+});
+
+describe('startup registry request ownership', () => {
+  it.each(['session', 'target'] as const)(
+    'does not execute a successor action for a held old request (%s)',
+    async (change) => {
+      loadInteractiveCommandsMock.mockReset();
+      const config = makeFakeConfig({
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      let session = config.getSessionId();
+      let target = config.getTargetDir();
+      const sessionRead = vi
+        .spyOn(config, 'getSessionId')
+        .mockImplementation(() => session);
+      const targetRead = vi
+        .spyOn(config, 'getTargetDir')
+        .mockImplementation(() => target);
+      const skillManagerRead = vi
+        .spyOn(config, 'getSkillManager')
+        .mockReturnValue(
+          {} as NonNullable<ReturnType<Config['getSkillManager']>>,
+        );
+      const oldAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'OLD_SELFHEAL_ACTION',
+        }),
+      );
+      const successorAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'HEALTHY_SUCCESSOR_ACTION',
+        }),
+      );
+      const oldCommands = [
+        stub({ name: 'workspace-action', action: oldAction }),
+      ];
+      const healthyCommands = [
+        stub({ name: 'workspace-action', action: successorAction }),
+      ];
+      let releaseOld!: (commands: SlashCommand[]) => void;
+      const held = new Promise<SlashCommand[]>((resolve) => {
+        releaseOld = resolve;
+      });
+      loadInteractiveCommandsMock
+        .mockReturnValueOnce(held)
+        .mockResolvedValue(healthyCommands);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [],
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      const pending = gateway.dispatch('/workspace-action');
+      try {
+        await vi.waitFor(() =>
+          expect(loadInteractiveCommandsMock).toHaveBeenCalledOnce(),
+        );
+        expect(gateway.isBusy()).toBe(true);
+        if (change === 'session') session = 'healthy-successor-session';
+        else target = '/owned/healthy-successor-workspace';
+        await dispatcher.loadCommands();
+        expect(dispatcher.commands).toEqual(healthyCommands);
+        releaseOld(oldCommands);
+        expect(await pending).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(gateway.isBusy()).toBe(false);
+        const oldCallsBeforeFresh = oldAction.mock.calls.length;
+        const successorCallsFromOldRequest = successorAction.mock.calls.length;
+        host.items.length = 0;
+        expect(await gateway.dispatch('/workspace-action')).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'info',
+          text: 'HEALTHY_SUCCESSOR_ACTION',
+        });
+        expect(successorCallsFromOldRequest).toBe(0);
+        expect(oldCallsBeforeFresh).toBe(0);
+        expect(successorAction).toHaveBeenCalledOnce();
+      } finally {
+        releaseOld(healthyCommands);
+        await pending.catch(() => undefined);
+        dispatcher.dispose();
+        skillManagerRead.mockRestore();
+        sessionRead.mockRestore();
+        targetRead.mockRestore();
+      }
+    },
+  );
+});
+
 describe('startup-window registry self-heal', () => {
   beforeEach(() => {
     loadInteractiveCommandsMock.mockReset();
@@ -597,6 +853,8 @@ describe('startup-window registry self-heal', () => {
     ...services,
     config: {
       getSkillManager,
+      getSessionId: () => 'startup-registry-session',
+      getTargetDir: () => '/owned/startup-registry-workspace',
     } as unknown as Config,
   });
 

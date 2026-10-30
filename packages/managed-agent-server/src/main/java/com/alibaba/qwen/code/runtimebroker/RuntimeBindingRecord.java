@@ -385,8 +385,10 @@ public final class RuntimeBindingRecord {
                         || (state == State.OPERATOR_RECOVERY || state == State.LOST || state == State.DRAINING
                                 || state == State.RECOVERY_BLOCKED || state == State.FAILED)
                                 && (request.getStorageId().equals(candidate.getStorageId())
-                                        || request.getScope().getCanonicalCwd().equals(
-                                                candidate.getScope().getCanonicalCwd()))
+                                        || (!(ResidentWorkspaceProfile.selects(request)
+                                                        && ResidentWorkspaceProfile.selects(candidate))
+                                                && request.getScope().getCanonicalCwd().equals(
+                                                        candidate.getScope().getCanonicalCwd())))
                         || request.getScope().getWorkspaceId().equals(
                                 candidate.getScope().getWorkspaceId()));
     }

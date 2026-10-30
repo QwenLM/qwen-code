@@ -164,6 +164,9 @@ describe('managed child operations (H4b)', () => {
       }
       for (const patch of [
         { extra: true },
+        { version: '1' },
+        { version: true },
+        { version: ['1'] },
         { approvalMode: ['yolo'] },
         { approvalRevision: -1 },
         { modelRevision: Number.MAX_SAFE_INTEGER + 1 },

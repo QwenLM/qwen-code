@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -81,13 +82,85 @@ class ManagedSessionStoreIntegrationTest {
     private ObjectMapper objectMapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedExtensionRecordStore records;
 
     @Autowired
     private ManagedSessionStore sessionStore;
+
+    @Test
+    void nativeJournalSnapshotRoutesPublishReadAndPageWithinWriterScope() throws Exception {
+        String session = "native-snapshot-" + UUID.randomUUID();
+        String base = historySession(session);
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
+                .andExpect(jsonPath("$.head").doesNotExist()).andExpect(jsonPath("$.nativeSnapshot").doesNotExist());
+        ObjectNode request = objectMapper.createObjectNode().put("workspaceId", WORKSPACE)
+                .put("writerId", WRITER_A).put("writerGeneration", 1).put("snapshotId", "native-one")
+                .put("expectedJournalRevision", 1).put("expectedCommittedSequence", 0);
+        MvcResult published = mvc.perform(post(base + "/journal-snapshots:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.snapshot.payloadFormat").value("committed-prefix-v1"))
+                .andExpect(jsonPath("$.snapshot.coveredJournalRevision").value(1)).andReturn();
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE)
+                .param("includeNativeSnapshot", "true"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
+                .andExpect(jsonPath("$.nativeSnapshot.snapshot.snapshotId").value("native-one"))
+                .andExpect(jsonPath("$.nativeSnapshot.snapshot.coveredJournalRevision").value(1));
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.snapshot.snapshotId").value("native-one"));
+        mvc.perform(get(base + "/journal-snapshots/native-one/pages").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pages.length()").value(1))
+                .andExpect(jsonPath("$.nextRevision").value(1)).andExpect(jsonPath("$.hasMore").value(false));
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .param("workspaceId", WORKSPACE)).andExpect(status().isBadRequest());
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B).param("workspaceId", WORKSPACE))
+                .andExpect(status().isConflict());
+        String manifestId = objectMapper.readTree(published.getResponse().getContentAsByteArray())
+                .path("manifest").path("resourceId").asText();
+        jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'NATIVE_SNAPSHOT' AND resource_id = ?", manifestId);
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.nativeSnapshot").doesNotExist());
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE)
+                .param("includeNativeSnapshot", "true"))
+                .andExpect(status().isConflict());
+        assertThat(sessionStore.restore(TENANT, WORKSPACE, session, TOKEN_A).compactedThroughRevision()).isZero();
+    }
+
+    @Test
+    void recentAndCommandQueryRoutesReadWithoutOpeningAnotherWriter() throws Exception {
+        String session = "recent-query-" + UUID.randomUUID();
+        String base = historySession(session);
+        mvc.perform(get(base + "/transactions:recent").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE).param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.transactions.length()").value(1))
+                .andExpect(jsonPath("$.transactions[0].commandId").value("command-genesis"))
+                .andExpect(jsonPath("$.throughRevision").value(1)).andExpect(jsonPath("$.hasMore").value(false));
+        mvc.perform(get(base + "/transactions:lookup").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE).param("operation", "session.create").param("commandId", "command-genesis"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.transaction.journalRevision").value(1));
+        mvc.perform(get(base + "/transactions:recent").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE).param("throughRevision", "2"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get(base + "/transactions:lookup").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B)
+                .param("workspaceId", WORKSPACE).param("operation", "session.create").param("commandId", "command-genesis"))
+                .andExpect(status().is4xxClientError());
+    }
 
     @Test
     void checkpointHistoryReusesCommittedDependenciesWithoutRecensus() throws Exception {

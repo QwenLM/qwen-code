@@ -11,6 +11,12 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  UiTelemetryService,
+  EVENT_API_RESPONSE,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
   CompressionStatus,
   ToolDisplayNames,
   type Config,
@@ -1322,5 +1328,176 @@ describe('canonical resumed tool projection', () => {
       historyId: 41,
     });
     expect(items.find((item) => item.kind === 'info')?.historyId).toBe(41);
+  });
+});
+
+describe('cost does not double-count included reasoning tokens (#15444)', () => {
+  // Priced so the rendered dollar figure isolates the OUTPUT term: input at
+  // $0/M and output at $1/M makes `$X` exactly outputTokens / 1_000_000.
+  const PRICING = {
+    'qwen3-max-001': { inputPerMillionTokens: 0, outputPerMillionTokens: 1 },
+  };
+
+  const metricsWith = (tokens: {
+    prompt: number;
+    candidates: number;
+    thoughts: number;
+    total: number;
+  }): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: { ...tokens, cached: 0 },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('renders accumulated event costs for mixed completeness and missing OpenAI totals', () => {
+    const telemetry = new UiTelemetryService();
+    const add = (
+      auth: string,
+      usage: ConstructorParameters<typeof ApiResponseEvent>[5],
+    ) =>
+      telemetry.addEvent({
+        ...new ApiResponseEvent('r', 'qwen3-max-001', 1, 'p', auth, usage),
+        'event.name': EVENT_API_RESPONSE,
+      } as UiEvent);
+    add('gemini', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 50_000,
+      thoughtsTokenCount: 120_000,
+      totalTokenCount: 270_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1700',
+    );
+    add('gemini', { promptTokenCount: 20_000, candidatesTokenCount: 10_000 });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1800',
+    );
+    // Legacy history cannot recover the missing total; its estimate stays unchanged.
+    const legacy = structuredClone(telemetry.getMetrics());
+    delete legacy.billableOutputTokens;
+    expect(projectModelStats(legacy, PRICING)).toContain('Estimated $0.1500');
+    telemetry.reset();
+    add('openai', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 150_000,
+      thoughtsTokenCount: 120_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1500',
+    );
+  });
+
+  it('honors an authoritative zero instead of falling back to raw thoughts', () => {
+    const metrics = metricsWith({
+      prompt: 100,
+      candidates: 0,
+      thoughts: 1000,
+      total: 0,
+    });
+    metrics.billableOutputTokens = {
+      'qwen3-max-001': { total: 0, bySource: {} },
+    };
+    expect(projectModelStats(metrics, PRICING)).toContain('Estimated $0.0000');
+  });
+
+  it('bills total − prompt when reasoning is already inside candidates', () => {
+    // OpenAI-style usage: the provider's `total` already counts the reasoning
+    // tokens that sit inside `candidates`, so `candidates + thoughts` bills
+    // the reasoning twice — 150000 + 120000 = 270000 ($0.2700) instead of the
+    // 150000 output the provider actually reported ($0.1500).
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 250_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1500');
+    expect(text).not.toContain('$0.2700');
+  });
+
+  it('is unchanged when thoughts are disjoint from candidates', () => {
+    // Gemini-style usage: total = prompt + candidates + thoughts, so
+    // total − prompt (170000) already equals candidates + thoughts (170000).
+    // The fix must be a no-op here — without this leg an implementation that
+    // drops thinking entirely would still pass the OpenAI assertion above.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 270_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('falls back to candidates + thoughts when no usable total is reported', () => {
+    // Mirrors the cost-ledger guard: derive only when the subtraction is
+    // meaningful, so an absent total keeps today's behaviour instead of
+    // billing a negative output.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('does not bill a total-only record as output', () => {
+    // A provider that reports only `total_tokens` leaves prompt and candidates
+    // at 0. Deriving anyway would bill the entire total -- almost all input --
+    // at the output rate, where the old sum reported no cost at all.
+    const text = projectModelStats(
+      metricsWith({ prompt: 0, candidates: 0, thoughts: 0, total: 250_000 }),
+      PRICING,
+    );
+    expect(text).not.toContain('$0.2500');
+    expect(text).not.toContain('Estimated');
+  });
+
+  it('does not bill a cached-only prompt as output', () => {
+    // Cached input coerces prompt to 0 while total keeps the cache, so
+    // derived 52_000 sits far above the band [10_000, 12_000]; the over-bill
+    // would be exactly the cached count, i.e. input tokens at the output rate.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 0,
+        candidates: 10_000,
+        thoughts: 2_000,
+        total: 52_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.0120');
+    expect(text).not.toContain('$0.0520');
+  });
+
+  it('does not under-bill when a short total lands below candidates', () => {
+    // One total-less event among complete ones subtracts an unreported prompt
+    // from the other events' output: derived 180_000 < candidates 190_000.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 110_000,
+        candidates: 190_000,
+        thoughts: 0,
+        total: 290_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1900');
+    expect(text).not.toContain('$0.1800');
   });
 });

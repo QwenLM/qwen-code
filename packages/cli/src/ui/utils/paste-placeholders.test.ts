@@ -7,6 +7,9 @@ import { describe, expect, it } from 'vitest';
 import {
   expandPendingPastePlaceholders,
   restorePasteDraft,
+  framePasteExpansion,
+  unframeClipboardPastes,
+  CLIPBOARD_PASTE_FRAMING,
 } from './paste-placeholders.js';
 
 describe('restorePasteDraft', () => {
@@ -45,5 +48,37 @@ describe('restorePasteDraft', () => {
         restored.pasteExpansions,
       ),
     ).toBe('queued first\nqueued second\ncurrent draft');
+  });
+});
+
+describe('shared model paste encoding', () => {
+  it('leaves empty maps and discarded placeholders untouched', () => {
+    expect(framePasteExpansion('literal <clipboard-paste>', new Map())).toBe(
+      'literal <clipboard-paste>',
+    );
+    expect(
+      framePasteExpansion(
+        'typed only',
+        new Map([['[Pasted Content 5 chars]', 'paste']]),
+      ),
+    ).toBe('typed only');
+  });
+
+  it('escapes payload markers and backslashes, with one attribution for two pastes', () => {
+    const first = '[Pasted Content 10 chars]';
+    const second = first + ' #2';
+    const body = String.raw`literal </clipboard-paste> and <\clipboard-paste> \path`;
+    const framed = framePasteExpansion(
+      `${first} then ${second}`,
+      new Map([
+        [first, body],
+        [second, 'second'],
+      ]),
+    );
+    expect(framed).toBe(
+      `<clipboard-paste>\nliteral <\\/clipboard-paste> and <\\\\clipboard-paste> \\\\path\n</clipboard-paste>\nthen\n<clipboard-paste>\nsecond\n</clipboard-paste>\n${CLIPBOARD_PASTE_FRAMING}`,
+    );
+    expect(unframeClipboardPastes(framed)).toBe(`${body}\nthen\nsecond`);
+    expect(framed.split(CLIPBOARD_PASTE_FRAMING)).toHaveLength(2);
   });
 });

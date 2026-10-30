@@ -632,6 +632,8 @@ describe('classifyShellCommandSafety', () => {
     'find . -exec rm --help \\;',
     'sed -f script.sed file',
     'sed -fscript.sed file',
+    "sed --posix 's/a/b/' file",
+    "sed --follow-symlinks 's/a/b/' file",
     "sed --in-pl=.bak 's/a/b/' file",
     'sed --f script.sed file',
     'sed -newout input',

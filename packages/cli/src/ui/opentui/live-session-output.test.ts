@@ -589,6 +589,91 @@ describe('logical tools and actual permission transitions', () => {
     }
   });
 
+  it('finishes a client-restored tool locally and sends only an explicit follow-up', async () => {
+    const { InteractiveModToolScheduler: RealScheduler } =
+      await vi.importActual<
+        typeof import('../../services/interactive-mod-tool-scheduler.js')
+      >('../../services/interactive-mod-tool-scheduler.js');
+    control.schedule.mockImplementation(
+      (
+        options: SchedulerOptions,
+        requests: ToolCallRequestInfo[],
+        signal: AbortSignal,
+      ) => new RealScheduler(options).schedule(requests, signal),
+    );
+    const h = setup(function* () {
+      yield content('explicit answer');
+    });
+    const config = makeFakeConfig({
+      targetDir: roots.at(-1)!,
+      cwd: roots.at(-1)!,
+      disableAllHooks: true,
+      usageStatisticsEnabled: false,
+    });
+    Object.assign(config, h.config);
+    const execute = vi.fn(async () => ({
+      llmContent: 'restored-result',
+      returnDisplay: 'restored-result',
+    }));
+    const registry = new ToolRegistry(config);
+    registry.registerTool(new MockTool({ name: 'owned_restore', execute }));
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const emitUser = vi.spyOn(h.bridge, 'emitUserMessage');
+    const emitResult = vi.spyOn(h.bridge, 'emitToolResult');
+    const prepared = vi.fn();
+    try {
+      await drain(
+        livePromptEvents(config, [], undefined, {
+          promptId: 'restored-tool',
+          toolCall: { name: 'owned_restore', args: { owned: true } },
+          dualOutput: h.bridge,
+          onPreparedRequest: prepared,
+        }),
+      );
+      expect(execute).toHaveBeenCalledExactlyOnceWith({ owned: true });
+      expect(control.schedule).toHaveBeenCalledOnce();
+      expect(h.client.sendMessageStream).not.toHaveBeenCalled();
+      expect(prepared).not.toHaveBeenCalled();
+      expect(emitUser).not.toHaveBeenCalled();
+      expect(emitResult).toHaveBeenCalledOnce();
+      await drain(
+        livePromptEvents(config, 'explain restored result', undefined, {
+          promptId: 'explicit-followup',
+          dualOutput: h.bridge,
+        }),
+      );
+      expect(h.client.sendMessageStream).toHaveBeenCalledOnce();
+      expect(h.client.sendMessageStream.mock.calls[0][0]).toBe(
+        'explain restored result',
+      );
+      expect(h.client.sendMessageStream.mock.calls[0][3]).toEqual({
+        type: SendMessageType.UserQuery,
+      });
+      expect(execute).toHaveBeenCalledOnce();
+      expect(control.schedule).toHaveBeenCalledOnce();
+      expect(emitResult).toHaveBeenCalledOnce();
+      expect(emitUser).toHaveBeenCalledExactlyOnceWith([
+        { text: 'explain restored result' },
+      ]);
+      const frames = await h.frames();
+      expect(users(frames)).toHaveLength(2);
+      expect(users(frames)[0].message.content).toEqual([
+        expect.objectContaining({
+          type: 'tool_result',
+          content: 'restored-result',
+        }),
+      ]);
+      expect(users(frames)[1].message.content).toEqual([
+        { type: 'text', text: 'explain restored result' },
+      ]);
+      expect(
+        assistants(frames).flatMap((frame) => frame.message.content),
+      ).toEqual([{ type: 'text', text: 'explicit answer' }]);
+    } finally {
+      await config.shutdown({ strictResourceCleanup: true });
+    }
+  });
+
   it('emits one logical result between tool-use and the next model message', async () => {
     const h = setup(toolHop());
     await h.run();

@@ -119,7 +119,10 @@ vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
-import { foldLiveEvent } from './live-session-model.js';
+import {
+  foldLiveEvent,
+  snapshotCanonicalHistory,
+} from './live-session-model.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import { ToolCallStatus, type HistoryItem } from '../types.js';
 import type {
@@ -140,6 +143,41 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('shows the exact executing shell focus hint and removes it from completed or unrelated cards', () => {
+    const view = render(
+      <OpenTuiTranscriptView items={[toolItem()]} activeShellCallId="t1" />,
+    );
+    expect(view.container.textContent).toContain('(ctrl+f to focus)');
+    expect(view.container.textContent).not.toContain('(Focused)');
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={[toolItem()]}
+        activeShellCallId="t1"
+        focusedShellCallId="t1"
+      />,
+    );
+    expect(view.container.textContent).toContain('(Focused)');
+    expect(view.container.textContent).not.toContain('(ctrl+f to focus)');
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={[toolItem({ done: true })]}
+        activeShellCallId="t1"
+        focusedShellCallId="t1"
+      />,
+    );
+    expect(view.container.textContent).not.toContain('(Focused)');
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={[toolItem()]}
+        activeShellCallId="other"
+        focusedShellCallId="other"
+      />,
+    );
+    expect(view.container.textContent).not.toContain('(Focused)');
+    expect(view.container.textContent).not.toContain('(ctrl+f to focus)');
+    view.unmount();
+  });
+
   it('keeps replayed batches with the same wire call ID in distinct height slots', () => {
     const group = (id: number, result: string): HistoryItem => ({
       id,
@@ -167,7 +205,7 @@ describe('OpenTuiTranscriptView', () => {
     expect(cards).toHaveLength(2);
     expect(new Set(cards.map((item) => item.renderId)).size).toBe(2);
     expect(cards.every((item) => item.renderId !== undefined)).toBe(true);
-    expect(cards.map((item) => item.canonicalHistoryItem)).toEqual(history);
+    expect(snapshotCanonicalHistory(items)).toEqual(history);
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const view = render(<OpenTuiTranscriptView items={items} />);
@@ -1103,8 +1141,11 @@ describe('OpenTuiTranscriptView scroll host', () => {
     /** The height prop, deliberately separate from the host's own viewport. */
     propRows?: number;
     width?: number;
+    thoughtsExpanded?: boolean;
+    itemRows?: (text: string) => number | undefined;
   }) {
     let width = opts.width ?? 100;
+    let thoughtsExpanded = opts.thoughtsExpanded ?? false;
     const rows = opts.rows;
     let items = opts.items ?? session;
     const viewportRows = opts.viewportRows ?? 24;
@@ -1114,6 +1155,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
         items={items}
         availableWidth={width}
         availableTerminalHeight={propRows}
+        thoughtsExpanded={thoughtsExpanded}
       />,
     );
 
@@ -1132,6 +1174,8 @@ describe('OpenTuiTranscriptView scroll host', () => {
       if (el.hasAttribute('data-height')) {
         return Number(el.getAttribute('data-height'));
       }
+      const controlled = opts.itemRows?.(el.textContent ?? '');
+      if (controlled !== undefined) return controlled;
       const turn = /TURN_(\d+)/.exec(el.textContent ?? '');
       return turn ? (rows[Number(turn[1])] ?? 0) + 1 : 0;
     };
@@ -1174,11 +1218,16 @@ describe('OpenTuiTranscriptView scroll host', () => {
           configurable: true,
         });
         const turn = turnOf(el);
-        const laidOut = turn < 0 ? 0 : (rows[turn] ?? 0);
+        const controlled =
+          el.parentElement === root
+            ? opts.itemRows?.(el.textContent ?? '')
+            : undefined;
+        const laidOut = controlled ?? (turn < 0 ? 0 : (rows[turn] ?? 0));
         // `Renderable.height` is clamped to at least one row, so a box laid out
         // empty still reports 1 while Yoga's own computed height stays 0.
         Object.defineProperty(el, 'height', {
-          get: () => (turn < 0 ? 0 : Math.max(laidOut, 1)),
+          get: () =>
+            controlled === undefined && turn < 0 ? 0 : Math.max(laidOut, 1),
           configurable: true,
         });
         Object.defineProperty(el, 'yogaNode', {
@@ -1198,6 +1247,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
             items={items}
             availableWidth={width}
             availableTerminalHeight={propRows}
+            thoughtsExpanded={thoughtsExpanded}
           />,
         );
         install();
@@ -1232,6 +1282,28 @@ describe('OpenTuiTranscriptView scroll host', () => {
         width = next;
         paint();
       },
+      setThoughtsExpanded: (next: boolean) => {
+        thoughtsExpanded = next;
+        paint();
+      },
+      visibleLines: () => {
+        const root = view.container.firstElementChild as Element;
+        let top = TRANSCRIPT_OFFSET;
+        const lines: string[] = [];
+        for (const element of root.children) {
+          const height = paintedRows(element);
+          const text = element.textContent ?? '';
+          if (
+            text &&
+            top + height > host.scrollTop &&
+            top < host.scrollTop + viewportRows
+          ) {
+            lines.push(text);
+          }
+          top += height;
+        }
+        return lines;
+      },
       /** A new item list — what a `task-end` splice does to the transcript. */
       setItems: (next: readonly LiveHistoryItem[]) => {
         items = next;
@@ -1249,6 +1321,147 @@ describe('OpenTuiTranscriptView scroll host', () => {
       unmount: () => act(() => view.unmount()),
     };
   }
+
+  it('preserves expanded height ownership across compact frames above the reader', () => {
+    const history: HistoryItem[] = Array.from({ length: 200 }, (_, index) => ({
+      id: 49000 + index,
+      type: 'user' as const,
+      text: `TURN_${String(index).padStart(4, '0')}`,
+    }));
+    history.splice(80, 2, {
+      id: 60000,
+      type: 'tool_group',
+      tools: [80, 81].map((index) => ({
+        callId: `transition-read-${index}`,
+        name: 'ReadFile',
+        description: `TURN_${String(index).padStart(4, '0')}.txt`,
+        status: ToolCallStatus.Success,
+        resultDisplay: '',
+        confirmationDetails: undefined,
+      })),
+    });
+    const items = projectHistoryToStreamEvents(history, {}).reduce<
+      readonly LiveHistoryItem[]
+    >(foldLiveEvent, []);
+    const originalRows = [...items];
+    const originalSources = items.map((item) => item.canonicalHistoryItem);
+    const originalHistory = structuredClone(history);
+    const summary = 'Read TURN_0080.txt, TURN_0081.txt';
+    const view = mountHosted({
+      rows: Array.from({ length: 200 }, () => 3),
+      items,
+      viewportRows: 12,
+      thoughtsExpanded: true,
+      itemRows: (text) => {
+        if (/ReadFile TURN_008[01]\.txt/.test(text)) return 4;
+        if (text.includes(summary)) return 1;
+        return undefined;
+      },
+    });
+    const sourceUnchanged = () => {
+      expect(snapshotCanonicalHistory(items)).toEqual(originalHistory);
+      expect(items.every((item, index) => item === originalRows[index])).toBe(
+        true,
+      );
+      expect(
+        items.every(
+          (item, index) => item.canonicalHistoryItem === originalSources[index],
+        ),
+      ).toBe(true);
+    };
+    const frames = () => {
+      view.frame();
+      view.frame();
+    };
+    try {
+      frames();
+      // Find the actual rendered group without computing the private window offsets.
+      let found = false;
+      for (let top = 0; top <= 1200; top += 12) {
+        view.jump(top);
+        frames();
+        const text = view.container.textContent ?? '';
+        if (
+          text.includes('ReadFile TURN_0080.txt') &&
+          text.includes('ReadFile TURN_0081.txt')
+        ) {
+          found = true;
+          break;
+        }
+      }
+      expect(found).toBe(true);
+      const expanded = [...view.container.firstElementChild!.children].filter(
+        (element) =>
+          /ReadFile TURN_008[01]\.txt/.test(element.textContent ?? ''),
+      );
+      expect(expanded).toHaveLength(2);
+      expect(
+        expanded.map(
+          (element) => (element as unknown as { height: number }).height,
+        ),
+      ).toEqual([4, 4]);
+      sourceUnchanged();
+
+      view.setThoughtsExpanded(false);
+      frames();
+      expect(view.container.textContent?.split(summary)).toHaveLength(2);
+      const compact = [...view.container.firstElementChild!.children].find(
+        (element) => element.textContent?.includes(summary),
+      );
+      expect((compact as unknown as { height: number }).height).toBe(1);
+      sourceUnchanged();
+
+      view.jump(0);
+      frames();
+      expect(view.container.textContent).not.toContain(summary);
+      expect(view.visibleLines()[0]).toContain('TURN_0000');
+      const anchor = view.visibleLines();
+      const compactBottom = view.spacers().bottom;
+      expect(view.spacers().top).toBe(0);
+      expect(view.host.scrollTop).toBe(0);
+      sourceUnchanged();
+
+      // The off-window group has measured expanded4+4 and compact1 rows.
+      // Reusing its first card's renderId for compact would overwrite4 with1.
+      view.setThoughtsExpanded(true);
+      expect(view.spacers().bottom).toBe(compactBottom + 7);
+      expect(view.visibleLines()).toEqual(anchor);
+      frames();
+      expect(view.host.scrollTop).toBe(0);
+      expect(view.visibleLines()).toEqual(anchor);
+      sourceUnchanged();
+
+      view.setThoughtsExpanded(false);
+      expect(view.spacers().bottom).toBe(compactBottom);
+      view.setThoughtsExpanded(true);
+      expect(view.spacers().bottom).toBe(compactBottom + 7);
+      sourceUnchanged();
+
+      for (let settle = 0; settle < 3; settle++) {
+        view.jump(Math.max(0, view.host.scrollHeight - 12));
+        frames();
+      }
+      expect(view.visibleLines().at(-1)).toContain('TURN_0199');
+      expect(view.host.scrollTop).toBeGreaterThan(0);
+      expect(view.host.scrollTop).toBeLessThanOrEqual(
+        Math.max(0, view.host.scrollHeight - 12),
+      );
+      expect(view.spacers().bottom).toBe(0);
+      sourceUnchanged();
+
+      view.jump(0);
+      frames();
+      expect(view.host.scrollTop).toBe(0);
+      expect(view.spacers().top).toBe(0);
+      expect(view.visibleLines()[0]).toContain('TURN_0000');
+      expect(
+        view.visibleLines().every((line) => !line.includes('TURN_0199')),
+      ).toBe(true);
+      sourceUnchanged();
+    } finally {
+      view.unmount();
+    }
+  });
 
   it('records real heights without moving the scroll position', () => {
     const rows = Array.from({ length: 2000 }, () => 3);
@@ -1549,5 +1762,415 @@ describe('OpenTuiTranscriptView scroll host', () => {
     view.unmount();
     expect(mocks.renderer.count('frame')).toBe(0);
     expect(view.scrollListeners()).toBe(0);
+  });
+});
+
+describe('Ink compact read-summary parity', () => {
+  const mountReadGroup = (
+    status = ToolCallStatus.Success,
+    options: {
+      fullDetail?: boolean;
+      approval?: boolean;
+      userInitiated?: boolean;
+      secondRead?: boolean;
+    } = {},
+  ) => {
+    const group: HistoryItem = {
+      id: 47001,
+      type: 'tool_group',
+      isUserInitiated: options.userInitiated,
+      tools: [
+        {
+          callId: 'summary-read-a',
+          name: 'ReadFile',
+          description: 'owned-checkpoint.txt',
+          status: options.approval ? ToolCallStatus.Confirming : status,
+          resultDisplay: '',
+          confirmationDetails: undefined,
+        },
+        ...(options.secondRead
+          ? [
+              {
+                callId: 'summary-read-b',
+                name: 'ReadFile',
+                description: 'second.txt',
+                status: ToolCallStatus.Success,
+                resultDisplay: '',
+                confirmationDetails: undefined,
+              },
+            ]
+          : []),
+      ],
+    };
+    let items: readonly LiveHistoryItem[];
+    if (options.approval) {
+      items = foldLiveEvent([], {
+        type: 'tool-start',
+        id: 'summary-read-a',
+        tool: 'read_file',
+        title: 'ReadFile',
+      });
+      items = foldLiveEvent(items, {
+        type: 'tool-description',
+        id: 'summary-read-a',
+        description: 'owned-checkpoint.txt',
+      });
+      items = foldLiveEvent(items, {
+        type: 'tool-history',
+        item: group,
+        pending: true,
+      });
+      items = foldLiveEvent(items, {
+        type: 'confirm',
+        id: 'summary-read-a',
+        tool: 'read_file',
+        title: 'Read owned-checkpoint.txt',
+      });
+      const awaiting = items.find((item) => item.kind === 'tool');
+      expect(awaiting?.kind).toBe('tool');
+      if (awaiting?.kind !== 'tool') throw new Error('Missing live read');
+      expect(awaiting.done).toBe(false);
+      expect(awaiting.confirm).toBe('pending');
+      expect(awaiting.canonicalPending).toBe(true);
+      expect(awaiting.canonicalHistoryItem).toBe(group);
+      expect(group.tools[0].status).toBe(ToolCallStatus.Confirming);
+    } else {
+      items = projectHistoryToStreamEvents([group], {}).reduce<
+        readonly LiveHistoryItem[]
+      >(foldLiveEvent, []);
+    }
+    expect(snapshotCanonicalHistory(items)).toEqual([group]);
+    const view = render(
+      <OpenTuiTranscriptView
+        items={items}
+        thoughtsExpanded={options.fullDetail}
+        awaitingCallId={options.approval ? 'summary-read-a' : undefined}
+      />,
+    );
+    expect(items.every((item) => item.canonicalHistoryItem === group)).toBe(
+      true,
+    );
+    expect(snapshotCanonicalHistory(items)).toEqual([group]);
+    return view;
+  };
+
+  it('uses exactly the Ink successful single-read summary by default', () => {
+    const view = mountReadGroup();
+    try {
+      expect(view.container.textContent).toContain('Read owned-checkpoint.txt');
+      expect(view.container.textContent).not.toContain('ReadFile');
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it.each(['expanded', 'error', 'approval', 'user-initiated'] as const)(
+    'retains the individual ReadFile label for canonical %s control',
+    (mode) => {
+      const view = mountReadGroup(
+        mode === 'error' ? ToolCallStatus.Error : ToolCallStatus.Success,
+        {
+          fullDetail: mode === 'expanded',
+          approval: mode === 'approval',
+          userInitiated: mode === 'user-initiated',
+        },
+      );
+      try {
+        expect(view.container.textContent).toContain('ReadFile');
+        expect(view.container.textContent).toContain('owned-checkpoint.txt');
+      } finally {
+        view.unmount();
+      }
+    },
+  );
+
+  it('summarizes two successful reads once in the same canonical group', () => {
+    const view = mountReadGroup(ToolCallStatus.Success, { secondRead: true });
+    try {
+      const summary = 'Read owned-checkpoint.txt, second.txt';
+      expect(view.container.textContent?.split(summary)).toHaveLength(2);
+      expect(view.container.textContent).not.toContain('ReadFile');
+    } finally {
+      view.unmount();
+    }
+  });
+});
+
+describe('canonical compact group boundaries', () => {
+  const read = (
+    callId: string,
+    description: string,
+    status = ToolCallStatus.Success,
+  ) => ({
+    callId,
+    name: 'ReadFile',
+    description,
+    args: { file_path: description },
+    status,
+    resultDisplay: '',
+    confirmationDetails: undefined,
+  });
+  const foldGroups = (history: HistoryItem[]) =>
+    projectHistoryToStreamEvents(history, {}).reduce<
+      readonly LiveHistoryItem[]
+    >(foldLiveEvent, []);
+
+  it('keeps all sibling calls individual when one tool errors', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 48001,
+        type: 'tool_group',
+        tools: [
+          read('ok', 'a.txt'),
+          read('failed', 'b.txt', ToolCallStatus.Error),
+        ],
+      },
+    ];
+    const items = foldGroups(history);
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    try {
+      expect(view.container.textContent?.match(/ReadFile/g)).toHaveLength(2);
+      expect(snapshotCanonicalHistory(items)).toEqual(history);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('retains the individual canceled label and status styling', () => {
+    const items = foldGroups([
+      {
+        id: 48002,
+        type: 'tool_group',
+        tools: [read('cancelled', 'a.txt', ToolCallStatus.Canceled)],
+      },
+    ]);
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    try {
+      expect(view.container.textContent).toContain('ReadFile');
+      expect(
+        view.container.querySelector('[data-attributes="128"]'),
+      ).not.toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('retains individual argument rows when real arguments are requested', () => {
+    const items = foldGroups([
+      {
+        id: 48003,
+        type: 'tool_group',
+        tools: [read('args', 'a.txt')],
+      },
+    ]);
+    const view = render(
+      <OpenTuiTranscriptView items={items} showToolCallArgs />,
+    );
+    try {
+      expect(view.container.textContent).toContain('ReadFile');
+      expect(view.container.textContent).toContain('file_path');
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('does not join different canonical groups that reuse one wire ID', () => {
+    const history: HistoryItem[] = [
+      { id: 48004, type: 'tool_group', tools: [read('same-wire', 'a.txt')] },
+      { id: 48005, type: 'tool_group', tools: [read('same-wire', 'b.txt')] },
+    ];
+    const items = foldGroups(history);
+    const sourceRows = [...items];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    try {
+      expect(view.container.textContent).toContain('Read a.txt');
+      expect(view.container.textContent).toContain('Read b.txt');
+      expect(view.container.textContent).not.toContain('Read a.txt, b.txt');
+      expect(snapshotCanonicalHistory(items)).toEqual(history);
+      expect(items.every((item, index) => item === sourceRows[index])).toBe(
+        true,
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('builds the complete group summary before viewport slicing', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 48006,
+        type: 'tool_group',
+        tools: Array.from({ length: 200 }, (_, index) =>
+          read(`read-${index}`, `file-${index}.txt`),
+        ),
+      },
+    ];
+    const items = foldGroups(history);
+    const view = render(
+      <OpenTuiTranscriptView items={items} availableTerminalHeight={5} />,
+    );
+    try {
+      expect(view.container.textContent).toContain(
+        'Read file-0.txt, file-1.txt, ... and 198 more',
+      );
+      expect(snapshotCanonicalHistory(items)).toEqual(history);
+      expect(items.filter((item) => item.kind === 'tool')).toHaveLength(200);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it.each([
+    'completed',
+    'failed',
+    'cancelled',
+    'running',
+    'background',
+  ] as const)(
+    'keeps the read sibling individual for a %s subagent group',
+    (status) => {
+      const history: HistoryItem[] = [
+        {
+          id: 48007,
+          type: 'tool_group',
+          tools: [
+            read('read-sibling', 'a.txt'),
+            {
+              callId: 'agent-sibling',
+              name: 'Agent',
+              description: 'inspect imports',
+              status: ToolCallStatus.Success,
+              resultDisplay: {
+                type: 'task_execution',
+                subagentName: 'reviewer',
+                taskDescription: 'inspect imports',
+                taskPrompt: 'check imports',
+                status,
+                terminateReason: 'finished',
+              },
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ];
+      const items = foldGroups(history);
+      const view = render(<OpenTuiTranscriptView items={items} />);
+      try {
+        expect(view.container.textContent).toContain('ReadFile');
+        expect(view.container.textContent).toContain('a.txt');
+        expect(snapshotCanonicalHistory(items)).toEqual(history);
+      } finally {
+        view.unmount();
+      }
+    },
+  );
+
+  it('keeps the read sibling individual for a nested subagent confirmation', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 48008,
+        type: 'tool_group',
+        tools: [
+          read('read-sibling', 'a.txt'),
+          {
+            callId: 'agent-sibling',
+            name: 'Agent',
+            description: 'inspect imports',
+            status: ToolCallStatus.Success,
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'reviewer',
+              taskDescription: 'inspect imports',
+              taskPrompt: 'check imports',
+              status: 'running',
+              pendingConfirmation: {
+                type: 'info',
+                title: 'Approve?',
+                prompt: 'Allow this read?',
+                onConfirm: async () => {},
+              },
+            },
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+    ];
+    const view = render(<OpenTuiTranscriptView items={foldGroups(history)} />);
+    try {
+      expect(view.container.textContent).toContain('ReadFile');
+      expect(view.container.textContent).toContain('a.txt');
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it.each([ToolCallStatus.Executing, ToolCallStatus.Success])(
+    'keeps the read sibling individual when a PTY-bearing tool is %s',
+    (status) => {
+      const items = foldGroups([
+        {
+          id: 48009,
+          type: 'tool_group',
+          tools: [
+            read('read-sibling', 'a.txt'),
+            {
+              callId: 'pty-sibling',
+              name: 'Shell',
+              description: 'owned shell',
+              status,
+              ptyId: 42,
+              resultDisplay: '',
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ]);
+      const view = render(<OpenTuiTranscriptView items={items} />);
+      try {
+        expect(view.container.textContent).toContain('ReadFile');
+        expect(view.container.textContent).toContain('owned shell');
+      } finally {
+        view.unmount();
+      }
+    },
+  );
+
+  it('still summarizes when the arguments toggle has no arguments to render', () => {
+    const tool = { ...read('empty-args', 'a.txt'), args: {} };
+    const items = foldGroups([
+      { id: 48010, type: 'tool_group', tools: [tool] },
+    ]);
+    const view = render(
+      <OpenTuiTranscriptView items={items} showToolCallArgs />,
+    );
+    try {
+      expect(view.container.textContent).toContain('Read a.txt');
+      expect(view.container.textContent).not.toContain('ReadFile');
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('preserves the individual image-bearing read and canonical image bytes', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 48011,
+        type: 'tool_group',
+        tools: [
+          {
+            ...read('image-read', 'image.png'),
+            images: [{ mimeType: 'image/png', data: 'owned-image-data' }],
+          },
+        ],
+      },
+    ];
+    const items = foldGroups(history);
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    try {
+      expect(view.container.textContent).toContain('ReadFile');
+      expect(snapshotCanonicalHistory(items)).toEqual(history);
+    } finally {
+      view.unmount();
+    }
   });
 });

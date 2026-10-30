@@ -8,7 +8,7 @@ import java.util.Objects;
 
 import javax.sql.DataSource;
 
-/** Explicit initializer for the fresh 32-table database, independent of legacy bootstrap. */
+/** Explicit initializer for the fresh Managed database, independent of legacy bootstrap. */
 public final class ManagedSchema {
     public static final String FLYWAY_LOCATION = "classpath:db/managed-schema";
     public static final String RESOURCE = "/db/managed-schema/V1__managed_schema.sql";

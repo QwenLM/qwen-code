@@ -46,6 +46,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsModelSelection() { return false; }
 
+    default boolean supportsUserMessageQueue() { return false; }
+
     default boolean supportsContextCompression() { return false; }
 
     @FunctionalInterface
@@ -86,6 +88,16 @@ public interface HarnessConnector extends AutoCloseable {
 
     default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
         throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default boolean supportsSessionExtensions() { return false; }
+
+    default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
+    default Map<String, Object> continueExtensionOperation(String tenantId, String sessionId, String operationId, boolean recoverPrevious) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
     }
 
     default boolean isWorkspaceFilesAvailable() {

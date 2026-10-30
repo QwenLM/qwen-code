@@ -30,6 +30,11 @@ import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
+/** Select an existing directory on the connected daemon, or cancel with undefined. */
+export type WebShellWorkspaceDirectoryPicker = (opts?: {
+  signal?: AbortSignal;
+}) => Promise<string | undefined>;
+
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
   /**
@@ -722,6 +727,7 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  composerVariant?: 'default' | 'simple';
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.

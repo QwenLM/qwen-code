@@ -44,6 +44,17 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
   it('keeps deletion-only copy out of the read-only transcript', () => {
     for (const copy of [
       'Delete permanently',

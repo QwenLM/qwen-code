@@ -33,7 +33,7 @@ import type {
   SkillLevel,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from '../utils/tool-group-summary.js';
 import { ToolCallStatus } from '../types.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
@@ -43,7 +43,10 @@ import {
   toolResultEvent,
 } from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import { levelLabel } from '../utils/skill-level-label.js';
@@ -211,6 +214,7 @@ export function projectSkillsList(
 }
 
 interface FlatModelEntry {
+  billableOutputTokens?: number;
   /** Structured key (raw model name + optional `::source` suffix). */
   key: string;
   label: string;
@@ -228,7 +232,11 @@ interface FlatModelEntry {
 
 /** Active-model rows; `flattenModelsBySource` already labels + filters. */
 function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
-  return flattenModelsBySource(metrics.models).map((entry) => ({
+  return flattenModelsBySource(
+    metrics.models,
+    metrics.billableOutputTokens,
+  ).map((entry) => ({
+    billableOutputTokens: entry.billableOutputTokens,
     key: entry.key,
     label: entry.label,
     metrics: entry.metrics as FlatModelEntry['metrics'],
@@ -245,7 +253,7 @@ function entryCost(
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
     outputTokens:
-      entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+      entry.billableOutputTokens ?? billableOutputTokens(entry.metrics.tokens),
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],

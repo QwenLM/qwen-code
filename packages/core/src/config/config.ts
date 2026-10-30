@@ -11,6 +11,7 @@ import {
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
@@ -73,6 +74,16 @@ import { LlmClient } from '../core/client.js';
 import { resolveInteractionMode } from '../core/prompts.js';
 import type { OutputStyleDefinition } from '../core/output-styles.js';
 import {
+  WorkflowModeContext,
+  type PreparedWorkflowMode,
+  type WorkflowModeSnapshot,
+  type WorkflowModeState,
+} from '../core/workflow-mode.js';
+import {
+  resolveWorkflowContext,
+  type WorkflowIntent,
+} from '../core/workflow-intent.js';
+import {
   AuthType,
   createContentGenerator,
   resetPreloadedContentGenerator,
@@ -134,6 +145,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { forgetAutofixPrSession } from '../tools/autofix-pr-grants.js';
 import {
   ToolMode,
   type ToolMode as ToolModeValue,
@@ -361,6 +373,10 @@ import {
   ManagedSessionUncommittedTailError,
 } from '../managed-runtime/managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import {
+  acquireLocalManagedSessionWriter,
+  prepareLocalManagedSessionWriter,
+} from '../managed-runtime/local-managed-session-writer.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import {
   LocalManagedRuntimeOutcomes,
@@ -1132,6 +1148,7 @@ export interface ConfigParameters {
   executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
+  workflowMode?: boolean;
   sessionRestoreProjection?: SessionRestoreProjection;
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
@@ -2492,6 +2509,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getWorkspaceContext'
     | 'getFileService'
     | 'getEffectiveInputModalities'
+    | 'isOmniEnabled'
     | 'getFileReadCache'
     | 'getFileHistoryService'
     | 'getToolRegistry'
@@ -2796,6 +2814,15 @@ export class Config {
   private sessionSourceType?: string;
   private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
+  private readonly workflowModeContext = new WorkflowModeContext();
+  private initialWorkflowMode: boolean | undefined;
+  private workflowModeReady = false;
+  private workflowModeEpoch = 0;
+  private workflowModeWriteTail: Promise<void> = Promise.resolve();
+  private workflowModePublishedState: WorkflowModeState | undefined;
+  private readonly workflowModeListeners = new Set<
+    (state: WorkflowModeState) => void
+  >();
   private pendingSessionRestoreProjection?: SessionRestoreProjection;
   private sessionRestoreRuntime?: SessionRuntimeResumeState;
   private readonly sessionRestoreProjectionSource?: () => Promise<
@@ -2881,6 +2908,9 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private readonly bundledGeneratedUi: Readonly<BundledGeneratedUiConfig>;
   private bundledGeneratedUiActive = false;
+  // Set by the owning client before initialize(); only a client that renders
+  // MCP Apps can show Generated UI, so the provider stays off elsewhere.
+  private mcpAppHostSupported = false;
   private bundledGeneratedUiStatus: BundledGeneratedUiStatus = {
     version: 1,
     enabled: false,
@@ -3984,13 +4014,17 @@ export class Config {
     this.hooks = params.hooks;
     this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
+    if (params.workflowMode !== undefined) {
+      this.stageInitialWorkflowMode(params.workflowMode);
+    }
   }
 
   /**
    * Must only be called once, throws if called again after the first call
    * settled. Callers arriving while the first call is still in flight join
    * that flight instead of throwing; a joining caller's options are ignored
-   * — the first caller's options win.
+   * — the first caller's options win. Later callers retain a failed flight's
+   * original rejection.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -4025,6 +4059,7 @@ export class Config {
         await this.initializationPromise;
         return;
       }
+      await this.initializationPromise;
       throw Error('Config was already initialized');
     }
     if (this.shutdownRequested) {
@@ -4121,10 +4156,22 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
+      this.workflowModeContext.restore(
+        this.isWorkflowModeSupported()
+          ? this.chatRecordingService?.getSessionWorkflowMode()
+          : undefined,
+      );
       await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
+      this.workflowModeReady = true;
+      if (this.initialWorkflowMode !== undefined) {
+        const enabled = this.initialWorkflowMode;
+        this.initialWorkflowMode = undefined;
+        await this.setWorkflowMode(enabled);
+      }
+      this.refreshWorkflowMode();
     } catch (error) {
       this.clearSessionRestoreProjection();
       if (this.sessionProjectDirRegistered) {
@@ -4996,10 +5043,14 @@ export class Config {
       ReturnType<typeof LocalJsonlManagedSessionJournalStore.read>
     >;
     try {
-      scan = await LocalJsonlManagedSessionJournalStore.read(
+      scan = await LocalJsonlManagedSessionJournalStore.read({
         transcriptPath,
-        localManagedSessionKey(this.storage.getProjectRoot(), this.sessionId),
-      );
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey: localManagedSessionKey(
+          this.storage.getProjectRoot(),
+          this.sessionId,
+        ),
+      });
     } catch {
       return;
     }
@@ -5077,7 +5128,10 @@ export class Config {
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
     try {
-      lease = await SessionWriterLease.acquire({
+      const acquire = managed
+        ? acquireLocalManagedSessionWriter
+        : SessionWriterLease.acquire;
+      lease = await acquire({
         runtimeBaseDir: this.sessionRuntimeBaseDir,
         sessionId: this.sessionId,
         transcriptPath: this.getTranscriptPath(),
@@ -5131,6 +5185,23 @@ export class Config {
         projection = await this.sessionRestoreProjectionSource();
         if (managed) {
           // Checked before the log is opened, which writes to it.
+          assertSessionExecutionEngine(
+            projection?.executionEngine,
+            this.sessionId,
+            'managed',
+          );
+        }
+        if (
+          managed &&
+          (await prepareLocalManagedSessionWriter(
+            lease,
+            localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              this.sessionId,
+            ),
+          ))
+        ) {
+          projection = await this.sessionRestoreProjectionSource();
           assertSessionExecutionEngine(
             projection?.executionEngine,
             this.sessionId,
@@ -6349,7 +6420,7 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    // Include the request-only catalog as well as the system memory policy.
+    // Include the current catalog as well as the system memory policy.
     const memoryContextWarning = this.buildMemoryContextWarning(
       [
         this.getUserMemory(),
@@ -6407,6 +6478,8 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     const nextSessionId = sessionId ?? randomUUID();
+    // #13004: skipped extraction turns are not carried across a switch.
+    this.memoryManager.discardExtractCadence(previousSessionId, nextSessionId);
     // Resuming the session the user is already in keeps the same id. That is
     // not a lifecycle transition: ending it here would record session.end for
     // a live session and pair it with a duplicate session.start.
@@ -6429,6 +6502,8 @@ export class Config {
     unregisterSessionModel(previousSessionId);
     this.publishModelEnv();
     this.sessionData = sessionData;
+    this.workflowModeEpoch++;
+    this.workflowModeContext.retire();
     if (isSessionTransition) {
       const skillTool = this.toolRegistry?.getTool?.(ToolNames.SKILL);
       if (skillTool && 'clearLoadedSkills' in skillTool) {
@@ -6440,6 +6515,10 @@ export class Config {
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
+      // So do the autofix-pr watches it confirmed and the fixes it let run
+      // without asking; a resumed watch asks again.
+      forgetAutofixPrSession(previousSessionId);
+      forgetAutofixPrSession(nextSessionId);
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
       // So does the Advisor budget, reset in place for the same reason the
@@ -6463,6 +6542,13 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.workflowModeContext.restore(
+      this.isWorkflowModeSupported()
+        ? this.chatRecordingService?.getSessionWorkflowMode()
+        : undefined,
+    );
+    this.workflowModePublishedState = undefined;
+    this.refreshWorkflowMode();
     this.sessionSourceService = this.sessionSourceServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
@@ -8052,6 +8138,12 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    this.workflowModeEpoch++;
+    this.workflowModeContext.retire();
+    this.workflowModeListeners.clear();
+    // What the session confirmed for autofix-pr ends with it: a daemon that
+    // loads it again under the same id asks again.
+    forgetAutofixPrSession(this.sessionId);
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     // Only a Config with a Runtime waits for it, so others close their
@@ -8640,8 +8732,15 @@ export class Config {
     return mcpServers;
   }
 
+  // A channel session the daemon creates for an IM bot comes through the
+  // daemon bridge too, but its user reads the reply in the IM client.
+  private rendersMcpApps(): boolean {
+    return this.mcpAppHostSupported && this.sessionSourceType !== 'channel';
+  }
+
   private generatedUiUnavailableReason(): BundledGeneratedUiStatus['reason'] {
     if (!this.bundledGeneratedUi.enabled) return 'setting-disabled';
+    if (!this.rendersMcpApps()) return 'unsupported-client';
     if (
       this.getBareMode() ||
       this.isSafeMode() ||
@@ -8692,10 +8791,10 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): void {
     const reason =
-      options?.disableBundledGeneratedUi || options?.skipSkillManager
-        ? this.bundledGeneratedUi.enabled
-          ? 'unsupported-runtime'
-          : 'setting-disabled'
+      this.bundledGeneratedUi.enabled &&
+      this.rendersMcpApps() &&
+      (options?.disableBundledGeneratedUi || options?.skipSkillManager)
+        ? 'unsupported-runtime'
         : this.generatedUiUnavailableReason();
     this.bundledGeneratedUiActive = reason === undefined;
     this.bundledGeneratedUiStatus = {
@@ -8703,7 +8802,14 @@ export class Config {
       enabled: this.bundledGeneratedUiActive,
       ...(reason ? { reason } : {}),
     };
-    if (reason && reason !== 'setting-disabled') {
+    // A disabled setting or a client without MCP Apps is an expected state,
+    // and so is any reason while the feature is only on by default.
+    if (
+      reason &&
+      reason !== 'setting-disabled' &&
+      reason !== 'unsupported-client' &&
+      this.bundledGeneratedUi.explicit
+    ) {
       const warning = `Bundled Generated UI is unavailable (${reason}). Restart the owning session after resolving it.`;
       this.warnings.push(warning);
       this.debugLogger.warn(warning);
@@ -9289,7 +9395,7 @@ export class Config {
     return this.autoMemoryPrompt;
   }
 
-  /** Latest legacy catalog, sent only at the request tail, never stored history. */
+  /** Latest legacy catalog; scoped maintenance configs suppress it. */
   getAutoMemoryContext(): string {
     // Scoped maintenance configs override the policy getter to suppress session
     // memory. Respect that override rather than inheriting the parent's catalog.
@@ -10666,6 +10772,205 @@ export class Config {
 
   setWorkflowsEnabled(enabled: boolean | undefined): void {
     this.workflowsEnabled = enabled;
+    this.refreshWorkflowMode();
+  }
+
+  isWorkflowModeSupported(): boolean {
+    return (
+      !isDerivedConfig(this) &&
+      this.chatRecordingEnabled &&
+      this.sessionExecutionEngine !== 'managed' &&
+      !this.executionEnvironment &&
+      this.sessionSourceType !== 'agent' &&
+      this.sessionSourceType !== 'agent-host' &&
+      !this.shutdownRequested &&
+      !this.sessionWriterShutdownRequested
+    );
+  }
+
+  getWorkflowMode(): WorkflowModeState {
+    if (!this.isWorkflowModeSupported()) {
+      return {
+        requested: false,
+        available: false,
+        effective: false,
+        reason: 'unsupported',
+      };
+    }
+    const requested = this.workflowModeContext.getRequested();
+    if (!this.workflowModeReady) {
+      return {
+        requested,
+        available: false,
+        effective: false,
+        reason: 'initializing',
+      };
+    }
+    let available = false;
+    try {
+      available = resolveWorkflowContext(this) !== null;
+    } catch {
+      // A registry refresh can temporarily make authoring unavailable.
+    }
+    return {
+      requested,
+      available,
+      effective: requested && available,
+      ...(!available ? { reason: 'workflow_unavailable' } : {}),
+    };
+  }
+
+  stageInitialWorkflowMode(enabled: boolean): void {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    if (!this.isWorkflowModeSupported()) {
+      throw new Error('Workflow mode is unsupported for this session');
+    }
+    if (this.initialized) {
+      throw new Error(
+        'Initial workflow mode must be staged before initialization',
+      );
+    }
+    if (
+      this.initialWorkflowMode !== undefined &&
+      this.initialWorkflowMode !== enabled
+    ) {
+      throw new Error('Conflicting initial workflow mode values');
+    }
+    this.initialWorkflowMode = enabled;
+  }
+
+  async setWorkflowMode(enabled: boolean): Promise<WorkflowModeState> {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    if (!this.isWorkflowModeSupported()) {
+      throw new Error('Workflow mode is unsupported for this session');
+    }
+    if (getInvocationContext()?.workflowModeWriteAllowed === false) {
+      throw new Error('Workspace is not trusted.');
+    }
+    if (!this.workflowModeReady) {
+      throw new Error('Workflow mode is not initialized');
+    }
+    if (this.getLlmClient().isTelemetrySwapInProgress()) {
+      throw new Error(
+        'A session switch is in progress. Try again in a moment.',
+      );
+    }
+    const epoch = this.workflowModeEpoch;
+    const recorder = this.chatRecordingService;
+    const write = this.workflowModeWriteTail.then(async () => {
+      if (
+        epoch !== this.workflowModeEpoch ||
+        recorder !== this.chatRecordingService ||
+        !this.isWorkflowModeSupported()
+      ) {
+        throw new Error('Workflow mode session changed');
+      }
+      const state = this.getWorkflowMode();
+      if (enabled && !state.available) {
+        throw new Error('Workflow mode is unavailable in this session');
+      }
+      if (!recorder) throw new SessionWriterUnavailableError();
+      await recorder.recordSessionWorkflowMode(enabled);
+      if (
+        epoch !== this.workflowModeEpoch ||
+        recorder !== this.chatRecordingService ||
+        !this.isWorkflowModeSupported()
+      ) {
+        throw new Error('Workflow mode session changed');
+      }
+      const changed =
+        !this.workflowModeContext.hasRecord() ||
+        this.workflowModeContext.getRequested() !== enabled;
+      this.workflowModeContext.setRequested(enabled);
+      if (changed) this.workflowModePublishedState = undefined;
+      this.refreshWorkflowMode();
+      return this.getWorkflowMode();
+    });
+    this.workflowModeWriteTail = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
+  }
+
+  onWorkflowModeChange(
+    listener: (state: WorkflowModeState) => void,
+  ): () => void {
+    if (!this.isWorkflowModeSupported()) return () => {};
+    this.workflowModeListeners.add(listener);
+    return () => this.workflowModeListeners.delete(listener);
+  }
+
+  refreshWorkflowMode(): void {
+    if (isDerivedConfig(this)) return;
+    const state = Object.freeze(this.getWorkflowMode());
+    this.workflowModeContext.observeAvailability(state.available);
+    const previous = this.workflowModePublishedState;
+    this.workflowModePublishedState = state;
+    if (
+      previous?.requested === state.requested &&
+      previous.available === state.available &&
+      previous.reason === state.reason
+    ) {
+      return;
+    }
+    for (const listener of this.workflowModeListeners) {
+      try {
+        listener(state);
+      } catch (error) {
+        this.debugLogger.warn('Workflow mode listener failed:', error);
+      }
+    }
+  }
+
+  resetWorkflowModeContext(): void {
+    if (this.isWorkflowModeSupported()) {
+      this.workflowModeContext.resetContext();
+    }
+  }
+
+  hasWorkflowModeContext(): boolean {
+    return (
+      this.isWorkflowModeSupported() && this.workflowModeContext.hasContext()
+    );
+  }
+
+  async captureWorkflowModeState(): Promise<WorkflowModeSnapshot> {
+    // The swap latch blocks new writes; include any write already in flight.
+    await this.workflowModeWriteTail;
+    return this.isWorkflowModeSupported()
+      ? this.workflowModeContext.snapshot()
+      : new WorkflowModeContext().snapshot();
+  }
+
+  restoreWorkflowModeState(snapshot: WorkflowModeSnapshot): void {
+    if (!this.isWorkflowModeSupported()) return;
+    this.workflowModeEpoch++;
+    this.workflowModeContext.restoreSnapshot(snapshot);
+    this.chatRecordingService?.restoreSessionWorkflowMode(
+      snapshot.recorded ? snapshot.requested : undefined,
+    );
+    // Rollback replays persisted history, which can omit live notices.
+    this.workflowModeContext.resetContext();
+    this.refreshWorkflowMode();
+  }
+
+  prepareWorkflowMode(keyword: WorkflowIntent | null): PreparedWorkflowMode {
+    if (!this.isWorkflowModeSupported() || !this.workflowModeReady) {
+      return { reminder: keyword?.reminder };
+    }
+    this.refreshWorkflowMode();
+    let context = null;
+    try {
+      context = resolveWorkflowContext(this);
+    } catch {
+      // Keep a pending exit even when registry resolution fails.
+    }
+    return this.workflowModeContext.prepare(context, keyword);
   }
 
   getWorkflowKeywordTriggerEnabled(): boolean {
@@ -10892,6 +11197,15 @@ export class Config {
    */
   getModelProposedGoals(): ModelProposedGoalsMode {
     return this.modelProposedGoals;
+  }
+
+  /**
+   * Declares that the owning client renders MCP Apps (Web Shell through the
+   * daemon). Call before initialize(); it decides whether the bundled
+   * Generated UI provider can activate for this session.
+   */
+  setMcpAppHostSupported(supported: boolean): void {
+    this.mcpAppHostSupported = supported;
   }
 
   setGoalProposalHostSupported(supported: boolean): void {
@@ -13259,6 +13573,11 @@ export class Config {
         return new LoopWakeupTool(this);
       });
     }
+
+    await registerLazy(ToolNames.AUTOFIX_PR, async () => {
+      const { AutofixPrTool } = await import('../tools/autofix-pr.js');
+      return new AutofixPrTool(this);
+    });
 
     // create_sub_session is daemon-only: it needs the bridge, wired onto the
     // Config as a sub-session spawner by the ACP session. Registering it

@@ -39,7 +39,7 @@ describe('no-AK integration CI wiring', () => {
         path.join(ROOT, '.github/workflows/ci.yml'),
         'utf8',
       );
-      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+      const routingBlocks = ['test', 'test_macos_shards', 'test_windows'].map(
         (jobName) => {
           const testStep = getWorkflowStep(
             getWorkflowJob(workflow, jobName),
@@ -105,7 +105,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos']) {
+    for (const jobName of ['test', 'test_macos_shards']) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
@@ -116,7 +116,10 @@ describe('no-AK integration CI wiring', () => {
       let previous = -1;
       for (const command of [
         'set +e',
-        'npm run test:ci',
+        // The Linux job runs the suites through the lane script.
+        jobName === 'test'
+          ? '.github/scripts/ci/run-unit-test-lanes.sh'
+          : 'node scripts/run-macos-ci-group.js',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -144,7 +147,7 @@ describe('no-AK integration CI wiring', () => {
       'SCRIPTS_RC=$?',
       'if [ "$SCRIPTS_RC" -ne 0 ]; then',
       '::warning::The complete Windows script suite has known baseline failures',
-      'npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts',
+      'npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false',
       'INSTALLER_RC=$?',
       'set -e',
       'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -212,21 +215,27 @@ describe('no-AK integration CI wiring', () => {
       './qwen-live-m2-steering.test.ts',
       './cli/_prompt-latency-policy.test.ts',
       './cli/agent-loop-parity.test.ts',
+      './cli/acp-agent-loop-parity.test.ts',
       './cli/hosted-harness-process.test.ts',
       './cli/daemon-invocation-context.test.ts',
       './cli/headless-workflow-skill.test.ts',
       './cli/workflow-ancestor-discovery.test.ts',
       './cli/daemon-workflow-ancestor-trust.test.ts',
       './cli/workflow-intent.test.ts',
+      './cli/workflow-mode.test.ts',
+      './cli/acp-workflow-mode.test.ts',
       './cli/daemon-workflow-intent.test.ts',
+      './cli/daemon-workflow-mode.test.ts',
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
       './cli/qwen-serve-routes.test.ts',
+      './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
       './interactive/workflow-completion.test.ts',
       './interactive/workflow-intent.test.ts',
+      './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
@@ -238,6 +247,7 @@ describe('no-AK integration CI wiring', () => {
       './sdk-typescript/system-control.test.ts',
       './sdk-typescript/tool-control.test.ts',
       './sdk-typescript/workflow-intent.test.ts',
+      './sdk-typescript/workflow-mode.test.ts',
     ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
@@ -364,6 +374,10 @@ describe('no-AK integration CI wiring', () => {
       'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
       'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-extension-acquisition.test.ts':
+        'Dedicated TUI parity gate',
+      'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
       'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
@@ -399,7 +413,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const macosJob = getWorkflowJob(workflow, 'test_macos_shards');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
     const classifyJob = getWorkflowJob(workflow, 'classify_pr');
@@ -412,7 +426,7 @@ describe('no-AK integration CI wiring', () => {
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     for (const [name, job] of Object.entries({
       test: ubuntuJob,
-      test_macos: macosJob,
+      test_macos_shards: macosJob,
       test_windows: windowsJob,
     })) {
       expect(job, `${name} must not run the no-AK script`).not.toContain(
@@ -433,11 +447,11 @@ describe('no-AK integration CI wiring', () => {
     expect(jobIf).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
-    // PR head ref on pull_request, queue head on merge_group — the same
+    // Event PR head SHA on pull_request, queue head on merge_group — the same
     // shape the Ubuntu gate uses, so this check tests the pushed tree, not
     // the lagging merge ref.
     expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
-      "format('refs/pull/{0}/head', github.event.pull_request.number)",
+      "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
     );
     const trustedClassifierCheckout = getWorkflowStep(
       classifyJob,
@@ -626,25 +640,27 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
-  it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
+  it('pins PR checkouts to the event head even after the PR ref advances', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const integrationJob = getWorkflowJob(workflow, 'integration_cli');
     const noAkJob = getWorkflowJob(workflow, 'integration_no_ak');
 
-    // On PRs every gate checks out refs/pull/N/head, which is published the
-    // instant the branch is pushed, instead of the merge ref that GitHub
-    // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, macosJob, windowsJob, noAkJob]) {
-      expect(job).toContain(
-        "format('refs/pull/{0}/head', github.event.pull_request.number)",
+    // A retry retains the event head SHA while refs/pull/N/head may advance.
+    // Only these four lanes currently run on pull_request.
+    for (const job of [ubuntuJob, lintJob, webShellJob, noAkJob]) {
+      const checkout = getWorkflowStep(job, 'Checkout');
+      expect(checkout).toContain(
+        "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
       );
+      expect(checkout).not.toContain('refs/pull/');
+      expect(checkout).toContain('fetch-depth: 1');
     }
 
     // The brittle merge-ref retry/refresh machinery is gone: in particular the
@@ -685,7 +701,6 @@ describe('no-AK integration CI wiring', () => {
     // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
 
-    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
       lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
@@ -979,7 +994,7 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
   });
 
-  it('keeps install-script.test.js out of the win32 exclude list', () => {
+  it('keeps both installer files out of the win32 exclude list', () => {
     // install-script.test.js is the only home of the nine Windows installer
     // end-to-end cases; excluding it on win32 would silently drop coverage
     // docs/design/windows-ecs-ci-validation.md declares required.
@@ -989,6 +1004,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(scriptSuiteConfig).not.toContain(
       "'scripts/tests/install-script.test.js'",
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/opentui-preview-install.test.js'",
     );
   });
 
@@ -1045,12 +1063,8 @@ describe('no-AK integration CI wiring', () => {
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    // The lane still takes its runner from the classifier, so an untrusted
-    // fork PR cannot reach a self-hosted host; the architecture override it
-    // applies on top is pinned in scripts/tests/ci-platform-lanes.test.js.
-    expect(webShellJob).toMatch(
-      /runs-on: .*needs\.classify_pr\.outputs\.ubuntu_runner/,
-    );
+    // Browser smoke stays hosted, including for untrusted fork PRs.
+    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium and WebKit (hosted)',

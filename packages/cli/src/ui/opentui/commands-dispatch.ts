@@ -27,6 +27,7 @@
  * applies, where ink returned `SlashCommandProcessorResult` to AppContainer.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -165,6 +166,7 @@ export type OpenTuiDispatchOutcome =
       kind: 'schedule_tool';
       toolName: string;
       toolArgs: Record<string, unknown>;
+      restoreResponseBinding?: RestoreToolResponseBinding;
     }
   | {
       kind: 'submit_prompt';
@@ -371,11 +373,22 @@ export class OpenTuiSlashDispatcher {
 
   /** Rebuilds the registry through the original loader stack. */
   async loadCommands(signal?: AbortSignal): Promise<void> {
-    this.commandList = await loadInteractiveCommands(
-      this.services.config,
+    const config = this.services.config;
+    const session = config?.getSessionId();
+    const target = config?.getTargetDir();
+    const commands = await loadInteractiveCommands(
+      config,
       signal,
       this.services.settings,
     );
+    if (
+      config !== this.services.config ||
+      config?.getSessionId() !== session ||
+      config?.getTargetDir() !== target ||
+      signal?.aborted
+    )
+      return;
+    this.commandList = commands;
   }
 
   /**
@@ -541,12 +554,28 @@ export class OpenTuiSlashDispatcher {
       args,
       canonicalPath: resolvedCommandPath,
     } = parseSlashCommand(trimmed, this.commandList);
-    if (!commandToExecute && (await this.ensureCommandsLoaded())) {
-      ({
-        commandToExecute,
-        args,
-        canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, this.commandList));
+    if (!commandToExecute) {
+      const config = this.services.config;
+      const session = config?.getSessionId();
+      const target = config?.getTargetDir();
+      const loaded = await this.ensureCommandsLoaded();
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand ||
+        config !== this.services.config ||
+        config?.getSessionId() !== session ||
+        config?.getTargetDir() !== target
+      ) {
+        releaseOwnership();
+        return { kind: 'handled' };
+      }
+      if (loaded) {
+        ({
+          commandToExecute,
+          args,
+          canonicalPath: resolvedCommandPath,
+        } = parseSlashCommand(trimmed, this.commandList));
+      }
     }
     let hideInvocation =
       isBtwCommand(trimmed) ||
@@ -735,6 +764,9 @@ export class OpenTuiSlashDispatcher {
             ...baseContext,
             ui: {
               ...baseContext.ui,
+              get history() {
+                return baseContext.ui.history;
+              },
               addItem: (item, timestamp) =>
                 addItemWithRecording(item, timestamp),
             },
@@ -742,6 +774,7 @@ export class OpenTuiSlashDispatcher {
               raw: trimmed,
               name: commandToExecute.name,
               args,
+              historyItemId: invocationItemId,
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
@@ -792,6 +825,9 @@ export class OpenTuiSlashDispatcher {
                   kind: 'schedule_tool',
                   toolName: result.toolName,
                   toolArgs: result.toolArgs,
+                  ...(result.restoreResponseBinding
+                    ? { restoreResponseBinding: result.restoreResponseBinding }
+                    : {}),
                 };
               case 'message': {
                 // Picker-shaped commands can still reject their arguments
