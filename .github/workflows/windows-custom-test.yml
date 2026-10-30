@@ -31,6 +31,7 @@ jobs:
       - name: Build official Qwen desktop app and bundled runtime
         working-directory: packages/desktop
         run: npm run build -- --bundles nsis
+      # Retry the latest official desktop build with the same configuration.
       - name: Verify desktop installer exists
         shell: pwsh
         run: |
