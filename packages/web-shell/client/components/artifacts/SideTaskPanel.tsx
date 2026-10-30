@@ -20,6 +20,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from '../../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../../unavailableModels';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
@@ -52,6 +56,8 @@ interface SideTaskPanelProps {
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Policy refused the stored initial prompt; the parent drops it from the tab. */
   onInitialPromptRefused?: (tabId: string) => void;
@@ -75,6 +81,8 @@ export function SideTaskPanel({
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onImageIngestionNotice,
   onInitialPromptRefused,
 }: SideTaskPanelProps) {
@@ -115,6 +123,8 @@ export function SideTaskPanel({
         onError={onError}
         sessionWorkflowEnabled={sessionWorkflowEnabled}
         modelManagement={modelManagement}
+        unavailableModels={unavailableModels}
+        mountUnavailableModelTooltip={mountUnavailableModelTooltip}
         onImageIngestionNotice={onImageIngestionNotice}
         onInitialPromptRefused={onInitialPromptRefused}
       />
@@ -221,6 +231,8 @@ function SideTaskSession({
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onImageIngestionNotice,
   onInitialPromptRefused,
 }: Omit<
@@ -404,6 +416,8 @@ function SideTaskSession({
       onPaneArtifactsChange={onArtifactsChange}
       sessionWorkflowEnabled={sessionWorkflowEnabled}
       modelManagement={modelManagement}
+      unavailableModels={unavailableModels}
+      mountUnavailableModelTooltip={mountUnavailableModelTooltip}
     />
   );
 }

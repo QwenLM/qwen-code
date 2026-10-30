@@ -768,6 +768,9 @@ describe('ShellTool', () => {
       await runShell('gh pr create --help', 'usage: gh pr create\n');
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: URL absent from the command output',
+      );
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
@@ -815,6 +818,11 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      // A merged PR arrives as `status: 'pr'`; the state is what names it.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'pr', state: 'merged' },
+      );
     });
 
     it('does not bind an open PR the branch already had before the run', async () => {
@@ -826,6 +834,10 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: PR already existed before the run',
+        { number: 42 },
+      );
     });
 
     it('does not bind when the pre-run snapshot errored', async () => {
@@ -839,6 +851,32 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: pre-run PR snapshot unavailable',
+      );
+    });
+
+    it('names the post-run resolution status instead of paraphrasing a cause', async () => {
+      // `none` (gh proved the branch has no PR) and `error` (gh could not
+      // answer at all) are different facts; the log must not report the first
+      // when the second happened.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'error' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'error' },
+      );
+
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'none' },
+      );
     });
 
     it('does not re-emit when the resolved PR is already bound', async () => {
@@ -859,6 +897,10 @@ describe('ShellTool', () => {
         [{ ...prRecord(42), source: 'create' }],
       );
       expect(sessionServiceMock().emitSessionPrBound).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: already bound',
+        { number: 42 },
+      );
     });
 
     it('binds when a promote is refused after the command settled', async () => {
@@ -917,6 +959,10 @@ describe('ShellTool', () => {
       );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: branch mismatch',
+        { created: 'other-branch', expected: 'main' },
+      );
     });
 
     it('does not bind when the pre-run branch could not be captured', async () => {

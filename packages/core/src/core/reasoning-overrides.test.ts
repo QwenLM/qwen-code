@@ -21,6 +21,7 @@ import {
   resolveReasoningForModel,
 } from './reasoning-overrides.js';
 import type { AvailableModel } from '../models/types.js';
+import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 
 const route: ContentGeneratorConfig = {
   model: 'alias',
@@ -271,7 +272,7 @@ describe('reasoning declarations', () => {
     );
     expect(resolved).toMatchObject({
       profile: 'dashscope-effort',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
     });
     expect(getEffectiveReasoning(route, resolved)).toEqual({
@@ -280,7 +281,7 @@ describe('reasoning declarations', () => {
     expect(route.reasoning).toBeUndefined();
     expect(
       getEffectiveReasoning({ reasoning: { effort: 'high' } }, resolved),
-    ).toEqual({ effort: 'xhigh' });
+    ).toEqual({ effort: 'high' });
     expect(getEffectiveReasoning({ reasoning: false }, resolved)).toBe(false);
   });
 
@@ -379,7 +380,7 @@ describe('reasoning declarations', () => {
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
     [
-      'deepseek-v3.2',
+      'glm-5.2',
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
   ])('inherits %s toggle capabilities from its provider', (model, baseUrl) => {
@@ -399,8 +400,10 @@ describe('reasoning declarations', () => {
   });
 
   it('inherits the selected provider policy for the same model', () => {
-    const target = { ...route, model: 'qwen3.8-max-preview' };
-    const input = { defaultEffort: 'medium' };
+    // kimi-k2.5 is a Token Plan preset model only; on the Standard endpoint
+    // the same override has no provider declaration to extend.
+    const target = { ...route, model: 'kimi-k2.5' };
+    const input = { canDisable: false };
     expect(
       resolveReasoningCapabilities(
         {
@@ -410,7 +413,7 @@ describe('reasoning declarations', () => {
         },
         input,
       ),
-    ).toMatchObject({ defaultEffort: 'medium', canDisable: false });
+    ).toMatchObject({ toggleOnly: true, canDisable: false });
     expect(
       resolveReasoningCapabilities(
         {
@@ -418,7 +421,7 @@ describe('reasoning declarations', () => {
           baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         },
         input,
-      )?.canDisable,
+      ),
     ).toBeUndefined();
   });
 
@@ -481,6 +484,24 @@ describe('reasoning declarations', () => {
         { canDisable: false },
       );
       expect(resolved).toBeDefined();
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
+    },
+  );
+
+  // Same derived-from-the-leaf shape as the telemetry pin: the gate must keep
+  // admitting every host the attribution leaf owns, including its
+  // `token-plan.` form, without restating the literals here (#15107).
+  it.each(QWENCLOUD_MAAS_HOSTS.flatMap((host) => [host, `token-plan.${host}`]))(
+    'admits QwenCloud host %s as a DashScope endpoint',
+    (host) => {
+      const resolved = resolveReasoningCapabilities(
+        {
+          ...route,
+          model: 'qwen3.8-max',
+          baseUrl: `https://${host}/compatible-mode/v1`,
+        },
+        { canDisable: false },
+      );
       expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
     },
   );

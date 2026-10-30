@@ -11,6 +11,13 @@ type ManagedTaskMessage =
 
 export const MANAGED_TASK_MESSAGES_EN: Record<string, ManagedTaskMessage> = {
   'managed.tasks.title': 'Session tasks',
+  'managed.tasks.activeChildren': (v) => `Active child Agents: ${v?.count}`,
+  'managed.tasks.awaitingApproval': 'Awaiting approval',
+  'managed.tasks.approvalMode': 'Approval mode',
+  'managed.tasks.childApproval': 'Child Agent approval',
+  'managed.tasks.viewChild': 'View child Session',
+  'managed.tasks.childSession': 'Child Session',
+  'managed.tasks.backToParent': 'Back to parent Session',
   'managed.tasks.recovery': 'Resume task cancellation',
   'managed.tasks.description': 'Task status and cancellation for this Session.',
   'managed.tasks.kind.child_agent': 'Child Agent',
@@ -82,6 +89,13 @@ export const MANAGED_TASK_MESSAGES_EN: Record<string, ManagedTaskMessage> = {
 
 export const MANAGED_TASK_MESSAGES_ZH: Record<string, ManagedTaskMessage> = {
   'managed.tasks.title': '会话任务',
+  'managed.tasks.activeChildren': (v) => `活动子 Agent：${v?.count}`,
+  'managed.tasks.awaitingApproval': '等待审批',
+  'managed.tasks.approvalMode': '审批模式',
+  'managed.tasks.childApproval': '子 Agent 审批',
+  'managed.tasks.viewChild': '查看子会话',
+  'managed.tasks.childSession': '子会话',
+  'managed.tasks.backToParent': '返回父会话',
   'managed.tasks.recovery': '恢复任务取消确认',
   'managed.tasks.description': '查看此会话的任务状态并请求取消。',
   'managed.tasks.kind.child_agent': '子 Agent',

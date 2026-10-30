@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
@@ -14,13 +15,38 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
     }
 
+    default boolean supportsPublicChildAgents() { return false; }
+
+    default String closeSession(OperationRecord operation) {
+        return closeSession(operation.tenantId(), operation.sessionId());
+    }
+
+    default void runLifecycleChildOperation(OperationRecord operation, Map<String, Object> body) {
+        runChildOperation(operation.tenantId(), operation.sessionId(), body);
+    }
+
+    default Map<String, Object> drainInstance(String instanceId, String operationId) {
+        throw new UnsupportedOperationException("Harness drain is unavailable");
+    }
+
+    default Map<String, Object> releaseOwnership(String tenantId, String sessionId,
+            String operationId, long expectedPlacementEpoch) {
+        throw new UnsupportedOperationException("Harness ownership release is unavailable");
+    }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsLiveApprovalSelection() { return false; }
 
+    default boolean supportsAutoApproval() { return false; }
+
+    default boolean supportsPermissionRules() { return false; }
+
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
 
     default boolean supportsModelSelection() { return false; }
+
+    default boolean supportsUserMessageQueue() { return false; }
 
     default boolean supportsContextCompression() { return false; }
 
@@ -49,6 +75,30 @@ public interface HarnessConnector extends AutoCloseable {
     default boolean supportsInputAttachments() { return false; }
 
     default boolean supportsSessionSkills() { return false; }
+
+    default boolean supportsMcpManagement() { return false; }
+
+    default Map<String, Object> mcpManagement(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default boolean supportsSessionExtensions() { return false; }
+
+    default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
+    default Map<String, Object> continueExtensionOperation(String tenantId, String sessionId, String operationId, boolean recoverPrevious) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;
@@ -97,6 +147,11 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    default Attachment recoverManagedRuntime(String tenantId, String sessionId,
+            boolean cancellation, String promptId) {
+        throw new UnsupportedOperationException("Targeted Runtime recovery is unavailable");
+    }
+
     /**
      * Sends the cancellation takeover load even when this Harness already
      * serves the Session: a plain cancel the daemon refused with
@@ -110,10 +165,20 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    default Attachment recoverManagedCancellation(String tenantId,
+            String sessionId, String promptId) {
+        throw new UnsupportedOperationException("Targeted Runtime recovery is unavailable");
+    }
+
     default Attachment recoverManagedFailureCancellation(String tenantId,
             String sessionId, String turnId, String dispatchOwner) {
         throw new UnsupportedOperationException(
                 "Managed Runtime recovery is unavailable");
+    }
+
+    default Attachment recoverManagedFailureCancellation(String tenantId,
+            String sessionId, String turnId, String dispatchOwner, String promptId) {
+        throw new UnsupportedOperationException("Targeted Runtime recovery is unavailable");
     }
 
     /**
@@ -122,6 +187,24 @@ public interface HarnessConnector extends AutoCloseable {
      * from a report already known to be stale.
      */
     default void discardManagedRecovery(String tenantId, String sessionId) {
+    }
+
+    record RecoveryStatus(String state, String reasonCode, String promptId,
+            boolean inputSettled, boolean continuationReady, boolean nextTurnAllowed) {}
+
+    /** Inspects an existing attachment without loading or acquiring anything. */
+    default RecoveryStatus inspectRecovery(String tenantId, String sessionId, String promptId) {
+        return null;
+    }
+
+    /** Returns only cached replay identity, without loading or acquiring anything. */
+    default Attachment cachedRecoveryAttachment(String tenantId, String sessionId) {
+        return null;
+    }
+
+    /** Returns false when the original terminal cleanup cannot safely be retried. */
+    default boolean recheckRecoveryCleanup(String tenantId, String sessionId, String promptId) {
+        return false;
     }
 
     Admission submit(String tenantId, String sessionId, String promptId,
@@ -143,6 +226,12 @@ public interface HarnessConnector extends AutoCloseable {
     SourceStream stream(String tenantId, String sessionId, long lastEventId,
             String eventEpoch);
 
+    /** Reads only an existing original attachment; it must never load or take over execution. */
+    default SourceStream observeStream(String tenantId, String sessionId, String bootId,
+            long lastEventId, String eventEpoch) {
+        throw new UnsupportedOperationException("Read-only Harness observation is unavailable");
+    }
+
     default void resolveAction(
             String tenantId,
             String sessionId,
@@ -152,6 +241,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void cancel(String tenantId, String sessionId);
+
+    default void cancelOriginalTurn(String tenantId, String sessionId, String promptId) {
+        throw new UnsupportedOperationException("Targeted cancellation is unavailable");
+    }
 
     /**
      * H6b/H6c: one automation operation onto the Session's journal, from the
@@ -255,7 +348,10 @@ public interface HarnessConnector extends AutoCloseable {
     default void close() {
     }
 
-    record AttachedSession(String tenantId, String sessionId) {
+    record AttachedSession(String tenantId, String sessionId, String writerIdentity, long placementEpoch) {
+        public AttachedSession(String tenantId, String sessionId) {
+            this(tenantId, sessionId, null, 0);
+        }
     }
 
     record Attachment(String bootId, HarnessRuntimeRecovery runtimeRecovery,
@@ -281,6 +377,10 @@ public interface HarnessConnector extends AutoCloseable {
         String eventEpoch();
 
         SourceEvent next();
+
+        default boolean recoveryBlocked(long afterEventId) {
+            return false;
+        }
 
         @Override
         void close();

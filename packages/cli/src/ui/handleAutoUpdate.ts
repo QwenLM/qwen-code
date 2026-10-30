@@ -22,6 +22,7 @@ import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { getNpmNodePath } from '../utils/npm-runtime.js';
 
 const debugLogger = createDebugLogger('AUTO_UPDATE');
 
@@ -121,7 +122,7 @@ export async function handleAutoUpdate(
   const isManagedNpmUpdate =
     installationInfo.packageManager === PackageManager.NPM;
   const command = isManagedNpmUpdate
-    ? process.execPath
+    ? getNpmNodePath()
     : isWindows
       ? 'cmd.exe'
       : 'bash';

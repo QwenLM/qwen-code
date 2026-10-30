@@ -42,12 +42,12 @@ public final class HostedMySqlIsolationExtension implements BeforeAllCallback {
             // truncate must use this same connection, before any context boots.
             try (var statement = connection.createStatement()) {
                 statement.execute("SET FOREIGN_KEY_CHECKS = 0");
-                try {
+                // Restore failures must not replace the original truncate failure.
+                try (AutoCloseable restoreForeignKeyChecks =
+                        () -> statement.execute("SET FOREIGN_KEY_CHECKS = 1")) {
                     for (String table : tables) {
                         statement.execute("TRUNCATE TABLE `" + table.replace("`", "``") + "`");
                     }
-                } finally {
-                    statement.execute("SET FOREIGN_KEY_CHECKS = 1");
                 }
             }
         }

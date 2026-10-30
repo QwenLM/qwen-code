@@ -16,6 +16,14 @@ public final class CsiOwnershipRevision {
         return revision == 2;
     }
 
+    public static boolean residentReleased(long revision) {
+        return revision >= 0 && revision % 2 == 0;
+    }
+
+    public static boolean residentReserved(long revision) {
+        return revision > 0 && revision % 2 == 1;
+    }
+
     public static long next(long revision) {
         if (revision < 0 || revision > 1) {
             throw new IllegalArgumentException("Only the original CSI ownership transition is available.");
