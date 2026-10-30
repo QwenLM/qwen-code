@@ -81,6 +81,7 @@ import type {
 } from './session-startup-config.js';
 
 export interface RewindSnapshotInfo {
+  sourceRecordId?: string;
   promptId: string;
   turnIndex: number;
   timestamp: string;
@@ -278,6 +279,7 @@ function requireManagedSessionStoreString(
 export type { ManagedToolV2Client } from '@qwen-code/qwen-code-core';
 
 export interface RewindRequest {
+  expectedRecordId?: string;
   promptId: string;
   rewindFiles?: boolean;
 }
@@ -1603,6 +1605,7 @@ export interface BridgeMidTurnMessagesSnapshot {
  * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
  */
 export interface PendingPromptEntry {
+  queueDraft?: Pick<BridgePromptRequest, 'prompt' | '_meta'>;
   eventDetailMode?: LiveReplayMode;
   promptId: string;
   queuedAt: number;
@@ -1651,9 +1654,11 @@ export interface PendingPromptEntry {
 /**
  * Public projection of `PendingPromptEntry` returned by
  * `getPendingPrompts` and the HTTP API. Omits the internal
- * `abortController` and raw prompt content blocks.
+ * `abortController`. Full draft content is included only on explicit opt-in.
  */
 export interface PendingPromptSummary {
+  queueDraft?: Pick<BridgePromptRequest, 'prompt' | '_meta'>;
+  restoreComplete?: boolean;
   promptId: string;
   text: string;
   /**
@@ -2121,6 +2126,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getPendingPrompts(
     sessionId: string,
     context?: BridgeClientRequestContext,
+    includeDraft?: boolean,
   ): readonly PendingPromptSummary[];
 
   /** Read an exact prompt, or the current/newest turn when omitted. */

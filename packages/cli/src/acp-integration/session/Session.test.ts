@@ -8771,6 +8771,78 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
+    function identifiedHistory() {
+      const history: Content[] = [];
+      const records: ChatRecord[] = [];
+      for (let i = 1; i <= 35; i++) {
+        const promptId = `test-session-id########${i}`;
+        const user: Content = { role: 'user', parts: [{ text: `turn ${i}` }] };
+        markApiHistoryPrompt(user, promptId);
+        history.push(user, { role: 'model', parts: [{ text: 'answer' }] });
+        records.push(chatRecord({ uuid: `user-${i}`, promptId, message: user }));
+      }
+      const snapshots = records.slice(24).map((record) => ({
+        promptId: record.promptId,
+      }));
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.readActiveTranscriptChain.mockResolvedValue(
+        records,
+      );
+      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
+      return { history, records, snapshots };
+    }
+
+    it('maps a retained snapshot window to the identified global user turn', async () => {
+      const { snapshots } = identifiedHistory();
+      const target = await session.resolveRewindTarget('test-session-id########35');
+      expect(target).toEqual({
+        turnIndex: 34,
+        snapshotIndex: 10,
+        sourceRecordId: 'user-35',
+      });
+      session.rewindToTurn(target!.turnIndex, {
+        rewindFiles: false,
+        snapshotIndex: target!.snapshotIndex,
+      });
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(68);
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
+        snapshots.slice(0, 10),
+      );
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        34,
+        expect.anything(),
+        snapshots.slice(0, 10),
+        expect.anything(),
+      );
+    });
+
+    it.each([
+      'missing',
+      'duplicate',
+      'compacted',
+      'persisted-mismatch',
+      'duplicate-api',
+      'duplicate-snapshot',
+    ])(
+      'rejects %s rewind identity without mutating history',
+      async (failure) => {
+        const { history, records, snapshots } = identifiedHistory();
+        if (failure === 'missing') delete records[34]!.promptId;
+        if (failure === 'duplicate') records[33]!.promptId = records[34]!.promptId;
+        if (failure === 'compacted') {
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history.slice(48));
+        }
+        if (failure === 'persisted-mismatch') records.pop();
+        if (failure === 'duplicate-api') history.push(history[68]!);
+        if (failure === 'duplicate-snapshot') snapshots.push(snapshots[10]!);
+        expect(
+          await session.resolveRewindTarget('test-session-id########35'),
+        ).toBeUndefined();
+        expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+      },
+    );
+
     it('clears the active-todo chain so a rewound turn starts fresh', async () => {
       // A registered reminder would otherwise make the post-rewind turn
       // continue the rewound-away chain (#10953 regression).
