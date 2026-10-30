@@ -9,9 +9,74 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
 function renderError(error: Error): string {
-  const name = typeof error.name === 'string' ? error.name : 'Error';
-  const message = String(error.message ?? '');
-  return `${name}: ${message}`;
+  const ancestors = new Set<Error>();
+  let remaining = 32;
+  let text = '';
+  let full = false;
+  const append = (part: string) => {
+    if (full) return;
+    const next = text + part;
+    full = next.length > 4_096;
+    text = truncateWorkflowText(next, 4_096);
+  };
+  const visit = (value: unknown, depth: number): void => {
+    if (full) return;
+    if (depth > 4 || remaining-- <= 0) {
+      append('… (truncated)');
+      return;
+    }
+    let enteredError: Error | undefined;
+    try {
+      if (!types.isNativeError(value)) {
+        append(String(value));
+        return;
+      }
+      if (ancestors.has(value)) {
+        append('[Circular error]');
+        return;
+      }
+      enteredError = value;
+      ancestors.add(value);
+      const name = value.name;
+      append(
+        `${typeof name === 'string' ? name : 'Error'}: ${String(value.message ?? '')}`,
+      );
+      // Native cause/errors are data properties. Do not execute user getters.
+      const errors = Object.getOwnPropertyDescriptor(value, 'errors')?.value;
+      let length = 0;
+      try {
+        length = Array.isArray(errors) ? Number(errors.length) : 0;
+      } catch {
+        append(' [errors: [unrenderable object]]');
+      }
+      if (length > 0) {
+        append(' [errors: ');
+        const count = Math.min(length, 8);
+        for (let i = 0; i < count; i++) {
+          if (i > 0) append('; ');
+          try {
+            visit(errors[i], depth + 1);
+          } catch {
+            append('[unrenderable object]');
+          }
+        }
+        if (length > count) append('; … (truncated)');
+        append(']');
+      }
+      const cause = Object.getOwnPropertyDescriptor(value, 'cause')?.value;
+      if (cause !== undefined) {
+        append(' [cause: ');
+        visit(cause, depth + 1);
+        append(']');
+      }
+    } catch {
+      append(`[unrenderable ${typeof value}]`);
+    } finally {
+      if (enteredError) ancestors.delete(enteredError);
+    }
+  };
+  visit(error, 0);
+  return text;
 }
 
 export function workflowResultReplacer(_key: string, value: unknown): unknown {

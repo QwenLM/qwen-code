@@ -35,7 +35,7 @@ it('serves the settings page without claiming the settings source module', async
   const server = await createServer({
     ...loadConfig(),
     configFile: false,
-    server: { host: '127.0.0.1', port: 0 },
+    server: { host: '127.0.0.1', port: 0, preTransformRequests: false },
   });
   onTestFinished(() => server.close());
   await server.listen();
