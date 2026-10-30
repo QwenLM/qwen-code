@@ -1353,6 +1353,26 @@ describe('SDK Java self-hosted workflow guards', () => {
 // trusted runs onto the ECS pool (a seconds-long scan sat 26 minutes in the
 // hosted queue); untrusted fork PRs stay hosted.
 describe('SDK Java Flyway migration version guard', () => {
+  it('checks exactly the SQL locations scanned by both runtime entry points', () => {
+    const root = 'packages/managed-agent-server/src/main';
+    const application = parse(
+      readFileSync(`${root}/resources/application.yml`, 'utf8'),
+    );
+    const schema = readFileSync(
+      `${root}/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchema.java`,
+      'utf8',
+    );
+    const locations = LOCATIONS.map(({ dir, suffix }) => {
+      expect(suffix).toBe('.sql');
+      expect(dir.slice(0, 3)).toEqual(['src', 'main', 'resources']);
+      return `classpath:${dir.slice(3).join('/')}`;
+    });
+    expect(locations).toEqual([application.spring.flyway.locations]);
+    expect(locations).toEqual([
+      schema.match(/FLYWAY_LOCATION\s*=\s*"([^"]+)"/)?.[1],
+    ]);
+  });
+
   it('runs the uniqueness check as an unconditional job', () => {
     const block = job('flyway-migrations');
     const parsed = parse(workflow).jobs['flyway-migrations'];

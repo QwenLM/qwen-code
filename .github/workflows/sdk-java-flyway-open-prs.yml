@@ -17,11 +17,7 @@ on:
     branches:
       - 'main'
     paths:
-      - 'packages/sdk-java/*/src/main/resources/db/migration/**'
-      - 'packages/sdk-java/*/src/main/java/db/migration/**'
       - 'packages/sdk-java/*/src/main/resources/db/managed-schema/**'
-      - 'packages/managed-agent-server/src/main/resources/db/migration/**'
-      - 'packages/managed-agent-server/src/main/java/db/migration/**'
       - 'packages/managed-agent-server/src/main/resources/db/managed-schema/**'
       - 'scripts/check-flyway-open-prs.js'
       - 'scripts/flyway-migration-utils.js'

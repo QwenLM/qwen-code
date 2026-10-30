@@ -23,13 +23,12 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-// A Maven module holding the two migration locations that share one Flyway
-// version sequence: SQL under resources, BaseJavaMigration classes under the
-// db.migration package.
+// SQL migrations use the runtime's configured managed-schema location;
+// Java fixtures exercise the retired migration package.
 function module(name, { sql = [], java = [] } = {}) {
   const dir = join(root, name);
   for (const file of sql) {
-    const target = join(dir, 'src/main/resources/db/migration', file);
+    const target = join(dir, 'src/main/resources/db/managed-schema', file);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, '');
   }
@@ -65,10 +64,14 @@ const newlineNamesWork = (() => {
 })();
 
 describe('check-flyway-migrations', () => {
-  it('passes when every version is claimed once across both locations', () => {
+  it('passes when every version is claimed once in the runtime location', () => {
     const dir = module('server', {
-      sql: ['V1__core.sql', 'V2__store.sql', 'V16__evidence.sql'],
-      java: ['V15__event_identity.java'],
+      sql: [
+        'V1__core.sql',
+        'V2__store.sql',
+        'V15__event_identity.sql',
+        'V16__evidence.sql',
+      ],
     });
     const result = check(dir);
     expect(result.output).toContain('4 migrations, all versions unique');
@@ -87,18 +90,21 @@ describe('check-flyway-migrations', () => {
     expect(result.status).toBe(1);
   });
 
-  it('sees a collision between the SQL and the Java location', () => {
+  it('rejects a retired Java migration without treating it as a collision', () => {
     const dir = module('server', {
       sql: ['V15__event_identity.sql'],
       java: ['V15__event_identity.java'],
     });
     const result = check(dir);
-    expect(result.output).toContain('2 migrations claim version 15');
+    expect(result.output).toContain('V15__event_identity.java');
+    expect(result.output).toContain('src/main/resources/db/managed-schema');
+    expect(result.output).not.toContain('migrations claim version');
+    expect(result.output).not.toContain('all versions unique');
     expect(result.status).toBe(1);
   });
 
   it('sees a collision between two modules of one invocation', () => {
-    // Flyway resolves classpath:db/migration across every jar on the
+    // Flyway resolves classpath:db/managed-schema across every jar on the
     // classpath, so a version claimed in two modules collides exactly like
     // two files in one module do.
     const first = module('first', { sql: ['V1__x.sql'] });
@@ -123,12 +129,9 @@ describe('check-flyway-migrations', () => {
     expect(check(distinct).status).toBe(0);
   });
 
-  it('equates the underscore a Java migration uses for a dotted version', () => {
-    // A Java class name cannot contain a dot, so a Java migration writes
-    // V1_1 for what SQL writes as V1.1; Flyway equates the two.
+  it('equates underscore and dotted versions', () => {
     const dir = module('server', {
-      sql: ['V1.1__a.sql'],
-      java: ['V1_1__b.java'],
+      sql: ['V1.1__a.sql', 'V1_1__b.sql'],
     });
     const result = check(dir);
     expect(result.output).toContain('2 migrations claim version 1.1');
@@ -181,15 +184,30 @@ describe('check-flyway-migrations', () => {
     expect(result.output).toContain('1 migrations, all versions unique');
   });
 
-  it('detects a baseline collision across registered SQL locations', () => {
-    const dir = module('broker', { sql: ['V1__legacy.sql'] });
-    const baseline = join(dir, 'src/main/resources/db/managed-schema');
-    mkdirSync(baseline, { recursive: true });
-    writeFileSync(join(baseline, 'V1__managed_schema.sql'), '');
+  it('rejects a retired SQL migration without treating it as a collision', () => {
+    const dir = module('broker', { sql: ['V1__managed_schema.sql'] });
+    const legacy = join(dir, 'src/main/resources/db/migration');
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, 'V1__legacy.sql'), '');
     const result = check(dir);
     expect(result.status).toBe(1);
-    expect(result.output).toContain('2 migrations claim version 1');
+    expect(result.output).toContain(
+      'found migration files outside src/main/resources/db/managed-schema',
+    );
+    expect(result.output).toContain('V1__legacy.sql');
+    expect(result.output).not.toContain('migrations claim version');
     expect(result.output).not.toContain('found no migration under');
+  });
+
+  it('rejects a unique SQL migration in the retired directory', () => {
+    const dir = module('server', { sql: ['V1__managed_schema.sql'] });
+    const legacy = join(dir, 'src/main/resources/db/migration');
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, 'V2__legacy.sql'), '');
+    const result = check(dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('V2__legacy.sql');
+    expect(result.output).not.toContain('all versions unique');
   });
 
   it('scans subdirectories, which Flyway scans too', () => {
@@ -213,7 +231,7 @@ describe('check-flyway-migrations', () => {
   it('fails when a location rename would empty the guard', () => {
     const dir = module('server', { sql: ['V1__a.sql'] });
     rmSync(join(dir, 'src'), { recursive: true });
-    mkdirSync(join(dir, 'src/main/resources/db/migrations'), {
+    mkdirSync(join(dir, 'src/main/resources/db/managed-schemas'), {
       recursive: true,
     });
     const result = check(dir);
@@ -221,48 +239,44 @@ describe('check-flyway-migrations', () => {
     expect(result.status).toBe(1);
   });
 
-  it('fails when the SQL location moved but the Java location stayed', () => {
-    // Only one of the two locations moving must not pass vacuously: the
-    // aggregate count still sees the Java migration, but the renamed-away
-    // SQL population — the one #12940 collided in — is no longer scanned.
+  it('rejects retired SQL and Java migrations without an active location', () => {
     const dir = module('server', { java: ['V15__event_identity.java'] });
-    const moved = join(dir, 'src/main/resources/db/migrations');
+    const moved = join(dir, 'src/main/resources/db/migration');
     mkdirSync(moved, { recursive: true });
     writeFileSync(join(moved, 'V16__a.sql'), '');
     writeFileSync(join(moved, 'V16__b.sql'), '');
     const result = check(dir);
     expect(result.output).toContain(
-      'found no migration under src/main/resources/db/migration',
+      'found no migration under src/main/resources/db/managed-schema',
     );
     // A moved location is an error, not a smaller scan: no clean summary.
     expect(result.output).not.toContain('all versions unique');
+    expect(result.output).not.toContain('migrations claim version');
     expect(result.status).toBe(1);
   });
 
-  it('fails when the Java location moved but the SQL location stayed', () => {
-    // The twin of the case above, and the live layout: managed-agent-server
-    // really carries its V15 under src/main/java/db/migration, so a package
-    // rename there must fail rather than print "all versions unique" from a
-    // scan that skipped it.
+  it('rejects Java migrations outside the retired package too', () => {
     const dir = module('server', { sql: ['V15__a.sql'] });
-    const moved = join(dir, 'src/main/java/db/migrations');
+    const moved = join(dir, 'src/main/java/com/example');
     mkdirSync(moved, { recursive: true });
     writeFileSync(join(moved, 'V15__b.java'), '');
     const result = check(dir);
     expect(result.output).toContain(
-      'found no migration under src/main/java/db/migration',
+      'found migration files outside src/main/resources/db/managed-schema',
     );
     expect(result.output).not.toContain('all versions unique');
     expect(result.status).toBe(1);
   });
 
-  it('fails when the location was renamed outside the migration* family', () => {
+  it('fails when the location was renamed outside the managed-schema family', () => {
     // The ownership predicate cannot key on the two exact directory names:
-    // db/changelog holds the whole sequence, no db/migration* sibling exists
+    // db/changelog holds the whole sequence, no db/managed-schema* sibling exists
     // anywhere, and a name-keyed probe passes silently on exactly the
     // collision the guard exists for.
     const dir = module('server', { sql: ['V16__a.sql', 'V16__b.sql'] });
-    rmSync(join(dir, 'src/main/resources/db/migration'), { recursive: true });
+    rmSync(join(dir, 'src/main/resources/db/managed-schema'), {
+      recursive: true,
+    });
     const moved = join(dir, 'src/main/resources/db/changelog');
     mkdirSync(moved, { recursive: true });
     writeFileSync(join(moved, 'V16__a.sql'), '');
@@ -285,7 +299,7 @@ describe('check-flyway-migrations', () => {
     const result = check(dir);
     expect(result.status).toBe(1);
     expect(result.output).toContain(
-      'found migration files outside src/main/resources/db/migration',
+      'found migration files outside src/main/resources/db/managed-schema',
     );
     // path.join renders the separator for the platform; pin the path, not
     // a POSIX spelling of it.
@@ -311,27 +325,27 @@ describe('check-flyway-migrations', () => {
     expect(result.output).not.toContain('claim version 99');
   });
 
-  it('scans a Java-only module for collisions instead of misreading it as moved', () => {
-    // No src/main/resources at all: a module carrying only BaseJavaMigration
-    // classes owns a sequence like any other, so one class passes and two
-    // classes claiming one version fail by name.
+  it('rejects Java-only modules without counting their versions', () => {
     const single = module('single', { java: ['V15__event_identity.java'] });
     const one = check(single);
-    expect(one.output).toContain('1 migrations, all versions unique');
-    expect(one.status).toBe(0);
+    expect(one.output).toContain('V15__event_identity.java');
+    expect(one.output).not.toContain('all versions unique');
+    expect(one.status).toBe(1);
     const dup = module('dup', { java: ['V15__a.java', 'V15__b.java'] });
     const two = check(dup);
-    expect(two.output).toContain('2 migrations claim version 15');
+    expect(two.output).toContain('V15__a.java');
+    expect(two.output).toContain('V15__b.java');
+    expect(two.output).not.toContain('migrations claim version');
     expect(two.status).toBe(1);
   });
 
   it('passes a module whose only SQL file is not a versioned migration', () => {
     const dir = module('server', {
       sql: ['R__view.sql'],
-      java: ['V1__x.java'],
+      java: ['package-info.java'],
     });
     const result = check(dir);
-    expect(result.output).toContain('1 migrations, all versions unique');
+    expect(result.output).toContain('no migration directories');
     expect(result.status).toBe(0);
   });
 

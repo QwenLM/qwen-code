@@ -85,8 +85,12 @@ async function fixture(root) {
       JSON.stringify({ info: { version: '1.46.0' } }),
     'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
       'select 1;',
-    'packages/managed-agent-server/src/main/java/db/migration/V9__latest.java':
-      'class Latest {}',
+    'packages/managed-agent-server/src/main/resources/db/managed-schema/V9__latest.sql':
+      'select 9;',
+    'packages/managed-agent-server/src/main/resources/db/migration/V99__retired.sql':
+      'select 99;',
+    'packages/managed-agent-server/src/main/java/db/migration/V100__retired.java':
+      'class Retired {}',
     'packages/cli/src/serve/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
     'packages/cli/src/serve/managed-runtime-broker-client.ts':

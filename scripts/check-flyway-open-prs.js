@@ -27,6 +27,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   LOCATIONS,
+  MIGRATION_SOURCES,
   isMigrationFile,
   migrationFiles,
   migrationVersion,
@@ -88,9 +89,9 @@ const neutralize = (text) =>
   text.replace(/\s+/g, ' ').replace(/::/g, ';;').replace(/##\[/g, '##［');
 
 // Flyway scans each location's subdirectories too.
-const isTracked = (modules, file) =>
+const isTracked = (modules, file, locations) =>
   modules.some((module) =>
-    LOCATIONS.some(
+    locations.some(
       (location) =>
         file.startsWith(`${[module, ...location.dir].join('/')}/`) &&
         isMigrationFile(path.posix.basename(file), location.suffix),
@@ -189,7 +190,7 @@ function evaluate(modules, mainFiles, prs) {
             )
           : file.path,
       }))
-      .filter((file) => isTracked(modules, file.path));
+      .filter((file) => isTracked(modules, file.path, MIGRATION_SOURCES));
     const deleted = new Set(
       touched
         .filter((file) => file.changeType === 'DELETED')
@@ -198,18 +199,23 @@ function evaluate(modules, mainFiles, prs) {
     const kept = touched
       .filter((file) => file.changeType !== 'DELETED')
       .map((file) => file.path);
+    const misplaced = kept.filter(
+      (file) => !isTracked(modules, file, LOCATIONS),
+    );
+    const valid = kept.filter((file) => isTracked(modules, file, LOCATIONS));
     return {
       pr,
+      misplaced,
       // The merge result. The API does not name a renamed file's old path,
       // so a migration the PR renames away from main still counts here —
       // which can only over-report.
       merged: [
         ...new Set([
           ...mainFiles.filter((file) => !deleted.has(file)),
-          ...kept,
+          ...valid,
         ]),
       ],
-      added: kept.filter((file) => !onMain.has(file)),
+      added: valid.filter((file) => !onMain.has(file)),
     };
   });
   const claimedBy = new Map();
@@ -223,14 +229,18 @@ function evaluate(modules, mainFiles, prs) {
     }
   }
   return claims
-    .filter(({ pr, added }) => pr.incomplete || pr.current || added.length > 0)
-    .map(({ pr, merged, added }) => {
+    .filter(
+      ({ pr, added, misplaced }) =>
+        pr.incomplete || pr.current || added.length > 0 || misplaced.length > 0,
+    )
+    .map(({ pr, merged, added, misplaced }) => {
       const versions = [...new Set(added.map(versionOf))];
       return {
         number: pr.number,
         sha: pr.sha,
         incomplete: pr.incomplete,
         current: pr.current,
+        misplaced,
         collisions: versions
           .map((version) => ({
             version,
@@ -264,7 +274,10 @@ function evaluate(modules, mainFiles, prs) {
 function statusFor(verdict) {
   let state;
   let text;
-  if (verdict.collisions.length > 0) {
+  if (verdict.misplaced.length > 0) {
+    state = 'failure';
+    text = `Migration files outside ${LOCATIONS.map((location) => location.dir.join('/')).join(', ')}: ${verdict.misplaced.map(nameOf).join(', ')}`;
+  } else if (verdict.collisions.length > 0) {
     state = 'failure';
     text = `Version collision when merged into main: ${verdict.collisions
       .map(
