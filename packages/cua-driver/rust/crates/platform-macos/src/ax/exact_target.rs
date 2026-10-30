@@ -158,6 +158,68 @@ pub unsafe fn focused_element_in_window(pid: i32, window_id: u32) -> Option<AXUI
     }
 }
 
+/// Resolve a ViewBridge keyboard receiver without changing the logical window target.
+pub(crate) unsafe fn keyboard_recipient_pid(
+    pid: i32,
+    window_id: Option<u32>,
+    explicit_element: Option<usize>,
+) -> anyhow::Result<i32> {
+    use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
+
+    let Some(wid) = window_id else {
+        return Ok(pid);
+    };
+    let element = match explicit_element {
+        Some(ptr) => AXIdentity::retained(ptr as AXUIElementRef),
+        None => {
+            let Some(ptr) = focused_element_in_window(pid, wid) else {
+                return Ok(pid);
+            };
+            let element = AXIdentity::retained(ptr);
+            CFRelease(ptr as CFTypeRef);
+            element
+        }
+    };
+    let ptr = element.as_ptr() as AXUIElementRef;
+    let _ = AXUIElementSetMessagingTimeout(ptr, 0.1);
+    let Some(actual_pid) = super::bindings::actual_pid_of_element(ptr)
+        .map_err(|error| anyhow::anyhow!("keyboard receiver query failed: {error}"))?
+    else {
+        return Ok(pid);
+    };
+    if actual_pid == pid {
+        return Ok(pid);
+    }
+
+    // Open/Save fields can expose the app PID while their key events belong to
+    // an auxiliary process. Admit only the same focused, exact-window AX object.
+    let mut owner = 0;
+    let focused = focused_element_in_window(pid, wid).map(|focused| {
+        let same = CFEqual(focused as CFTypeRef, ptr as CFTypeRef) != 0;
+        CFRelease(focused as CFTypeRef);
+        same
+    });
+    if AXUIElementGetPid(ptr, &mut owner) != kAXErrorSuccess
+        || owner != pid
+        || element_window_id(ptr) != Some(wid)
+        || copy_bool_attr(ptr, "AXFocused") != Some(true)
+        || focused != Some(true)
+        || !crate::windows::window_info_by_id(wid).is_some_and(|window| window.pid == pid)
+    {
+        anyhow::bail!("keyboard receiver no longer belongs to the focused target window");
+    }
+    let auxiliary = NSRunningApplication::runningApplicationWithProcessIdentifier(actual_pid)
+        .is_some_and(|app| {
+            !app.isTerminated()
+                && app.isFinishedLaunching()
+                && app.activationPolicy() == NSApplicationActivationPolicy::Prohibited
+        });
+    if !auxiliary {
+        anyhow::bail!("keyboard receiver is not a live auxiliary process");
+    }
+    Ok(actual_pid)
+}
+
 // WKWebView can expose AXFocused on its input while the application's
 // AXFocusedUIElement is empty. Never infer focus from a cached observation.
 unsafe fn focused_text_descendant(pid: i32, window_id: u32) -> Option<AXUIElementRef> {
@@ -462,6 +524,14 @@ pub fn gather_background_facts(
 #[cfg(test)]
 mod tests {
     use super::{attached_sheet_record, count_competing_keyboard_destinations, AxWindowRecord};
+
+    #[test]
+    fn windowless_keyboard_delivery_does_not_follow_an_unbound_element() {
+        assert_eq!(
+            unsafe { super::keyboard_recipient_pid(42, None, Some(usize::MAX)) }.unwrap(),
+            42
+        );
+    }
 
     fn ax_window(window_id: u32, minimized: Option<bool>) -> AxWindowRecord {
         AxWindowRecord {

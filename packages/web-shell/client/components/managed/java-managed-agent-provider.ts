@@ -210,7 +210,7 @@ export function createJavaManagedAgentProvider(
     },
     exportSnapshot: (sessionId, request) =>
       client.exportSnapshot(
-        { sessionId, cursor: request.cursor, limit: 100, view: 'messages' },
+        { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
     exportConsistency: 'live',
@@ -877,7 +877,6 @@ export function createJavaManagedAgentProvider(
           sessionId,
           cursor: request.before,
           limit: request.limit,
-          view: 'messages',
         },
         request.signal,
       );
