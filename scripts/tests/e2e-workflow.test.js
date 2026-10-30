@@ -1270,6 +1270,13 @@ describe('e2e workflow', () => {
         String(job['runs-on'] ?? '').includes('ecs-qwen'),
       );
       expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
+      // The leg's heal body is pinned in full by the docker-lock ownership
+      // suite above, so comparing every pool job against that one body keeps
+      // a build-side edit from dropping the `sudo -n` fallbacks that let the
+      // next checkout survive root-owned leftovers.
+      const pinnedHeal = yml.jobs['e2e-test-linux'].steps.find(
+        (step) => step.name === 'Restore workspace ownership',
+      );
       for (const [id, job] of poolJobs) {
         const steps = job.steps ?? [];
         const names = steps.map((step) => step.name);
@@ -1307,11 +1314,20 @@ describe('e2e workflow', () => {
         expect(hostedNode?.if, id).toBe(
           "${{ runner.environment == 'github-hosted' }}",
         );
-        const npmCache = steps.find(
-          (step) =>
-            step.name === 'Configure persistent npm cache (self-hosted)',
+        const npmCacheIndex = names.indexOf(
+          'Configure persistent npm cache (self-hosted)',
         );
-        expect(npmCache, id).toBeDefined();
+        // Presence alone is not the contract here either: below the install it
+        // exports NPM_CONFIG_CACHE after npm has already picked a cache, so
+        // the pool re-downloads through the slow egress this step avoids, and
+        // without the `if:` the hosted lane points npm at a directory no cache
+        // step ever restores.
+        expect(npmCacheIndex, id).toBeGreaterThanOrEqual(0);
+        expect(npmCacheIndex, id).toBeLessThan(installIndex);
+        expect(steps[npmCacheIndex]?.if, id).toBe(
+          "${{ runner.environment == 'self-hosted' }}",
+        );
+        expect(heal?.run, id).toBe(pinnedHeal?.run);
       }
     });
   });
