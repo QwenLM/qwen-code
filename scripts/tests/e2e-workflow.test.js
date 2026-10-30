@@ -1270,10 +1270,8 @@ describe('e2e workflow', () => {
         String(job['runs-on'] ?? '').includes('ecs-qwen'),
       );
       expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
-      // The leg's heal body is pinned in full by the docker-lock ownership
-      // suite above, so comparing every pool job against that one body keeps
-      // a build-side edit from dropping the `sudo -n` fallbacks that let the
-      // next checkout survive root-owned leftovers.
+      // Keep the build aligned with the leg, and pin the workspace fallback
+      // chains below so editing both copies cannot silently remove them.
       const pinnedHeal = yml.jobs['e2e-test-linux'].steps.find(
         (step) => step.name === 'Restore workspace ownership',
       );
@@ -1327,7 +1325,19 @@ describe('e2e workflow', () => {
         expect(steps[npmCacheIndex]?.if, id).toBe(
           "${{ runner.environment == 'self-hosted' }}",
         );
+        expect(steps[npmCacheIndex]?.run, id).toContain(
+          'cache_dir="${HOME}/.cache/qwen-code/npm"',
+        );
+        expect(steps[npmCacheIndex]?.run, id).toContain(
+          'echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"',
+        );
         expect(heal?.run, id).toBe(pinnedHeal?.run);
+        expect(heal?.run, id).toContain(
+          'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
+        );
+        expect(heal?.run, id).toContain(
+          'chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE"',
+        );
       }
     });
   });
