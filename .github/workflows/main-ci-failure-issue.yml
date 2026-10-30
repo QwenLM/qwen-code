@@ -335,17 +335,34 @@ jobs:
           # Keep in sync with qwen-autofix.yml's INFRA_FAILURE_SIGNATURES — a
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the issue failure record.
+          # Maven transfer failures are checked separately in failed-step
+          # logs; do not broaden this shared annotation-only signature list.
           # Full rationale → qwen-autofix.md#af-076
           INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 
+          maven_transfer_failure() {
+            local job_id="$1"
+            local log_file="${RUNNER_TEMP}/maven-${job_id}.log"
+            local job
+            job="$(jq -c --argjson id "${job_id}" '.jobs[] | select(.id == $id)' "${jobs_json}")" || return 1
+            # gh can fall back to whole-job logs with UNKNOWN STEP. The helper
+            # requires explicit step names or unambiguous API time windows;
+            # recovered errors in successful steps cannot explain a failure.
+            gh run view --repo "${REPO}" --job "${job_id}" --log-failed \
+              > "${log_file}" 2>/dev/null || return 1
+            node .github/scripts/ci/maven-transfer-failure.mjs "${job}" "${log_file}"
+          }
+
           # A failed job whose annotations carry an infrastructure signature
           # died with the runner, not with the code, and clears on a re-run.
+          # A terminal Maven artifact-transfer failure is also retryable when
+          # every failed step reports only a transient transfer error.
           # Only when EVERY failed job matches — and only on the first
           # attempt, so on main a persistent break still files once the rerun
           # re-fails — does the run get a rerun instead of an issue. Every
-          # read fails CLOSED: an unfetchable or unannotated job, an empty
+          # read fails CLOSED: a job with no conclusive evidence, an empty
           # failure list, and a later main attempt all file exactly as before;
           # a merged PR's later attempt is suppressed by the destination
           # guard.
@@ -353,6 +370,13 @@ jobs:
           if [[ "${RUN_ATTEMPT}" == '1' ]]; then
             total=0
             infra=0
+            # The gate workflow's reporter job is always() and fails with
+            # only the tier-result error, which carries no infrastructure
+            # signature; excluding it by its failing step keeps a lane's
+            # infra death classifiable. Filtering the step rather than the
+            # job keeps the legitimate rerun: when the reporter's own
+            # runner dies no step has failed, so the job still counts and
+            # its GitHub-generated annotation still matches.
             while IFS=$'\t' read -r job_id check_run_id; do
               total=$((total + 1))
               annotations=''
@@ -363,19 +387,13 @@ jobs:
                     --jq '[.[].message] | join("\n")' 2>/dev/null || true
                 )"
               fi
-              if grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${annotations}"; then
+              if grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${annotations}" || \
+                maven_transfer_failure "${job_id}"; then
                 infra=$((infra + 1))
               else
-                echo "Failed job ${job_id} carries no infrastructure annotation; the run gets an issue."
+                echo "Failed job ${job_id} has no conclusive infrastructure failure; the run gets an issue."
               fi
             done < <(
-              # The gate workflow's reporter job is always() and fails with
-              # only the tier-result error, which carries no infrastructure
-              # signature; excluding it by its failing step keeps a lane's
-              # infra death classifiable. Filtering the step rather than the
-              # job keeps the legitimate rerun: when the reporter's own
-              # runner dies no step has failed, so the job still counts and
-              # its GitHub-generated annotation still matches.
               jq -r '.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
                 "${jobs_json}" 2>/dev/null
             )

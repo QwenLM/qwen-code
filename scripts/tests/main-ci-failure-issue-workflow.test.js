@@ -2244,7 +2244,7 @@ printf '%s\\n' '{"jobs":[]}'
       );
     });
 
-    it('fails closed: later attempts, empty failure lists, and unreadable annotations all file', () => {
+    it('fails closed without evidence and never reruns later attempts', () => {
       // The attempt guard is what stops a rerun loop: on main a persistent
       // break re-fails at attempt 2 and files then. Negate it and the pin
       // below goes red.
@@ -2255,10 +2255,20 @@ printf '%s\\n' '{"jobs":[]}'
       expect(infraScript).toContain('"${total}" -gt 0');
       // The default is filing: the flag flips only inside the guarded block.
       expect(infraScript).toContain('infra_only=false');
-      // An errored annotations fetch must degrade to "not infrastructure",
-      // never abort the step or fabricate a match.
+      // An errored annotations fetch must never abort or fabricate a match;
+      // the log fallback still needs independent evidence.
       expect(infraScript).toContain(
         '--jq \'[.[].message] | join("\\n")\' 2>/dev/null || true',
+      );
+    });
+
+    it('reads failed-step logs through gh in the read-only analyze job', () => {
+      expect(infraScript).toContain(
+        'gh run view --repo "${REPO}" --job "${job_id}" --log-failed',
+      );
+      expect(infraScript).toContain('maven-transfer-failure.mjs');
+      expect(JSON.stringify(rerunJob)).not.toContain(
+        'maven-transfer-failure.mjs',
       );
     });
 
@@ -2269,9 +2279,10 @@ printf '%s\\n' '{"jobs":[]}'
     // of rerunning. These cases run the step body against fixture job lists.
     const failedJob = (id, checkId, steps) => ({
       id,
+      name: `Java job ${id}`,
       conclusion: 'failure',
       check_run_url: `https://api.github.com/repos/QwenLM/qwen-code/check-runs/${checkId}`,
-      steps,
+      steps: steps.map((step, index) => ({ number: index + 1, ...step })),
     });
     const REPORTER_STEP = 'Report the tier result';
     const reporterJob = (id, checkId) =>
@@ -2280,7 +2291,7 @@ printf '%s\\n' '{"jobs":[]}'
         { name: REPORTER_STEP, conclusion: 'failure' },
         { name: 'Complete job', conclusion: 'success' },
       ]);
-    const classify = (jobs, annotations) => {
+    const classify = (jobs, annotations, { logs = {}, attempt = 1 } = {}) => {
       const tmp = mkdtempSync(join(tmpdir(), 'infra-classify-'));
       try {
         const bin = join(tmp, 'bin');
@@ -2289,8 +2300,25 @@ printf '%s\\n' '{"jobs":[]}'
           join(bin, 'gh'),
           [
             '#!/usr/bin/env bash',
-            'id="$(printf \'%s \' "$@" | grep -oE \'check-runs/[0-9]+\' | cut -d/ -f2)"',
-            'cat "${ANN_DIR}/${id}.txt" 2>/dev/null || true',
+            'if [[ "$1" == api ]]; then',
+            '  id="$(printf \'%s \' "$@" | grep -oE \'check-runs/[0-9]+\' | cut -d/ -f2)"',
+            '  cat "${ANN_DIR}/${id}.txt" 2>/dev/null',
+            'elif [[ "$1" == run && "$2" == view ]]; then',
+            '  shift 2',
+            '  while [[ "$#" -gt 0 ]]; do',
+            '    case "$1" in',
+            '      --repo) repo="$2"; shift 2 ;;',
+            '      --job) id="$2"; shift 2 ;;',
+            '      --log-failed) failed=true; shift ;;',
+            '      *) exit 64 ;;',
+            '    esac',
+            '  done',
+            '  [[ "$repo" == QwenLM/qwen-code && "$failed" == true ]] || exit 64',
+            '  cat "${LOG_DIR}/${id}.txt" 2>/dev/null || exit 1',
+            '  exit "$(cat "${LOG_DIR}/${id}.status")"',
+            'else',
+            '  exit 64',
+            'fi',
           ].join('\n'),
         );
         chmodSync(join(bin, 'gh'), 0o755);
@@ -2298,6 +2326,18 @@ printf '%s\\n' '{"jobs":[]}'
         mkdirSync(annDir);
         for (const [id, message] of Object.entries(annotations)) {
           writeFileSync(join(annDir, `${id}.txt`), message);
+        }
+        const logDir = join(tmp, 'logs');
+        mkdirSync(logDir);
+        for (const [id, log] of Object.entries(logs)) {
+          writeFileSync(
+            join(logDir, `${id}.txt`),
+            typeof log === 'string' ? log : log.stdout,
+          );
+          writeFileSync(
+            join(logDir, `${id}.status`),
+            String(typeof log === 'string' ? 0 : log.exitCode),
+          );
         }
         writeFileSync(join(tmp, 'run-jobs.json'), JSON.stringify({ jobs }));
         const output = join(tmp, 'output');
@@ -2310,11 +2350,12 @@ printf '%s\\n' '{"jobs":[]}'
             env: {
               PATH: `${bin}:${process.env.PATH}`,
               RUNNER_TEMP: tmp,
-              RUN_ATTEMPT: '1',
+              RUN_ATTEMPT: String(attempt),
               REPO: 'QwenLM/qwen-code',
               GH_TOKEN: 'fake',
               INFRA_FAILURE_SIGNATURES: infraStep.env.INFRA_FAILURE_SIGNATURES,
               ANN_DIR: annDir,
+              LOG_DIR: logDir,
               GITHUB_OUTPUT: output,
             },
             encoding: 'utf8',
@@ -2379,6 +2420,248 @@ printf '%s\\n' '{"jobs":[]}'
         },
       );
       expect(out).toContain('infra_only=false');
+    });
+
+    const mavenFailure = (reason = 'status: 503 Service Unavailable') => [
+      '[INFO] Scanning for projects...',
+      '[INFO] Building infra-probe 1.0',
+      '[INFO] ------------------------------------------------------------------------',
+      '[INFO] BUILD FAILURE',
+      '[INFO] ------------------------------------------------------------------------',
+      '[INFO] Total time:  0.118 s',
+      '[INFO] Finished at: 2026-10-17T15:34:20Z',
+      '[INFO] ------------------------------------------------------------------------',
+      '[ERROR] Plugin org.apache.maven.plugins:maven-resources-plugin:2.6 or one of its dependencies could not be resolved: Failed to read artifact descriptor for org.apache.maven.plugins:maven-resources-plugin:jar:2.6: Could not transfer artifact org.apache.maven.plugins:maven-resources-plugin:pom:2.6 from/to central (https://repo.maven.apache.org/maven2/): transfer failed for https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-resources-plugin/2.6/maven-resources-plugin-2.6.pom, ' +
+        reason +
+        ' -> [Help 1]',
+      '[ERROR]',
+      '[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.',
+      '[ERROR] Re-run Maven using the -X switch to enable full debug logging.',
+      '[ERROR]',
+      '[ERROR] For more information about the errors and possible solutions, please read the following articles:',
+      '[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/PluginResolutionException',
+      '##[error]Process completed with exit code 1.',
+    ];
+    const javaJob = () =>
+      failedJob(1001, 9001, [
+        { name: 'Set up job', conclusion: 'success' },
+        { name: 'Compile Java', conclusion: 'failure' },
+        { name: 'Complete job', conclusion: 'success' },
+      ]);
+    const stepLog = (job, stepName, lines) =>
+      lines
+        .map(
+          (line) =>
+            `${job.name}\t${stepName}\t2026-10-17T15:34:20.0000000Z ${line}`,
+        )
+        .join('\n') + '\n';
+    const genericAnnotation = { 9001: 'Process completed with exit code 1.' };
+
+    it.each([
+      'status: 502 Bad Gateway',
+      'status: 503 Service Unavailable',
+      'status: 504 Gateway Timeout',
+      'Read timed out',
+      'Connection timed out',
+      'Connection reset',
+    ])('reruns terminal Maven artifact transfer failures: %s', (reason) => {
+      const job = javaJob();
+      expect(
+        classify([job], genericAnnotation, {
+          logs: { 1001: stepLog(job, 'Compile Java', mavenFailure(reason)) },
+        }),
+      ).toContain('infra_only=true');
+    });
+
+    it('still accepts Maven evidence when the annotation read fails', () => {
+      const job = javaJob();
+      expect(
+        classify(
+          [job],
+          {},
+          {
+            logs: { 1001: stepLog(job, 'Compile Java', mavenFailure()) },
+          },
+        ),
+      ).toContain('infra_only=true');
+    });
+
+    it.each([false, true])(
+      'checks whole-job BOM logs against step time boundaries (overlap: %s)',
+      (overlap) => {
+        const job = javaJob();
+        const intervals = [
+          ['00', '01'],
+          ['02', '20'],
+          [overlap ? '20' : '21', '22'],
+        ];
+        job.steps.forEach((step, index) => {
+          step.started_at = `2026-10-17T15:34:${intervals[index][0]}Z`;
+          step.completed_at = `2026-10-17T15:34:${intervals[index][1]}Z`;
+        });
+        const log = [
+          stepLog(job, 'UNKNOWN STEP', ['Preparing job']).replaceAll(
+            '15:34:20.',
+            '15:34:00.',
+          ),
+          stepLog(job, 'UNKNOWN STEP', mavenFailure()),
+          stepLog(job, 'UNKNOWN STEP', ['Post job cleanup.']).replaceAll(
+            '15:34:20.',
+            '15:34:21.',
+          ),
+        ]
+          .join('')
+          .replaceAll('\t2026-', '\t\uFEFF2026-');
+        expect(
+          classify([job], genericAnnotation, { logs: { 1001: log } }),
+        ).toContain(`infra_only=${!overlap}`);
+      },
+    );
+
+    it.each([
+      'status: 401 Unauthorized',
+      'status: 403 Forbidden',
+      'status: 404 Not Found',
+      'status: 429 Too Many Requests',
+      'Could not find artifact org.example:missing:jar:1.0 in central',
+    ])('files non-transient Maven failures: %s', (reason) => {
+      const job = javaJob();
+      expect(
+        classify([job], genericAnnotation, {
+          logs: { 1001: stepLog(job, 'Compile Java', mavenFailure(reason)) },
+        }),
+      ).toContain('infra_only=false');
+    });
+
+    it.each([
+      '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.14.0:compile (default-compile) on project example: Compilation failure: cannot find symbol -> [Help 1]',
+      '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.3:test (default-test) on project example: There are test failures. -> [Help 1]',
+    ])('files when a later Maven error is a code failure: %s', (error) => {
+      const job = javaJob();
+      const lines = mavenFailure();
+      lines.splice(-1, 0, error);
+      expect(
+        classify([job], genericAnnotation, {
+          logs: { 1001: stepLog(job, 'Compile Java', lines) },
+        }),
+      ).toContain('infra_only=false');
+    });
+
+    it('does not let a recovered transfer error hide a later shell failure', () => {
+      const job = javaJob();
+      const lines = mavenFailure().slice(0, -1);
+      lines.push(
+        '[INFO] BUILD SUCCESS',
+        'Schema verification failed',
+        '##[error]Process completed with exit code 1.',
+      );
+      expect(
+        classify([job], genericAnnotation, {
+          logs: { 1001: stepLog(job, 'Compile Java', lines) },
+        }),
+      ).toContain('infra_only=false');
+    });
+
+    it('does not use a successful step network error to explain the failed step', () => {
+      const job = javaJob();
+      job.steps = [
+        { name: 'Set up job', conclusion: 'success' },
+        { name: 'Warm Maven cache', conclusion: 'success' },
+        { name: 'Compile Java', conclusion: 'failure' },
+        { name: 'Complete job', conclusion: 'success' },
+      ].map((step, index) => ({ number: index + 1, ...step }));
+      const logs =
+        stepLog(job, 'Warm Maven cache', mavenFailure()) +
+        stepLog(job, 'Compile Java', [
+          '[ERROR] COMPILATION ERROR :',
+          '[ERROR] cannot find symbol',
+          '##[error]Process completed with exit code 1.',
+        ]);
+      expect(
+        classify([job], genericAnnotation, { logs: { 1001: logs } }),
+      ).toContain('infra_only=false');
+    });
+
+    it('requires every failed step of a job to be a Maven transfer failure', () => {
+      const job = javaJob();
+      job.steps.push({ number: 4, name: 'Run tests', conclusion: 'failure' });
+      const logs =
+        stepLog(job, 'Compile Java', mavenFailure()) +
+        stepLog(job, 'Run tests', [
+          'AssertionError: expected the daemon to answer',
+          '##[error]Process completed with exit code 1.',
+        ]);
+      expect(
+        classify([job], genericAnnotation, { logs: { 1001: logs } }),
+      ).toContain('infra_only=false');
+    });
+
+    it('reruns when every failed step has its own terminal Maven evidence', () => {
+      const job = javaJob();
+      job.steps.push({ number: 4, name: 'Compile SDK', conclusion: 'failure' });
+      const logs =
+        stepLog(job, 'Compile Java', mavenFailure()) +
+        stepLog(job, 'Compile SDK', mavenFailure('Read timed out'));
+      expect(
+        classify([job], genericAnnotation, { logs: { 1001: logs } }),
+      ).toContain('infra_only=true');
+    });
+
+    it('does not hide a different job failure behind a Maven infrastructure job', () => {
+      const job = javaJob();
+      const other = failedJob(1002, 9002, [
+        { name: 'Run tests', conclusion: 'failure' },
+      ]);
+      expect(
+        classify(
+          [job, other],
+          { ...genericAnnotation, 9002: 'AssertionError' },
+          { logs: { 1001: stepLog(job, 'Compile Java', mavenFailure()) } },
+        ),
+      ).toContain('infra_only=false');
+    });
+
+    it.each(['missing', 'unknown-step', 'failed-command', 'missing-step-log'])(
+      'files when grouped log evidence is unavailable: %s',
+      (scenario) => {
+        const job = javaJob();
+        const log = stepLog(job, 'Compile Java', mavenFailure());
+        let logs = {};
+        if (scenario === 'unknown-step') {
+          logs = { 1001: stepLog(job, 'UNKNOWN STEP', mavenFailure()) };
+        } else if (scenario === 'failed-command') {
+          logs = { 1001: { stdout: log, exitCode: 1 } };
+        } else if (scenario === 'missing-step-log') {
+          job.steps.push({
+            number: 4,
+            name: 'Compile SDK',
+            conclusion: 'failure',
+          });
+          logs = { 1001: log };
+        }
+        expect(classify([job], genericAnnotation, { logs })).toContain(
+          'infra_only=false',
+        );
+      },
+    );
+
+    it('files on the second attempt even with terminal Maven evidence', () => {
+      const job = javaJob();
+      expect(
+        classify([job], genericAnnotation, {
+          attempt: 2,
+          logs: { 1001: stepLog(job, 'Compile Java', mavenFailure()) },
+        }),
+      ).toContain('infra_only=false');
+    });
+
+    it('files an empty failure list even when a log contains a transfer failure', () => {
+      const job = javaJob();
+      expect(
+        classify([], genericAnnotation, {
+          logs: { 1001: stepLog(job, 'Compile Java', mavenFailure()) },
+        }),
+      ).toContain('infra_only=false');
     });
 
     it('reruns the failed jobs once, with actions:write and no PAT or checkout', () => {
