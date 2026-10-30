@@ -38,9 +38,16 @@ jobs:
           $files = @(Get-ChildItem packages/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe' -File -ErrorAction SilentlyContinue)
           if ($files.Count -eq 0) { throw "Official Tauri desktop installer missing" }
           $files | ForEach-Object { Write-Host $_.FullName }
+      - name: Package one-click setup with original desktop installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop-package | Out-Null
+          Copy-Item packages/desktop/src-tauri/target/release/bundle/nsis/*.exe desktop-package/
+          Copy-Item scripts/windows/Setup-Local-Qwen.ps1 desktop-package/
+          Copy-Item scripts/windows/Setup-Local-Qwen.cmd desktop-package/
       - name: Upload original Qwen desktop installer
         uses: actions/upload-artifact@v4
         with:
           name: Qwen-3.8-JailBreak-${{ github.run_number }}
-          path: packages/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          path: desktop-package/
           if-no-files-found: error
