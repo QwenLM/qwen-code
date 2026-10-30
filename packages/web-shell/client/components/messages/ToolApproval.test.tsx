@@ -14,6 +14,7 @@ import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellCustomizationProvider } from '../../customization';
+import styles from './ToolApproval.module.css';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -2061,5 +2062,144 @@ describe('goal approval objective whitespace', () => {
       container!.querySelector('[role="tabpanel"][data-state="active"]')!
         .textContent,
     ).toBe(`${goalNotice}\n\n${goalObjective}`);
+  });
+});
+
+describe('floating variant scroll layout', () => {
+  // Regression guard for the nested-scrollbar bug: in the floating card the
+  // diff line list must defer its scroll to the card's content region (one
+  // scroll container, decision buttons pinned) instead of capping itself at
+  // 400px with a second scrollbar.
+  function renderVariant(
+    variant: 'inline' | 'floating',
+    leadingContent: unknown[] = [],
+  ): void {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-float',
+        kind: 'permission',
+        requestId: 'request-edit-float',
+        sessionId: 'session-edit-float',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            ...leadingContent,
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+              variant={variant}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+  }
+
+  it('lets the diff lines fill the card content region', () => {
+    renderVariant('floating');
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const diffRegion = dialog.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    // The keyboard-inspect path stays intact: the line list is still the
+    // focusable diff region.
+    expect(diffRegion.tabIndex).toBe(0);
+    // ...and it defers its scroll to the region instead of adding a nested
+    // scrollbar of its own.
+    expect(diffRegion.className).toContain('linesFill');
+    // The content region wrapping the diff is a direct child of the card, so
+    // the sheet's flex budget — not a sheet-level scrollbar — absorbs the
+    // diff.
+    const wrapper = diffRegion.closest<HTMLElement>('[data-plan-interactive]')!;
+    expect(wrapper.parentElement).toBe(dialog);
+  });
+
+  it('keeps the exec command region a direct child of the floating sheet', () => {
+    // The `.floating > .code` half of the scroll-region rule (pinned as CSS
+    // text in ToolApproval.css.test.ts) rests on a DOM premise: the command
+    // wrapper is a direct child of the panel that carries .floating. Shell
+    // command approvals are the common floating case, so guard the premise
+    // with a render: wrap the region in one more element and the child
+    // combinator stops matching, the command no longer absorbs the sheet's
+    // overflow, and the decision buttons are clipped again.
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <ToolApproval
+            request={execRequest}
+            onConfirm={onConfirm}
+            variant="floating"
+          />
+        </I18nProvider>,
+      ),
+    );
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    expect(dialog.classList.contains(styles.floating)).toBe(true);
+    expect(
+      Array.from(dialog.children).some((el) =>
+        el.classList.contains(styles.code),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps every region of a compound card a floored direct child of the sheet', () => {
+    // The issue's own reproduction: an outside-workspace write emits a warning
+    // text block before the diff block, so the card renders two sibling
+    // regions. Both must be direct children of the sheet, outside the
+    // .planContent exemption, so `.floating > .content:not(.planContent)`
+    // gives each one the 3.5em floor (pinned in ToolApproval.css.test.ts) and
+    // the warning cannot be squeezed below a readable height by the diff.
+    renderVariant('floating', [
+      {
+        type: 'content',
+        content: { type: 'text', text: 'Path is outside the workspace' },
+      },
+    ]);
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const regions = Array.from(dialog.children).filter((el) =>
+      el.classList.contains(styles.content),
+    );
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.classList.contains(styles.planContent)).toBe(false);
+    }
+    expect(regions[0]!.textContent).toBe('Path is outside the workspace');
+    expect(regions[1]!.hasAttribute('data-plan-interactive')).toBe(true);
+  });
+
+  it('keeps the inline card self-scrolling', () => {
+    renderVariant('inline');
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    expect(diffRegion.className).not.toContain('linesFill');
   });
 });

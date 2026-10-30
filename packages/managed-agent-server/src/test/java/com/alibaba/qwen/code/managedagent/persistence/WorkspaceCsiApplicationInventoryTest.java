@@ -106,9 +106,6 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("INSERT INTO ma_message (tenant_id,session_id,item_id,turn_id,item_type,item_status,attributes_json,"
                         + "first_sequence,last_sequence,gmt_create,gmt_modified,parts_json,body_resource_key)"
                         + " VALUES ('foreign','foreign-session','item','turn','message','completed','{}',1,1,1,1,'[]',?)", resource);
-        jdbc.update("INSERT INTO ma_snapshot (tenant_id,session_id,snapshot_id,snapshot_version,covered_sequence,"
-                        + "projection_version,manifest_resource_key,manifest_sha256,item_count,state,gmt_create,retain_until)"
-                        + " VALUES ('foreign','foreign-session','snapshot',1,1,1,?,?,0,'PUBLISHED',1,2)", resource, sha(bytes));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,artifact_refs_resource_key,gmt_modified)"
                         + " VALUES ('foreign','foreign-session','SESSION','',?,1)", resource);
         String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
@@ -116,7 +113,7 @@ class WorkspaceCsiApplicationInventoryTest {
                         + "tenant_id,session_id,resource_id,gmt_create) VALUES (?,'MESSAGE',?,1,?,'foreign',"
                         + "'foreign-session','original-resource'," + ManagedSchemaTime.SQL_NOW + ")", foreignScope, "a".repeat(64), resource);
         var found = inspect();
-        for (String table : List.of("ma_message", "ma_snapshot", "ma_event_stream", "ma_resource_ref")) {
+        for (String table : List.of("ma_message", "ma_event_stream", "ma_resource_ref")) {
             assertThat(found.blockers()).as(table).anyMatch(blocker -> blocker.table().equals(table)
                     && blocker.code().equals("foreign_original_reference"));
             assertThat(found.table(table).rows()).anyMatch(row -> "foreign".equals(row.text("tenant_id")));
@@ -592,6 +589,20 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(proof.predecessorSequence()).isEqualTo(41);
         assertThat(proof.terminalSequence()).isEqualTo(42);
         assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
+        var journal = baseline.table("ma_session_journal_tx");
+        var activationRow = journal.rows().stream().filter(row -> List.of("installActivation", "renewActivation")
+                .contains(row.text("operation"))).max(java.util.Comparator.comparingLong(row -> row.number("journal_revision"))).orElseThrow();
+        Map<String, byte[]> renewedFields = new java.util.LinkedHashMap<>();
+        activationRow.fields().forEach((field, cell) -> renewedFields.put(field, cell.bytes()));
+        renewedFields.put("activation_lease_until", Long.toString(proof.predecessorActivation().expiresAt()).getBytes(StandardCharsets.UTF_8));
+        renewedFields.put("activation_renewal_seq", Long.toString(proof.predecessorActivation().renewalSequence() + 100).getBytes(StandardCharsets.UTF_8));
+        var renewedRow = WorkspaceCsiApplicationInventory.expectedRow(journal.name(), renewedFields, activationRow.membership());
+        var compactTables = baseline.tables().stream().map(table -> table != journal ? table
+                : new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(),
+                        table.rows().stream().map(row -> row == activationRow ? renewedRow : row).toList())).toList();
+        var compactProof = WorkspaceCsiApplicationHistory.preparedTerminal(WorkspaceCsiApplicationInventory.expectedImage(compactTables), original, body);
+        assertThat(compactProof.predecessorActivation().renewalSequence()).isEqualTo(proof.predecessorActivation().renewalSequence() + 100);
+        assertThat(compactProof.terminalSequence()).isEqualTo(proof.terminalSequence());
         for (var fault : List.of(
                 List.of("ma_resource", "workspace_id", "other"),
                 List.of("ma_resource", "session_scope_key", "b".repeat(64)),
@@ -600,6 +611,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 List.of("ma_resource_ref", "workspace_id", "other"),
                 List.of("ma_resource_ref", "journal_revision", "32"),
                 List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
+                List.of("ma_session_journal_tx", "activation_lease_until", "1"),
                 List.of("ma_session_head", "activation_head_revision", "2"),
                 List.of("ma_session_head", "activation_head_revision", "3"),
                 List.of("ma_session_head", "activation_head_revision", "33"),
@@ -770,7 +782,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(822);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(805);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",

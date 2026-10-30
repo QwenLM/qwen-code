@@ -26,14 +26,20 @@
   overflow-y: auto;
 }
 
-.lines:focus-visible {
-  outline: 2px solid var(--agent-blue-500);
-  outline-offset: 2px;
-}
-
+/* The surrounding region scrolls instead (floating approval card) or the
+   document-mode transcript owns the scroll: the line list fills the region
+   with its full height instead of adding a nested scrollbar. The override
+   carries two classes, so it beats the .lines cap by specificity rather
+   than by file position. */
+.lines.linesFill,
 :global([data-transcript-render-mode='document']) .lines {
   max-height: none;
   overflow-y: visible;
+}
+
+.lines:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
 }
 
 .line {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildContextBoundedDiff,
   buildUnifiedDiff,
+  diffPreviewText,
   DIFF_CRLF_MIXED_MARKER,
   DIFF_CRLF_UNIFORM_MARKER,
   DIFF_OMITTED_MARKER,
@@ -413,10 +414,14 @@ describe('CRLF uniformity is decided at the source layer', () => {
   });
 
   it('keeps the marker out of the bounded hunk arithmetic', () => {
-    const oldText = Array.from({ length: 10 }, (_, i) => `L${i}\r`).join('\n');
-    const newSegments = oldText.split('\n');
-    newSegments[5] = 'X5\r';
-    const newText = newSegments.join('\n');
+    const oldLines = Array.from({ length: 10 }, (_, i) => `L${i}`);
+    const newLines = [...oldLines];
+    newLines[5] = 'X5';
+    // Every line is `\r\n`-terminated, the last one included: a text that ends
+    // at a bare `\r` has no terminator there, and that byte is content rather
+    // than a line ending (see the bare-CR cases above).
+    const oldText = oldLines.map((line) => `${line}\r\n`).join('');
+    const newText = newLines.map((line) => `${line}\r\n`).join('');
     const diff = buildContextBoundedDiff(oldText, newText);
     const parsed = parseUnifiedDiff(diff);
     expect(parsed.crlfUniform).toBe(true);
@@ -482,12 +487,33 @@ it.each([
   },
 );
 
+describe('a bare final CR is content, not a terminator', () => {
+  it('does not certify a pair whose texts end in a bare CR', () => {
+    // `isUniformCrlf` allowed a file whose last line has no terminator, and it
+    // read `a\r` as such a line — but that `\r` was never followed by `\n`, so
+    // it is a byte of content. Certifying it let the renderer strip the byte,
+    // leaving a `+1/-1` badge over two rows that then rendered identically.
+    const diff = buildUnifiedDiff('a\r', 'b\r');
+    expect(diff).not.toContain(DIFF_CRLF_UNIFORM_MARKER);
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('still certifies a pair whose lines end in CRLF', () => {
+    const diff = buildUnifiedDiff('a\r\n', 'b\r\n');
+    expect(diff).toContain(DIFF_CRLF_UNIFORM_MARKER);
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(true);
+  });
+});
+
 // Raw patches reach the renderer through `getRawFileDiff` and never pass
-// through `buildUnifiedDiff` / `buildContextBoundedDiff`, so they carry no
-// `DIFF_CRLF_UNIFORM_MARKER`. The rows themselves still record the terminator,
-// and leaving them unmasked painted a visible `\r` escape chip on every row of
-// a CRLF file's completed diff.
-describe('raw patches infer CRLF uniformity from their own rows', () => {
+// through `buildUnifiedDiff` / `buildContextBoundedDiff`, so no builder saw
+// their source text and none of them carries a verdict marker. Their rows
+// cannot stand in for the missing answer: a patch shows a context window, not
+// the file, and a row cannot distinguish an unterminated final line from an LF
+// line inside a mixed file. Voting on them certified whole-file uniformity
+// from one-sided evidence, so the answer stays "unknown" and the `\r` stays
+// visible as an escape chip.
+describe('raw patches are never certified from their own rows', () => {
   const rawPatch = (rows: string[], terminator = '\n') =>
     [
       'Index: notes.txt',
@@ -499,30 +525,28 @@ describe('raw patches infer CRLF uniformity from their own rows', () => {
       '',
     ].join(terminator);
 
-  it('reports uniform CRLF when every content row keeps its \\r', () => {
+  it('does not certify a patch whose content rows all keep their \\r', () => {
     const patch = rawPatch([' a\r', '-b\r', '+c\r']);
     expect(patch).not.toContain(DIFF_CRLF_UNIFORM_MARKER);
-    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(false);
   });
 
-  it('reports a mixed directory line-ending as non-uniform', () => {
+  it('does not certify a mixed directory line-ending', () => {
     const patch = rawPatch([' a\r', '-b', '+c\r']);
     expect(parseUnifiedDiff(patch).crlfUniform).toBe(false);
   });
 
-  it('reports a bare-LF patch as non-uniform', () => {
+  it('does not certify a bare-LF patch', () => {
     expect(parseUnifiedDiff(rawPatch([' a', '-b', '+c'])).crlfUniform).toBe(
       false,
     );
   });
 
-  it('honours the unterminated-final-line notice rather than voting it down', () => {
-    // `isUniformCrlf` allows one unterminated final line, and jsdiff's real
-    // output marks exactly that row with git's notice. Counting it as a
-    // dissenting vote painted three `\r` chips over a file the builder renders
-    // clean — same bytes, two producers, two renderings. Only the notice lets
-    // a patch claim the allowance; an unmarked unterminated row is still an LF
-    // line in a mixed file.
+  it('does not let the unterminated-final-line notice certify', () => {
+    // The notice says one row really is a file's unterminated last line, which
+    // is what `isUniformCrlf` allows for; it says nothing about the rest of the
+    // file, which the patch cannot show. Reading it as a licence to certify is
+    // the same one-sided inference in a friendlier costume.
     const patch = rawPatch([
       ' a\r',
       '-b\r',
@@ -530,30 +554,60 @@ describe('raw patches infer CRLF uniformity from their own rows', () => {
       '\\ No newline at end of file',
       '+c\r',
     ]);
-    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(false);
   });
 
-  it('does not withhold the vote of a single row that kept its terminator', () => {
-    // The trailing-row exclusion protects a row cut mid-way by `maxLength`,
-    // and it fired on every patch that did not end with `\n` — including one
-    // whose last row is intact and `\r`-terminated, which has no other row to
-    // be judged by.
-    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r').crlfUniform).toBe(true);
-    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r\n').crlfUniform).toBe(true);
+  it('does not certify a single row that kept its terminator', () => {
+    // A one-row patch is the thinnest possible evidence: it proves one row had
+    // a `\r`, not that the file is uniformly CRLF.
+    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r').crlfUniform).toBe(false);
+    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r\n').crlfUniform).toBe(false);
   });
 
-  it('ignores a row truncated by maxLength slicing', () => {
-    // `DiffView` cuts the patch at `maxLength`, which can leave the final row
-    // without its terminator. That partial row must not demote the whole file,
-    // or previews of long CRLF diffs would put the `\r` chips back.
+  it('does not certify a row truncated by maxLength slicing', () => {
     const patch = rawPatch([' a\r', '-b\r', '+c\r', ' d\r']);
     const truncated = patch.slice(0, patch.indexOf('+c\r') + 2);
     expect(truncated.endsWith('\n')).toBe(false);
-    expect(parseUnifiedDiff(truncated).crlfUniform).toBe(true);
+    expect(parseUnifiedDiff(truncated).crlfUniform).toBe(false);
   });
 
   it('still honours the marker when a builder supplied one', () => {
     const patch = `${DIFF_CRLF_UNIFORM_MARKER}\n@@ -1,1 +1,1 @@\n-a\n+b\n`;
     expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+  });
+});
+
+describe('diffPreviewText', () => {
+  it('localizes a marker-only preview instead of leaking the token', () => {
+    // The pane resolves the notice at its render boundary; Copy reads the same
+    // preview, so it has to resolve it too or it hands over `\diff-omitted`.
+    expect(diffPreviewText(DIFF_OMITTED_MARKER, stubT)).toBe(
+      '[approval.diffOmitted]',
+    );
+    expect(diffPreviewText(DIFF_TRAILING_NEWLINE_REMOVED_MARKER, stubT)).toBe(
+      '[approval.trailingNewlineRemoved]',
+    );
+  });
+
+  it('drops the verdict row and the CR the pane hides', () => {
+    const diff = `${DIFF_CRLF_UNIFORM_MARKER}\n@@ -1,1 +1,1 @@\n-a\r\n+b\r\n`;
+    expect(diffPreviewText(diff, stubT)).toBe('@@ -1,1 +1,1 @@\n-a\n+b\n');
+  });
+
+  it('keeps the verdict row when it was never certified', () => {
+    const diff = `${DIFF_CRLF_MIXED_MARKER}\n@@ -1,1 +1,1 @@\n-a\r\n+b\r\n`;
+    expect(diffPreviewText(diff, stubT)).toBe('@@ -1,1 +1,1 @@\n-a\r\n+b\r\n');
+  });
+
+  it('repeats the marker column the pane draws', () => {
+    const diff = '@@ -1,2 +1,2 @@\n a\n-b\n+c\n';
+    expect(diffPreviewText(diff, stubT)).toBe('@@ -1,2 +1,2 @@\n a\n-b\n+c\n');
+  });
+
+  it('bounds the copied text the same way the pane does', () => {
+    // `maxLength` cuts the payload, exactly as `DiffView` slices the preview
+    // it renders, so even a cut mid-row copies as the pane drew it.
+    const diff = '@@ -1,1 +1,1 @@\n-abcdef\n+ghijkl\n';
+    expect(diffPreviewText(diff, stubT, 20)).toBe('@@ -1,1 +1,1 @@\n-abc');
   });
 });

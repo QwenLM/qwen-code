@@ -12,6 +12,7 @@ import { I18nProvider } from '../../../i18n';
 import {
   buildContextBoundedDiff,
   buildUnifiedDiff,
+  DIFF_CRLF_UNIFORM_MARKER,
   DIFF_OMITTED_MARKER,
 } from '../../../utils/unifiedDiff';
 import { DiffView } from './DiffView';
@@ -204,8 +205,11 @@ it('localizes the invisible-character label in Chinese', () => {
 });
 
 // Raw patches (`getRawFileDiff`) are rendered straight from jsdiff and never
-// pass a builder, so they arrive without `DIFF_CRLF_UNIFORM_MARKER`. They used
-// to paint a visible `\r` escape chip on every row of a CRLF file's diff.
+// pass a builder, so they arrive without a CRLF verdict. Their rows cannot stand
+// in for one: a patch shows a context window, not the file, and a row cannot
+// tell an unterminated final line from an LF line inside a mixed file. The
+// honest answer is "unknown", so the `\r` stays visible; only a builder that saw
+// both texts may retract it.
 const rawPatch = (rows: string[]) =>
   [
     'Index: notes.txt',
@@ -217,10 +221,20 @@ const rawPatch = (rows: string[]) =>
     '',
   ].join('\n');
 
-it('keeps a raw CRLF patch free of trailing \\r chips', () => {
+it('keeps the \\r visible on a raw CRLF patch no builder certified', () => {
   const rows = renderDiff(rawPatch([' a\r', '-b\r', '+c\r']));
-  expect(rows.some((row) => row.includes('\\r'))).toBe(false);
+  expect(rows.some((row) => row.includes('\\r'))).toBe(true);
   expect(container.textContent).not.toContain('\r');
+  expect(
+    container.querySelectorAll('[title^="Invisible character:"]').length,
+  ).toBeGreaterThan(0);
+});
+
+it('hides the terminator once a builder certified the file as uniform CRLF', () => {
+  const rows = renderDiff(
+    `${DIFF_CRLF_UNIFORM_MARKER}\n@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r\n`,
+  );
+  expect(rows.some((row) => row.includes('\\r'))).toBe(false);
   expect(container.querySelector('[title^="Invisible character:"]')).toBeNull();
 });
 

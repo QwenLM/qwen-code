@@ -27,10 +27,12 @@ export const DIFF_CRLF_UNIFORM_MARKER = '\\diff-crlf-uniform';
  * The negative half of the source-layer verdict. A builder that saw the source
  * text and refused to certify uniformity used to stay silent, and silence was
  * indistinguishable from "no builder ran" — so the renderer filled the gap by
- * voting on whichever rows the patch happened to show. A context window cannot
- * speak for the rest of the file, and rows cannot distinguish an unterminated
- * final line from an LF line inside a mixed file. The negative verdict removes
- * the gap: the row vote now only runs where nobody decided.
+ * voting on whichever rows the patch happened to show. That vote is gone: a
+ * context window cannot speak for the rest of the file, and rows cannot
+ * distinguish an unterminated final line from an LF line inside a mixed file,
+ * so an inference there certified whole-file properties from one-sided
+ * evidence. Only the source layer decides now, and both halves of its answer
+ * are stamped so the renderer never has to guess.
  */
 export const DIFF_CRLF_MIXED_MARKER = '\\diff-crlf-mixed';
 
@@ -79,7 +81,12 @@ function isUniformCrlf(text: string): boolean {
   // the interior lines only, and this one is the segment the trailing
   // newline terminated.
   if (lastLine === '') return false;
-  if (lastLine.endsWith('\r')) return true;
+  // A `\r` that is followed by a `\n` is a terminator; a `\r` at the very end
+  // of the text is file content. `trailing` is the only witness that the `\n`
+  // exists — without it, treating the `\r` as a terminator let the renderer
+  // strip a real byte from the row, leaving a `+1/-1` badge over two rows that
+  // then rendered identically.
+  if (lastLine.endsWith('\r')) return trailing;
   return !trailing;
 }
 
@@ -316,22 +323,18 @@ interface UnifiedDiffLine {
 }
 
 /**
- * One side's row terminators, judged by the rule {@link isUniformCrlf} applies
- * to the source text: every line closed by `\r\n`, with at most a final line
- * that has no terminator at all. A patch can only justify that exception for
- * its final row when git's `\ No newline at end of file` notice says the row
- * really is an unterminated last line — otherwise an unterminated row is an
- * LF line inside a mixed file, which breaks uniformity. An empty side is
- * vacuously uniform: a pure insertion says nothing about the old side and must
- * not be demoted for it.
+ * Decides whether a preview's content rows carry a trailing `\r` that belongs
+ * to a `\r\n` terminator, so the renderer may hide it.
+ *
+ * Only the source layer answers this, via the verdict a builder stamped when it
+ * still had both texts. Raw patches (a `fileDiff` built by jsdiff and shipped
+ * through `getRawFileDiff`) never carry one, and their rows cannot stand in for
+ * the missing answer: a patch shows a context window, not the file, and a row
+ * cannot distinguish an unterminated final line from an LF line inside a mixed
+ * file. Voting on those rows therefore certified whole-file uniformity from
+ * one-sided evidence — a mixed-ending file rendered chip-free. When no verdict
+ * is present the answer is "unknown", and the renderer shows the `\r`.
  */
-function votesUniform(votes: boolean[], notice: boolean): boolean {
-  if (votes.length === 0) return true;
-  const unterminated = votes.filter((terminated) => !terminated).length;
-  if (unterminated === 0) return true;
-  return notice && unterminated === 1 && !votes[votes.length - 1];
-}
-
 export function parseUnifiedDiff(diff: string): {
   lines: UnifiedDiffLine[];
   additions: number;
@@ -349,36 +352,10 @@ export function parseUnifiedDiff(diff: string): {
   const hunkHeader = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
   const diffLines = diff.split('\n');
   const hasHunks = diffLines.some((line) => hunkHeader.test(line));
-  // Raw patches (a `fileDiff` built by jsdiff and shipped through
-  // `getRawFileDiff`) never carry a verdict marker, because no builder saw the
-  // source text. The information is still recoverable from the rows
-  // themselves: a `\r\n` file keeps its `\r` on every content row, so a patch
-  // whose content rows all end with `\r` is uniform by the same definition the
-  // builders use.
-  //
-  // That recovery is a fallback, not a method. It runs only when no verdict
-  // was seen, because a builder that decided "mixed" says so now — silence
-  // used to mean both "mixed" and "no builder", and the renderer resolved the
-  // ambiguity by voting, which certified whole-file properties from whatever
-  // rows the context window happened to include. Votes are collected per side:
-  // `isUniformCrlf` allows one unterminated final line, and only git's
-  // `\ No newline at end of file` notice says a row really is that line rather
-  // than an LF line in a mixed file.
-  let noNewlineNotice = false;
-  let verdictSeen = false;
-  const oldVotes: boolean[] = [];
-  const newVotes: boolean[] = [];
-  // `DiffView` slices by `maxLength`, which can cut the final row mid-way. A
-  // row that still ends with `\r` kept its terminator, so only an unmarked
-  // tail is withheld from the vote — excluding the tail unconditionally threw
-  // away the vote of every single-row patch, which has no other row to be
-  // judged by.
-  const lastRowTerminated = diff.endsWith('\n') || diff.endsWith('\r');
 
   for (let index = 0; index < diffLines.length; index++) {
     const line = diffLines[index];
     const match = line.match(hunkHeader);
-    let contentRow = false;
     if (match) {
       oldLine = parseInt(match[1], 10);
       oldRemaining = match[2] === undefined ? 1 : parseInt(match[2], 10);
@@ -386,17 +363,10 @@ export function parseUnifiedDiff(diff: string): {
       newRemaining = match[4] === undefined ? 1 : parseInt(match[4], 10);
       lines.push({ type: 'header', content: line });
     } else if (line.startsWith('\\')) {
-      // Read the notice off the row itself rather than substring-matching the
-      // whole patch: a content row is free to contain that text, and a diff
-      // cannot grant itself the allowance by quoting it.
-      if (line.startsWith('\\ No newline at end of file')) {
-        noNewlineNotice = true;
-      }
+      // The verdict rows are the builders' own answer, read by exact match so a
+      // content row quoting the marker text cannot grant itself the ruling.
       if (line === DIFF_CRLF_UNIFORM_MARKER) {
         crlfUniform = true;
-        verdictSeen = true;
-      } else if (line === DIFF_CRLF_MIXED_MARKER) {
-        verdictSeen = true;
       }
       lines.push({ type: 'header', content: line });
     } else if ((!hasHunks || newRemaining > 0) && line.startsWith('+')) {
@@ -404,13 +374,11 @@ export function parseUnifiedDiff(diff: string): {
       lines.push({ type: 'add', content: line.slice(1), newLine });
       newLine++;
       if (hasHunks) newRemaining--;
-      contentRow = true;
     } else if ((!hasHunks || oldRemaining > 0) && line.startsWith('-')) {
       deletions++;
       lines.push({ type: 'del', content: line.slice(1), oldLine });
       oldLine++;
       if (hasHunks) oldRemaining--;
-      contentRow = true;
     } else if (
       (!hasHunks || (oldRemaining > 0 && newRemaining > 0)) &&
       line.startsWith(' ')
@@ -427,24 +395,53 @@ export function parseUnifiedDiff(diff: string): {
         oldRemaining--;
         newRemaining--;
       }
-      contentRow = true;
     } else {
       lines.push({ type: 'header', content: line });
     }
-    if (contentRow && (index < diffLines.length - 1 || lastRowTerminated)) {
-      const terminated = line.endsWith('\r');
-      const row = lines[lines.length - 1];
-      if (row.type !== 'add') oldVotes.push(terminated);
-      if (row.type !== 'del') newVotes.push(terminated);
-    }
-  }
-
-  if (!verdictSeen) {
-    crlfUniform =
-      oldVotes.length + newVotes.length > 0 &&
-      votesUniform(oldVotes, noNewlineNotice) &&
-      votesUniform(newVotes, noNewlineNotice);
   }
 
   return { lines, additions, deletions, crlfUniform };
+}
+
+/**
+ * The plain text a diff preview shows, for the surfaces that copy instead of
+ * render (the trajectory inspector's Copy button). It answers with the same
+ * marker localization and the same verdict-row removal `DiffView` performs, and
+ * repeats its marker column (`+`, `-`, a space), so Copy cannot disagree with
+ * the pane it sits under: a marker-only preview copies as its localized
+ * sentence rather than the internal `\diff-omitted` token, and a
+ * certified-CRLF row copies without the `\r` the pane hides.
+ */
+export function diffPreviewText(
+  diff: string,
+  t: Translate,
+  maxLength?: number,
+): string {
+  const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
+  const { lines, crlfUniform } = parseUnifiedDiff(input);
+  if (lines.length === 1 && lines[0].type === 'header') {
+    return localizeDiffNotice(diff, t);
+  }
+  return lines
+    .filter(
+      (line) =>
+        line.content !== DIFF_CRLF_UNIFORM_MARKER &&
+        line.content !== DIFF_CRLF_MIXED_MARKER,
+    )
+    .map((line) => {
+      const content =
+        crlfUniform && line.content.endsWith('\r')
+          ? line.content.slice(0, -1)
+          : line.content;
+      const marker =
+        line.type === 'add'
+          ? '+'
+          : line.type === 'del'
+            ? '-'
+            : line.type === 'context'
+              ? ' '
+              : '';
+      return `${marker}${content}`;
+    })
+    .join('\n');
 }

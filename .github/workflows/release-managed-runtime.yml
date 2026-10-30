@@ -127,6 +127,31 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
+      - name: 'Repair the 0.26.3 ownership test fixture'
+        if: "${{ env.RELEASE_TAG == 'v0.26.3' }}"
+        run: |-
+          set -euo pipefail
+          if [[ "${SOURCE_SHA}" != 'eeee1443a7e36ab22b2f1dcded8dec64b621a7ee' ]]; then
+            echo 'The 0.26.3 test repair requires the original release commit.' >&2
+            exit 1
+          fi
+          test_file='packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180HardenedVerificationTest.java'
+          patch='.qwen/managed-release-tools/scripts/patches/managed-runtime-v0.26.3-tests.patch'
+          git diff --exit-code HEAD
+          if [[ "$(git apply --numstat "${patch}" | cut -f3)" != "${test_file}" ]]; then
+            echo 'The 0.26.3 repair must change only the ownership test.' >&2
+            exit 1
+          fi
+          git apply --check "${patch}"
+          git apply "${patch}"
+          [[ "$(git diff --name-only HEAD)" == "${test_file}" ]]
+          {
+            echo '### Managed runtime 0.26.3 test repair'
+            echo "Product source: ${SOURCE_SHA}; original tag unchanged."
+            echo "Test-only patch blob: $(git hash-object "${patch}")"
+            echo 'The complete SDK and server verification gates remain enabled.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: 'Build the matching CLI prerequisites'
         env:
           QWEN_SKIP_PREPARE: '1'

@@ -12,11 +12,18 @@ import styles from './DiffView.module.css';
 interface DiffViewProps {
   diff: string;
   maxLength?: number;
+  /**
+   * The surrounding region scrolls instead of the line list (floating
+   * approval card): the list fills that region with its full height instead
+   * of capping itself at 400px with a nested scrollbar.
+   */
+  fillScrollRegion?: boolean;
 }
 
 export const DiffView = memo(function DiffView({
   diff,
   maxLength,
+  fillScrollRegion = false,
 }: DiffViewProps) {
   // `buildContextBoundedDiff` emits ASCII-safe markers instead of prose (it is
   // import-free, so it cannot reach the catalog); resolve them here, at the
@@ -27,12 +34,12 @@ export const DiffView = memo(function DiffView({
   const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
   const { lines, additions, deletions, crlfUniform } = parseUnifiedDiff(input);
   // Whether a trailing `\r` is part of a `\r\n` terminator is decided in
-  // `parseUnifiedDiff`, which reads the verdict builders stamp — affirmative
-  // or negative, because a builder that refuses to certify a file is telling
-  // the renderer something too. Raw patches (which no builder produced) carry
-  // no verdict, and only they are judged from their own rows: a uniform-CRLF
-  // file keeps the `\r` on every content row. A mixed file keeps the `\r`
-  // visible as an escape node, which is the honest rendering there.
+  // `parseUnifiedDiff`, which reads the verdict builders stamp — affirmative or
+  // negative, because a builder that refuses to certify a file is telling the
+  // renderer something too. Raw patches (which no builder produced) carry no
+  // verdict and are never certified: a patch cannot prove a whole-file property
+  // from a context window, so their `\r` stays visible as an escape node, which
+  // is the honest rendering there.
   // Builders emit a notice as the whole preview, never inside a raw patch.
   const notice =
     lines.length === 1 && lines[0].type === 'header'
@@ -85,7 +92,15 @@ export const DiffView = memo(function DiffView({
         {additions > 0 && <span className={styles.statAdd}>+{additions}</span>}
         {deletions > 0 && <span className={styles.statDel}>-{deletions}</span>}
       </div>
-      <div className={styles.lines} tabIndex={0} aria-label="File diff">
+      <div
+        className={
+          fillScrollRegion
+            ? `${styles.lines} ${styles.linesFill}`
+            : styles.lines
+        }
+        tabIndex={0}
+        aria-label="File diff"
+      >
         {renderedLines.map((line, i) => (
           <div
             key={i}

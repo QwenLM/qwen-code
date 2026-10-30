@@ -722,7 +722,10 @@ export function ToolApproval({
                     )
                   : null}
               </div>
-              <DiffView diff={block.diff} />
+              <DiffView
+                diff={block.diff}
+                fillScrollRegion={variant === 'floating'}
+              />
             </div>
           ))}
         </div>
