@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Content, Part } from '@google/genai';
 import { SessionReferenceService } from './session-reference-service.js';
+import { opensAttachedContent } from '../utils/attached-content.js';
 import type { ResumedSessionData } from './sessionService.js';
 import {
   content,
@@ -181,6 +182,14 @@ describe('SessionReferenceService', () => {
     // contributes nothing to the slimmed output. Verify it does not throw
     // and the session still resolves.
     expect(res.text).toContain('Referenced session');
+  });
+
+  it('opens its text with a header compaction recognizes as attached', async () => {
+    const { res } = await resolveS1([
+      toolResult({ callId: 'c1', error: new Error('permission denied') }),
+    ]);
+
+    expect(opensAttachedContent(res.text)).toBe(true);
   });
 
   it('keeps assistant text on a turn that ALSO calls a tool', async () => {

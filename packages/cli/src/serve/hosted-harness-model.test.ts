@@ -31,6 +31,7 @@ import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/attached-content.js';
 import { loadCliConfig } from '../config/config.js';
 import {
   HostedModelRoundLimitError,
@@ -370,7 +371,7 @@ describe('Hosted Harness model boundary', () => {
     expect(model.requests).toEqual([[{ text: 'second' }]]);
     expect(model.setHistory).toHaveBeenLastCalledWith(
       expect.arrayContaining([
-        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'user', parts: [markTypedPrompt({ text: 'hello' })] },
         { role: 'user', parts: [{ text: 'first' }] },
       ]),
     );
@@ -399,7 +400,7 @@ describe('Hosted Harness model boundary', () => {
       userMessages: { claim, commit, commitAssistant },
     });
     expect(model.requests).toEqual([
-      [{ text: 'hello' }],
+      [markTypedPrompt({ text: 'hello' })],
       [{ text: 'follow up' }],
     ]);
     expect(commitAssistant).toHaveBeenCalledOnce();
@@ -755,11 +756,11 @@ describe('Hosted Harness model boundary', () => {
       userMessages: { claim, commit, commitAssistant: vi.fn() },
     });
     expect(model.requests[0]).toEqual([
-      { text: 'updated guidance' },
+      markTypedPrompt({ text: 'updated guidance' }),
       ...attachments,
     ]);
     expect(commit).toHaveBeenCalledWith('umsg_file:1', [
-      { text: 'updated guidance' },
+      markTypedPrompt({ text: 'updated guidance' }),
       ...attachments,
     ]);
   });
@@ -791,7 +792,7 @@ describe('Hosted Harness model boundary', () => {
       hooks: hook.session,
     });
     expect(model.requests[0]).toEqual([
-      { text: 'updated text' },
+      markTypedPrompt({ text: 'updated text' }),
       ...attachmentParts,
     ]);
   });
@@ -1603,7 +1604,9 @@ describe('Hosted Harness model boundary', () => {
         ([event]) => event === HookEventName.SessionStart,
       ),
     ).toBe(false);
-    expect(model.requests[0]).toEqual([{ text: input.prompt }]);
+    expect(model.requests[0]).toEqual([
+      markTypedPrompt({ text: input.prompt }),
+    ]);
   });
 
   it('defers initialization InstructionsLoaded until authentication, preserving native fields', async () => {
@@ -1781,7 +1784,9 @@ describe('Hosted Harness model boundary', () => {
     });
     expect(bindBudget).toHaveBeenCalledOnce();
     expect(complete).toHaveBeenCalledWith(true, [{ candidatesTokenCount: 30 }]);
-    expect(model.requests[0]).toEqual([{ text: 'rewritten +10k' }]);
+    expect(model.requests[0]).toEqual([
+      markTypedPrompt({ text: 'rewritten +10k' }),
+    ]);
   });
 
   it.each([
@@ -3108,7 +3113,10 @@ it.each([undefined, 3])(
       { name: 'skill', args: { skill: 'testing' }, isClientInitiated: true },
     ]);
     expect(mocks.setHistory).toHaveBeenLastCalledWith([
-      { role: 'user', parts: [{ text: prompt }, ...attachmentParts] },
+      {
+        role: 'user',
+        parts: [markTypedPrompt({ text: prompt }), ...attachmentParts],
+      },
       { role: 'model', parts: expect.any(Array) },
     ]);
     expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_REVIEW_BODY');

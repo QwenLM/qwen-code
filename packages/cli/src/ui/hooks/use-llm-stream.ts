@@ -127,6 +127,7 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { markPromptParts } from '../../services/prompt-processors/prompt-parts.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -1914,7 +1915,11 @@ export const useLlmStream = (
               };
             }
             case 'submit_prompt': {
-              localQueryToSendToLlm = slashCommandResult.content;
+              // A string is marked by the client when it is sent.
+              localQueryToSendToLlm =
+                typeof slashCommandResult.content === 'string'
+                  ? slashCommandResult.content
+                  : markPromptParts(slashCommandResult.content);
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
               refreshContextFilesOnWriteRef.current = Boolean(
@@ -2045,6 +2050,10 @@ export const useLlmStream = (
             messageId: userMessageTimestamp,
             signal: abortSignal,
             addItem,
+            // Scheduled text, a `/loop` tick's included, is not marked.
+            markPrompt:
+              submitType === SendMessageType.UserQuery ||
+              submitType === SendMessageType.Retry,
           });
 
           if (!atCommandResult.shouldProceed) {
@@ -3638,7 +3647,7 @@ export const useLlmStream = (
 
         restoreMessages.push(message);
         const sideEffects: Array<() => void> = [];
-        let resolvedQuery: PartListUnion = [{ text: message }];
+        let resolvedQuery: PartListUnion = markPromptParts(message);
         if (isAtCommand(message)) {
           const timeout = new AbortController();
           const atCommandSignal = AbortSignal.any([signal, timeout.signal]);

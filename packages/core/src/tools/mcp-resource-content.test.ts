@@ -10,9 +10,11 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   MAX_MCP_RESOURCE_BLOB_CHARS,
   MAX_MCP_RESOURCE_TEXT_CHARS,
+  emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
 } from './mcp-resource-content.js';
+import { opensAttachedContent } from '../utils/attached-content.js';
 
 const textOf = (parts: Part[]) =>
   parts.map((p) => (p as { text?: string }).text ?? '').join('');
@@ -37,6 +39,24 @@ describe('formatMcpResourceContents', () => {
     const nonces = noncesOf(joined);
     expect(nonces).toHaveLength(2);
     expect(nonces[0]).toBe(nonces[1]);
+  });
+
+  it('opens its frame with a header compaction recognizes as attached', () => {
+    const out = formatMcpResourceContents(
+      { contents: [{ uri: 'x://a', text: 'hello' }] },
+      'srv:x://a',
+    );
+
+    expect(opensAttachedContent(textOf(out.parts.slice(0, 1)))).toBe(true);
+  });
+
+  it('opens the note for an empty read with a header compaction recognizes as attached', () => {
+    const formatted = formatMcpResourceContents({ contents: [] }, 'srv:x://a');
+
+    expect(formatted.parts).toHaveLength(0);
+    expect(
+      opensAttachedContent(emptyMcpResourceText(formatted, 'srv:x://a')),
+    ).toBe(true);
   });
 
   it('caps text at MAX_MCP_RESOURCE_TEXT_CHARS and flags truncation', () => {

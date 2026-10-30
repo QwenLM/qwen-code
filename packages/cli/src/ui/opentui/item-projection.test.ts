@@ -922,6 +922,13 @@ describe('projectCompression (CompressionMessage parity, R1-7/76)', () => {
       }),
     ).toBe('Could not compress chat history due to a token counting error.');
     expect(
+      projectCompression({
+        compressionStatus: CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+      }),
+    ).toBe(
+      'Could not compress chat history because it is too large for the context window.',
+    );
+    expect(
       projectCompression({ compressionStatus: CompressionStatus.NOOP }),
     ).toBe('Nothing to compress.');
   });

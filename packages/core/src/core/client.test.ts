@@ -26,7 +26,10 @@ import type {
   GenerateContentResponse,
   Part,
   PartListUnion,
+  PartUnion,
 } from '@google/genai';
+import { isTypedPrompt } from '../utils/attached-content.js';
+import { condenseToUserMessages } from '../services/compactionInputSlimming.js';
 import {
   LlmClient,
   SendMessageType,
@@ -10929,6 +10932,27 @@ Other open files:
       expect(getLastTurnRequestText()).toContain('</system-reminder>\n\nHi');
     });
 
+    it('opens the IDE context with a line compaction leaves out of the quote', async () => {
+      await ideTurn(
+        [{ path: '/path/to/recent/file1.ts', timestamp: Date.now() }],
+        true,
+      );
+      const request = mockTurnRunFn.mock.calls.at(-1)?.[1] as Part[];
+
+      const condensed = condenseToUserMessages(
+        [
+          { role: 'user', parts: request },
+          { role: 'model', parts: [{ text: 'x'.repeat(20_000) }] },
+          { role: 'user', parts: [{ text: 'next' }] },
+          { role: 'model', parts: [{ text: 'y'.repeat(20_000) }] },
+        ],
+        60_000,
+      );
+
+      const block = condensed![0]!.parts!.map((part) => part.text).join('\n');
+      expect(block).toContain('<user_message>\nHi\n</user_message>');
+    });
+
     it('should return the turn instance after the stream is complete', async () => {
       mockTurnRunFn.mockReturnValue(textTurn('Hello'));
       installChat();
@@ -13295,6 +13319,64 @@ Other open files:
           interactionSpan,
           'expanded model prompt',
         );
+      });
+
+      describe('marking the typed prompt for compaction (#9455)', () => {
+        const sentRequest = () =>
+          mockTurnRunFn.mock.calls[0]![1] as PartUnion[];
+        const typedParts = (request: PartUnion[]) =>
+          request.filter(
+            (part): part is Part =>
+              typeof part !== 'string' && isTypedPrompt(part),
+          );
+
+        it('marks a plain-string user prompt but not the hook context after it', async () => {
+          promptSubmitBus(extraHookContext());
+
+          await run('plain prompt', 'prompt-typed-mark', {
+            type: SendMessageType.UserQuery,
+          });
+
+          const request = sentRequest();
+          const typed = typedParts(request);
+          expect(typed).toHaveLength(1);
+          expect(typed[0]!.text).toContain('plain prompt');
+          expect(JSON.stringify(typed)).not.toContain('extra hook context');
+          expect(JSON.stringify(request)).toContain('extra hook context');
+        });
+
+        it('marks a retried prompt sent as a plain string', async () => {
+          installChat({
+            getHistoryLength: vi.fn().mockReturnValue(0),
+            stripOrphanedUserEntriesFromHistory: vi.fn(),
+          });
+
+          await run('retried prompt', 'prompt-typed-retry', {
+            type: SendMessageType.Retry,
+          });
+
+          const typed = typedParts(sentRequest());
+          expect(typed).toHaveLength(1);
+          expect(typed[0]!.text).toContain('retried prompt');
+        });
+
+        it('does not mark a cron prompt', async () => {
+          await run('scheduled prompt', 'prompt-typed-cron', {
+            type: SendMessageType.Cron,
+          });
+
+          expect(typedParts(sentRequest())).toEqual([]);
+        });
+
+        it('does not mark a prompt sent inside a subagent', async () => {
+          await runWithAgentContext('agent-1', () =>
+            run('delegated task', 'prompt-typed-subagent', {
+              type: SendMessageType.UserQuery,
+            }),
+          );
+
+          expect(typedParts(sentRequest())).toEqual([]);
+        });
       });
 
       it('passes a non-empty submitted prompt for UserQuery hooks', async () => {

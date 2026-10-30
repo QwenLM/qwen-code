@@ -24,6 +24,7 @@ import {
 import { hasVerifiableInode } from '../utils/file-identity.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
+import { REFERENCED_FILES_HEADER } from '../utils/attached-content.js';
 
 /**
  * Options for reading multiple files.
@@ -110,7 +111,7 @@ export interface ReadManyFilesResult {
   error?: string;
 }
 
-const DEFAULT_OUTPUT_HEADER = '\n--- Content from referenced files ---';
+const DEFAULT_OUTPUT_HEADER = `\n${REFERENCED_FILES_HEADER}`;
 const DEFAULT_OUTPUT_TERMINATOR = '\n--- End of content ---';
 
 /**

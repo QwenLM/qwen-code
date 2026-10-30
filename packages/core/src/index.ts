@@ -513,6 +513,12 @@ export {
   NOTIFICATION_LABEL_MAX_LENGTH,
 } from './utils/terminalSafe.js';
 export { escapeXml } from './utils/xml.js';
+export {
+  ATTACHMENT_PROCESSING_FAILURE_NOTICE,
+  isTypedPrompt,
+  markTypedPrompt,
+  TYPED_PROMPT_METADATA,
+} from './utils/attached-content.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';

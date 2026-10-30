@@ -73,7 +73,7 @@ import {
   markApiHistoryPrompt,
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import { historyCommand } from '../commands/historyCommand.js';
 import { restoreCommand } from '../commands/restoreCommand.js';
 import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
@@ -86,6 +86,8 @@ import {
   expandCollapsedHistory,
 } from '../utils/resumeHistoryUtils.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
+import { isTypedPrompt } from '@qwen-code/qwen-code-core/utils/attached-content.js';
+import { markInjectedFilePart } from '../../services/prompt-processors/injected-file-parts.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -2047,6 +2049,26 @@ describe('OpenTuiApp shell wiring', () => {
     });
     expect(mocks.state.inputProps?.['queueLength']).toBe(0);
     expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks an expanded prompt's text for compaction but not injected file content (#9455)", async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    const fileBody = markInjectedFilePart({ text: 'const x = 1;' });
+    mocks.state.handleResult = {
+      kind: 'submit_prompt',
+      content: [{ text: 'Explain this file:\n' }, fileBody],
+    } satisfies OpenTuiDispatchOutcome;
+
+    await submit('/explain');
+
+    const sent = (onSubmitPrompt.mock.calls[0] as unknown[])[0] as Part[];
+    expect(sent.map((part) => part.text)).toEqual([
+      'Explain this file:\n',
+      'const x = 1;',
+    ]);
+    expect(sent.map(isTypedPrompt)).toEqual([true, false]);
   });
 
   it('sends a submit_prompt outcome to the live-turn seam', async () => {

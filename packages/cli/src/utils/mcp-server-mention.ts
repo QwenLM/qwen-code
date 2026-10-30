@@ -5,6 +5,7 @@
  */
 
 import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { MCP_SERVER_HEADER_PREFIX } from '@qwen-code/qwen-code-core/utils/attached-content.js';
 
 export const MCP_SERVER_REF_PREFIX = 'mcp:';
 
@@ -36,7 +37,7 @@ export function buildMcpServerContextText(
   serverName: string,
 ): string {
   const lines = [
-    `--- MCP Server: ${serverName} ---`,
+    `${MCP_SERVER_HEADER_PREFIX}${serverName} ---`,
     `The user explicitly mentioned this MCP server. Prefer using tools and resources from this server when relevant for this turn. This is advisory context, not a hard restriction.`,
   ];
 

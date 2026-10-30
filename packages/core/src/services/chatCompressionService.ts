@@ -26,6 +26,12 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  getContextLengthExceededInfo,
+  type ContextLengthExceededInfo,
+} from '../utils/contextLengthError.js';
+import {
+  condenseToUserMessages,
+  countUnmarkedUserTurns,
   estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
@@ -68,6 +74,90 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
  * rejects the request with a 400 that propagates to the caller.
  */
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
+
+/**
+ * Smallest output budget a cold compression request is sent with on windows
+ * of 16K and up. Below it a `<state_snapshot>` is almost always cut off, so a
+ * request that cannot leave this much room is reduced first and not sent if
+ * it still cannot (#9455). Smaller windows need a quarter of the window
+ * instead (minCompactionOutputTokens): a fixed 4,096 would take half of an 8K
+ * window and all of a 4K one.
+ */
+export const MIN_COMPACTION_OUTPUT_TOKENS = 4_096;
+
+function minCompactionOutputTokens(window: number): number {
+  return Math.min(MIN_COMPACTION_OUTPUT_TOKENS, Math.floor(window / 4));
+}
+
+/**
+ * Output room a reduced cold request is sized to leave: a quarter of the
+ * window, up to the full output budget. It is never below
+ * minCompactionOutputTokens, so a reduction that reaches its target passes
+ * that minimum.
+ */
+function compactionOutputReserve(window: number): number {
+  return Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(window / 4));
+}
+
+/** What a cold compression request is sized against. */
+interface ColdRequestSizing {
+  /** The receiving model's window, or the smaller one a rejection reported. */
+  window: number;
+  /**
+   * The output budget a retry set from the provider's own count of the
+   * rejected prompt. Unset, the budget follows the local estimate.
+   */
+  outputTokens?: number;
+}
+
+type OverflowRetry =
+  | { kind: 'retry'; history: Content[]; sizing: ColdRequestSizing }
+  // The rejection was a context overflow, but no reduction fits the window.
+  | { kind: 'too-large' }
+  | { kind: 'none' };
+
+/**
+ * Size, relative to a request just rejected for context length, that the one
+ * retry aims for when the rejection names no token counts to size it by.
+ */
+const OVERFLOW_RETRY_SHRINK = 0.6;
+
+/**
+ * Lowest provider count, per locally estimated token, still taken as a count
+ * of the rejected prompt. char/4 under-counts; well below it, the number
+ * belongs to something else in the message.
+ */
+const MIN_COUNT_PER_ESTIMATED_TOKEN = 0.5;
+
+/**
+ * The rejected prompt's real size, from the rejection's own count, or an
+ * upper bound on it. A total that also counts the requested output budget,
+ * with no breakdown, is taken whole: the transport can lower `max_tokens`
+ * below the budget this service asked for (a configured or model output
+ * cap), so subtracting that budget could undercount the prompt and size a
+ * retry that overruns again. Undefined when the rejection states no count,
+ * or one this request cannot have produced: far below its estimate, or one
+ * under which it would have fit the limit the same message states.
+ */
+function rejectedPromptTokens(
+  overflow: ContextLengthExceededInfo,
+  sentOutputTokens: number,
+  estimatedTokens: number,
+): number | undefined {
+  const prompt = overflow.promptTokens ?? overflow.requestedTokens;
+  if (
+    prompt === undefined ||
+    prompt < estimatedTokens * MIN_COUNT_PER_ESTIMATED_TOKEN
+  ) {
+    return undefined;
+  }
+  if (overflow.limitTokens !== undefined) {
+    const counted =
+      overflow.limitKind === 'input' ? prompt : prompt + sentOutputTokens;
+    if (counted <= overflow.limitTokens) return undefined;
+  }
+  return prompt;
+}
 
 /**
  * Output budget for the compression side-query: the fixed ceiling clamped to
@@ -502,6 +592,23 @@ function hasStateSnapshot(summary: string): boolean {
   );
 }
 
+/**
+ * Whether the summary was cut off inside the `<state_snapshot>` it opened.
+ * Only closed `<analysis>` blocks are set aside: a snapshot often quotes the
+ * compression directive, `<analysis>` tag included, and stripping from an
+ * unclosed `<analysis>` to the end would take the snapshot's closing tag too.
+ * The first opening tag that starts a line is the one that counts: a tag
+ * named mid-sentence, before the snapshot or after it, opens nothing. The
+ * cost is the opposite shape: a summary that first quotes a complete example
+ * snapshot and is then cut inside its real one passes this check. The guard
+ * this one extends missed that shape too.
+ */
+function hasUnclosedStateSnapshot(summary: string): boolean {
+  const body = summary.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
+  const opening = /(?:^|\n)[ \t]*<state_snapshot>/.exec(body);
+  return opening !== null && !body.includes('</state_snapshot>', opening.index);
+}
+
 export class ChatCompressionService {
   async compress(
     chat: LlmChat,
@@ -865,36 +972,183 @@ export class ChatCompressionService {
     // Hoisted because the truncation guard below compares the reported
     // output count against it.
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
-    const runColdCompression = () => {
-      const slim = getColdInput();
-      if (
-        slim.stats.imagesStripped > 0 ||
-        slim.stats.documentsStripped > 0 ||
-        slim.stats.textPartsTruncated > 0
-      ) {
-        config
-          .getDebugLogger()
-          .debug(
-            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
-              `${slim.stats.documentsStripped} document(s), and truncated ` +
-              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
-          );
-      }
-      // Clamp the output budget to the receiving model's remaining window so
-      // `prompt + max_tokens <= window` holds even on small-window
-      // deployments (issue #7960).
-      coldOutputBudget = computeCompactionOutputBudget(
-        getColdInputEstimate() +
-          Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN),
-        budgetWindow,
+    // The window that request was sized against, which the snapshot check
+    // below compares its reported usage with.
+    let coldWindow = budgetWindow;
+    // Set once the cold request is reduced to fit: its usage then no longer
+    // describes the history it replaces.
+    let coldInputReduced = false;
+    const fixedColdTokens =
+      Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+      Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN);
+    const estimateColdRequest = (history: Content[]) =>
+      estimateContentTokens(history, slimmingConfig.imageTokenEstimate) +
+      fixedColdTokens;
+    // Clamp the output budget to the receiving model's remaining window so
+    // `prompt + max_tokens <= window` holds even on small-window
+    // deployments (issue #7960). A retry sized from the provider's own count
+    // carries the budget that count leaves room for.
+    const initialSizing: ColdRequestSizing = { window: budgetWindow };
+    const coldBudgetFor = (
+      history: Content[],
+      sizing: ColdRequestSizing = initialSizing,
+    ) =>
+      sizing.outputTokens ??
+      computeCompactionOutputBudget(
+        estimateColdRequest(history),
+        sizing.window,
       );
+    // Tool output is truncated first, then older turns are condensed to the
+    // user's own messages: those are the one part of the history the summary
+    // cannot recover from anywhere else (#9455).
+    const reduceColdInput = (targetTokens: number): Content[] => {
+      debugLogger.debug(
+        `Reducing the compression input: ${countUnmarkedUserTurns(sideQueryHistory)} user turns carry no prompt mark and are read by position.`,
+      );
+      const truncated = opts.requestPayloadTooLarge
+        ? getColdInput().slimmedHistory
+        : slimCompactionInput(sideQueryHistory, undefined, {
+            maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+            preserveUserText: true,
+          }).slimmedHistory;
+      if (estimateColdRequest(truncated) <= targetTokens) return truncated;
+      return (
+        condenseToUserMessages(
+          truncated,
+          (targetTokens - fixedColdTokens) * CHARS_PER_TOKEN,
+          slimmingConfig.imageTokenEstimate,
+        ) ?? truncated
+      );
+    };
+    // A context-length rejection means the estimate ran low for this request.
+    // The window it reports (a self-hosted server's can be below the one
+    // configured) bounds the one retry. When it also states the prompt's
+    // real size, the retry removes exactly the overflow and leaves the
+    // summary its reserve. Without a count, the retry is a fixed step
+    // smaller.
+    const shrinkAfterOverflow = (
+      error: unknown,
+      rejected: Content[],
+    ): OverflowRetry => {
+      const overflow = getContextLengthExceededInfo(error);
+      if (!overflow.isExceeded) return { kind: 'none' };
+      const rejectedTokens = estimateColdRequest(rejected);
+      const promptTokens = rejectedPromptTokens(
+        overflow,
+        coldOutputBudget,
+        rejectedTokens,
+      );
+      // A limit the wording leaves untyped ("N tokens > M maximum") bounds
+      // the window too once this request's own count is past it: the
+      // endpoint takes no more than M, whatever window was configured.
+      const limit = overflow.limitTokens;
+      const window =
+        limit &&
+        (overflow.limitKind === 'total' ||
+          (overflow.limitKind === undefined &&
+            promptTokens !== undefined &&
+            promptTokens > limit))
+          ? Math.min(budgetWindow, limit)
+          : budgetWindow;
+      const reserve = compactionOutputReserve(window);
+      // A retry sized as if every estimated token cost `tokensPerEstimate`
+      // real ones, and at least a fixed step smaller than the rejection.
+      const retrySizedBy = (tokensPerEstimate: number): OverflowRetry => {
+        const retry = reduceColdInput(
+          Math.min(
+            Math.floor(
+              (window - reserve - COMPACTION_BUDGET_SAFETY_MARGIN) /
+                tokensPerEstimate,
+            ),
+            Math.floor(rejectedTokens * OVERFLOW_RETRY_SHRINK),
+          ),
+        );
+        const outputTokens = computeCompactionOutputBudget(
+          Math.ceil(estimateColdRequest(retry) * tokensPerEstimate),
+          window,
+        );
+        if (outputTokens < minCompactionOutputTokens(window)) {
+          return { kind: 'too-large' };
+        }
+        // The provider rejected this for context length, so a reduction
+        // that cannot get any smaller leaves nothing that would fit.
+        return estimateColdRequest(retry) < rejectedTokens
+          ? { kind: 'retry', history: retry, sizing: { window, outputTokens } }
+          : { kind: 'too-large' };
+      };
+      if (promptTokens !== undefined) {
+        const inputLimit =
+          overflow.limitKind === 'input' ? overflow.limitTokens : undefined;
+        const overflowTokens = Math.max(
+          promptTokens + reserve + COMPACTION_BUDGET_SAFETY_MARGIN - window,
+          inputLimit === undefined
+            ? -Infinity
+            : promptTokens + COMPACTION_BUDGET_SAFETY_MARGIN - inputLimit,
+        );
+        if (overflowTokens <= 0) {
+          // The prompt fits with the reserve to spare, so only the output
+          // budget overran: resend the request unchanged with the room the
+          // provider's count leaves, which is never below the reserve. When
+          // that room is no smaller than the budget sent, the request fit
+          // this window by the count, so the server's is smaller by an
+          // amount the message does not state: take the fixed step.
+          const outputTokens = Math.min(
+            COMPACT_MAX_OUTPUT_TOKENS,
+            window - promptTokens - COMPACTION_BUDGET_SAFETY_MARGIN,
+          );
+          return outputTokens < coldOutputBudget
+            ? {
+                kind: 'retry',
+                history: rejected,
+                sizing: { window, outputTokens },
+              }
+            : retrySizedBy(1);
+        }
+        // char/4 usually under-counts, so an estimated token removed takes at
+        // least one real token with it. Cutting the overflow from the
+        // estimate then leaves the real prompt inside the window minus
+        // the reserve, whatever mix of dense and sparse text remains. A
+        // single ratio for the whole request cannot promise that: the user
+        // text the reduction keeps is often denser than the tool output it
+        // removes. Where the count runs below the estimate (sparse ASCII), a
+        // token removed takes less than one with it, so the cut grows by
+        // that ratio.
+        const targetTokens =
+          rejectedTokens -
+          Math.ceil(
+            overflowTokens / Math.min(1, promptTokens / rejectedTokens),
+          );
+        const retry = reduceColdInput(targetTokens);
+        if (estimateColdRequest(retry) <= targetTokens) {
+          return {
+            kind: 'retry',
+            history: retry,
+            sizing: { window, outputTokens: reserve },
+          };
+        }
+        // No reduction removes the overflow at one real token per estimated
+        // token. When the text removed is as dense as the rest, less
+        // suffices, so rather than refuse, size the retry by the rejected
+        // prompt's average density. It overruns only if the text kept is
+        // denser than the text removed, and then fails like any second
+        // rejection.
+        return retrySizedBy(Math.max(1, promptTokens / rejectedTokens));
+      }
+      return retrySizedBy(1);
+    };
+    const runColdCompression = (
+      history: Content[],
+      sizing: ColdRequestSizing,
+    ) => {
+      coldOutputBudget = coldBudgetFor(history, sizing);
+      coldWindow = sizing.window;
       if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
         config
           .getDebugLogger()
           .debug(
             `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
-              `(estimated input ${getColdInputEstimate()}, ` +
-              `effectiveWindow ${budgetWindow}, ` +
+              `(estimated input ${estimateColdRequest(history)}, ` +
+              `effectiveWindow ${sizing.window}, ` +
               `ceiling ${opts.observedServerCeiling ?? 'none'})`,
           );
       }
@@ -917,7 +1171,7 @@ export class ChatCompressionService {
         maxAttempts: 1,
         systemInstruction,
         contents: [
-          ...slim.slimmedHistory,
+          ...history,
           {
             role: 'user',
             parts: [
@@ -1088,23 +1342,95 @@ export class ChatCompressionService {
 
     if (!summaryResult) {
       abortSignal.throwIfAborted();
-      try {
-        summaryResult = await runColdCompression();
-      } catch (error) {
-        if (abortSignal.aborted) throw error;
+      const slim = getColdInput();
+      if (
+        slim.stats.imagesStripped > 0 ||
+        slim.stats.documentsStripped > 0 ||
+        slim.stats.textPartsTruncated > 0
+      ) {
         config
           .getDebugLogger()
-          .warn(
-            `[chat-compression] compression side-query failed: ${String(error)}`,
+          .debug(
+            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
+              `${slim.stats.documentsStripped} document(s), and truncated ` +
+              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
           );
-        return {
-          newHistory: null,
-          info: {
-            originalTokenCount,
-            newTokenCount: originalTokenCount,
-            compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
-          },
-        };
+      }
+      let coldHistory = slim.slimmedHistory;
+      let coldSizing = initialSizing;
+      const minOutputTokens = minCompactionOutputTokens(budgetWindow);
+      if (coldBudgetFor(coldHistory) < minOutputTokens) {
+        coldInputReduced = true;
+        coldHistory = reduceColdInput(
+          budgetWindow -
+            compactionOutputReserve(budgetWindow) -
+            COMPACTION_BUDGET_SAFETY_MARGIN,
+        );
+        if (coldBudgetFor(coldHistory) < minOutputTokens) {
+          config
+            .getDebugLogger()
+            .warn(
+              `[chat-compression] compression request does not fit the ` +
+                `context window even after reduction (estimated input ` +
+                `${estimateColdRequest(coldHistory)}, effectiveWindow ` +
+                `${budgetWindow}); not sending it.`,
+            );
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount,
+              newTokenCount: originalTokenCount,
+              compressionStatus:
+                CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+            },
+          };
+        }
+      }
+      for (let attempt = 0; summaryResult === undefined; attempt++) {
+        try {
+          summaryResult = await runColdCompression(coldHistory, coldSizing);
+        } catch (error) {
+          if (abortSignal.aborted) throw error;
+          const retry: OverflowRetry =
+            attempt === 0
+              ? shrinkAfterOverflow(error, coldHistory)
+              : getContextLengthExceededInfo(error).isExceeded
+                ? { kind: 'too-large' }
+                : { kind: 'none' };
+          if (retry.kind !== 'retry') {
+            const tooLarge = retry.kind === 'too-large';
+            config
+              .getDebugLogger()
+              .warn(
+                tooLarge
+                  ? `[chat-compression] compression side-query exceeded the ` +
+                      `context window and no smaller request fits it; not ` +
+                      `retrying: ${String(error)}`
+                  : `[chat-compression] compression side-query failed: ${String(error)}`,
+              );
+            return {
+              newHistory: null,
+              info: {
+                originalTokenCount,
+                newTokenCount: originalTokenCount,
+                compressionStatus: tooLarge
+                  ? CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
+                  : CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+              },
+            };
+          }
+          const sameInput = retry.history === coldHistory;
+          config
+            .getDebugLogger()
+            .warn(
+              `[chat-compression] compression side-query exceeded the ` +
+                `context window; retrying once with a smaller ` +
+                `${sameInput ? 'output budget' : 'request'}: ${String(error)}`,
+            );
+          if (!sameInput) coldInputReduced = true;
+          coldHistory = retry.history;
+          coldSizing = retry.sizing;
+        }
       }
     }
     const summary = summaryResult.text;
@@ -1164,30 +1490,26 @@ export class ChatCompressionService {
     // fixed ceiling: since issue #7960's clamp the requested budget can sit
     // below COMPACT_MAX_OUTPUT_TOKENS, and output can never exceed what was
     // requested — comparing against the fixed ceiling would make this guard
-    // unreachable on every clamped request. That includes the floor regime
-    // (budget 1): a 1-token cap cannot hold a usable summary, so any output
-    // at the cap is definitionally truncated and must be dropped.
+    // unreachable on every clamped request.
     //
     // Local estimates instead keep the pre-clamp fixed-ceiling threshold:
     // unlike provider counts they can overshoot the budget purely from
     // estimator error (the ±30% variance the margin documents), so comparing
     // them against a clamped budget would convert that error into false
     // truncation verdicts for complete summaries. The fixed ceiling
-    // preserves the pre-#7960 semantics for the usage-missing path. The one
-    // exception is the floor regime (budget 1): no complete summary can
-    // exist at a 1-token cap, so the false-positive rationale cannot apply
-    // and estimates must be dropped there too — otherwise a provider that
-    // omits usage would persist a 1-token fragment as COMPRESSED.
+    // preserves the pre-#7960 semantics for the usage-missing path. No
+    // request is sent with a budget below minCompactionOutputTokens (the
+    // admission check and the retry sizing both refuse it), so the old floor
+    // regime, a 1-token cap that needed its own exception here, cannot occur.
     //
     // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
     // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
-    const truncationThreshold =
-      outputCountIsEstimated && coldOutputBudget > 1
-        ? COMPACT_MAX_OUTPUT_TOKENS
-        : coldOutputBudget;
+    const truncationThreshold = outputCountIsEstimated
+      ? COMPACT_MAX_OUTPUT_TOKENS
+      : coldOutputBudget;
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
@@ -1217,29 +1539,52 @@ export class ChatCompressionService {
         },
       };
     }
-    // The threshold comparison above cannot detect cap-hits when the budget
-    // was clamped and the count is a local estimate: output never exceeds
-    // the requested budget and the estimator tops out at ~1.5x actual tokens,
-    // so below ~2/3 of the ceiling the estimate can never reach the fixed
-    // threshold. Gate that path on snapshot well-formedness instead — a
-    // summary truncated at the clamped cap lacks the closing
-    // </state_snapshot> tag, while a complete one carries it (the directive
-    // requires the XML, and the cache-sharing path gates on the same check).
+    // The threshold comparison above cannot detect every cap-hit, so gate on
+    // snapshot well-formedness too: a complete summary closes the
+    // <state_snapshot> the directive asks for (the cache-sharing path gates
+    // on the same check).
+    // - A summary that opens <state_snapshot> and never closes it was cut
+    //   off when its request filled the window it was sized for. A server
+    //   can stop the output where its window ends instead of rejecting
+    //   `prompt + max_tokens > window` (llama.cpp's server does); the count
+    //   it reports then stays below the budget requested, out of the
+    //   threshold's reach, but its prompt and output counts reach the
+    //   window. Without that sign the summary is kept: a model can end
+    //   without closing the tag, and dropping each such summary would trip
+    //   the failure breaker. A summary without the tags is left alone here.
+    // - When the budget was clamped and the count is a local estimate, output
+    //   never exceeds the requested budget and the estimator tops out at
+    //   ~1.5x actual tokens, so below ~2/3 of the ceiling the estimate can
+    //   never reach the fixed threshold. That path also drops a summary
+    //   without a closed snapshot.
+    const filledColdWindow =
+      !outputCountIsEstimated &&
+      typeof compressionInputTokenCount === 'number' &&
+      typeof compressionOutputTokenCount === 'number' &&
+      compressionInputTokenCount + compressionOutputTokenCount >=
+        coldWindow - COMPACTION_BUDGET_SAFETY_MARGIN;
+    const cutMidSnapshot =
+      filledColdWindow && hasUnclosedStateSnapshot(summary);
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
-      outputCountIsEstimated &&
-      coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS &&
-      !hasStateSnapshot(summary)
+      (cutMidSnapshot ||
+        (outputCountIsEstimated &&
+          coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS &&
+          !hasStateSnapshot(summary)))
     ) {
       config
         .getDebugLogger()
         .warn(
-          `[chat-compression] summary lacks a closed <state_snapshot> while ` +
-            `the output budget was clamped (${coldOutputBudget}) and the ` +
-            `output count is a local estimate; dropping ` +
-            `potentially-truncated result. This counts as a compression ` +
-            `failure for the per-chat circuit breaker.`,
+          cutMidSnapshot
+            ? `[chat-compression] summary opens <state_snapshot> but never ` +
+                `closes it; dropping truncated result. This counts as a ` +
+                `compression failure for the per-chat circuit breaker.`
+            : `[chat-compression] summary lacks a closed <state_snapshot> ` +
+                `while the output budget was clamped (${coldOutputBudget}) ` +
+                `and the output count is a local estimate; dropping ` +
+                `potentially-truncated result. This counts as a compression ` +
+                `failure for the per-chat circuit breaker.`,
         );
       return {
         newHistory: null,
@@ -1372,6 +1717,7 @@ export class ChatCompressionService {
       if (
         !usedCacheSharing &&
         !opts.requestPayloadTooLarge &&
+        !coldInputReduced &&
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
         typeof compressionOutputTokenCount === 'number' &&
@@ -1432,7 +1778,9 @@ export class ChatCompressionService {
               `[chat-compression] ${
                 usedCacheSharing
                   ? 'cache-sharing token accounting'
-                  : 'usage metadata missing'
+                  : coldInputReduced
+                    ? 'reduced compression request'
+                    : 'usage metadata missing'
               }; estimated ` +
                 `post-compression token count by preserving the ` +
                 `API-reported non-visible remainder ` +
