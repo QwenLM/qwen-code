@@ -321,6 +321,42 @@ describe('board CLI', () => {
 });
 
 describe('board rendering', () => {
+  it('preserves mixed-case actor labels in the show panel', () => {
+    const output = renderBoard({
+      board: 'mixedboard',
+      tasks: [
+        {
+          schemaVersion: 1,
+          id: TASK_ID,
+          subject: 'check',
+          createdBy: 'MiXeDActor',
+          owner: 'OwNeR',
+          status: 'pending',
+          createdAt: 1,
+          updatedAt: 1,
+          notes: [],
+        },
+      ],
+      asks: [
+        {
+          schemaVersion: 1,
+          id: ASK_ID,
+          from: 'MiXeDActor',
+          to: 'OwNeR',
+          question: 'status?',
+          state: 'open',
+          createdAt: 1,
+          expiresAt: 2,
+          answer: null,
+          reason: null,
+          settledAt: null,
+        },
+      ],
+    });
+    expect(output).toContain('MiXeDActor -> OwNeR: status?');
+    expect(output).toContain('OwNeR: check');
+  });
+
   it('keeps full actionable ids and one line per item', () => {
     const output = renderBoard({
       board: 'demo',

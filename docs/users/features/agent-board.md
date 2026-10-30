@@ -45,7 +45,8 @@ one (ext4) alike.
 
 The `board` field in `show --json` and the `board:` heading in the plain-text
 `show` panel use the lowercase storage name, even when `--board` uses mixed
-case. Actor labels retain their supplied spelling.
+case. Actor labels retain their supplied spelling and are compared exactly:
+`--as Web` does not match work labelled `web`.
 
 ## Ask a question
 
