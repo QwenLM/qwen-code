@@ -210,7 +210,12 @@ describe('acceptSpeculation', () => {
       { role: 'user', parts: [{ text: 'hi' }] },
     ]);
 
-    await expect(acceptSpeculation(state, client)).rejects.toThrow(/file\.ts/);
+    const rejection = acceptSpeculation(state, client);
+    await expect(rejection).rejects.toThrow(/file\.ts/);
+    await expect(rejection).rejects.toMatchObject({
+      applied: [],
+      failed: [blocked],
+    });
 
     // No history may be injected when the files did not land, and the overlay must
     // not be left behind for the next speculation to trip over.
