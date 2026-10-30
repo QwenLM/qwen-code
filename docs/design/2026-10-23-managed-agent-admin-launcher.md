@@ -36,18 +36,18 @@ That form does not work for an operator who installed the reference distribution
 
 | Command                  | Entry point                                    |
 | ------------------------ | ---------------------------------------------- |
-| `storage-registration`   | `persistence.WorkspaceStorageRegistrationMain` |
-| `workspace-recovery`     | `persistence.WorkspaceRecoveryMain`            |
-| `workspace-migration`    | `workspace.runtime.WorkspaceMigrationMain`     |
-| `maintenance-recovery`   | `persistence.WorkspaceMaintenanceRecoveryMain` |
-| `operator-recovery`      | `workspace.runtime.WorkspaceRecoveryCommand`   |
-| `csi-registration`       | `persistence.WorkspaceCsiRegistrationMain`     |
-| `csi-protection`         | `workspace.runtime.WorkspaceCsiProtectionMain` |
-| `csi-session`            | `persistence.WorkspaceCsiSessionMain`          |
-| `csi-runtime`            | `persistence.WorkspaceCsiRuntimeMain`          |
-| `csi-retirement`         | `persistence.WorkspaceCsiRetirementMain`       |
-| `csi-worker-ack`         | `persistence.WorkspaceCsiWorkerAckMain`        |
-| `resident-retirement`    | `persistence.ResidentWorkspaceRetirementMain`  |
+| `storage-registration`   | `maintenance.WorkspaceStorageRegistrationMain` |
+| `workspace-recovery`     | `maintenance.WorkspaceRecoveryMain`            |
+| `workspace-migration`    | `maintenance.WorkspaceMigrationMain`           |
+| `maintenance-recovery`   | `maintenance.WorkspaceMaintenanceRecoveryMain` |
+| `operator-recovery`      | `maintenance.WorkspaceRecoveryCommand`         |
+| `csi-registration`       | `maintenance.WorkspaceCsiRegistrationMain`     |
+| `csi-protection`         | `maintenance.WorkspaceCsiProtectionMain`       |
+| `csi-session`            | `maintenance.WorkspaceCsiSessionMain`          |
+| `csi-runtime`            | `maintenance.WorkspaceCsiRuntimeMain`          |
+| `csi-retirement`         | `maintenance.WorkspaceCsiRetirementMain`       |
+| `csi-worker-ack`         | `maintenance.WorkspaceCsiWorkerAckMain`        |
+| `resident-retirement`    | `maintenance.ResidentWorkspaceRetirementMain`  |
 | `resolved-configuration` | `preflight.ResolvedConfiguration`              |
 
 All classes are under `com.alibaba.qwen.code.managedagent`.

@@ -37,6 +37,22 @@ The sidebar trigger, dialog heading, and non-browse submit button all use
 The Recent heading and its region name continue to share the same translation
 key; a separate descriptive region label is outside this copy-only update.
 
+## Sidebar category headers
+
+Pinned, Workspaces, No-workspace sessions, and Recent are peer collapsible
+categories. Their active sidebar headers use the same height, spacing, muted
+text, and trailing expansion chevron, including hover and keyboard-focus reveal
+rules. No-workspace sessions retains its independent saved expansion preference
+and search behavior. Its header in Archived settings keeps the workspace-entry
+presentation.
+
+Chromium comparison with simulated daemon responses (hovering the collapsed
+No-workspace sessions category):
+
+| Before                                                                     | After                                                                   |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| ![Workspace-entry header](../../assets/sidebar-category-header-before.png) | ![Peer category header](../../assets/sidebar-category-header-after.png) |
+
 ## Shared UI Contract
 
 Use the TypeScript SDK daemon UI exports as the common boundary:

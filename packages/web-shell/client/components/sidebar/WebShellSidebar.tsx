@@ -383,6 +383,7 @@ export interface WebShellSidebarSessionActionsOptions {
    * (details/group/archive are dropdown-only).
    * Recent sessions use dedicated Pin and Archive buttons instead of this
    * layout; the items policy still controls whether those actions are enabled.
+   * Archived rows use Export and Restore inline, independently of this option.
    */
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
@@ -4899,11 +4900,11 @@ export function WebShellSidebar({
         const showArchivedRename = standalone
           ? sessionActionItems.has('rename')
           : canRenameSession(session);
-        const hasArchivedActions =
-          showArchivedExport ||
-          showArchivedUnarchive ||
-          showArchivedDelete ||
-          showArchivedRename;
+        const showArchivedMore = showArchivedRename || showArchivedDelete;
+        const archivedActionCount =
+          Number(showArchivedExport) +
+          Number(showArchivedUnarchive) +
+          Number(showArchivedMore);
         return withDetails(
           <div
             className={cx(
@@ -4940,9 +4941,7 @@ export function WebShellSidebar({
               )}
               style={
                 {
-                  '--session-actions-width': hasArchivedActions
-                    ? '26px'
-                    : '0px',
+                  '--session-actions-width': `${archivedActionCount * 26}px`,
                 } as CSSProperties
               }
             >
@@ -4950,83 +4949,93 @@ export function WebShellSidebar({
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
-              {hasArchivedActions && (
+              {archivedActionCount > 0 && (
                 <div
                   className={styles.sessionActions}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                 >
-                  <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        className={styles.sessionActionButton}
-                        type="button"
-                        aria-label={t('sidebar.moreActions')}
-                        title={t('sidebar.moreActions')}
-                      >
-                        <EllipsisVerticalIcon />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      align="end"
-                      className="w-auto min-w-40"
-                      style={SESSION_MENU_PORTAL_STYLE}
-                      onPointerDownOutside={handleSessionMenuPointerDownOutside}
-                      onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                  {showArchivedExport && (
+                    <button
+                      className={styles.sessionActionButton}
+                      type="button"
+                      disabled={exporting}
+                      aria-label={t('sidebar.export')}
+                      title={t('sidebar.export')}
+                      onClick={() => {
+                        if (standalone) standalone.onExport();
+                        else handleExportSession(session);
+                      }}
                     >
-                      <DropdownMenuGroup>
-                        {showArchivedRename && (
-                          <DropdownMenuItem
-                            disabled={busy}
-                            onSelect={() => {
-                              if (standalone) standalone.onRename();
-                              else handleRenameFromMenu(session);
-                            }}
-                          >
-                            <PencilIcon />
-                            {t('sidebar.rename')}
-                          </DropdownMenuItem>
-                        )}
-                        {showArchivedExport && (
-                          <DropdownMenuItem
-                            disabled={exporting}
-                            onSelect={() => {
-                              if (standalone) standalone.onExport();
-                              else handleExportSession(session);
-                            }}
-                          >
-                            <DownloadIcon />
-                            {t('sidebar.export')}
-                          </DropdownMenuItem>
-                        )}
-                        {showArchivedUnarchive && (
-                          <DropdownMenuItem
-                            disabled={busy}
-                            onSelect={() => {
-                              if (standalone) standalone.onUnarchive?.();
-                              else handleUnarchive(session);
-                            }}
-                          >
-                            <ArchiveRestoreIcon />
-                            {t('sidebar.unarchive')}
-                          </DropdownMenuItem>
-                        )}
-                        {showArchivedDelete && (
-                          <DropdownMenuItem
-                            variant="destructive"
-                            disabled={busy}
-                            onSelect={() => {
-                              if (standalone) standalone.onDelete();
-                              else handleDeleteSession(session);
-                            }}
-                          >
-                            <Trash2Icon />
-                            {t('sidebar.delete')}
-                          </DropdownMenuItem>
-                        )}
-                      </DropdownMenuGroup>
-                    </DropdownMenuContent>
-                  </SessionMenu>
+                      <DownloadIcon size={16} strokeWidth={1.2} />
+                    </button>
+                  )}
+                  {showArchivedUnarchive && (
+                    <button
+                      className={styles.sessionActionButton}
+                      type="button"
+                      disabled={busy}
+                      aria-label={t('sidebar.unarchive')}
+                      title={t('sidebar.unarchive')}
+                      onClick={() => {
+                        if (standalone) standalone.onUnarchive?.();
+                        else handleUnarchive(session);
+                      }}
+                    >
+                      <ArchiveRestoreIcon size={16} strokeWidth={1.2} />
+                    </button>
+                  )}
+                  {showArchivedMore && (
+                    <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className={styles.sessionActionButton}
+                          type="button"
+                          aria-label={t('sidebar.moreActions')}
+                          title={t('sidebar.moreActions')}
+                        >
+                          <EllipsisVerticalIcon />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent
+                        align="end"
+                        className="w-auto min-w-40"
+                        style={SESSION_MENU_PORTAL_STYLE}
+                        onPointerDownOutside={
+                          handleSessionMenuPointerDownOutside
+                        }
+                        onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                      >
+                        <DropdownMenuGroup>
+                          {showArchivedRename && (
+                            <DropdownMenuItem
+                              disabled={busy}
+                              onSelect={() => {
+                                if (standalone) standalone.onRename();
+                                else handleRenameFromMenu(session);
+                              }}
+                            >
+                              <PencilIcon />
+                              {t('sidebar.rename')}
+                            </DropdownMenuItem>
+                          )}
+                          {showArchivedDelete && (
+                            <DropdownMenuItem
+                              variant="destructive"
+                              disabled={busy}
+                              onSelect={() => {
+                                if (standalone) standalone.onDelete();
+                                else handleDeleteSession(session);
+                              }}
+                            >
+                              <Trash2Icon />
+                              {t('sidebar.delete')}
+                            </DropdownMenuItem>
+                          )}
+                        </DropdownMenuGroup>
+                      </DropdownMenuContent>
+                    </SessionMenu>
+                  )}
                 </div>
               )}
             </div>
@@ -6912,7 +6921,7 @@ export function WebShellSidebar({
                           if (
                             target instanceof Element &&
                             target.closest(
-                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
                             )
                           )
                             event.preventDefault();

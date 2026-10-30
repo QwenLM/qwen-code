@@ -2,6 +2,7 @@
 
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
@@ -194,7 +195,9 @@ describe('StandaloneRecents', () => {
     const newSession = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
     );
-    expect(newSession?.parentElement?.className).toContain('invisible');
+    expect(newSession?.parentElement?.className).toContain(
+      'projectsHeaderActions',
+    );
     const sessions = container.querySelector(
       '[data-testid="standalone-active-group"] > div:nth-child(2)',
     );
@@ -202,6 +205,11 @@ describe('StandaloneRecents', () => {
     const header = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] > div > button',
     )!;
+    expect(header.parentElement?.className).toContain('projectsHeader');
+    expect(header.className).toContain('projectsHeaderToggle');
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-down',
+    );
     header.focus();
     await act(async () =>
       header.dispatchEvent(
@@ -209,6 +217,9 @@ describe('StandaloneRecents', () => {
       ),
     );
     expect(document.activeElement).not.toBe(header);
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-right',
+    );
     await act(async () =>
       header.dispatchEvent(
         new MouseEvent('click', { bubbles: true, detail: 1 }),
@@ -313,6 +324,16 @@ describe('StandaloneRecents', () => {
   it('loads only the requested archived group', async () => {
     const { renderSession } = await render({ archiveState: 'archived' });
 
+    const group = container.querySelector(
+      '[data-testid="standalone-archived-group"]',
+    )!;
+    expect(group.classList).toContain('mb-3');
+    const header = group.querySelector('button[aria-expanded]')!;
+    expect(header.parentElement?.className).toContain('headerRow');
+    expect(header.querySelector('svg')?.classList).toContain(
+      'lucide-circle-dashed',
+    );
+    expect(header.querySelector('span + svg')).toBeNull();
     expect(container.textContent).toContain('Archived chat');
     expect(container.textContent).not.toContain('Active chat');
     expect(renderSession).toHaveBeenCalledWith(
@@ -330,37 +351,92 @@ describe('StandaloneRecents', () => {
     });
   });
 
-  it('keeps archived pagination reachable after an empty page', async () => {
-    mocks.list
-      .mockResolvedValueOnce({ sessions: [], nextCursor: 'next' })
-      .mockResolvedValueOnce({
-        sessions: [
-          summary('later', 'Later archived chat', { isArchived: true }),
-        ],
+  it.each(['active', 'archived'] as const)(
+    'keeps %s pagination reachable after an empty page',
+    async (archiveState) => {
+      mocks.list
+        .mockResolvedValueOnce({ sessions: [], nextCursor: 'next' })
+        .mockResolvedValueOnce({
+          sessions: [
+            summary('later', 'Later chat', {
+              isArchived: archiveState === 'archived',
+            }),
+          ],
+        });
+      await render({ archiveState });
+
+      const loadMore = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      );
+      expect(loadMore).toBeDefined();
+      await act(async () => loadMore!.click());
+
+      expect(mocks.list).toHaveBeenLastCalledWith({
+        archiveState,
+        cursor: 'next',
+        pageSize: 50,
       });
-    await render({ archiveState: 'archived' });
+      expect(container.textContent).toContain('Later chat');
+    },
+  );
 
-    const loadMore = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'sidebar.showAllSessions',
+  it.each(['active', 'archived'] as const)(
+    'hides the empty %s group regardless of its expanded preference',
+    async (archiveState) => {
+      mocks.list.mockResolvedValue({ sessions: [] });
+      for (const expanded of [false, true]) {
+        window.localStorage.setItem(
+          `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`,
+          String(expanded),
+        );
+        await render({ archiveState });
+        expect(container.querySelector('section')).toBeNull();
+        await act(async () => root.unmount());
+        root = createRoot(container);
+      }
+    },
+  );
+
+  it('keeps the group visible before the initial list request starts', () => {
+    const html = renderToString(
+      <StandaloneRecents
+        archiveState="active"
+        renderSession={() => null}
+        onLoadSession={vi.fn()}
+        onError={vi.fn()}
+        onNotice={vi.fn()}
+      />,
     );
-    expect(loadMore).toBeDefined();
-    await act(async () => loadMore!.click());
-
-    expect(mocks.list).toHaveBeenLastCalledWith({
-      archiveState: 'archived',
-      cursor: 'next',
-      pageSize: 50,
-    });
-    expect(container.textContent).toContain('Later archived chat');
+    expect(html).toContain('standalone-active-group');
+    expect(mocks.list).not.toHaveBeenCalled();
   });
 
-  it('aligns the empty state with the workspace label', async () => {
-    mocks.list.mockResolvedValue({ sessions: [] });
-    await render();
-
-    expect(container.querySelector('div[class*="empty"]')?.textContent).toBe(
-      'sidebar.noSessions',
+  it('keeps a loading group visible until the list is confirmed empty', async () => {
+    let resolveList!: (value: { sessions: never[] }) => void;
+    mocks.list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveList = resolve;
+      }),
     );
+    await render();
+    expect(container.querySelector('section')).not.toBeNull();
+    await act(async () => resolveList({ sessions: [] }));
+    expect(container.querySelector('section')).toBeNull();
+  });
+
+  it('shows the first session and hides the group after the last session leaves on refresh', async () => {
+    mocks.list
+      .mockResolvedValueOnce({ sessions: [] })
+      .mockResolvedValueOnce({ sessions: [summary('first', 'First chat')] })
+      .mockResolvedValueOnce({ sessions: [] });
+    await render({ refreshKey: 0 });
+    expect(container.querySelector('section')).toBeNull();
+
+    await render({ refreshKey: 1 });
+    expect(container.textContent).toContain('First chat');
+
+    await render({ refreshKey: 2 });
+    expect(container.querySelector('section')).toBeNull();
   });
 
   it('does not reload when the selected session changes', async () => {
@@ -535,6 +611,7 @@ describe('StandaloneRecents', () => {
     await act(async () => archiveButton?.click());
 
     expect(container.textContent).not.toContain('Active chat');
+    expect(container.querySelector('section')).toBeNull();
     expect(onMutated).toHaveBeenCalledOnce();
   });
 
