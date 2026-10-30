@@ -3262,9 +3262,13 @@ export abstract class ChannelBase {
   /**
    * Called when the running turn ACCEPTED this message into its mid-turn queue.
    * Unlike `onPromptBuffered` the message starts no turn of its own, so an
-   * adapter must keep any resources the message still references (e.g. a
-   * downloaded attachment directory) until the running turn's `onPromptEnd`
-   * fires — that is the turn which reads the injected text.
+   * adapter that tracks per-message state can keep it until the running turn's
+   * `onPromptEnd` fires — that is the turn which reads the injected text.
+   * Injected messages are text-only: media parks for a replay turn and inline
+   * images are refused, so no media resource is retained for injection. If the
+   * turn ends before the bridge drains the message, it is replayed as its own
+   * turn: that replay fires the ordinary `onPromptStart`/`onPromptEnd` hooks
+   * and carries the replay envelope's IDs, not the injected message's.
    */
   protected onPromptInjected(
     _chatId: string,
@@ -7447,7 +7451,13 @@ export abstract class ChannelBase {
                   // between the accepted queue call and this drain, so the
                   // replayed turn cannot also deliver the same backfill.
                   this.drainPendingGroupHistory(envelope);
-                  this.recordInjectedMessage(sessionId, injectText, envelope);
+                  // Record the RAW text, not `injectText`: the wrapper above is
+                  // for the running turn only. If the running turn ends before
+                  // draining this message, the ledger entry is replayed as its
+                  // own turn, and that replay composes a fresh wrapper of its
+                  // own — storing the wrapped text would nest a stale wrapper
+                  // and present the previous backfill as the message to answer.
+                  this.recordInjectedMessage(sessionId, promptText, envelope);
                   process.stderr.write(
                     `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
                   );
