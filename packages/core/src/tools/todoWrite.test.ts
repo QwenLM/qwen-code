@@ -1522,6 +1522,29 @@ describe('TodoWriteTool – runtime output directory', () => {
     expect(mockFs.readdir).not.toHaveBeenCalled();
   });
 
+  it('should reject listing a configured todosDirectory symlink that escapes the project root', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, 'project-todos');
+    const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
+    mockRealpath(
+      new Map([
+        [projectRoot, projectRoot],
+        [todoDir, outsideTodoDir],
+      ]),
+    );
+    mockFs.readdir.mockResolvedValue(['leaked-session.json'] as never);
+    mockConfig = {
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(listTodoSessions(mockConfig)).rejects.toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockFs.readdir).not.toHaveBeenCalled();
+  });
+
   it('should list a configured todosDirectory inside the project root that is not under .qwen', async () => {
     const projectRoot = path.resolve('workspace', 'project');
     const todoDir = path.join(projectRoot, 'project-todos');

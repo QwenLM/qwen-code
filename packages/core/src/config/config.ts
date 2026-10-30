@@ -9715,92 +9715,75 @@ export class Config {
   }
 
   private addLegacyPlanLocationWarning(): void {
-    try {
-      if (!this.plansDirectoryConfigured) {
-        return;
-      }
-
-      const legacyPlansDir = Storage.getPlansDir();
-      const legacyPlanFiles = this.getPlanFileNames(legacyPlansDir);
-      if (legacyPlanFiles.length === 0) {
-        return;
-      }
-
-      const configuredPlanFiles = new Set(this.getPlanFileNames(this.plansDir));
-      const hiddenLegacyPlanFiles = legacyPlanFiles.filter(
-        (fileName) => !configuredPlanFiles.has(fileName),
-      );
-      if (hiddenLegacyPlanFiles.length === 0) {
-        return;
-      }
-
-      this.warnings.push(
-        `Warning: Saved plan files exist at ${legacyPlansDir}, but ` +
-          `plansDirectory is configured to use ${this.plansDir}. Move ` +
-          `existing plan files to ${this.plansDir} if you want to keep ` +
-          `using them.`,
-      );
-    } catch (err: unknown) {
-      const message = `Failed to check legacy plan directory migration warning: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-      this.warnings.push(message);
-      this.debugLogger.warn(message, err);
-    }
-  }
-
-  private getPlanFileNames(plansDir: string): string[] {
-    try {
-      return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') {
-        return [];
-      }
-      if (code === 'EACCES' || code === 'EPERM') {
-        const message = `Failed to read plan directory ${plansDir}: ${
-          err instanceof Error ? err.message : String(err)
-        }`;
-        this.warnings.push(message);
-        this.debugLogger.warn(message, err);
-        return [];
-      }
-      throw err;
-    }
+    this.addLegacyStorageLocationWarning({
+      configured: this.plansDirectoryConfigured,
+      legacyDir: Storage.getPlansDir(),
+      currentDir: this.plansDir,
+      extension: '.md',
+      settingName: 'plansDirectory',
+      noun: 'plan',
+    });
   }
 
   private addLegacyTodoLocationWarning(): void {
+    this.addLegacyStorageLocationWarning({
+      configured: this.todosDirectoryConfigured,
+      legacyDir: Storage.getTodosDir(),
+      currentDir: this.todosDir,
+      extension: '.json',
+      settingName: 'todosDirectory',
+      noun: 'todo',
+    });
+  }
+
+  /**
+   * Warns when a configured storage directory hides files that still live in
+   * the legacy default location. Shared by plansDirectory and todosDirectory.
+   */
+  private addLegacyStorageLocationWarning(options: {
+    configured: boolean;
+    legacyDir: string;
+    currentDir: string;
+    extension: string;
+    settingName: string;
+    noun: string;
+  }): void {
+    const { configured, legacyDir, currentDir, extension, settingName, noun } =
+      options;
     try {
-      if (!this.todosDirectoryConfigured) {
+      if (!configured) {
         return;
       }
 
-      const legacyTodosDir = Storage.getTodosDir();
-      if (path.resolve(legacyTodosDir) === path.resolve(this.todosDir)) {
+      // The configured dir can coincide with the legacy one; skip so an
+      // unreadable shared dir is not reported twice.
+      if (path.resolve(legacyDir) === path.resolve(currentDir)) {
         return;
       }
 
-      const legacyTodoFiles = this.getTodoFileNames(legacyTodosDir);
-      if (legacyTodoFiles.length === 0) {
+      const legacyFiles = this.getStorageFileNames(legacyDir, extension, noun);
+      if (legacyFiles.length === 0) {
         return;
       }
 
-      const configuredTodoFiles = new Set(this.getTodoFileNames(this.todosDir));
-      const hiddenLegacyTodoFiles = legacyTodoFiles.filter(
-        (fileName) => !configuredTodoFiles.has(fileName),
+      const currentFiles = new Set(
+        this.getStorageFileNames(currentDir, extension, noun),
       );
-      if (hiddenLegacyTodoFiles.length === 0) {
+      const hiddenLegacyFiles = legacyFiles.filter(
+        (fileName) => !currentFiles.has(fileName),
+      );
+      if (hiddenLegacyFiles.length === 0) {
         return;
       }
 
       this.warnings.push(
-        `Warning: Saved todo files exist at ${legacyTodosDir}, but ` +
-          `todosDirectory is configured to use ${this.todosDir}. Move ` +
-          `existing todo files to ${this.todosDir} if you want to keep ` +
+        `Warning: Saved ${noun} files exist at ${legacyDir}, but ` +
+          `${settingName} is configured to use ${currentDir}. Move ` +
+          `existing ${noun} files to ${currentDir} if you want to keep ` +
           `using them.`,
       );
     } catch (err: unknown) {
-      const message = `Failed to check legacy todo directory migration warning: ${
+      const message = `Failed to check legacy ${noun} directory migration warning: ${
         err instanceof Error ? err.message : String(err)
       }`;
       this.warnings.push(message);
@@ -9808,18 +9791,20 @@ export class Config {
     }
   }
 
-  private getTodoFileNames(todosDir: string): string[] {
+  private getStorageFileNames(
+    dir: string,
+    extension: string,
+    noun: string,
+  ): string[] {
     try {
-      return fs
-        .readdirSync(todosDir)
-        .filter((entry) => entry.endsWith('.json'));
+      return fs.readdirSync(dir).filter((entry) => entry.endsWith(extension));
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         return [];
       }
       if (code === 'EACCES' || code === 'EPERM') {
-        const message = `Failed to read todo directory ${todosDir}: ${
+        const message = `Failed to read ${noun} directory ${dir}: ${
           err instanceof Error ? err.message : String(err)
         }`;
         this.warnings.push(message);
