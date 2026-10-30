@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreCli
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.SourceEvent;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
@@ -43,10 +44,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 // mechanics — the relay's loop control, the fault arms, the case
 // choreography — stay in the letters; only the byte-identical machinery
 // lives here.
-final class HostedGateTestSupport {
+public final class HostedGateTestSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private HostedGateTestSupport() {
+    }
+
+    public static HarnessConnector harnessDelegate(HarnessConnector connector) {
+        return connector instanceof SdkHarnessBoundary
+                ? (HarnessConnector) ReflectionTestUtils.getField(connector, "delegate")
+                : connector;
     }
 
     // A Hosted IT advertises ports it probed by binding an ephemeral port
@@ -376,7 +383,7 @@ final class HostedGateTestSupport {
     static HarnessSessionRef attachment(HarnessConnector connector,
             String sessionId) {
         for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
-                connector, "attachments")).values()) {
+                harnessDelegate(connector), "attachments")).values()) {
             if (value instanceof HarnessSessionRef ref
                     && sessionId.equals(ref.getHarnessSessionId())) {
                 return ref;

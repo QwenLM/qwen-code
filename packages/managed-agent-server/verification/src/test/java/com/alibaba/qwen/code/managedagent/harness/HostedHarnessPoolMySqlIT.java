@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.harness;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -33,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.harnessDelegate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -85,7 +87,7 @@ class HostedHarnessPoolMySqlIT {
         var settings = spring.getBean(ManagedAgentProperties.class);
         settings.getSessionStore().setBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
         var placements = spring.getBean(HarnessPlacementStore.class);
-        pool = spring.getBean(HarnessPoolConnector.class);
+        pool = (HarnessPoolConnector) harnessDelegate(spring.getBean(HarnessConnector.class));
         pool.refresh();
         assertThat(pool.supportsFencedTitles()).isTrue();
         String tenantA = "pool-a-" + UUID.randomUUID();

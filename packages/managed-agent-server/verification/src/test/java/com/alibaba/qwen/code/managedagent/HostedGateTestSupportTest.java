@@ -1,8 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -48,8 +52,9 @@ class HostedGateTestSupportTest {
 
     // The lookup reads the connector's private field by name; renaming that
     // field turns this red here rather than in five Hosted gate classes.
-    @Test
-    void attachmentReturnsTheSessionsRefFromTheConnector() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void attachmentReturnsTheSessionsRefFromTheConnector(boolean wrapped) {
         var connector = mock(QwenHostedHarnessConnector.class);
         var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
         attachments.put("other", ref("session-b"));
@@ -57,8 +62,9 @@ class HostedGateTestSupportTest {
         attachments.put("mine", mine);
         ReflectionTestUtils.setField(connector, "attachments", attachments);
 
-        assertThat(attachment(connector, "session-a")).isSameAs(mine);
-        assertThat(attachment(connector, "session-c")).isNull();
+        HarnessConnector source = wrapped ? new SdkHarnessBoundary(connector) : connector;
+        assertThat(attachment(source, "session-a")).isSameAs(mine);
+        assertThat(attachment(source, "session-c")).isNull();
     }
 
     // The boot retry's only consumer is the deep MySQL lane; pin its contract

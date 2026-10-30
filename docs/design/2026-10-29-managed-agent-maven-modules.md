@@ -106,6 +106,8 @@ results and synchronous, asynchronous and callback errors into contract values.
 Keep HTTP, transport, protocol, generation, capability and refusal distinctions,
 including retry inputs, status, reason and cause. Delegate SDK payload-digest and
 permission-rule algorithms through narrow ports instead of duplicating them.
+Stream idle timeouts retain a distinct transport-failure subtype and the original
+idle duration, so retry diagnostics distinguish silence from other transport failures.
 Workspace scope and authorization wrappers stay in the control plane. Physical
 provisioning and communication belong to adapters; construction and listeners
 belong to server composition.
@@ -315,3 +317,23 @@ the packaging integration tests. Ordinary-host, executable/archive and real
 integration results are separate evidence. Live cloud OSS qualification is not
 established by these runs. This follow-up does not publish or deploy artifacts and
 does not reset the shared local Java budget.
+
+### Hosted fault follow-up
+
+The full run at `2d878d48e2` executed 165 Hosted integration cases with four
+failures, 20 errors and four skips. Nineteen errors came from test-only reflection
+against the SDK wrapper instead of its delegate; the pool fixture also requested
+a concrete bean now hidden behind that wrapper. The event-reader replay used the
+old source-directory depth. The two idle-stream cases exposed loss of the SDK's
+idle subtype and duration at the contract boundary. The recovery-settlement
+driver treated the documented retryable `503 message_projection_pending` response
+as fatal during its existing bounded Items poll.
+
+The follow-up unwraps the known boundary only for test fault injection, locates
+the TypeScript reader by walking to its repository marker, preserves the neutral
+idle subtype, and retries only that exact projection-pending response at the
+Items poll. The existing deadlines, terminal-state checks, single-execution
+assertions and report-completeness gates remain intact. New Java regressions and
+the complete Hosted/admission profiles remain pending CI; local Java checks do
+not resume after the shared budget is exhausted. The separate RocketMQ disk
+protection failure remains an environment blocker and is not fixed by this change.
