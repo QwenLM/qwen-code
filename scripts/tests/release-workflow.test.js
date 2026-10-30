@@ -579,7 +579,7 @@ describe('release workflow', () => {
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/.github/workflows/audio-capture-prebuilds.yml\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -3887,6 +3887,22 @@ describe('release artifact handoff', () => {
       expectedPublish: true,
     },
     {
+      name: 'enabled, reused audio',
+      audio: 'skipped',
+      artifact: '123',
+      expectedBuild: true,
+      expectedPublish: true,
+    },
+    {
+      name: 'unset switch, reused audio',
+      enabled: '',
+      audio: 'skipped',
+      artifact: '123',
+      build: 'skipped',
+      expectedBuild: false,
+      expectedPublish: true,
+    },
+    {
       name: 'missing audio',
       audio: 'skipped',
       expectedBuild: false,
@@ -3946,6 +3962,7 @@ describe('release artifact handoff', () => {
     const needs = {
       prepare: {
         result: scenario.prepare ?? 'success',
+        outputs: { audio_artifact_id: scenario.artifact ?? '' },
       },
       quality: { result: scenario.quality ?? 'success' },
       integration_none: { result: 'success' },
