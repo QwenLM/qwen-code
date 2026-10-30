@@ -171,7 +171,11 @@ class DaemonServeE2ETest {
                             .build()
                             .send(request.build(),
                                     HttpResponse.BodyHandlers.discarding());
-                    assertEquals(204, response.statusCode());
+                    // A prompt is in flight at the permission request, so the
+                    // delete is refused; the session must be stopped first
+                    // (#12091).
+                    assertEquals(409, response.statusCode());
+                    session.cancelActivePrompt();
                 } catch (java.io.IOException ignored) {
                     // The terminal below proves that the ambiguous DELETE ran.
                 }
