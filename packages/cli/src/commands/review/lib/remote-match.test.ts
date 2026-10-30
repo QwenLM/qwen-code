@@ -480,7 +480,7 @@ describe('isAoneHostFamily', () => {
     expect(isAoneHostFamily('code.alibaba-inc.com')).toBe(true);
   });
 
-  it("normalizes the spelling variants through the shared helper", () => {
+  it('normalizes the spelling variants through the shared helper', () => {
     // Same three spellings `hostsEquivalent` and `isAoneCanonicalHost`
     // admit: case, a port kept inside the CR-URL host capture, and the
     // FQDN trailing dot.
