@@ -19,7 +19,7 @@ class ManagedSessionJsonConfigurationTest {
     void readsLargeBase64OnlyForInternalCommitRequests() throws Exception {
         var mapper = new ObjectMapper();
         var converter = new MappingJackson2HttpMessageConverter(mapper);
-        new ManagedSessionJsonConfiguration().extendMessageConverters(List.of(converter));
+        new ManagedSessionJsonConfiguration(mapper).extendMessageConverters(new java.util.ArrayList<>(List.of(converter)));
         String encoded = "A".repeat(21_000_000);
         byte[] body = ("{\"resources\":[{\"bytesBase64\":\"" + encoded + "\"}]}").getBytes(StandardCharsets.UTF_8);
         var input = new MockHttpInputMessage(body);

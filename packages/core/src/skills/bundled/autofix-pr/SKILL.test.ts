@@ -194,6 +194,25 @@ describe('bundled autofix-pr skill', () => {
     );
     expect(body).toContain('merge, never rebase');
     expect(body).toContain('Never list an `untrusted_comment` id');
+    // A bot's PR conversation comment is dropped, not listed as untrusted.
+    expect(body).toContain(
+      "a bot's `issue_comment` (a report, not a request) is dropped",
+    );
+    // A round of a watch whose fix is still running says so and ends.
+    expect(body).toContain(
+      "a fix agent is working in the PR's worktree → nothing was read or written",
+    );
+    // Work in the user's own copy of the head branch keeps a start from
+    // racing the user's push to that branch.
+    expect(body).toContain(
+      "the user's own copy of the head branch could not be squared with the PR",
+    );
+    expect(body).toContain('do not start, `--once` included');
+    expect(body).toContain('`localWorkUnknown` is true');
+    expect(body).toContain('have them fetch the branch or fix the checkout');
+    // A --once round of a watch this session already runs spends its budget.
+    expect(body).toContain("its push counts against that watch's budget");
+    expect(body).toContain('`--no-work` skips its git scan');
     // One task drives a watch: each schedule mints its id, every other task
     // of the PR — from before a take-over, a /clear or a later start — is
     // deleted before the new one is made, and a round woken by one deletes it.

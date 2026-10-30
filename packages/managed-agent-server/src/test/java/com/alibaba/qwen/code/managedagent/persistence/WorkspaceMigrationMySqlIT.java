@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -72,11 +73,11 @@ class WorkspaceMigrationMySqlIT {
     }
 
     @Test
-    void freshBaselineContainsOneGcAuthorityAndExactly38Tables() {
+    void freshBaselineContainsOneGcAuthorityAndEveryContractTable() {
         ManagedSchema.initialize(data);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema"
-                                        + " = ?", Integer.class, schema)).isEqualTo(38);
+                                        + " = ?", Integer.class, schema)).isEqualTo(ManagedSchemaContract.TABLES.size());
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
                                         + " 'SESSION_RESOURCE_GC'", Integer.class)).isZero();

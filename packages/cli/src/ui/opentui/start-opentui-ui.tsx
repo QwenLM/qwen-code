@@ -45,6 +45,7 @@ import {
   useRenderer,
 } from '@opentui/react';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { modBandInput } from '../utils/mod-band-tree.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -108,7 +109,7 @@ import type { LiveHistoryItem } from './live-session-model.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
-import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import { exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
 import type { OpenTuiComposerHandle } from './input-submission.js';
 import { buildUiHistoryItems } from './session-switch.js';
@@ -168,6 +169,18 @@ function OpenTuiEntryApp({
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
+  // The Mods' band above the prompt. OpenTUI has no session survey.
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
+        columns: width,
+        rows: height,
+        isFullscreen: renderer.screenMode === 'alternate-screen',
+        hasSurvey: false,
+        isWorking: live.streaming,
+      }),
+    );
+  }, [config, renderer, width, height, live.streaming]);
 
   const userMessagesRef = useRef<readonly string[]>([]);
   const userMessages = useMemo(() => {
@@ -334,7 +347,7 @@ function OpenTuiEntryApp({
     // Ink pre-arms C before cleanup; D only arms at an idle/confirmation boundary.
     if (key.name === 'c' || parked || !streamingRef.current) {
       if (exitGuard.press(guardKey) === 'exit') {
-        void exitSession(config, EXIT_CODE_INTERRUPT);
+        void exitSession(config, 0);
         return;
       }
       setExitHint(exitGuardHint(guardKey));

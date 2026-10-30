@@ -12,6 +12,7 @@ import {
   type SessionAgentRunFrame,
   type SessionAgentRunStatus,
 } from '@qwen-code/sdk/daemon';
+import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import type { AgentStreamState } from './agent-events';
 import type { SessionAgentsApi } from './session-agents-api';
 
@@ -165,6 +166,7 @@ export function useSessionAgentRuns({
   /** Runs a `retryable` run again; rejects when the daemon refuses. */
   retry: (runId: string) => Promise<void>;
 } {
+  const availability = useDaemonAvailabilityController();
   const [state, setState] = useState<{
     key: string | undefined;
     frames: RunFrameMap;
@@ -189,6 +191,7 @@ export function useSessionAgentRuns({
       });
     };
     const loadSnapshot = () => {
+      if (availability && availability.getSnapshot() !== 'available') return;
       api.listRuns(sessionId).then(
         (result) => apply(result.frames ?? []),
         () => {
@@ -201,27 +204,51 @@ export function useSessionAgentRuns({
       if (poll !== undefined) clearInterval(poll);
       poll = undefined;
     };
+    let streamState: AgentStreamState = 'closed';
+    const startPolling = () => {
+      if (
+        poll === undefined &&
+        streamState !== 'open' &&
+        (!availability || availability.getSnapshot() === 'available')
+      ) {
+        poll = setInterval(loadSnapshot, POLL_MS);
+      }
+    };
+    let wasAvailable = availability?.getSnapshot() === 'available';
+    const unsubscribeAvailability = availability?.subscribe(() => {
+      const available = availability.getSnapshot() === 'available';
+      if (available === wasAvailable) return;
+      wasAvailable = available;
+      if (!available) {
+        stopPolling();
+        return;
+      }
+      loadSnapshot();
+      startPolling();
+    });
     loadSnapshot();
     const unsubscribe = api.subscribe(
       sessionId,
       (event) => {
         if (event?.type === 'run') apply([event]);
       },
-      (streamState: AgentStreamState) => {
+      (nextState: AgentStreamState) => {
         if (disposed) return;
+        streamState = nextState;
         if (streamState === 'open') {
           stopPolling();
-        } else if (poll === undefined) {
-          poll = setInterval(loadSnapshot, POLL_MS);
+        } else {
+          startPolling();
         }
       },
     );
     return () => {
       disposed = true;
       stopPolling();
+      unsubscribeAvailability?.();
       unsubscribe();
     };
-  }, [api, sessionId, key]);
+  }, [api, availability, sessionId, key]);
 
   // Settle runs the transcript has caught up with.
   const frames = state.key === key ? state.frames : undefined;

@@ -12,13 +12,15 @@ Qwen Code / any MCP client
 
 ## Setup
 
-Node.js 22 or later and npm are required. Register the MCP server, then restart Qwen Code:
+This checkout documents the upcoming CUA 0.27.0 release. The installation commands below require its native GitHub Release (`cua-driver-rs-v0.27.0`) and matching npm packages to be published; merging these sources does not publish them. Before publication, use the [local development setup](https://github.com/QwenLM/qwen-code/blob/890cb0349a259761a571da889f4fe1cccc6ed108/packages/node-repl/README.md#local-development-and-environment) to test a repository build.
+
+Node.js 22 or later and npm are required. Once the release is published, register the MCP server, then restart Qwen Code:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.26.0
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.27.0
 ```
 
-The server installs the matching SDK and browser SDK as dependencies. The native SDK payload is downloaded for the current platform and verified against the matching release's SHA-256 checksums. It is cached outside the npm package; no workspace SDK bootstrap command is needed. Version 0.26.0 is a local development target until its release is published.
+The server installs the matching SDK and browser SDK as dependencies. The native SDK payload is downloaded for the current platform and verified against the matching release's SHA-256 checksums. It is cached outside the npm package; no workspace SDK bootstrap command is needed. Version 0.27.0 is a local development target until its release is published.
 
 Windows uses ordinary input delivery by default and does not install a UIAccess
 worker. Opting into UIAccess with `CUA_DRIVER_USE_UIACCESS=1` requires a signed
@@ -69,12 +71,18 @@ The server executes JavaScript with ordinary Node.js permissions and follows the
 
 `js` completes in one call and defaults to a 30-second timeout. A timeout can leave external effects; observe before retrying. `js_reset` discards bindings and gracefully closes the owning native/browser session. After context compaction call `cua.rewriteDocumentation()` before continuing.
 
+The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. The borderless window starts near the lower-right; drag a card or its Move preview handle to reposition it. Hover reveals floating controls and brings a rear card forward. Close it to stop that preview; a later authorized observation can create it again. The image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
+
+To disable PiP without changing the MCP registration, set `"experimental_pip": false` in `~/.cua-driver/config.json`, preserving its other keys, then restart the owning MCP server or runtime. This existing key is retained for compatibility. The server's `--no-pip` argument also disables PiP and takes precedence over the file.
+
+The preview may be visible to others when you share or record the desktop, including during a full-screen presentation. For a persistent opt-out, disable PiP and restart its owning runtime before sharing; closing the current panel alone does not prevent a later observation from recreating it. Sharing is not detected automatically.
+
 ## Remote desktop relay
 
 For an existing macOS desktop relay setup, install its matching server:
 
 ```bash
-npx -y @qwen-code/node-repl-mcp@0.26.0 desktop-relay install
+npx -y @qwen-code/node-repl-mcp@0.27.0 desktop-relay install
 ```
 
 This uses the existing local launchd socket at `127.0.0.1:47821`. In a secure Web Shell, choose **Use this computer**, then **Connect this computer**. The desktop prompts for each connection. The remote daemon must enable `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`.

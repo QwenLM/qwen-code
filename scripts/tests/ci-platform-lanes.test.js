@@ -39,9 +39,63 @@ const failureIssue = parse(
 );
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
-const LANES = ['test_macos', 'test_windows'];
+const LANES = ['test_macos_shards', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
+
+describe('complete macOS test groups', () => {
+  it('partitions both heavy suites and retains every remaining test group', () => {
+    const job = ci.jobs.test_macos_shards;
+    expect(job.strategy['fail-fast']).toBe(false);
+    expect(job.strategy.matrix.include).toEqual([
+      { group: 'cli', shard: '1/3' },
+      { group: 'cli', shard: '2/3' },
+      { group: 'cli', shard: '3/3' },
+      { group: 'core', shard: '1/2' },
+      { group: 'core', shard: '2/2' },
+      { group: 'rest', shard: '' },
+      { group: 'scripts', shard: '' },
+    ]);
+    const step = job.steps.find(
+      (candidate) => candidate.name === 'Run tests and generate reports',
+    );
+    expect(step.env.MACOS_TEST_GROUP).toBe('${{ matrix.group }}');
+    expect(step.env.MACOS_TEST_SHARD).toBe('${{ matrix.shard }}');
+    expect(step.run).toContain(
+      'node scripts/run-macos-ci-group.js "$MACOS_TEST_GROUP" "$MACOS_TEST_SHARD"',
+    );
+  });
+
+  it('keeps the original check name and rejects incomplete matrix results', () => {
+    const aggregate = ci.jobs.test_macos;
+    expect(aggregate.name).toBe('Test (macos-latest, Node 22.x)');
+    expect(aggregate.needs).toBe('test_macos_shards');
+    expect(aggregate.if).toContain('always()');
+    const [step] = aggregate.steps;
+    expect(step.env.MACOS_RESULT).toBe('${{ needs.test_macos_shards.result }}');
+    expect(step.run).toBe('test "$MACOS_RESULT" = success');
+    for (const result of ['failure', 'cancelled', 'skipped', '']) {
+      expect(() =>
+        execFileSync('bash', ['-c', step.run], {
+          env: { ...process.env, MACOS_RESULT: result },
+          stdio: 'pipe',
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('keeps the aggregate gate on exactly the events the shards run on', () => {
+    // The aggregate only reads `needs.test_macos_shards.result`, so a gate
+    // that drifts from the shards' makes the preserved check name report
+    // `skipped` while the seven legs run and fail.
+    for (const event of ['merge_group', 'schedule', 'workflow_dispatch']) {
+      expect(gateRunsOn(condOf('test_macos'), event)).toBe(
+        gateRunsOn(condOf('test_macos_shards'), event),
+      );
+    }
+    expect(gateRunsOn(condOf('test_macos'), 'pull_request')).toBe(false);
+  });
+});
 
 // The extended ceilings below, except the test lane's, are scoped to the
 // self-hosted pool: `runs-on` falls back to ubuntu-latest for fork PRs from
@@ -259,6 +313,11 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
     (step) => step.name === 'Run web-shell browser smoke',
   );
   expect(smoke.run).toMatch(/ -- --workers=2$/);
+  expect(smoke.env.TMPDIR).toBe('${{ runner.temp }}');
+  const transcript = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run transcript document browser gate',
+  );
+  expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
@@ -452,7 +511,7 @@ describe('platform lanes — triggers', () => {
     // therefore either exclude `schedule` outright or gate on an event
     // allowlist that cannot contain it — otherwise the nightly quietly
     // becomes a full CI run every day.
-    assertEventReachesOnly('schedule', LANES);
+    assertEventReachesOnly('schedule', [...LANES, 'test_macos']);
   });
 });
 
@@ -1032,8 +1091,31 @@ describe('post-merge push lane', () => {
       );
       expect(checkout, job).toBeDefined();
       expect(String(checkout.with?.ref ?? ''), job).toBe(
-        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
       );
+    }
+  });
+
+  it('pins the two PR-only lanes to their whole checkout ref', () => {
+    // Same order contract as above, for the two lanes that carry no push arm
+    // and so cannot join that loop. Whole literal, not a substring: moving
+    // `|| github.ref` ahead of the pull-request arm keeps every token in
+    // place — `toContain(head.sha)` and `not.toContain('refs/pull/')` both
+    // stay green — while the lane silently checks out the asynchronously
+    // rebuilt merge ref this PR exists to avoid, and the ancestor guard still
+    // passes because a newer merge tree contains the expected head.
+    const expectedRefs = {
+      web_shell_e2e_smoke:
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}",
+      integration_no_ak:
+        "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}",
+    };
+    for (const [job, ref] of Object.entries(expectedRefs)) {
+      const checkout = (ci.jobs[job].steps ?? []).find((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(checkout, job).toBeDefined();
+      expect(String(checkout.with?.ref ?? ''), job).toBe(ref);
     }
   });
 

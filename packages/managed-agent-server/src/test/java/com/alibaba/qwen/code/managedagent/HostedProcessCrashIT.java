@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -180,8 +181,8 @@ class HostedProcessCrashIT {
                     String.class, tenant, session, turn)), 45, "recovered Turn completion");
             assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
                     null, null, 200).path("status").asText()).isEqualTo("completed");
-            await(() -> api("GET", "/v1/agents/sessions/" + session + "/items?limit=100",
-                    null, null, 200).toString().contains("RESTART_OK"), 15,
+            await(() -> itemsWhenProjected(session)
+                    .map(node -> node.toString().contains("RESTART_OK")).orElse(false), 15,
                     "materialized recovered output");
 
             JsonNode state = driverState();
@@ -215,8 +216,8 @@ class HostedProcessCrashIT {
             await(() -> "COMPLETED".equals(jdbc.queryForObject("SELECT status FROM ma_turn"
                             + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
                     String.class, tenant, session, followupTurn)), 30, "following Turn completion");
-            await(() -> api("GET", "/v1/agents/sessions/" + session + "/items?limit=100",
-                    null, null, 200).toString().contains("FOLLOW_UP_OK"), 15,
+            await(() -> itemsWhenProjected(session)
+                    .map(node -> node.toString().contains("FOLLOW_UP_OK")).orElse(false), 15,
                     "materialized following output");
             state = driverState();
             assertThat(state.path("primaryRequests").asInt()).isEqualTo(1);
@@ -288,6 +289,33 @@ class HostedProcessCrashIT {
             }
         }
 
+        // The public reader answers 503 message_projection_pending while
+        // projection catches up, and its contract calls that retryable (#15909):
+        // a projection lagging behind committed events must be retried, not
+        // exported as history. Return empty for that one response so the caller's
+        // await() loop polls again, instead of unwinding on the first lagging read
+        // taken right after the coordinator restart.
+        private java.util.Optional<JsonNode> itemsWhenProjected(String session) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder(URI.create(
+                                "http://127.0.0.1:" + port + "/v1/agents/sessions/" + session
+                                        + "/items?limit=100"))
+                        .timeout(java.time.Duration.ofSeconds(10))
+                        .header("X-Qwen-Tenant-Id", tenant).header("X-Qwen-Actor-Id", "actor")
+                        .header("Accept", "application/json")
+                        .GET().build();
+                HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() == 503
+                        && response.body().contains("message_projection_pending")) {
+                    return java.util.Optional.empty();
+                }
+                assertThat(response.statusCode()).as("GET /items: %s", response.body()).isEqualTo(200);
+                return java.util.Optional.of(JSON.readTree(response.body()));
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
         private JsonNode driverState() {
             return control("GET", "/state");
         }
@@ -328,7 +356,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() -> !running(process), 10, "process cleanup " + process.pid());
+                HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "process cleanup");
             }
         }
     }
@@ -512,7 +540,7 @@ class HostedProcessCrashIT {
                 residentWorker = workers.getFirst();
             }
             assertThat(workers.getFirst().pid()).isEqualTo(residentWorker.pid());
-            assertThat(running(residentWorker)).isTrue();
+            assertThat(HostedProcessLiveness.running(residentWorker)).isTrue();
         }
 
         private Map<String, Object> control(String route) throws Exception {
@@ -576,7 +604,7 @@ class HostedProcessCrashIT {
                 spring.destroyForcibly();
                 assertThat(spring.waitFor(10, TimeUnit.SECONDS)).isTrue();
                 assertThat(spring.exitValue()).isEqualTo(137);
-                assertThat(running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
+                assertThat(HostedProcessLiveness.running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
                 // Keep the Store down beyond the Harness's five-second writer lease.
                 Thread.sleep(8_000);
                 startSpring();
@@ -586,7 +614,7 @@ class HostedProcessCrashIT {
             }
             if (route.equals("/worker-kill")) {
                 assertThat(worker.destroyForcibly()).isTrue();
-                await(() -> !running(worker), 10, "worker SIGKILL");
+                HostedProcessLiveness.awaitStopped(worker, Duration.ofSeconds(10), "worker SIGKILL");
                 return Map.of("pid", worker.pid(), "signal", "SIGKILL");
             }
             assertThat(route).isEqualTo("/worker-stop");
@@ -790,7 +818,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() -> !running(process), 10, "process cleanup " + process.pid());
+                HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "process cleanup");
             }
             if (driver != null) {
                 assertThat(driver.waitFor(5, TimeUnit.SECONDS)).isTrue();
@@ -802,22 +830,6 @@ class HostedProcessCrashIT {
                 assertThat(brokerSidecar.waitFor(5, TimeUnit.SECONDS)).isTrue();
             }
         }
-    }
-
-    private static boolean running(ProcessHandle process) {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (Files.exists(stat)) {
-            try {
-                String value = Files.readString(stat);
-                return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-            } catch (java.io.IOException gone) {
-                return process.isAlive();
-            }
-        }
-        return true;
     }
 
     private static boolean stopped(ProcessHandle worker) {

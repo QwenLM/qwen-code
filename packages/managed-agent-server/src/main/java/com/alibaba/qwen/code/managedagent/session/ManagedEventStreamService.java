@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub.Delivery;
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub.Subscription;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -35,7 +36,7 @@ public class ManagedEventStreamService {
     private final Duration readGrantRecheckInterval;
 
     public ManagedEventStreamService(ManagedAgentService agentService,
-            SessionEventHub eventHub, ExecutorService executor,
+            SessionEventHub eventHub, @Qualifier("managedAgentExecutor") ExecutorService executor,
             ManagedAgentProperties properties) {
         this.agentService = agentService;
         this.eventHub = eventHub;

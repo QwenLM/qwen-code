@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -52,7 +53,7 @@ class WorkspaceSessionCloseTest {
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
     @Autowired ManagedSessionStore journal;
-    @Autowired JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired CloseRuntime runtime;
 
     @Test
@@ -220,7 +221,8 @@ class WorkspaceSessionCloseTest {
             };
         }
         @Bean @Primary CloseRuntime closeRuntime() { return new CloseRuntime(); }
-        @Bean @Primary ManagedAgentStore closeStore(JdbcTemplate jdbc, ObjectMapper mapper,
+        @Bean @Primary ManagedAgentStore closeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                ObjectMapper mapper,
                 com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry registry) {
             var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
