@@ -522,8 +522,10 @@ session's sub-session; turning `review.autoVerify` off produces the event and no
   unresolved non-outdated thread hands off that head once, with no action from
   the reviewer, and spawns the owning session's sub-session; a dismissed approval, an
   open blocker, a draft, or a cut thread page hands off nothing.
-- `review.autoVerify: false` in User settings stops the spawn without stopping
-  the event; a workspace-scoped value of either sign is ignored.
+- `review.autoVerify: false` in User settings stops the spawn and the
+  observation. Producers still write the record; the consumer declines it and
+  drops it rather than queueing it. A workspace-scoped value of either sign is
+  ignored.
 - `npm run build`, `npm run typecheck` and the touched packages' unit tests pass.
 
 ## Follow-ups

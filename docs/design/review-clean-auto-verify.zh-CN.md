@@ -428,8 +428,9 @@ watch 的 PR 每个周期多一次调用。
 - 已登记的 watch，其 PR 达到 `reviewDecision: APPROVED` 且无未决未过期线程时，
   在评审者毫不作为的情况下把该 head 交接一次，并派生归属会话的子会话；被 dismiss
   的批准、未决阻塞、draft、被截断的线程页都不交接。
-- User 设置里的 `review.autoVerify: false` 停止派生但不停止事件产出；工作区作用域
-  里无论 true 还是 false 都被忽略。
+- User 设置里的 `review.autoVerify: false` 停止派生与观测。生产者仍会写记录，
+  但消费者拒绝并丢弃它，而不是排队留待以后。工作区作用域里无论 true 还是 false
+  都被忽略。
 - `npm run build`、`npm run typecheck` 与所改包的单元测试通过。
 
 ## 后续工作

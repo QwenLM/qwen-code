@@ -312,8 +312,9 @@ manually invoked `/verify-pr`, so treat it as you would that command.
   but `/verify-pr` has no Aone or GitLab backend and no `--host` flag yet, and
   the workspace must carry the project skill (`.qwen/skills/verify-pr`).
   Other targets are recorded and declined with a reason in the daemon log.
-- **Turn it off** with `review.autoVerify: false` in your user settings. Events
-  are still recorded; nothing is spawned. A repository's own
+- **Turn it off** with `review.autoVerify: false` in your user settings. Producers
+  still write the record, but the consumer declines and drops it — nothing is
+  queued for later, and nothing is spawned. A repository's own
   `.qwen/settings.json` cannot change this either way.
 
 ### Handing off a review performed elsewhere

@@ -64,14 +64,19 @@ export interface ReviewCleanEventV1 {
    *  built-in producer, whatever an external caller names itself otherwise. */
   reviewedBy?: string;
   target: ReviewEventTarget;
+  /** Provenance: no consumer reads this. The dedupe key deliberately excludes
+   *  it — two clean rounds at one head are one verification. */
   round: number;
   verdict: {
     event: string;
     critical: number;
+    /** Provenance: no consumer reads this. The gate is `critical === 0`. */
     suggestion: number;
   };
   /** Workspace-relative path of the saved review artifact, when the producer
-   *  is qwen-code's own pipeline. An external producer has none. */
+   *  is qwen-code's own pipeline. An external producer has none. Provenance:
+   *  no consumer reads this — it is here so a reader of the record can find the
+   *  round that produced it. */
   artifactPath?: string;
 }
 

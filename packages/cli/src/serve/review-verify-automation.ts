@@ -220,6 +220,9 @@ export function startReviewVerifyAutomation(
   // A watch that cannot be read (no gh auth, a deleted PR) fails every interval;
   // report each distinct failure once rather than filling the log.
   const reportedObserveFailures = new Set<string>();
+  // A corrupt watch list fails every interval; report it once, the same care
+  // the per-watch failures below get. Failing closed on it is still right.
+  let reportedWatchListFailure = false;
 
   /** Consume one owner's pending events, spawning that owner's sub-sessions. */
   const consumeFor = async (
@@ -493,11 +496,14 @@ export function startReviewVerifyAutomation(
       // next file interval.
       if (emitted > 0) runPass();
     } catch (error) {
-      notice(
-        `review-verify: observation pass failed (${
-          error instanceof Error ? error.message : String(error)
-        })`,
-      );
+      if (!reportedWatchListFailure) {
+        reportedWatchListFailure = true;
+        notice(
+          `review-verify: observation pass failed (${
+            error instanceof Error ? error.message : String(error)
+          })`,
+        );
+      }
     } finally {
       observing = false;
     }
