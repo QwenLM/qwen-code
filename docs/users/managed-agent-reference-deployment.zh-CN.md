@@ -4,6 +4,10 @@
 
 Managed Agent 参考分发产物仍处于实验阶段。首个已接受拓扑为：一台可信 Linux 主机上的单 Java 控制面及其嵌入式 Runtime Broker、一个 MySQL 数据库，以及一个兼容的 Qwen Hosted Harness。每个发布版本中的兼容性 manifest 是该版本的权威依据。
 
+从源码安装 Kubernetes 部署（可选可信单节点工具和 WebShell）时，参见独立的
+[Helm 部署说明](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes)。
+该 chart 不扩大本参考分发产物的验收范围。
+
 ## 校验并解压
 
 从同一个 GitHub prerelease 下载压缩包、独立 manifest 和 `SHA256SUMS.txt`，解压前完成校验：
