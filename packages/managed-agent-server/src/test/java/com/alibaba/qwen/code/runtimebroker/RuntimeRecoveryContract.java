@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -17,6 +19,7 @@ final class RuntimeRecoveryContract {
 
     static void verify(RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, String prefix) throws Exception {
+        verifyHistoricalInventory(sessions, prefix + "-history-ids");
         for (ToolExecutionRecord.State state : ToolExecutionRecord.State.values()) {
             if (state == ToolExecutionRecord.State.ABANDONED) {
                 continue;
@@ -198,6 +201,67 @@ final class RuntimeRecoveryContract {
                 new RuntimeProvisionRequest(changed, null, "other-provisioner")));
         RuntimeRecoveryEvidence foreign = evidence(bounded.binding, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
         assertThrows(IllegalArgumentException.class, () -> bare.withRecoveryEvidence(foreign, null, Instant.now()));
+    }
+
+    /**
+     * The harness-scoped candidate read that resolves the restart drain
+     * inventory in one statement per hundred ids (#13986 review R1-9):
+     * missing ids stay absent so the caller can keep counting them as held,
+     * RELEASED rows come back so the caller can discharge them, and a
+     * duplicated identity is still refused as ambiguous.
+     */
+    static void verifyHistoricalInventory(RuntimeSessionRepository sessions,
+            String prefix) {
+        String tenant = prefix + "-tenant";
+        String harness = prefix + "-harness";
+        RuntimeScope scope = new RuntimeScope(tenant, "workspace", "generation",
+                "/workspace", "profile", "workspace");
+        RuntimeScope otherScope = new RuntimeScope(tenant, "other-workspace",
+                "generation", "/other", "profile", "workspace");
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-active", "bootstrap", scope),
+                prefix + "-binding", 1, RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-released", "bootstrap", scope),
+                prefix + "-binding", 1, RuntimeSessionRecord.State.RELEASED,
+                0, Instant.now()));
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-ambiguous", "bootstrap", scope),
+                prefix + "-binding", 1, RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-ambiguous", "bootstrap", otherScope),
+                prefix + "-binding", 2, RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+
+        List<RuntimeSessionRecord> found = sessions.findHistoricalByIds(tenant,
+                harness, List.of(prefix + "-released", prefix + "-missing",
+                        prefix + "-active"));
+        assertEquals(Set.of(prefix + "-released", prefix + "-active"),
+                found.stream().map(RuntimeSessionRecord::getRuntimeSessionId)
+                        .collect(java.util.stream.Collectors.toSet()));
+        assertTrue(sessions.findHistoricalByIds(tenant, harness, List.of()).isEmpty());
+        assertTrue(sessions.findHistoricalByIds(tenant, harness + "-other",
+                List.of(prefix + "-active")).isEmpty());
+        RuntimeBrokerException ambiguous = assertThrows(
+                RuntimeBrokerException.class,
+                () -> sessions.findHistoricalByIds(tenant, harness,
+                        List.of(prefix + "-ambiguous")));
+        assertEquals("runtime_session_ambiguous", ambiguous.getCode());
+        // 101 candidates cross the one-hundred-id statement boundary; a
+        // batched read that only issued the first chunk would lose one.
+        List<String> bulk = new java.util.ArrayList<>();
+        for (int index = 0; index < 101; index++) {
+            String id = prefix + "-bulk-" + index;
+            bulk.add(id);
+            sessions.findOrCreate(new RuntimeSessionRecord(
+                    new RuntimeSession(harness, id, "bootstrap", scope),
+                    prefix + "-binding", 1,
+                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        }
+        assertEquals(101,
+                sessions.findHistoricalByIds(tenant, harness, bulk).size());
     }
 
     /**

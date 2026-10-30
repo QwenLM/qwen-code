@@ -50,6 +50,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -59,6 +60,8 @@ import {
   shouldOfferAssistantFeedback,
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
+import { Checkbox } from './ui/checkbox';
+import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -98,6 +101,7 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 export interface MessageListProps {
+  deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
@@ -2431,14 +2435,6 @@ export function shouldAdjustVirtualScrollPosition(
   return itemEnd <= scrollOffset;
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds - minutes * 60;
-  return `${minutes}m ${seconds}s`;
-}
-
 type Translate = (
   key: string,
   vars?: Record<string, string | number>,
@@ -2446,7 +2442,7 @@ type Translate = (
 
 function durationMetricText(elapsedMs: number | undefined): string {
   return elapsedMs !== undefined && elapsedMs >= 0
-    ? formatDuration(elapsedMs)
+    ? formatTurnDuration(elapsedMs)
     : '';
 }
 
@@ -2495,6 +2491,14 @@ interface TurnCollapseRowProps {
   onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
+function hasTurnMetadataRow(turn: TurnCollapseHead): boolean {
+  return (
+    turn.hiddenCount > 0 ||
+    turn.liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turn)
+  );
+}
+
 const TurnCollapseRow = memo(function TurnCollapseRow({
   turnCollapse,
   onToggleCollapse,
@@ -2502,10 +2506,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   const { t } = useI18n();
   const hasToggle = turnCollapse.hiddenCount > 0;
   const liveStartedAt = turnCollapse.liveStartedAt;
-  const showMetadataRow =
-    hasToggle ||
-    liveStartedAt !== undefined ||
-    hasNonDurationMetrics(turnCollapse);
+  const showMetadataRow = hasTurnMetadataRow(turnCollapse);
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
@@ -3029,6 +3030,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      deletion,
       frozenViewport = false,
       sessionKey,
       terminalBackgroundShellTaskIds,
@@ -3714,6 +3716,13 @@ export const MessageList = memo(
       isResponding,
       latestTurnAwaitsAgentSummary,
     ]);
+    const latestFinalAssistantTurnId = useMemo(() => {
+      let latest: string | undefined;
+      for (const turnId of finalAssistantTurnIdByAssistantId.values()) {
+        latest = turnId;
+      }
+      return latest;
+    }, [finalAssistantTurnIdByAssistantId]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -4234,8 +4243,8 @@ export const MessageList = memo(
     //   5. Session restore / reconnect — during history replay
     //      (`catchingUp === true`), all auto-scrolling is suppressed to
     //      avoid fighting the rapidly replaying transcript. Once replay
-    //      finishes (`catchingUp` flips to falsy), a single scroll-to-
-    //      bottom fires so the user lands at the latest content.
+    //      finishes (`catchingUp` flips to falsy), scroll to the bottom
+    //      unless the user paused follow to read earlier content.
     //
     //   6. Short content — if the content doesn't overflow the container
     //      (no scrollbar), scrollToBottom is a no-op. This avoids a
@@ -5660,11 +5669,13 @@ export const MessageList = memo(
     }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
-    // replay just finished. Scroll to bottom once so the user sees the
-    // latest content without the viewport fighting the replay.
+    // replay just finished. Preserve a reading pause across reconnects.
     useLayoutEffect(() => {
-      if (prevCatchingUp.current && !catchingUp) {
-        followPausedByUserRef.current = false;
+      if (
+        prevCatchingUp.current &&
+        !catchingUp &&
+        !followPausedByUserRef.current
+      ) {
         setShouldFollow(true);
         scrollToBottom('auto');
       }
@@ -5937,6 +5948,19 @@ export const MessageList = memo(
                   ? scrollToMessage
                   : undefined
               }
+              onDeleteMessage={
+                deletion &&
+                (deletion.active || !deletion.disabled) &&
+                deletion.canDelete(displayItem.message) &&
+                (displayItem.message.role === 'user' ||
+                  displayItem.message.localCommandId) &&
+                (displayItem.message.promptId ||
+                  displayItem.message.sourceRecordIds?.length ||
+                  displayItem.message.localCommandId)
+                  ? () => deletion.start(displayItem.message)
+                  : undefined
+              }
+              deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
@@ -5976,6 +6000,11 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 (agentReply ||
                   finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
+              }
+              assistantFooterAlwaysVisible={
+                !isResponding &&
+                finalAssistantTurnId !== undefined &&
+                finalAssistantTurnId === latestFinalAssistantTurnId
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -6050,6 +6079,7 @@ export const MessageList = memo(
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        deletion,
         onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
@@ -6059,6 +6089,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
         assistantFeedbackRatings,
@@ -6138,12 +6169,82 @@ export const MessageList = memo(
       scheduleScrollOverflowReport();
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
+    const selectionByItem = useMemo(() => {
+      const selections = new Map<DisplayItem, string | undefined>();
+      if (!deletion?.active) return selections;
+      const groupOf = (item: DisplayItem) => {
+        const messageId =
+          item.type === 'message'
+            ? item.message.id
+            : item.type === 'turn_collapse'
+              ? item.turnCollapse.turnId
+              : item.turnId;
+        return (
+          deletion.groupByMessage.get(messageId) ??
+          deletion.groupByMessage.get(
+            summaryRunFirstMemberId(messageId) ?? messageId,
+          )
+        );
+      };
+      const replyGroups = new Set<string>();
+      for (const item of visibleItems) {
+        if (
+          item.type === 'turn_collapse' &&
+          hasTurnMetadataRow(item.turnCollapse)
+        ) {
+          const group = groupOf(item);
+          const key = group ?? item.turnCollapse.turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      let turnId = 'unowned';
+      for (const item of visibleItems) {
+        if (item.type === 'turn_collapse' || item.type === 'turn_outputs')
+          continue;
+        const group = groupOf(item);
+        if (item.type === 'message' && isTurnStartMessage(item.message)) {
+          turnId = item.message.id;
+          selections.set(item, group);
+        } else {
+          const key = group ?? turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      return selections;
+    }, [deletion, visibleItems]);
+
+    const renderSelection = (item: DisplayItem | undefined) => {
+      if (!deletion?.active || !item || !selectionByItem.has(item)) return null;
+      const groupId = selectionByItem.get(item);
+      return (
+        <Checkbox
+          className={styles.deletionCheckbox}
+          aria-label={t('messageDelete.selectGroup')}
+          title={!groupId ? t('messageDelete.unavailable') : undefined}
+          checked={groupId ? deletion.selected.has(groupId) : false}
+          disabled={
+            !groupId || deletion.disabled || !deletion.allowed.has(groupId)
+          }
+          onCheckedChange={() => {
+            if (groupId) deletion.toggle(groupId);
+          }}
+        />
+      );
+    };
+
     return (
       <McpAppSessionContext.Provider value={mcpAppSessionId}>
         <div
           ref={containerRef}
           className={joinClassNames(
             styles.list,
+            deletion?.active ? styles.deletionMode : undefined,
             hasHeader && centerWelcomeHeader
               ? styles.listWithWelcomeHeader
               : undefined,
@@ -6218,6 +6319,9 @@ export const MessageList = memo(
                     right: 0,
                   }}
                 >
+                  {renderSelection(
+                    visibleItems[virtualRow.index - headerOffset],
+                  )}
                   {renderVirtualItem(virtualRow.index)}
                 </div>
               ))}
@@ -6238,6 +6342,7 @@ export const MessageList = memo(
                   )}
                   data-web-shell-message-row
                 >
+                  {renderSelection(item)}
                   {renderVirtualItem(index)}
                 </div>
               );

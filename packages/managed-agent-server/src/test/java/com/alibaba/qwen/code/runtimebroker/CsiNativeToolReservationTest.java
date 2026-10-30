@@ -1,11 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,6 +19,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 /** Tuple-validation units only; the supplied prefix does not prove native SQL admission. */
 class CsiNativeToolReservationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -35,6 +35,36 @@ class CsiNativeToolReservationTest {
             "binding", 1, RuntimeBindingRecord.State.READY, false, 1, 2L);
 
     @Test
+    void recoveryStoredBytesAreBoundedBeforeParsingAndRejectAmbiguousJson() {
+        String exact = "{\"text\":\"" + "x".repeat(65525) + "\"}";
+        assertEquals(65536, CsiNativeToolReservation.recoveryBytes(exact).length);
+        for (String value : new String[] {exact + " ", "{} {}", "{\"x\":1,\"x\":1}", "", "{\"x\":\"\ud800\"}"}) {
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.recoveryBytes(value));
+        }
+        assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.recoveryBytes(null));
+    }
+
+    @Test
+    void recoveryOwnerMatchesTheInstalledActivationRatherThanTheOldCheckpoint() {
+        var activation = new CsiNativeActivationProof.Activation(SESSION, PROMPT, JSON.createObjectNode(), 60000,
+                Long.MAX_VALUE, 0, 2, 3);
+        var head = new JdbcCsiActivationAdmission.NativeHead(1, 1, "digest", CsiNativeActivationProof.Prefix.empty(),
+                Long.MAX_VALUE, Long.MAX_VALUE, activation);
+        Map<String, Object> owner = Map.of("writerId", PROMPT, "writerGeneration", 3, "activationId", SESSION, "activationEpoch", 2);
+        assertDoesNotThrow(() -> head.requireRecoveryOwner(owner));
+        for (String field : owner.keySet()) {
+            var changed = new HashMap<>(owner);
+            changed.put(field, field.endsWith("Id") ? BATCH : 1);
+            assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(changed));
+            changed.remove(field);
+            assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(changed));
+        }
+        var extra = new HashMap<>(owner);
+        extra.put("checkpointId", BATCH);
+        assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(extra));
+    }
+
+    @Test
     void tupleValidationRetainsObservedNonUuidFunctionIdsAndFullPartPositions() throws Exception {
         JsonNode parts = capturedParts();
         var prefix = prefix(parts);
@@ -44,6 +74,26 @@ class CsiNativeToolReservationTest {
             assertDoesNotThrow(() -> CsiNativeToolReservation.qualify(original, prefix, tuple.execution(), tuple.input(), tuple.definition()));
             assertEquals(index + 2, tuple.execution().getReference().get("partIndex"));
             assertEquals("owned-provider-nonuuid-" + index, tuple.execution().getReference().get("functionCallId"));
+        }
+    }
+
+    @Test
+    void qualifiesSurvivingCallsWithoutTreatingRefusalProgressAsBatchIdentity() throws Exception {
+        var parts = capturedParts();
+        ((ObjectNode) parts.get(3).path("functionCall").path("args")).put("file_path", ".");
+        var before = prefix(parts);
+        var pending = before.pendingBatch();
+        var refused = pending.calls().get(1);
+        assertEquals("CSI file input is invalid.", CsiNativeToolReservation.refusalReason(request, refused));
+        var after = new CsiNativeActivationProof.Prefix(before.input(), before.checkpoint(), before.lastMessageId(),
+                before.attempt(), before.assistantCommitted(), before.stream(), before.usedIds(),
+                new CsiNativeActivationProof.PendingBatch(pending.messageId(), pending.contentRef(), pending.calls(),
+                        Set.of(refused.id())),
+                before.batches(), before.fileHistory(), before.intents(), before.receipts(), before.nextDeltaOrdinal());
+        for (int index : List.of(0, 2)) {
+            var tuple = tuple(after, index);
+            assertDoesNotThrow(() -> CsiNativeToolReservation.qualify(original, after,
+                    tuple.execution(), tuple.input(), tuple.definition()));
         }
     }
 

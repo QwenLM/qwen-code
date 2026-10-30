@@ -354,6 +354,28 @@ publication 车道在到达 `lockPublicationWriter` 之前就已触租户守卫�
 首次获取现均以同一逐语句上界运行并共享 `tenant_guard_contended` 映射。见
 证：`ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`。
 
+原生 producer 和 dispatch 入口也在 `lockOriginal` 中对首次 placement 获取
+施加上界，再锁定原 binding 与 execution，复用同一事务连接和命名失败映射；
+grant 检查和 CSI 路径保持既有行为。见证在持有 placement 时调用
+`verifyDispatch` 与 producer `finish`，释放后再验证两者成功，覆盖 #14393 A.1。
+上界按获取锁的每条语句计算；更早的 lifecycle 获取缺口仍由 #14393 A.3 跟踪。
+
+取得 tenant 行后，`lockSessionHead` 也为 root UPSERT、root 加锁读取与 head
+加锁读取设置每条语句五秒的上界，并共享 `tenant_guard_contended` 映射，
+包括锁等待超时 1205，避免因一个 Session 的 writer 占住 publication 守卫，
+一直等到数据库默认锁等待超时。既有更短的语句或事务超时继续生效；普通
+root-only writer 路径保留原等待设置与死锁映射。见证
+`ManagedSessionGuardConvoyIT#heldSessionRowsBoundRetentionReads` 检查 root 与
+head 被持有时的有界拒绝，以及释放后的成功读取，覆盖 #14393 A.2。
+
+#14393 的 A.3 后续仅为原文列出的快照过期、投影正文回收、工具结果
+claim/结算、Session 资源 claim/page 和生命周期完成入口的首次 publication
+CAS 获取加界。超时使用既有 `503 tenant_guard_contended` 映射并回滚当前事务。
+CSI 检查、placement 和 Session/event-stream 等待保持原有行为；这不代表
+整次操作具有总时间上限。生命周期 publication 入口见证：
+`ManagedSessionGuardConvoyIT#heldPublicationGuardBoundsLifecycleCompletion`。
+collector 入口的运行见证仍待补齐。
+
 ### F3. writer 获取保持 placement 先于 drain 栅栏
 
 普通分支的 `checkLifecycleWriter` 早退后，`acquireWriter` 先读
@@ -496,6 +518,10 @@ O4 门控的迟到 writer 在应被拒绝处径直获得授权
   `WorkspaceLifecycleStore.lockPlacement`）：Session 创建与子 Session、重命
   名、变更、close/archive/delete 准入、cwd 变更与任务取消操作。它们都不是
   逐轮路径；被长持有时每一处仍会等满 `innodb_lock_wait_timeout`。
+- 给剩余 `output_publication` 获取加界：`ManagedAgentStore.beginLifecycle`
+  （lifecycle 协议 Session 的 close/archive/delete 准入）与
+  `ManagedToolResultStore` 中的 o3 回填两处。用户可见的 close 准入仍可能在
+  被持有的 `ma_tenant_guard` 行上等满 `innodb_lock_wait_timeout`。
 - 物化器 gap 绊线熔断（审计 §B2；毒化的 consumer progress 标死而不是
   10 Hz 永久异常）。
 - 续期调度器隔离基线（复现假设 H2）——当前未决；rig 证据若指向它再

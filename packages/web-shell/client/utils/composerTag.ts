@@ -56,7 +56,7 @@ export function isPreviewableFileComposerTag(
   return !(tag.serialized ?? tag.value).trim().endsWith('/');
 }
 
-function isValidComposerTag(tag: unknown): tag is WebShellComposerTag {
+export function isValidComposerTag(tag: unknown): tag is WebShellComposerTag {
   if (!tag || typeof tag !== 'object') return false;
   const candidate = tag as Record<string, unknown>;
   return (

@@ -1,17 +1,19 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.HARNESS;
-import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.SESSION;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.HARNESS;
+import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.SESSION;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** FG1: the rig itself, proven by a run with no fault injected. */
 @Tag("fault-gate")
@@ -56,6 +58,11 @@ class FaultGateControlTest {
         assertEquals("deferred", settled.getReference().get("dispatchMode"));
         assertEquals(List.of("ran"), rig.marker("control"));
         assertEquals(1, proxy.count("execute"));
+        // A failed wait would name that execute and the worker it reached.
+        String diagnostics = rig.diagnostics();
+        assertTrue(diagnostics.contains("execute=1"), diagnostics);
+        assertTrue(diagnostics.contains("live workers: ["
+                + broker.workers().get(0).pid() + "]"), diagnostics);
 
         // The Runtime answers a lookup by the original identity with the
         // same result the Broker recorded.

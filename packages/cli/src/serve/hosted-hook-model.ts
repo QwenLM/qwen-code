@@ -149,6 +149,7 @@ export async function runHostedHookOperation<T>(
       acp: true,
       safeMode: true,
       chatRecording: false,
+      sessionIdGenerated: true,
       sessionId: input.sessionId,
     } as CliArgs,
     input.cwd,

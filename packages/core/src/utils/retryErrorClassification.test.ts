@@ -12,6 +12,8 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  RETRY_DIAGNOSTIC_REASONS,
+  toRetryDiagnostics,
   type RetryErrorClassificationContext,
   type RetryErrorDiagnosis,
 } from './retryErrorClassification.js';
@@ -907,5 +909,98 @@ describe('isFallbackEligible', () => {
     expect(classification).toMatchObject({ kind: 'provider', ...UPSTREAM });
     expect(classification.statusCode).toBeUndefined();
     expect(isFallbackEligible(classification)).toBe(false);
+  });
+});
+
+describe('toRetryDiagnostics', () => {
+  it('keeps only the allowlisted scalar fields', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'server-error',
+        statusCode: 503,
+        providerCode: 'arbitrary-upstream-code',
+        providerMessage: 'provider text with user content',
+        requestId: 'req-123',
+      }),
+    ).toEqual({
+      kind: 'http',
+      reason: 'server-error',
+      statusCode: 503,
+    });
+  });
+
+  it('omits optional fields instead of printing undefined', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+      }),
+    ).toEqual({ kind: 'transport', reason: 'transport-error' });
+  });
+
+  it('carries a vetted transport code and status code when present', () => {
+    expect(
+      toRetryDiagnostics(
+        classifyRetryError(
+          Object.assign(new TypeError('terminated'), {
+            cause: Object.assign(new Error('other side closed'), {
+              code: 'UND_ERR_SOCKET',
+            }),
+          }),
+        ),
+      ),
+    ).toEqual({
+      kind: 'transport',
+      reason: 'transport-error',
+      transportCode: 'UND_ERR_SOCKET',
+    });
+  });
+
+  it('degrades an interpolated or provider-controlled reason to unclassified', () => {
+    const maliciousReason = 'transport-error\nFAKE_UPSTREAM_TOKEN=sentinel';
+    expect(RETRY_DIAGNOSTIC_REASONS.has(maliciousReason)).toBe(false);
+    const result = toRetryDiagnostics({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: maliciousReason,
+    });
+    expect(result.reason).toBe('unclassified');
+    expect(JSON.stringify(result)).not.toContain('FAKE_UPSTREAM_TOKEN');
+  });
+
+  it('drops an unvetted transportCode instead of printing it', () => {
+    const result = toRetryDiagnostics({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: 'transport-error',
+      transportCode: 'ECONNRESET\nFAKE_UPSTREAM_TOKEN=sentinel',
+    });
+    expect(result.transportCode).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('FAKE_UPSTREAM_TOKEN');
+  });
+
+  it('drops status codes that are not real HTTP statuses', () => {
+    for (const statusCode of [0, 42, 99, 999, 12.5, Number.NaN]) {
+      const result = toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'http-status',
+        statusCode,
+      });
+      expect(result.statusCode).toBeUndefined();
+    }
+  });
+
+  it('degrades an unrecognized kind without leaking it', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'FAKE_UPSTREAM_KIND' as never,
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+      }).kind,
+    ).toBe('unknown');
   });
 });

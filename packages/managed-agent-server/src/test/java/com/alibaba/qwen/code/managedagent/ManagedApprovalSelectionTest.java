@@ -1,24 +1,25 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -50,11 +51,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class ManagedApprovalSelectionTest {
     private static final String BASE = "/api/agent/web-shell/v1";
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private MockMvc mvc;
     @Autowired private ManagedWorkspaceRegistry registry;
     @Autowired private ManagedAgentDefinitionStore definitions;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager manager;
 
     @ParameterizedTest
@@ -83,7 +85,7 @@ class ManagedApprovalSelectionTest {
         assertThat(session.toolProfile()).isEqualTo("hosted-workspace-shell/1");
         assertThatThrownBy(() -> create(store, tenant, "yolo", "qwen-code", "yolo"))
                 .isInstanceOfSatisfying(
-                        ApiException.class,
+                        ManagedAgentException.class,
                         error ->
                                 assertThat(error.getCode()).isEqualTo("unsupported_approval_mode"));
     }
@@ -94,7 +96,7 @@ class ManagedApprovalSelectionTest {
         String tenant = workspace();
         assertThatThrownBy(() -> create(store(false, "yolo"), tenant, "key", "qwen-code", mode))
                 .isInstanceOfSatisfying(
-                        ApiException.class,
+                        ManagedAgentException.class,
                         error ->
                                 assertThat(error.getCode()).isEqualTo("unsupported_approval_mode"));
         assertThat(
@@ -121,12 +123,12 @@ class ManagedApprovalSelectionTest {
         for (String changed : List.of("default", "auto-edit")) {
             assertThatThrownBy(() -> create(shell, tenant, "selected", "qwen-code", changed))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         }
         assertThatThrownBy(() -> create(shell, tenant, "omitted", "qwen-code", "yolo"))
                 .isInstanceOfSatisfying(
-                        ApiException.class,
+                        ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
     }
 
@@ -142,7 +144,7 @@ class ManagedApprovalSelectionTest {
         var admitted = create(store, tenant, "key", "model", "default");
         assertThatThrownBy(() -> create(store, tenant, "other", "model", "auto-edit"))
                 .isInstanceOfSatisfying(
-                        ApiException.class,
+                        ManagedAgentException.class,
                         error ->
                                 assertThat(error.getCode()).isEqualTo("unsupported_approval_mode"));
         define(tenant, "auto-edit");
@@ -164,7 +166,7 @@ class ManagedApprovalSelectionTest {
                                                         store.workspaceSessionOptions(
                                                                 "another-tenant", "model")))
                 .isInstanceOfSatisfying(
-                        ApiException.class,
+                        ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("agent_not_found"));
     }
 

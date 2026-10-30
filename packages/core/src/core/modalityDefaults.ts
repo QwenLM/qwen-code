@@ -68,10 +68,13 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen/, {}],
 
   // -------------------
-  // DeepSeek — text-only, except explicit vision variants
+  // DeepSeek — text-only, except explicit vision variants and the official
+  // API's `deepseek-flash` alias (served by multimodal V4.1 Flash). The
+  // DashScope `deepseek-v4.1-flash` ids stay text-only.
   // (QwenLM/qwen-code#10270)
   // -------------------
   [/^deepseek-.*vision/, { image: true }],
+  [/^deepseek-flash$/, { image: true }],
   [/^deepseek/, {}],
 
   // -------------------

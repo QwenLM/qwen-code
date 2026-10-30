@@ -1544,7 +1544,9 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         wrapperTokens,
         innerCommand,
         innerQuote,
-        innerArgsSuffix: commandToken.rest.trimStart(),
+        // Blanks only: a newline right after the script separates the
+        // next command, which the script's positional words are not.
+        innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
       };
     }
 
@@ -1625,6 +1627,150 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
     hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
     hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
   );
+}
+
+/**
+ * Whether `command` runs nothing but comments: every line blank or a `#`
+ * comment, or a shell wrapper whose script does (checked the same way, so
+ * nested wrappers too) with nothing after that script. Anything after the
+ * script (`bash -c '# x' && echo hi`) may run, so it counts as a command;
+ * plain words there are the script's positional parameters. Explicit no-ops
+ * such as `true` and `:` are commands. Best-effort: a wrapper behind a
+ * prefix (`nohup bash -c '# x'`) is not looked into.
+ */
+export function runsOnlyComments(command: string): boolean {
+  const { wrapperTokens, innerCommand, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
+  if (wrapperTokens) {
+    const suffix = innerArgsSuffix ?? '';
+    // A newline right after the script starts the next command: both must
+    // run only comments.
+    if (/^\r?\n/.test(suffix)) {
+      return (
+        runsOnlyComments(innerCommand) &&
+        runsOnlyComments(suffix.replace(/^\r?\n/, ''))
+      );
+    }
+    // Words after the script are its positional parameters, which run
+    // nothing; an operator there (`&& echo hi`, `; …`) runs more.
+    return !/[;&|()\n`]|\$\(/.test(suffix) && runsOnlyComments(innerCommand);
+  }
+  return command.split('\n').every((line) => /^\s*(#|$)/.test(line));
+}
+
+/**
+ * Whether a command backgrounds any part of itself with `&`: anywhere at its
+ * top level, at its end, or inside a script it hands to a shell wrapper —
+ * also a wrapper behind a prefix `normalizeMonitorCommand` does not unwrap
+ * (`nohup bash -c './probe.sh &'`, `sudo -u ci bash -c …`, `env FOO=1 bash
+ * -c …`). Nested scripts are checked the same way. An `&` inside a quoted
+ * argument that is not a shell script (`gh api 'pulls?a=1&b=2'`) or escaped
+ * at the end (`echo done \&`) does not count.
+ *
+ * The check is lexical and errs toward refusing. Each level is read twice,
+ * with comments and without, and an `&` either reading finds counts: a
+ * quote inside a comment cannot hide a later `&`, and neither can a `#` the
+ * comment rule misreads inside `$(…)`, `$'…'` or an escaped wrapper quote.
+ * So an `&` inside a comment, in a heredoc body, in `(( … ))`, or escaped
+ * inside a double-quoted wrapper script is refused too.
+ */
+export function backgroundsAnyPart(command: string): boolean {
+  return (
+    backgroundsAtLevel(command, true) || backgroundsAtLevel(command, false)
+  );
+}
+
+/** One reading of {@link backgroundsAnyPart} at this level; scripts it
+ * hands to a wrapper are read both ways again. */
+function backgroundsAtLevel(command: string, dropComments: boolean): boolean {
+  const read = (text: string) =>
+    dropComments ? stripShellComments(text) : text;
+  const text = read(command);
+  const { wrapperTokens, innerCommand, innerArgsSuffix } =
+    parseMonitorShellWrapper(text);
+  for (const part of [innerCommand, innerArgsSuffix ?? '']) {
+    const code = read(part);
+    if (
+      hasNonFinalTopLevelBackgroundOperator(code) ||
+      endsWithBackgroundAmp(code)
+    ) {
+      return true;
+    }
+  }
+  if (wrapperTokens) return backgroundsAnyPart(innerCommand);
+  // Not a wrapper at the head: look for one further along. Each recursion
+  // only enters a wrapper's script, which is shorter than the command.
+  let rest = takeLeadingToken(text)?.rest ?? '';
+  for (
+    let token = takeLeadingToken(rest);
+    token;
+    token = takeLeadingToken(rest)
+  ) {
+    if (
+      parseMonitorShellWrapper(rest).wrapperTokens &&
+      backgroundsAnyPart(rest)
+    ) {
+      return true;
+    }
+    rest = token.rest;
+  }
+  return false;
+}
+
+/**
+ * Whether `command` ends with an `&` that backgrounds it: not the second half
+ * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
+ * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
+ */
+function endsWithBackgroundAmp(command: string): boolean {
+  const text = command.trimEnd();
+  if (!text.endsWith('&') || text.endsWith('&&')) return false;
+  let backslashes = 0;
+  for (let at = text.length - 2; at >= 0 && text[at] === '\\'; at--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 0;
+}
+
+/**
+ * `command` without its comments: a `#` that starts a word outside quotes
+ * runs to the end of its line. Quotes and backslash escapes are tracked, so
+ * `'#'`, `"a # b"`, `a\#b`, `$#` and `${#v}` stay.
+ */
+function stripShellComments(command: string): string {
+  let out = '';
+  let quote: "'" | '"' | '' = '';
+  for (let at = 0; at < command.length; at++) {
+    const char = command[at]!;
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = '';
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (command[at + 1] ?? '');
+      at++;
+      continue;
+    }
+    if (quote === '"') {
+      out += char;
+      if (char === '"') quote = '';
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === '#' && (at === 0 || /[\s;&|()<>]/.test(command[at - 1]!))) {
+      const end = command.indexOf('\n', at);
+      if (end < 0) break;
+      at = end - 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 /**

@@ -1,8 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryCommand;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -12,14 +11,15 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -32,6 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Real maintenance CLI, real worker and SQL; only the model is deterministic. */
 final class HostedOperatorRecoveryProbe implements AutoCloseable {
+    static final String RECOVERY_KEY_ID = "operator-recovery-v2";
+    static final String RECOVERY_KEY = Base64.getEncoder().encodeToString(
+            "r".repeat(32).getBytes(StandardCharsets.UTF_8));
     private static final ObjectMapper JSON = new ObjectMapper();
     private final ServletWebServerApplicationContext spring;
     private final JdbcTemplate jdbc;
@@ -46,7 +49,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
     HostedOperatorRecoveryProbe(ServletWebServerApplicationContext spring, List<Map<String, Object>> sessions,
             Path state, HttpServer server) {
         this.spring = spring;
-        this.jdbc = spring.getBean(JdbcTemplate.class);
+        this.jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         this.sessions = sessions;
         this.state = state;
         broker = (RuntimeBrokerService) ReflectionTestUtils.getField(spring.getBean(EmbeddedRuntimeBroker.class), "service");
@@ -79,9 +82,13 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         var execution = rows.getFirst();
         String binding = execution.get("binding_id").toString();
         String generation = execution.get("runtime_generation").toString();
+        String originalSeed = jdbc.queryForObject(
+                "SELECT provision_seed_ciphertext FROM ma_runtime_binding WHERE binding_id = ?",
+                String.class, binding);
+        assertThat(originalSeed).isNotBlank();
         assertThat(execution.get("dispatch_generation")).isEqualTo(1L);
         if (phase.equals("prepare")) {
-            assertBusy(session);
+            assertIndependentAdmission(session);
             String inspection = command("inspect", binding, generation);
             var view = JSON.readTree(inspection.lines().filter(line -> line.startsWith("{")).findFirst().orElseThrow());
             assertThat(view.path("captureStatus").asText()).isEqualTo("partial");
@@ -89,6 +96,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
             String holder = view.path("holderKey").asText();
             assertThat(holder).isNotBlank();
             String prepared = command("prepare", binding, generation, holder, "#12904 physical acceptance");
+            assertOriginalSeed(binding, originalSeed);
             String recovery = prepared.lines().filter(line -> line.matches("[0-9a-f-]{36}")).findFirst().orElseThrow();
             assertThat(recoveries.putIfAbsent(id, recovery)).isNull();
             ProcessHandle worker = worker(binding);
@@ -108,7 +116,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
                 while (Files.size(proof) == before && System.nanoTime() < deadline) {
                     Thread.sleep(20);
                 }
-                assertThat(running(escaped)).isTrue();
+                assertThat(HostedProcessLiveness.running(escaped)).isTrue();
                 assertThat(Files.size(proof)).as("escaped writer survives worker death").isGreaterThan(before);
                 assertHeld(binding, holder);
             }
@@ -127,7 +135,8 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         Files.setPosixFilePermissions(evidence, PosixFilePermissions.fromString("rw-------"));
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
+        assertOriginalSeed(binding, originalSeed);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
                 Integer.class, binding)).isZero();
         assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                 String.class, binding)).isEqualTo("RELEASED");
@@ -140,24 +149,31 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
                 "replacementBindingId", next.getBindingId());
     }
 
-    private void assertBusy(Map<String, Object> session) throws Exception {
-        try {
-            broker.acquire(session.get("secondarySessionId").toString(), UUID.randomUUID().toString(), "bootstrap")
-                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
-            throw new AssertionError("A second Session entered the uncertain Workspace");
-        } catch (java.util.concurrent.ExecutionException error) {
-            Throwable cause = error.getCause();
-            while (cause.getCause() != null && !(cause instanceof RuntimeBrokerException)) {
-                cause = cause.getCause();
-            }
-            assertThat(cause).isInstanceOf(RuntimeBrokerException.class);
-            assertThat(((RuntimeBrokerException) cause).getCode()).isEqualTo("workspace_busy");
-        }
+    private void assertIndependentAdmission(Map<String, Object> session) throws Exception {
+        var neighbor = broker.acquire(session.get("secondarySessionId").toString(), UUID.randomUUID().toString(), "bootstrap")
+                .toCompletableFuture().get(30, TimeUnit.SECONDS);
+        assertThat(broker.release(neighbor.getSession().getHarnessSessionId(), neighbor.getRuntimeSessionId())
+                .toCompletableFuture().get(30, TimeUnit.SECONDS)).isTrue();
     }
 
     private void assertHeld(String binding, String holder) {
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner WHERE binding_id = ?",
-                String.class, binding)).isEqualTo(holder);
+        var members = jdbc.queryForList("SELECT runtime_generation, runtime_session_id, execution_storage_key"
+                + " FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL", binding);
+        assertThat(members).hasSize(1);
+        var member = members.getFirst();
+        assertThat(org.apache.commons.codec.digest.DigestUtils.sha256Hex((binding + "\u0000"
+                + member.get("runtime_generation") + "\u0000" + member.get("runtime_session_id"))
+                .getBytes(StandardCharsets.UTF_8))).isEqualTo(holder);
+    }
+
+    private void assertOriginalSeed(String binding, String ciphertext) {
+        assertThat(jdbc.queryForObject(
+                "SELECT provision_seed_ciphertext FROM ma_runtime_binding WHERE binding_id = ?",
+                String.class, binding)).isEqualTo(ciphertext);
+        assertThat(jdbc.queryForObject(
+                "SELECT credential_key_id FROM ma_runtime_binding WHERE binding_id = ?",
+                String.class, binding)).isEqualTo(spring.getEnvironment().getProperty(
+                        "qwen.managed-agent.runtime-broker.credential-key-id"));
     }
 
     private ProcessHandle worker(String binding) {
@@ -186,7 +202,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
             return null;
         }
         var process = ProcessHandle.of(Long.parseLong(Files.readString(identity).strip())).orElse(null);
-        if (process == null || !running(process)) {
+        if (process == null || !HostedProcessLiveness.running(process)) {
             return null;
         }
         Path cwd;
@@ -205,10 +221,15 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         var command = new ArrayList<String>();
         command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
         for (String name : List.of("spring.datasource.url", "spring.datasource.driver-class-name",
-                "spring.datasource.username", "spring.datasource.password",
-                "qwen.managed-agent.runtime-broker.credential-key-id", "qwen.managed-agent.runtime-broker.credential-key")) {
+                "spring.datasource.username", "spring.datasource.password")) {
             command.add("-D" + name + "=" + spring.getEnvironment().getProperty(name));
         }
+        String prefix = "-Dqwen.managed-agent.runtime-broker.";
+        command.add(prefix + "credential-key-id=" + RECOVERY_KEY_ID);
+        command.add(prefix + "credential-key=" + RECOVERY_KEY);
+        command.add(prefix + "previous-credential-keys["
+                + spring.getEnvironment().getProperty("qwen.managed-agent.runtime-broker.credential-key-id")
+                + "]=" + spring.getEnvironment().getProperty("qwen.managed-agent.runtime-broker.credential-key"));
         command.add("-Dqwen.managed-agent.runtime-broker.state-directory=" + state);
         command.add("-Dqwen.managed-agent.runtime-broker.durable-local-process=true");
         command.add("-Dqwen.managed-agent.runtime-broker.operator-recovery-enabled=true");
@@ -230,39 +251,11 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         }
     }
 
-    private static boolean running(ProcessHandle process) throws IOException {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (!Files.exists(stat)) {
-            return false;
-        }
-        return statRunning(process, stat);
-    }
-
-    static boolean statRunning(ProcessHandle process, Path stat) throws IOException {
-        try {
-            String value = Files.readString(stat);
-            return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-        } catch (IOException error) {
-            // A reaped process fails the read after the exists() probe (ENOENT, or ESRCH from an
-            // already-dead entry); re-check liveness so unrelated I/O failures still propagate.
-            if (!process.isAlive()) {
-                return false;
-            }
-            throw error;
-        }
-    }
-
     private void stopOwnedProcesses() throws Exception {
         processes.forEach(ProcessHandle::destroyForcibly);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         for (ProcessHandle process : processes) {
-            while (running(process)) {
-                assertThat(System.nanoTime()).as("Owned producer %s", process.pid()).isLessThan(deadline);
-                Thread.sleep(20);
-            }
+            HostedProcessLiveness.awaitStopped(process, Duration.ofNanos(deadline - System.nanoTime()), "Owned producer");
         }
     }
 

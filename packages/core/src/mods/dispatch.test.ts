@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { jsonDepth, validateInput, validateResult } from './dispatch.js';
 import { ModRuntime } from './runtime.js';
 import type { ModLog } from './types.js';
 
@@ -217,18 +218,20 @@ describe('Mod middleware through real isolated realms', () => {
     expect(effects()).toEqual([]);
   });
 
-  it('keeps an outer failure distinct from a nested reentry timeout in the same realm', async () => {
+  it('keeps an outer failure distinct from a sibling catch timeout in the same realm', async () => {
     const runtime = await group(
-      `export function register(on) {
+      `let innerCatches = 0; export function register(on) {
         on('*', async ($, e, next) => {
           const result = await next(e);
-          if (next.event === 'command.run') throw new Error('outer unrelated failure');
+          if (next.event === 'command.run' && e.args !== 'inspect') throw new Error('outer unrelated failure');
           return result;
         }).catch(($, e, next) => {
-          if (next.error.kind === 're-entry' && next.event === 'ui.log') while (true) {}
           if (next.event === 'command.run') return {text: next.error.kind + ':' + next.error.message};
           return next(e);
         });
+        on('ui.log', {text:'effect:1'}, () => { throw new Error('inner failure'); })
+          .catch(() => { innerCatches++; while (true) {} });
+        on('command.run', {args:'inspect'}, () => ({text:String(innerCatches)}));
       }`,
       provider,
     );
@@ -236,6 +239,7 @@ describe('Mod middleware through real isolated realms', () => {
       'throw:Error: outer unrelated failure',
     );
     expect(effects()).toEqual(['effect:1']);
+    expect(await runtime.runCommand('hello', 'inspect', signal())).toBe('1');
   });
 
   it.each(['throw new Error("after")', 'return undefined', 'return {text:3}'])(
@@ -539,32 +543,77 @@ describe('Mod middleware through real isolated realms', () => {
     expect(effects()).toEqual(['effect:1']);
   }, 20_000);
 
-  it('skips immediate self reentry and recovers ancestor reentry with an inert API', async () => {
+  it('skips immediate and ancestor catches without disabling other registrations or later calls', async () => {
     const runtime = await group(
-      `export function register(on) {
-      on('*', ($,e,next)=>next(e)).catch(async ($,e,next)=>{
-        if(next.error.kind!=='re-entry'||next.called) throw new Error('bad reentry');
-        let blocked=false; try {await $.command.register({name:'bad',description:'bad'});} catch {blocked=true;}
-        if(!blocked) throw new Error('reentry API was allowed');
-        const a=await next({...e,text:'must be ignored'}); const b=await next(e); return b;
+      `let caught = 0, logCalls = 0; export function register(on) {
+      on('*', ($,e,next)=>next(e)).catch(($,e,next)=>{caught++; return next(e);});
+      on('ui.log', ($,e,next)=>{
+        logCalls++;
+        $.ui.log('self');
+        return next({...e,text:'seen:'+e.text});
+      }).catch(($,e,next)=>{caught++; return next(e);});
+      on('command.run', {args:'inspect'}, ()=>{
+        return {text:JSON.stringify({caught,logCalls})};
       });
-      on('ui.log', ($,e,next)=>next({...e,text:'seen:'+e.text}));
     }`,
       provider,
     );
     expect(await runtime.runCommand('hello', 'ok', signal())).toBe('1:ok');
     expect(
-      logs.filter((log) => log.to === 'transcript').map((log) => log.text),
-    ).toEqual(['seen:effect:1']);
+      logs
+        .filter((log) => log.to === 'transcript')
+        .map((log) => log.text)
+        .sort(),
+    ).toEqual(['seen:effect:1', 'self']);
+    expect(await runtime.runCommand('hello', 'inspect', signal())).toBe(
+      '{"caught":0,"logCalls":1}',
+    );
+    expect(await runtime.runCommand('hello', 'again', signal())).toBe(
+      '2:again',
+    );
+    expect(await runtime.runCommand('hello', 'inspect', signal())).toBe(
+      '{"caught":0,"logCalls":2}',
+    );
     expect(runtime.getCommands('id0')).toEqual([]);
+    expect(runtime.getCommands('id1')).toEqual([
+      { name: 'hello', description: 'Hello' },
+    ]);
   });
 
-  it('replays invalid reentry catch results through the remaining same-plugin hooks', async () => {
+  it('excludes ancestor catches while preserving matching siblings and their normal budget', async () => {
     const runtime = await group(
-      `let reentryBudget; export function register(on) {
-      on('ui.log', {}, ($,e,next)=>{if(e.text==='outer') $.ui.log('nested-a'); return next(e);}).catch(($,e,next)=>{reentryBudget=next.error.budget; return {wrong:true};});
-      on('ui.log', {text:'ancestor'}, ($,e,next)=>next({...e,text:'SIBLING:'+e.text}));
-      on('command.run', {args:'inspect'}, ()=>({text:String(reentryBudget)}));
+      `let caught = 0, siblingBudget; export function register(on) {
+      on('ui.log', {}, ($,e,next)=>{if(e.text==='outer') $.ui.log('nested-a'); return next(e);}).catch(($,e,next)=>{caught++; return next(e);});
+      on('ui.log', {text:'ancestor'}, ($,e,next)=>{siblingBudget=next.budget.ms; return next({...e,text:'SIBLING:'+e.text});});
+      on('ui.log', {text:'not-matched'}, ()=>{throw new Error('matcher was ignored');});
+      on('command.run', {args:'inspect'}, ()=>({text:JSON.stringify({caught,siblingBudget})}));
+    }`,
+      `export function register(on) {
+      on('ui.log', ($,e,next)=>{if(e.text==='nested-a') $.ui.log('ancestor'); return next(e);});
+      on('session.start', async ($,e,next)=>{await $.command.register({name:'hello',description:'Hello'}); return next(e);});
+      on('command.run', ($,e)=>{$.ui.log('outer'); return {text:'done'};});
+    }`,
+    );
+    expect(await runtime.runCommand('hello', '', signal())).toBe('done');
+    expect(
+      logs.filter((log) => log.to === 'transcript').map((log) => log.text),
+    ).toEqual(['outer', 'nested-a', 'SIBLING:ancestor']);
+    expect(await runtime.runCommand('hello', 'inspect', signal())).toBe(
+      '{"caught":0,"siblingBudget":10000}',
+    );
+    expect(logs.filter((log) => log.to === 'debug')).toEqual([]);
+  });
+
+  it('does not select excluded ancestor catches when a sibling genuinely fails', async () => {
+    const runtime = await group(
+      `let caught = 0, recovered = 0, catchBudget; export function register(on) {
+      on('ui.log', {}, ($,e,next)=>{if(e.text==='outer') $.ui.log('nested-a'); return next(e);}).catch(($,e,next)=>{caught++; return next(e);});
+      on('ui.log', {text:'ancestor'}, ()=>{throw new Error('sibling failed');}).catch(($,e,next)=>{
+        recovered++;
+        catchBudget=next.budget.ms;
+        return next({...e,text:'RECOVERED:'+e.text});
+      });
+      on('command.run', {args:'inspect'}, ()=>({text:JSON.stringify({caught,recovered,catchBudget})}));
     }`,
       `export function register(on) {
       on('session.start', async ($,e,next)=>{await $.command.register({name:'hello',description:'Hello'}); return next(e);});
@@ -575,8 +624,10 @@ describe('Mod middleware through real isolated realms', () => {
     expect(await runtime.runCommand('hello', '', signal())).toBe('done');
     expect(
       logs.filter((log) => log.to === 'transcript').map((log) => log.text),
-    ).toEqual(['outer', 'nested-a', 'SIBLING:ancestor']);
-    expect(await runtime.runCommand('hello', 'inspect', signal())).toBe('1000');
+    ).toEqual(['outer', 'nested-a', 'RECOVERED:ancestor']);
+    expect(await runtime.runCommand('hello', 'inspect', signal())).toBe(
+      '{"caught":0,"recovered":1,"catchBudget":1000}',
+    );
   });
 
   it.each(['while(true){}', 'await new Promise(()=>{})'])(
@@ -597,4 +648,133 @@ describe('Mod middleware through real isolated realms', () => {
     },
     20_000,
   );
+});
+
+describe('Mod API event shapes', () => {
+  const usage = { startedAt: 1, context: { window: 0 }, rateLimits: [] };
+  it.each([
+    ['clock.now', 0, true],
+    ['clock.now', -1, false],
+    ['clock.sleep', undefined, true],
+    ['clock.sleep', 0, false],
+    ['session.id', 'abc', true],
+    ['session.model', 1, false],
+    ['session.turns', 3, true],
+    ['session.turns', 1.5, false],
+    ['session.surfaces', ['terminal', 'vscode'], true],
+    ['session.surfaces', ['web'], false],
+    ['session.surface', null, true],
+    ['session.surface', 'web', false],
+    ['session.usage', usage, true],
+    [
+      'session.usage',
+      {
+        startedAt: 1,
+        context: { tokens: 5, window: 10, percent: 50, breakdown: {} },
+        rateLimits: [{ kind: 'five_hour', percentUsed: 12.5, resetsAt: 'x' }],
+        cost: { usd: 0.5 },
+      },
+      true,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 100 } },
+      true,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 33.5 } },
+      false,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 101 } },
+      false,
+    ],
+    ['session.usage', { ...usage, extra: 1 }, false],
+    ['session.usage', { ...usage, context: {} }, false],
+    ['session.usage', { ...usage, rateLimits: [{ kind: 'x' }] }, false],
+    ['session.usage', { ...usage, cost: { usd: -1 } }, false],
+    ['turn.abort', undefined, true],
+    ['turn.abort', true, false],
+  ] as const)('checks a %s answer of %j', (event, value, valid) => {
+    const check = () => validateResult(event, { value });
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow('Unsupported ' + event + ' result fields.');
+  });
+
+  it.each([
+    ['clock.sleep', { ms: 0 }, true],
+    ['clock.sleep', { ms: -1 }, false],
+    ['clock.sleep', { ms: Infinity }, false],
+    ['clock.sleep', { ms: 1, signal: {} }, false],
+    ['session.usage', {}, true],
+    ['session.usage', { breakdown: 'full', columns: 80 }, true],
+    ['session.usage', { columns: 0 }, false],
+    ['session.usage', { mode: 'full' }, false],
+    ['session.id', {}, true],
+    ['session.id', { force: true }, false],
+    ['turn.abort', { turnId: 'turn-1' }, true],
+    ['turn.abort', {}, false],
+    ['turn.abort', { turnId: 1 }, false],
+    ['turn.abort', { turnId: 'turn-1', reason: 'x' }, false],
+  ] as const)('checks %s arguments %j', (event, value, valid) => {
+    const check = () => validateInput(event, value, {});
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow();
+  });
+
+  const turnUsage = {
+    input_tokens: 1,
+    output_tokens: 2,
+    cache_read_input_tokens: 3,
+    cache_creation_input_tokens: 0,
+    model: 'qwen-max',
+  };
+  it.each([
+    ['turn.start', { turnId: 'turn-1' }, true],
+    ['turn.start', { turnId: 'turn-1', text: 'x' }, false],
+    ['turn.start', {}, false],
+    ['turn.complete', { text: '' }, true],
+    ['turn.complete', { text: 'TL;DR', usage: turnUsage }, true],
+    ['turn.complete', { text: 'x', extra: 1 }, false],
+    ['turn.complete', { usage: turnUsage }, false],
+    ['turn.complete', { text: 'x', usage: { ...turnUsage, model: 1 } }, false],
+    [
+      'turn.complete',
+      { text: 'x', usage: { ...turnUsage, output_tokens: 1.5 } },
+      false,
+    ],
+    [
+      'turn.complete',
+      { text: 'x', usage: { ...turnUsage, cache_read_input_tokens: -1 } },
+      false,
+    ],
+  ] as const)('checks a %s result of %j', (event, value, valid) => {
+    const check = () => validateResult(event, value);
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow('Unsupported ' + event + ' result fields.');
+  });
+
+  it('pins the turn events against a rewritten input', () => {
+    const start = { text: 'Fix it', turnId: 'turn-1' };
+    expect(() =>
+      validateInput('turn.start', { ...start }, start),
+    ).not.toThrow();
+    expect(() =>
+      validateInput('turn.start', { ...start, text: 'other' }, start),
+    ).toThrow('Mod hook changed pinned event fields.');
+  });
+});
+
+describe('Mod value depth', () => {
+  it.each([
+    ['1', 0],
+    ['"[{"', 0],
+    ['{"a":"\\"[{"}', 1],
+    ['[[1],[[2]]]', 3],
+    ['{"a":{"b":[{}]}}', 4],
+  ])('counts the nesting of %s without parsing it', (json, depth) => {
+    expect(jsonDepth(json)).toBe(depth);
+  });
 });

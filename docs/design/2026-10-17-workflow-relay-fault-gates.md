@@ -1,4 +1,4 @@
-# Workflow child_run relay fault gates FG10b, FG10c, FG10e, FG10f
+# Workflow child_run relay fault gates FG10b–FG10f
 
 [English](2026-10-17-workflow-relay-fault-gates.md) | [简体中文](2026-10-17-workflow-relay-fault-gates.zh-CN.md)
 
@@ -12,11 +12,12 @@ crash) was deferred there with the production finding it caught, #14387 —
 the recovery re-drove an unsettled workflow Turn after a Harness kill —
 whose fix (#14461) makes the coordinator leave a bound, non-cancelling
 workflow Turn unsettled instead of re-driving it.
-This design covers the four letters that remain: **FG10b (lost replies),
+This design covers the five letters that remain: **FG10b (lost replies),
 FG10c (store failures), FG10e (cancellation) and FG10f (notification and
-output delivery).**
+output delivery)**, plus **FG10d (process crash)**, which joined as slice 3
+once #14461 merged (below).
 
-The a+d design called these four "largely kind-agnostic". They are not
+The a+d design called the first four "largely kind-agnostic". They are not
 free, though: every one of them lives in the record's **relay-driven
 settlement** — the walk from the launch to the parent's notification —
 which FG10a's driver-held parent could not reach (its parent attach
@@ -28,7 +29,7 @@ seconds: the lead's `workflow` call is admitted, the relay creates and
 binds the child Session, the child Turn runs the script and its
 in-process `agent()` dispatch, the result revision settles the record,
 the notification lands on the lead as a `<task-notification>` input, and
-the lead's wake Turn reads it. The four letters pin that walk's
+the lead's wake Turn reads it. FG10b, c, e and f pin that walk's
 workflow-specific promises under fault:
 
 - **at most one workflow instance per launch** — one child Session, one
@@ -44,7 +45,16 @@ workflow-specific promises under fault:
 - the notification is **delivered at most once**, and a stream cut
   mid-workflow resumes with no gap and no duplicate (FG10f).
 
-It touches **no production code**.
+FG10d (process crash) joins as slice 3 once #14461 merged. It lands here
+rather than in the a+d design's driver-held class for the reason above:
+what it pins after the kill — the record's blocked settlement, its ledger
+and the lead's notification — is the relay-driven walk. Under it, a run
+the Harness died under is **never re-executed and never settled as if
+its outcome had been observed** (FG10d).
+
+Slices 1 and 2 touch **no production code**. Slice 3 fixes the two
+defects its gate found and a third its review found (FG10d's _Findings
+fixed with the gate_).
 
 ## Current state
 
@@ -111,11 +121,12 @@ probe on the FG9 fixture (one background workflow with one `agent()` call).
 
 ## Scope decisions
 
-1. **Four letters, two slices.** Slice 1 = **FG10b + FG10f** — lost and
+1. **Five letters, three slices.** Slice 1 = **FG10b + FG10f** — lost and
    delayed replies and stream continuity, no restart. Slice 2 = **FG10c + FG10e** — store
-   refusals with a cold restart, and cancellation. FG10d stays with
-   #14387. Each slice is its own PR and marks its letters delivered on
-   #14165.
+   refusals with a cold restart, and cancellation. Slice 3 = **FG10d** —
+   the Harness killed under a running workflow Turn, after #14387's fix
+   (#14461) merged. Each slice is its own PR and marks its letters
+   delivered on #14165.
 2. **A new class on the FG9 fixture.** The letters live in
    `HostedWorkflowRelayFaultGatesIT`: Java-only, coordinator-owned lead,
    in-JVM Spring, the packaged Harness, a scripted model, selectors
@@ -139,8 +150,8 @@ probe on the FG9 fixture (one background workflow with one `agent()` call).
    re-driven), and the FG10d gate pins it. So FG10c refuses only
    commits made after the child Turn completed — the result revision and
    the notification — and its restart reloads the lead alone. Nothing in
-   this round arms a kill or a restart across a running workflow Turn;
-   that is FG10d's.
+   slices 1 and 2 arms a kill or a restart across a running workflow Turn;
+   that is FG10d's, in slice 3.
 4. **Pinned outcomes, not error codes.** As in FG9, a gate asserts what the
    record, the journals and the model saw, and attributes each fault by
    its own witness: a drop counter, a fire count, a held request.
@@ -150,9 +161,9 @@ probe on the FG9 fixture (one background workflow with one `agent()` call).
    fired before its expectations; JDBC mutations are scoped to the case
    tenant; the lead's own Turn has settled before any refusal or restart
    arm (the FG9 slice-3 lesson).
-6. **Closeability.** After slice 2 only FG10d remains on #14165, blocked
-   on #14387. Whether the tracker stays open for it or hands it to #14387
-   is the tracker owner's call, recorded on #14165 when slice 2 lands.
+6. **Closeability.** After slice 2 only FG10d remained on #14165, blocked
+   on #14387. With slice 3 every FG10 letter is delivered; closing the
+   tracker is its owner's call.
 
 ## The gate ledger
 
@@ -233,30 +244,148 @@ Mechanics notes recorded at landing:
 - `child-stream-resume` asserts no extra notification, and so runs every
   `assertOneWorkflowInstance` expectation besides the streams.
 
-### FG10c — store failures (slice 2)
+### FG10c — store failures (slice 2, delivered)
 
-A test-only trigger on `ma_session_record`, scoped to the case tenant and
-one Session and record shape, refuses every matching write until the case
-drops it: the FG9b shape, `fg9b_fire`-style fire counts, exactly three
-fires per refusal. Each case arms only after the child Turn completed
-(decision 3), drops the trigger, and restarts the Harness cold.
+A test-only trigger on `ma_session_record`, scoped to the case tenant, the
+lead and one record shape, refuses every matching write until the case
+drops it: the FG9b shape, with a MyISAM `fg10c_fire` count and exactly
+three fires per refusal (the store client's bounded retry). The subagent
+is held until the lead's own Turn settled, and only then is the trigger
+armed and the subagent released. So the refusal latches an idle lead and
+lands after the child Turn completed — never across a running workflow
+Turn (decision 3) — and the case then drops the trigger and restarts the
+Harness cold.
 
-| Case                      | Injection                                                                                       | Expect                                                                                                                                                                                                                                                                                                  |
-| ------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `result-revision-refused` | Refuse the update of the lead's `child_run` record to `settled`, after the child Turn completed | While latched, the record stays `running`: never silently advanced, no notification, no wake. After the drop and the cold restart, the relay's retry settles it once (`completed`), one notification lands, and the script never re-runs: one `agent()` dispatch for the case, the child Turn untouched |
-| `notification-refused`    | Refuse the lead's write that lands the notification input; the exact row is pinned at landing   | The record says the notification is owed: delivery never reads `consumed` while refused, and the `CHILD_RESULT` row's reception is not `accepted`. After the heal, exactly one notification and one wake round                                                                                          |
+| Case                      | Injection                                                                                                                                  | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `result-revision-refused` | Refuse the update of the lead's `child_run` record to its result revision (revision 4), after the child Turn completed                     | Three fires; the child Turn reads `COMPLETED`. While latched the record stays revision 3 `running` — never silently advanced — with no notification, no wake and no accepted `CHILD_RESULT` row. After the drop and a cold restart (a new writer generation holds the lead), the relay's retry settles the record once and the walk completes: every `assertOneWorkflowInstance` expectation, one `agent()` dispatch for the case — the script never re-ran |
+| `notification-refused`    | Refuse the insert of the lead's `child_acceptance` record, the commit that lands the notification input with it, after the child completed | Three fires. While latched the record is settled (the result committed) but its delivery never reads `consumed`, and there is no notification, no wake and no accepted `CHILD_RESULT` row — the owed notification is visible in the record. After the heal, exactly one notification and one wake round, and every `assertOneWorkflowInstance` expectation                                                                                                  |
 
-### FG10e — cancellation (slice 2)
+### FG10e — cancellation (slice 2, delivered)
 
-The cancel is the public task cancel on the lead. The in-flight window is
-a held `agent()` request at the scripted model, released only after the
-case read the cancel's outcome.
+The cancel is the public task cancel on the lead
+(`POST /v1/agents/sessions/{lead}/tasks/{taskId}/cancel`, the task id being
+`task_` + the record key of the `child_run`). The in-flight window is a held
+`agent()` request at the scripted model, released only after the case
+read the cancel's outcome. The held request is a live stream: its headers
+go out at once and an SSE comment every 250 ms. The run settling
+`cancelled` does not show that the subagent stopped — the sandbox's abort
+race settles the run with its dispatch still in flight — so the case has
+its own witness: a keepalive write failing while the hold is still
+closed, which only a Harness that aborted the subagent's request itself
+produces.
 
-| Case                        | Injection                                                                                                                                        | Expect                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancel-subagent-in-flight` | Cancel the workflow task while its `agent()` request is held                                                                                     | One `TASK_CANCEL` operation completes. The child Turn ends `CANCELLED`, and the record settles `cancelled` / `stop_requested`. No notification: the `CHILD_RESULT` reception never reads `accepted`. Nothing runs under the cancelled record: the `agent()` dispatch count stays one, and the held subagent's answer, released afterwards, never reaches the child journal. The task view reads `cancelled` |
-| `cancel-reply-lost`         | The same window, with the cancel POST sent through a public-API proxy that drops its reply after it committed; the client re-issues the same key | The re-issue answers 202 `replayed: true` for the same operation, with one `TASK_CANCEL` operation and one request receipt for the key; every `cancel-subagent-in-flight` expectation                                                                                                                                                                                                                       |
-| `cancel-after-settlement`   | Cancel a workflow task whose run already completed and was consumed                                                                              | 409 `task_action_unavailable`. No operation row; the record is unchanged (revision and state as before); no second notification                                                                                                                                                                                                                                                                             |
+| Case                        | Injection                                                                                                                                        | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-subagent-in-flight` | Cancel the workflow task while its `agent()` request is held                                                                                     | 202, then the child Turn ends `CANCELLED` and the record settles `cancelled` / `stop_requested`. One `TASK_CANCEL` operation, with one admission under the key. Nothing runs under the cancelled record: the held `agent()` request is aborted while still held, the dispatch count stays one, and no answer reaches the child journal. No notification and no wake: the `CHILD_RESULT` reception never reads `accepted`. The task view reads `cancelled` |
+| `cancel-reply-lost`         | The same window, with the cancel POST sent through a public-API proxy that drops its reply after it committed; the client re-issues the same key | The lost POST fails client-side, with the drop witnessed once. The re-issue answers 202 `replayed: true` for the same task, and every `cancel-subagent-in-flight` expectation holds — still one `TASK_CANCEL` operation and one admission under the key                                                                                                                                                                                                   |
+| `cancel-after-settlement`   | Cancel a workflow task whose run already completed and was consumed                                                                              | 409 `task_action_unavailable`. No `TASK_CANCEL` operation; the record's revision is unchanged; every `assertOneWorkflowInstance` expectation still holds (one notification, one wake round)                                                                                                                                                                                                                                                               |
+
+Mechanics notes recorded at landing:
+
+- The notification is the `child_acceptance` record's own commit: its
+  first revision is inserted in the transaction that carries the
+  notification input (open question 2).
+- A refused relay write latches the lead (FG9b's mechanics); the relay
+  keeps re-driving with backoff until the cold restart reloads the lead,
+  and then resumes from the committed state.
+- A task cancel keeps its idempotency key on its `TASK_CANCEL` admission
+  row in `ma_operation` (unlike the session-event cancel of FG9d, which
+  writes `ma_request_receipt`), so "one request receipt" is one admission
+  under the key.
+- A workflow Turn honours its stop through two paths: the Turn's abort
+  signal handed to `WorkflowRunner.start`, and the abort listener calling
+  `handle.abort()` (`hosted-workflow-turn.ts:261-278`). Either alone stops
+  the run.
+- The run's stop reaches its in-flight `agent()` dispatch only through
+  the run controller's signal, handed to `createProductionDispatch`
+  (`workflow-runner.ts:519-523`). Without it the run still settles
+  `cancelled`, the child Turn `CANCELLED`, and the answer released later
+  lands nowhere; only the aborted-request witness tells the two apart
+  (mutation 9).
+- #14456 (merged while slice 1 was in review) changed
+  `TaskCancelCoordinator`'s reconciliation of parked rows; the live cancel
+  path these cases drive is green on top of it.
+
+### FG10d — process crash (slice 3, delivered)
+
+The packaged Harness is SIGKILLed under an **attached** run (the record
+reads `running_attached`) after the lead's own Turn settled, and a cold
+one starts on the same port. Two windows:
+
+- the run's `agent()` request is held at the model. Its abort, a failed
+  keepalive write (FG10e's witness), shows that the kill took the
+  in-flight subagent with it;
+- the run's work is done — its answer is in the child journal — and the
+  child Turn's settlement commit is swallowed at the store, never
+  forwarded, so the kill lands before that commit leaves the wire. The
+  swallow is the deterministic form of the a+d design's
+  settlement-observed kill.
+
+| Case                                         | Injection                                                                                                                                                  | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kill-mid-workflow-subagents-in-flight`      | SIGKILL the Harness while the run's `agent()` request is held; start a cold one                                                                            | The kill aborts the held request. Nothing settles the Turn while no Harness runs. After the restart the Turn stays `RUNNING`, marked `hosted_workflow_recovery_blocked` — never settled — and the restarted Harness answers the child's load `hosted_turn_recovery_required`. The record settles `recovery_blocked` / `outcome_unknown` / `runtime_lost`, with no stop reason and no result, its `definitionDigest` still the script's sha256. Never re-executed: one `agent()` dispatch, no answer in the child journal, no Turn result reading `completed`. The `CHILD_RESULT` row reads `unknown/pending/pending`, the walk's ledger row `unknown`. The lead gets one `<status>blocked</status>` notification whose result line says the run is recovery blocked (outcome unknown), read by one wake round |
+| `kill-after-last-subagent-before-settlement` | Let the subagent answer and swallow the child Turn's `settleTurn` commit at the store; SIGKILL the Harness while it waits on that commit; start a cold one | The swallow is witnessed once and the swallowed command never passes through. The run's answer is in the child journal exactly once, and stays so. Every other `kill-mid-workflow-subagents-in-flight` expectation holds: the work that finished is not taken for an observed outcome                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+Mechanics notes recorded at landing:
+
+- The coordinator's in-flight drive of the child Turn fails with the
+  Harness and retries with backoff (1, 2, 4, 8 s). The first drive
+  against the cold Harness takes the recovery path (the Session is
+  bound). The restarted Harness's takeover load first meets the dead
+  writer (`managed_session_writer_conflict`), then refuses with
+  `hosted_turn_recovery_required` / `takeover_unrecovered`, and the
+  coordinator's takeover-refusal arm parks the Turn blocked. The relay
+  settles the record on its next scan, about 20 s after the restart in
+  both windows. The reason is a mechanics fact, not an expectation
+  (decision 4); the gate asserts the refusal and the mark.
+- Before refusing, the takeover closes the child journal's Turn as
+  interrupted (`cancelled` / `harness_interruption`, a journal fact),
+  while the managed Turn row stays `RUNNING` and marked. That commit is a
+  new command, never the swallowed one.
+- A blocked background child owes its parent a notification
+  (`settleRecoveryBlocked` commits it with the record and kicks the
+  idle lead), so FG10d expects exactly one notification and one wake,
+  not none.
+- The relay is the walk's only writer after the restart: the lead itself
+  is idle and reloads on demand.
+
+**Findings fixed with the gate.** On the first runs the gate went red on
+two production defects. Both were in the honest-settlement path #14461
+added, and slice 3 fixes them:
+
+1. **A close debt rewrote the walk's classification.** This fixture's
+   host cannot close a Workspace Session, so every settled arm retains a
+   close debt. `ChildResultRelayStore.advance(close_debt)` retired the
+   walk `done` and its `CHILD_RESULT` row `delivered` whatever the arm
+   proved. The `unknown` that the recovery-blocked arm (#14461) and the
+   relay's give-up chain intend therefore read as a delivered result
+   wherever the close is not admitted at once. The debt now parks under
+   the walk's own classification (`retainCloseDebt`), exactly as the
+   closed arm's `classify` does. Unit tests pin both classifications
+   (`ChildResultRelayStoreTest`) and the blocked arm passing `unknown`
+   (`ChildResultRelayTest`).
+2. **The blocked notification described the running revision.**
+   `settleRecoveryBlocked` rendered the parent's notification from the
+   record it replaces, so under `<status>blocked</status>` the result
+   line read "Workflow child run running (unknown).". It now renders the
+   blocked revision it commits, as a unit test in
+   `hosted-child-agent-session.test.ts` pins.
+
+Review found a third, which fix 1 widened:
+
+3. **An `unknown` child start held its parent's collection forever.**
+   `SessionResourceCollectionCollector` holds a retired parent's
+   resources while a `CHILD_SESSION_START` walk is not `done` or
+   `orphaned`. But `unknown` is just as terminal: the relay's discovery
+   page and claim exclude it, and nothing rewrites it. So an `unknown`
+   walk held the collection with no release, wherever the close is
+   admitted at once, and fix 1 carried the same hold to hosts without
+   close capability. The collector now treats `unknown` as terminal. An
+   owed close rides its own `CHILD_SESSION_CLOSE` row and reads no parent
+   resource, so it does not hold the collection either, as before.
+   `SessionResourceCollectionCollectorTest` pins the hold and its release
+   for all three classifications.
 
 ## Fixture design
 
@@ -292,6 +421,14 @@ the public API for FG10e's lost cancel reply.
 fire table and `restartHarness` with the writer-generation witness,
 applied only after the child Turn settled.
 
+**Kills** (slice 3) reuse `killHarness`, the kill half of
+`restartHarness`. The store proxy gains a `SWALLOW` disposition, which
+never forwards and answers 503 once released. The proxy runs every
+handler on its one dispatcher thread, so a swallow (like a hold) stalls
+all store traffic while it waits. FG10d therefore releases it as soon as
+the kill is confirmed, before the cold Harness needs the store; the 503
+then meets a closed connection.
+
 **CI.** The class name places it in the `hosted-harness-mysql` lane
 (`Hosted*IT`; `check-failsafe-reports.js hosted` enforces it ran), and the
 existing `hosted-workflow-gates` profile runs it locally. Each slice
@@ -312,6 +449,24 @@ the uncapped setup steps. The per-letter slack is then 10 s (600 + 3545 =
 4145 against 4155), so slice 2 on the same class re-measures the whole
 class and composes its own cost the same way rather than carrying slice
 1's number forward.
+
+Slice 2 re-measures the four-letter class at 181.2–181.6 s healthy locally
+across three runs (FG10c ~64 s, FG10e ~47 s, the slice-1 letters
+unchanged), ~363 s budgeted at the same 2×, 198 s over slice 1's 165 s. It
+composes onto main's allowance after slice 1: 3545 + 198 ≈ 3743 s. One
+600 s ceiling plus that needs a fork of at least 4343 s, so the fork moves
+4155→4353 s. The Verify step moves 85→90 minutes (447 s of margin; 85 would
+leave 147), and the job ceiling moves 330→335 to stay above the summed
+step ceilings (320) plus the uncapped setup steps.
+
+Slice 3 re-measures the five-letter class at 246.1–246.8 s healthy
+locally across three runs (FG10d ~65 s, the other letters unchanged),
+~494 s budgeted at the same 2×, 131 s over slice 2's 363 s. It composes
+onto main's allowance after slice 2: 3743 + 131 = 3874 s. One 600 s
+ceiling plus that needs a fork of at least 4474 s, so the fork moves
+4353→4484 s. The Verify step's 90 minutes still wrap the fork plus its
+600 s (316 s of margin), so the Verify step and the job ceiling (185 since
+#14467 moved the failover arms to their own job) stay as they are.
 
 ## Mutation checks
 
@@ -342,13 +497,73 @@ Slice 1, each run against its case alone (`-Dqwen.fg10b.case` /
 5. FG10f — the public `Last-Event-ID` cursor read one short:
    `child-stream-resume` red with a duplicate at the resume boundary.
 
-Planned for slice 2, refined when it lands:
+Slice 2, each run against its case alone (`-Dqwen.fg10c.case` /
+`-Dqwen.fg10e.case`):
 
-- FG10c — the relay advancing the record past a refused result revision:
-  `result-revision-refused` red at the never-advanced assertion.
-- FG10e — the child stop not aborting the in-process run (the abort
-  signal dropped before `agent()`): `cancel-subagent-in-flight` red; the
-  held answer reaches the child journal, or the child Turn completes.
+6. FG10c — a deferred relay step is not retried once the store heals (its
+   backoff runs away to a day): `result-revision-refused` red. Nothing
+   re-drives the refused step after the drop, so no new writer ever takes
+   the lead and the walk never resumes. Two narrower mutations are
+   equivalent here:
+   - the Harness answering the refused result commit as committed:
+     the relay's next step meets the latched lead, and after the restart
+     it reconciles the record still at revision 3 and commits the result
+     itself;
+   - the relay giving up on the first failure (its attempt bound
+     collapsed): the give-up chain settles from the committed truth,
+     a completed child Turn, and lands the same result.
+7. FG10c — the Harness answers a refused acceptance as committed:
+   `notification-refused` red; the relay moves on, and the walk never
+   reaches `consumed`.
+8. FG10e — the child stop never reaches the in-process run (the abort
+   signal handed to `WorkflowRunner.start` and the `handle.abort()`
+   listener both dropped): `cancel-subagent-in-flight` red; the child Turn
+   never leaves `CANCELLING`. Either path alone stops the run.
+9. FG10e — the run's stop not forwarded to its `agent()` dispatch (a fresh
+   signal handed to `createProductionDispatch` in place of the run
+   controller's; the workflow's own cancellation intact):
+   `cancel-subagent-in-flight` red at the aborted-request witness. The run
+   still settles `cancelled` and the child Turn `CANCELLED` first, so
+   without that witness the case passed.
+10. FG10e — the task cancel's request digest not stable across a retry (a
+    per-call nonce): `cancel-reply-lost` red; the re-issued cancel answers
+    409 instead of replaying the committed admission.
+11. FG10e — a settled task still advertising and admitting cancel
+    (`completed` added to the cancellable states):
+    `cancel-after-settlement` red; the cancel is admitted with 202 instead
+    of 409 `task_action_unavailable`.
+
+Slice 3, each run against its case alone (`-Dqwen.fg10d.case`); the
+Harness-side mutation patches the packaged bundle's chunk and restores it
+byte for byte, the others patch the Java source:
+
+12. FG10d — the coordinator no longer recognizes a workflow Turn
+    (`isWorkflowLaunchTurn` always false), so every #14461 refusal arm is
+    off: `kill-mid-workflow-subagents-in-flight` red at the mark. The
+    takeover's refusal keeps the drive on the generic retry path — five
+    retries by the time the case gives up — so the Turn is never parked
+    and the record never settles.
+13. FG10d — the relay ignores the recovery-blocked mark on the Turn line:
+    `kill-mid-workflow-subagents-in-flight` red; the Turn parks marked,
+    but the record stays `running`.
+14. FG10d — a close debt retires every walk `done` (slice 3's relay fix
+    reverted): `kill-after-last-subagent-before-settlement` red at the
+    ledger, whose `CHILD_RESULT` row reads `delivered/pending/pending`.
+15. FG10d — the blocked notification renders the running revision it
+    replaces (slice 3's Harness fix reverted):
+    `kill-after-last-subagent-before-settlement` red at the notification,
+    whose result line reads "Workflow child run running (unknown).".
+
+The fixes' unit tests are red with their fix reverted:
+`ChildResultRelayStoreTest.retainsACloseDebtUnderTheWalksOwnClassification`
+and, in `ChildResultRelayTest`,
+`aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown`,
+`aGiveUpWithoutCloseSupportRetainsItsCloseDebt` (red when the give-up arm passes
+`done`) and `aHostWithoutCloseSettlesAndRetainsTheCloseDebt` for the
+relay; `tells a background child's parent the run is blocked, not
+running` in `hosted-child-agent-session.test.ts` for the Harness; and
+`SessionResourceCollectionCollectorTest.aChildStartHoldsCollectionOnlyUntilTheRelayClassifiesIt`
+(its `unknown` case) for the collector.
 
 ## Validation and acceptance
 
@@ -361,15 +576,18 @@ Planned for slice 2, refined when it lands:
   workflow/pom meta-tests green, with the composed budget.
 - This design lands in both languages with slice 1; each slice records
   its letters on #14165.
+- Slice 3's three fixes ship with their unit tests, each shown red with
+  its fix reverted.
 
 ## Open questions
 
 1. Resolved at slice 1: the lead's wake Turn is not projected, the child
    Session's workflow Turn is, so FG10f cuts the child's streams (see
    FG10f's mechanics notes).
-2. Which row `acceptChildResult` writes for the notification, and so
-   where FG10c's `notification-refused` trigger sits. It is pinned at
-   slice-2 landing against the committed shape.
+2. Resolved at slice 2: `acceptChildResult` inserts the
+   `child_acceptance` record with the notification input in one
+   transaction, so FG10c's `notification-refused` trigger refuses that
+   insert.
 3. The kind gate's re-check on every revision commitment, the a+d
    design's open question 1. These gates assert that `kind` is
    `workflow` at every revision. They cannot assert the re-check itself:

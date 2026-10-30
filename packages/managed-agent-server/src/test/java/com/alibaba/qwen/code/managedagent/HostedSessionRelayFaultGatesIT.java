@@ -6,10 +6,10 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +33,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -74,6 +75,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -118,9 +120,9 @@ class HostedSessionRelayFaultGatesIT {
     private static final String DIGEST = "sha256:" + "b".repeat(64);
     /** The store client's bounded uncertain-error retry of one commit:
      * `ManagedSessionStoreHttpClient.appendTransaction`'s commit loop
-     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`,
-     * `for (let attempt = 0; attempt < 3; attempt++)`), which retries a
-     * 429/5xx/transport failure 250 ms apart before it throws. */
+     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`),
+     * which retries a 429/5xx/transport failure 250 ms apart and rethrows
+     * once `const exhausted = attempt >= 2`, the third attempt. */
     private static final int STORE_ATTEMPTS = 3;
     private static final Pattern MEMBER = Pattern.compile(
             "FG9_MEMBER_([a-z]+)_([A-Z]+)");
@@ -681,9 +683,10 @@ class HostedSessionRelayFaultGatesIT {
     // --------------------------------------------------- case: FG9b-1
 
     /** alice's outbound commit is refused at the store: nothing of the
-     * command exists anywhere, her Session latches its writes, and only a
-     * cold load answers the parked call — from the journal, as not sent,
-     * never by minting the command afresh. */
+     * command exists anywhere, her Session keeps the append unsettled
+     * instead of latching its writes (#14570), and only a cold load
+     * answers the parked call — from the journal, as not sent, never by
+     * minting the command afresh. */
     private void outboundCommitRefused() throws Exception {
         String name = "outbound-commit-refused";
         carolMode.set("WAIT");
@@ -697,9 +700,9 @@ class HostedSessionRelayFaultGatesIT {
         openSend();
         awaitRefusals(name);
         awaitHarnessLog(mark, "is recovery blocked: "
-                + "ManagedSessionWritesStoppedError");
+                + "ManagedSessionAppendUnsettledError");
         String turn = onlyTurn(alice);
-        // Latched, not answered: no entry, no ledger row, no answer, and
+        // Unsettled, not answered: no entry, no ledger row, no answer, and
         // the Turn stays open rather than settling over its call.
         assertThat(commandsOf(alice, "session_command")).isEmpty();
         assertThat(deliveryRows()).isZero();
@@ -719,7 +722,7 @@ class HostedSessionRelayFaultGatesIT {
         assertThat(commandsOf(lead, "session_command")).isEmpty();
         assertThat(msgcRows(lead)).isEmpty();
         assertThat(commandsOf(bob, "session_message")).isEmpty();
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
         settleAndCheckDelivered(lead);
     }
 
@@ -763,7 +766,7 @@ class HostedSessionRelayFaultGatesIT {
                 .isEqualTo(1);
         assertThat(sendAnswers(alice)).containsExactly(
                 "Message sent to bob.\n- bob: sent.");
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
         settleAndCheckDelivered(lead);
         assertThat(commandsOf(bob, "session_message")).hasSize(1);
     }
@@ -816,7 +819,7 @@ class HostedSessionRelayFaultGatesIT {
         assertThat(journalCommits(lead, "commitSessionCommandReceipt"))
                 .as("the retry re-executed into the stored receipt")
                 .isEqualTo(1);
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
         settleAndCheckDelivered(lead);
         assertThat(commandsOf(bob, "session_message")).hasSize(1);
     }
@@ -1438,19 +1441,6 @@ class HostedSessionRelayFaultGatesIT {
         return json.readTree(json.writeValueAsString(node));
     }
 
-    private static String camel(String key) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < key.length(); i++) {
-            char c = key.charAt(i);
-            if (c == '_' && i + 1 < key.length()) {
-                out.append(Character.toUpperCase(key.charAt(++i)));
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
-    }
-
     private void awaitTerminal(String session, String turn) {
         waiting().atMost(Duration.ofSeconds(90))
                 .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
@@ -1712,12 +1702,15 @@ class HostedSessionRelayFaultGatesIT {
     }
 
     /** Every attempt of the store client's bounded retry met the
-     * refusal; past it the Session latches its writes and sends no more. */
+     * refusal; past it the Session keeps the append unsettled and sends
+     * no more until the refusal drops (#14570). A settle that fires
+     * before the drop retries the same commit, so only the lower bound
+     * is exact. */
     private void awaitRefusals(String name) {
         waiting().atMost(Duration.ofSeconds(90))
                 .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
                     assertNoModelFailure();
-                    assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+                    assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
                 });
     }
 
@@ -1844,10 +1837,6 @@ class HostedSessionRelayFaultGatesIT {
                     temporary.resolve("workspace-" + i));
             Files.createDirectory(workspace.resolve("child"));
         }
-        // Spring and the embedded broker bind ephemeral ports and are read
-        // back after boot: a port picked ahead of a multi-second boot can
-        // be taken by any connection opened meanwhile.
-        harnessPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -1870,12 +1859,16 @@ class HostedSessionRelayFaultGatesIT {
         // FG9d's lost cancel reply: only the client's own request passes it.
         publicProxy = HostedSessionRelayForwardingProxy.start("public",
                 casesRoot.resolve("public-proxy.log"));
-        startSpring(cli, node, caseCount, letter);
-        port = spring.getWebServer().getPort();
-        brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
-                .getPort();
-        storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
-        publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+        // Reserve the Harness port while the other fixture listeners bind.
+        try (ServerSocket reservation = new ServerSocket(0)) {
+            harnessPort = reservation.getLocalPort();
+            startSpring(cli, node, caseCount, letter);
+            port = spring.getWebServer().getPort();
+            brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
+                    .getPort();
+            storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+            publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+        }
         startHarness();
     }
 
@@ -1984,7 +1977,7 @@ class HostedSessionRelayFaultGatesIT {
                                 .registerSingleton("fg9Authentication",
                                         authentication()))
                         .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
     }
 
     private void startHarness() throws Exception {
@@ -2352,12 +2345,6 @@ class HostedSessionRelayFaultGatesIT {
         return "";
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
-
     private static void deleteRecursively(Path root) throws IOException {
         if (!Files.exists(root)) {
             return;
@@ -2374,7 +2361,7 @@ class HostedSessionRelayFaultGatesIT {
     }
 
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it",
-                () -> Thread.currentThread().isInterrupted());
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 }
