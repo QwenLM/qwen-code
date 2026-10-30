@@ -97,8 +97,58 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
     ).toBe('[--publish] [--watch]');
     expect(
       getSlashCommandArgumentHint('/verify-pr 15871 --repo', verifyPr, 'en'),
-    ).toBe('[--publish] [--watch] <owner>/<repo>');
+    ).toBe('<owner>/<repo> [--publish] [--watch]');
   });
+
+  it('puts a pending flag value before the remaining arguments', () => {
+    expect(
+      getSlashCommandArgumentHint('/verify-pr --repo', verifyPr, 'en'),
+    ).toBe('<owner>/<repo> <pr-number> [--publish] [--watch]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr --repo alice/repo 15871',
+        verifyPr,
+        'en',
+      ),
+    ).toBe('[--publish] [--watch]');
+  });
+
+  it('rejects a flag prefix that is followed by more arguments', () => {
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr 15871 --pub --watch',
+        verifyPr,
+        'en',
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr 15871 --pub --bogus',
+        verifyPr,
+        'en',
+      ),
+    ).toBeNull();
+  });
+
+  it.each(['skill-dir-command', 'bundled-skill'] as const)(
+    'recognizes live-session source %s as skill-backed',
+    (source) => {
+      const commands: CommandInfo[] = [
+        {
+          name: 'verify-pr',
+          description: 'Verify a PR',
+          source,
+          argumentHint: '<pr-number> [--publish]',
+        },
+      ];
+      expect(getSlashCommandArgumentHint('/verify-pr', commands, 'en')).toBe(
+        '<pr-number> [--publish]',
+      );
+      expect(
+        getSlashCommandArgumentHint('/verify-pr 15871', commands, 'en'),
+      ).toBe('[--publish]');
+    },
+  );
 
   it('keeps the matching flag group visible while the flag is being typed', () => {
     expect(

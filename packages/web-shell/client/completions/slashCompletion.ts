@@ -363,7 +363,7 @@ export function getSlashCommandArgumentHint(
   if (!cmd) return null;
 
   const subcommandPath = match[2]?.trim();
-  if (cmd.source === 'skill') {
+  if (cmd.source !== undefined && SKILL_BACKED_SOURCES.has(cmd.source)) {
     const hint = cmd.argumentHint?.trim();
     if (!hint) return null;
     return subcommandPath
@@ -418,6 +418,15 @@ type SkillHintToken =
   | { kind: 'placeholder'; text: string; freeText: boolean }
   | { kind: 'flag'; text: string; flags: string[]; valueHint: string | null }
   | { kind: 'literal'; text: string; alternatives: string[] };
+
+// Live sessions keep the loader's source label ('skill-dir-command' for
+// project/user skills, 'bundled-skill' for bundled ones); only the
+// pre-session workspace bootstrap synthesizes 'skill'.
+const SKILL_BACKED_SOURCES = new Set([
+  'skill',
+  'skill-dir-command',
+  'bundled-skill',
+]);
 
 function splitHintParts(
   text: string,
@@ -496,8 +505,9 @@ function matchSkillHintBranch(
           t.kind === 'flag' &&
           t.flags.some((flag) => flag.startsWith(word)),
       );
-      // A flag still being typed: keep it and everything not yet consumed.
-      if (prefixIdx !== -1) break;
+      // Only a trailing prefix is still being typed; a prefix followed by
+      // more words is a completed, unmatchable argument.
+      if (prefixIdx !== -1 && ti === typed.length - 1) break;
       return null;
     }
     const idx = tokens.findIndex((t, i) => !consumed[i] && t.kind !== 'flag');
@@ -510,16 +520,19 @@ function matchSkillHintBranch(
     consumed[idx] = true;
     ti = token.kind === 'placeholder' && token.freeText ? typed.length : ti + 1;
   }
-  const remaining: string[] = [];
+  // The value a just-typed flag still needs comes first: it is what the
+  // matcher consumes next, regardless of its position in the template.
+  const pending: string[] = [];
+  const rest: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if (pendingValue[i] && token.kind === 'flag' && token.valueHint) {
-      remaining.push(token.valueHint);
+      pending.push(token.valueHint);
     } else if (!consumed[i]) {
-      remaining.push(token.text);
+      rest.push(token.text);
     }
   }
-  return { remaining, literals };
+  return { remaining: [...pending, ...rest], literals };
 }
 
 function getRemainingSkillArgumentHint(
@@ -527,7 +540,6 @@ function getRemainingSkillArgumentHint(
   argsText: string,
 ): string | null {
   const typed = argsText.split(/\s+/).filter(Boolean);
-  if (!typed.length) return argumentHint;
   // Hints may describe alternative modes separated by top-level '|' (e.g.
   // autofix-pr's "... | status [<pr>] | stop [<pr>]"). Prefer the branch with
   // the most literal matches so a mode word like "status" is not swallowed by
