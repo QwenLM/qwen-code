@@ -4717,6 +4717,7 @@ export class HostedWorkspaceToolTurn {
         intentSequence: number;
         modelCallId: string;
         captureId: string;
+        settled: boolean;
         originalBinding?: ToolPublicationBinding;
       }
     >();
@@ -5100,6 +5101,7 @@ export class HostedWorkspaceToolTurn {
             intentSequence: intent.lastSequence,
             modelCallId: request.call.callId,
             captureId: randomUUID(),
+            settled: false,
           });
           // H3: the record intent precedes every physical side effect.
           if (request.background) {
@@ -5308,19 +5310,45 @@ export class HostedWorkspaceToolTurn {
           if (renewInFlight) return renewInFlight;
           const pending = (async () => {
             const writer = await this.publication!.owner.owner();
+            const failures: Array<{
+              binding: { settled: boolean };
+              error: Error;
+            }> = [];
             for (const saved of shellBindings.values()) {
-              await this.publication!.owner.request(
-                '/grants',
-                {
-                  publication: 'managed-tool-publication/1',
-                  operation: 'renew',
-                  sessionKey: key,
-                  owner: writer,
-                  publicationId: saved.publicationId,
-                },
-                saved.publicationToken,
-              );
+              if (saved.settled) continue;
+              try {
+                await this.publication!.owner.request(
+                  '/grants',
+                  {
+                    publication: 'managed-tool-publication/1',
+                    operation: 'renew',
+                    sessionKey: key,
+                    owner: writer,
+                    publicationId: saved.publicationId,
+                  },
+                  saved.publicationToken,
+                );
+              } catch (cause) {
+                if (!saved.settled)
+                  failures.push({
+                    binding: saved,
+                    error: new Error(
+                      `${saved.publicationId}: ${String(cause)}`,
+                      {
+                        cause,
+                      },
+                    ),
+                  });
+              }
             }
+            const liveFailures = failures
+              .filter(({ binding }) => !binding.settled)
+              .map(({ error }) => error);
+            if (liveFailures.length)
+              throw new AggregateError(
+                liveFailures,
+                liveFailures.map((failure) => failure.message).join('; '),
+              );
           })();
           renewInFlight = pending.finally(() => {
             renewInFlight = null;
@@ -5522,6 +5550,8 @@ export class HostedWorkspaceToolTurn {
               throw new Error('Finished publication binding changed.');
             result = parseToolResultEnvelope(finished['result']);
           }
+          // Keep the binding for failure cleanup until its receipt is accepted.
+          saved.settled = true;
           if (request.monitoring) {
             responses.push(
               ...(await this.acceptMonitor(
