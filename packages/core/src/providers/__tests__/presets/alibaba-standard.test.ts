@@ -22,8 +22,17 @@ describe('alibabaStandardProvider', () => {
       protocol: AuthType.USE_OPENAI,
       envKey: 'DASHSCOPE_API_KEY',
       modelsEditable: true,
+      supportsModelDiscovery: true,
       uiGroup: 'alibaba',
     });
+  });
+
+  it('accepts pay-as-you-go keys and rejects subscription keys', () => {
+    const validate = alibabaStandardProvider.validateApiKey!;
+    expect(validate('sk-abc', '')).toBeNull();
+    expect(validate('sk-ws-abc', '')).toBeNull();
+    expect(validate('sk-sp-abc', '')).toMatch(/Token Plan/);
+    expect(validate('abc', '')).toMatch(/Invalid API key/);
   });
 
   it('offers multiple region endpoints', () => {
@@ -42,9 +51,12 @@ describe('alibabaStandardProvider', () => {
       'qwen3.6-plus',
       'qwen3.7-plus',
       'qwen3.7-max',
+      'glm-5.3',
+      'glm-5.2',
       'glm-5.1',
       'deepseek-v4-pro',
-      'deepseek-v4-flash',
+      'deepseek-v4.1-flash',
+      'deepseek-v4.1-flash-1017',
       'qwen3.8-max',
       'qwen3.8-max-0902',
       'qwen3.8-flash',
@@ -89,11 +101,11 @@ describe('alibabaStandardProvider', () => {
     expect(models?.[1]?.generationConfig).toBeUndefined();
   });
 
-  it('does not mark DeepSeek models as multimodal', () => {
+  it('marks only DeepSeek V4.1 Flash as multimodal', () => {
     const plan = buildInstallPlan(alibabaStandardProvider, {
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKey: 'sk-standard',
-      modelIds: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+      modelIds: ['deepseek-v4-pro', 'deepseek-v4.1-flash'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
@@ -102,7 +114,33 @@ describe('alibabaStandardProvider', () => {
     });
     expect(models?.[1]?.generationConfig).toEqual({
       contextWindowSize: 1000000,
+      modalities: { image: true },
     });
+  });
+
+  it('declares the GLM thinking switch', () => {
+    const models = alibabaStandardProvider.models!;
+    // glm-5.2 / glm-5.1 are hybrid; declaring the switch lets Off ship.
+    for (const id of ['glm-5.2', 'glm-5.1']) {
+      expect(models.find((m) => m.id === id)?.capabilities?.reasoning).toEqual({
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      });
+    }
+    // glm-5.3 rejects enable_thinking: false.
+    const glm53 = models.find((m) => m.id === 'glm-5.3');
+    expect(glm53?.thinkingMandatory).toBe(true);
+    expect(glm53?.capabilities?.reasoning?.canDisable).toBe(false);
+  });
+
+  it('offers the full qwen3.8 effort ladder', () => {
+    for (const id of ['qwen3.8-max', 'qwen3.8-max-0902', 'qwen3.8-flash']) {
+      expect(
+        alibabaStandardProvider.models!.find((m) => m.id === id)?.capabilities
+          ?.reasoning,
+      ).toMatchObject({ efforts: ['low', 'medium', 'high', 'xhigh', 'max'] });
+    }
   });
 
   it('limits the Alibaba Kimi K3 route to image input', () => {

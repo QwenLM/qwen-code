@@ -14,7 +14,7 @@ Hosted Harness 的私有创建请求已经接受 `captureBytes`。对于 Shell p
 
 在 Java SDK `CreateHarnessSession` 中新增可选的 `captureBytes(long)` builder 字段，仅在调用方提供时序列化，拒绝 Harness 合同闭区间 1 至 `2^41` 之外的值。已有 SDK 请求保持原格式。
 
-对于已解析的 `hosted-workspace-shell/1`、`/2` 与现有内部 `hosted-workspace-team-lead/1` Shell-family Session，Java connector 在启用 tool-publication 时传入 `qwen.managed-agent.tool-publication.execution-bytes`。这是现有原始 capture 上限，不增加配置键或默认值。Files、MCP 和无工具 profile 均省略该字段。AgentDefinition 保持其已解析 profile 和审批模式；公共 Shell 的 child-agent 抑制仍是独立条件，内部 team-lead profile 保持现有工具与准入规则。
+对于已解析的 `hosted-workspace-shell/1` 与现有内部 `hosted-workspace-team-lead/1` Shell-family Session，Java connector 在启用 tool-publication 时传入 `qwen.managed-agent.tool-publication.execution-bytes`。这是现有原始 capture 上限，不增加配置键或默认值。Files、MCP 和无工具 profile 均省略该字段。AgentDefinition 保持其已解析 profile 和审批模式；公共 Shell 的 child-agent 抑制仍是独立条件，内部 team-lead profile 保持现有工具与准入规则。
 
 `execution-bytes` 只覆盖原始 capture。Publication 会另将 producer 与 admission 开销计入现有 Session/tenant 配额；部署方须给这些开销与已保留 publication 留出聚合容量。本改动不自动压低预算或绕过配额拒绝。
 
@@ -31,7 +31,7 @@ Harness 将选定预算持久保存到 managed Session definition。Java load �
 ## 验证与验收
 
 - SDK HTTP 测试覆盖省略、最小/最大值、常用 1 MiB 预算及非法边界。
-- Connector 测试覆盖 Shell `/1` 与 `/2` 的 publication 启用/关闭、非 Shell profile、create 冲突后 load、配置漂移，以及恢复 load 不传当前预算。
+- Connector 测试覆盖统一后的 Shell `/1` 的 publication 启用/关闭、非 Shell profile、create 冲突后 load、配置漂移，以及恢复 load 不传当前预算。
 - 现有 Harness 合同测试验证原预算恢复及显式冲突 load。相关 SDK/server 测试、完整仓库 build/typecheck/bundle 和静态检查均须通过。
 - Linux 验收使用用户指定的 `oauth-data-govermence` profile、北京 `cn-beijing` 的私有无版本控制 bucket `qwencode-test`、独立 MySQL schema，以及不含 admission relay 的生产 Java 创建路径。设置 `execution-bytes=1048576`，聚合容量为额外开销留足空间。
 - 要求真实 OSS 输出记录、公开 REST/WebShell metadata 及完整/范围字节一致、取消、同 Session 下一个 Shell/Read Turn、worker 物理关闭、关闭后下载与仅回收本次对象的生产 GC。读回测试前缀为空并恢复环境。

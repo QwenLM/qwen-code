@@ -986,9 +986,7 @@ function parseAgentWaitRun(
 function parseAgentWait(
   value: ManagedSessionJsonValue | undefined,
 ): HarnessAgentWaitGroup | null {
-  // Checkpoints committed before this group existed carry no key at all;
-  // their writers could not have minted an agent wait, so absent means null.
-  if (value === null || value === undefined) return null;
+  if (value === null) return null;
   const record = object(value, 'agentWait');
   assertNoUnknownKeys(record, ['runs'], 'agentWait');
   const runs = jsonArray(record['runs'], 'agentWait.runs').map((item, index) =>
@@ -1048,10 +1046,7 @@ function parseCommandWaitRun(
 function parseCommandWait(
   value: ManagedSessionJsonValue | undefined,
 ): HarnessCommandWaitGroup | null {
-  // Checkpoints committed before this group existed carry no key at all;
-  // their writers could not have minted a command wait, so absent means
-  // null — the same mixed-version rule as the agent wait.
-  if (value === null || value === undefined) return null;
+  if (value === null) return null;
   const record = object(value, 'commandWait');
   assertNoUnknownKeys(record, ['runs', 'holdsWorkspaceMount'], 'commandWait');
   const runs = jsonArray(record['runs'], 'commandWait.runs').map(
@@ -1078,8 +1073,7 @@ function parseCommandWait(
 function parseCommandLock(
   value: ManagedSessionJsonValue | undefined,
 ): HarnessCommandLockGroup | null {
-  // Absent means unlocked: only a Turn that timed out writes the key.
-  if (value === null || value === undefined) return null;
+  if (value === null) return null;
   const record = object(value, 'commandLock');
   assertNoUnknownKeys(record, ['turnId'], 'commandLock');
   return {
@@ -1097,8 +1091,7 @@ function parseCommandLock(
 function carriedCommandLock(
   previous: HarnessCheckpointV1,
 ): HarnessCommandLockGroup | null {
-  // An in-memory checkpoint shaped before the key existed carries none.
-  const lock = previous.commandLock ?? null;
+  const lock = previous.commandLock;
   return lock !== null && lock.turnId === previous.identity.turnId
     ? lock
     : null;
@@ -1445,7 +1438,7 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
   }
 }
 
-function parseHarnessCheckpointObject(
+export function parseHarnessCheckpointObject(
   value: ManagedSessionJsonValue,
 ): HarnessCheckpointV1 {
   const record = object(value, 'harness checkpoint');
@@ -1564,19 +1557,7 @@ export function tryParseHarnessCheckpointV1(
 export function encodeHarnessCheckpointV1(
   checkpoint: HarnessCheckpointV1,
 ): Buffer {
-  // Mixed-version compat (#13708): a pre-`agentWait` reader rejects
-  // unknown root keys, and an absent key parses as null on both sides —
-  // so each optional group's key rides only the checkpoints that actually
-  // carry it. `commandWait` and `commandLock` (H4e-b3) follow the same
-  // rule, so a pre-b3b Harness never meets a checkpoint it cannot read
-  // until a member command is used.
-  const record: Partial<Record<keyof HarnessCheckpointV1, unknown>> = {
-    ...checkpoint,
-  };
-  for (const key of ['agentWait', 'commandWait', 'commandLock'] as const) {
-    if (record[key] === null) delete record[key];
-  }
-  return Buffer.from(JSON.stringify(record), 'utf8');
+  return Buffer.from(JSON.stringify(checkpoint), 'utf8');
 }
 
 function formatHarnessIdentity(input: {
@@ -2383,13 +2364,13 @@ export function createModelOutputCommittedHarnessCheckpoint(input: {
   // A carried group belongs only to the all-consumed advancement this
   // same module mints — an unconsumed one would be a checkpoint its own
   // assertPhaseShape refuses, durable-blocked at the next read.
-  const carried = input.previous.agentWait ?? null;
+  const carried = input.previous.agentWait;
   if (carried !== null && carried.runs.some((run) => !run.consumed)) {
     throw new ManagedSessionRecordError(
       'model_output_committed cannot carry an unconsumed agent wait.',
     );
   }
-  const carriedCommands = input.previous.commandWait ?? null;
+  const carriedCommands = input.previous.commandWait;
   if (
     carriedCommands !== null &&
     carriedCommands.runs.some((run) => !run.folded)

@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -16,6 +18,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 public final class HostedProcessCrashFixtureMain {
     private HostedProcessCrashFixtureMain() {
@@ -28,6 +31,9 @@ public final class HostedProcessCrashFixtureMain {
         String tenant = args[3];
         String fault = args[4];
         boolean coordinatorRestart = "coordinator-only".equals(fault);
+        boolean settlement = "recovery-settlement".equals(fault);
+        boolean brokerOnly = "recovery-broker".equals(fault);
+        boolean workspaceRecovery = settlement || brokerOnly;
         Path workspace = root.resolve("workspace");
         ObjectMapper mapper = new ObjectMapper();
         List<String> arguments = new ArrayList<>(List.of(
@@ -61,18 +67,19 @@ public final class HostedProcessCrashFixtureMain {
                     + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
                     + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
             arguments.addAll(List.of(
-                    "--server.port=0",
-                    "--qwen.managed-agent.harness.enabled=false",
+                    "--server.port=" + (settlement ? args[5] : "0"),
+                    "--qwen.managed-agent.harness.enabled=" + settlement,
                     "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                     "--qwen.managed-agent.runtime-broker.enabled=true",
-                    "--qwen.managed-agent.runtime-broker.port=0",
+                    "--qwen.managed-agent.runtime-broker.port=" + (brokerOnly ? args[7] : "0"),
                     "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
-                    "--qwen.managed-agent.runtime-broker.durable-local-process=false",
+                    "--qwen.managed-agent.runtime-broker.durable-local-process=" + workspaceRecovery,
                     "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                     "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                         + List.of("Linux", "Mac OS X").contains(System.getProperty("os.name")),
-                    "--qwen.managed-agent.runtime-broker.workspace-cwd=" + root,
-                    "--qwen.managed-agent.runtime-broker.state-directory=" + root.resolve("runtime"),
+                    "--qwen.managed-agent.runtime-broker.workspace-cwd=" + (workspaceRecovery ? workspace : root),
+                    "--qwen.managed-agent.runtime-broker.state-directory="
+                        + root.resolve(settlement ? "coordinator-runtime" : "runtime"),
                     "--qwen.managed-agent.runtime-broker.credential-key-id=test",
                     "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                     "--qwen.managed-agent.runtime-broker.node-executable=" + node,
@@ -80,9 +87,52 @@ public final class HostedProcessCrashFixtureMain {
                     "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                     "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                     "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
+            if (settlement) {
+                arguments.addAll(List.of(
+                        "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + args[5],
+                        "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
+                        "--qwen.managed-agent.session-store.writer-lease-duration=30s",
+                        "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
+                        "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + args[6],
+                        "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
+                        "--qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "--qwen.managed-agent.harness.approval-mode=yolo",
+                        "--qwen.managed-agent.runtime-broker.session-create-warm=false",
+                        "--qwen.managed-agent.dispatch.scan-delay=100ms",
+                        "--qwen.managed-agent.dispatch.lease-duration=3s",
+                        "--qwen.managed-agent.dispatch.lease-renew-interval=1s"));
+            }
         }
-        var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
-                ManagedAgentServerApplication.class).run(arguments.toArray(String[]::new));
+        var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
+        if (settlement) {
+            // The resident sidecar owns execution; suppress only the optional local prewarm.
+            application.initializers(context -> ((GenericApplicationContext) context).registerBean(
+                    "fixtureNoPrewarm", RuntimeWarmer.class, () -> new RuntimeWarmer() {
+                        @Override
+                        public boolean isEnabled() {
+                            return false;
+                        }
+
+                        @Override
+                        public CompletableFuture<Void> warm(String sessionId) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+
+                        @Override
+                        public CompletableFuture<Void> drain(String sessionId) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                    }, definition -> definition.setPrimary(true)));
+        }
+        var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new));
+        if (brokerOnly) {
+            Path ready = root.resolve("broker-ready.tmp");
+            mapper.writeValue(ready.toFile(), Map.of(
+                    "brokerUrl", spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
+            Files.move(ready, root.resolve("broker-ready.json"), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+            return;
+        }
         if (coordinatorRestart) {
             Path ready = root.resolve("ready.tmp");
             mapper.writeValue(ready.toFile(), Map.of(
@@ -96,7 +146,7 @@ public final class HostedProcessCrashFixtureMain {
         if (Files.exists(saved)) {
             sessionId = Files.readString(saved);
         } else {
-            JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
+            JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
                     + " 'Workspace', ?, ?, 'ACTIVE')", tenant,
@@ -113,7 +163,8 @@ public final class HostedProcessCrashFixtureMain {
                 "tenantId", tenant, "sessionId", sessionId, "workspaceId", "workspace",
                 "directory", workspace.resolve("child").toString(), "fault", fault,
                 "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
-                "brokerUrl", spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
+                "brokerUrl", settlement ? "http://127.0.0.1:" + args[7]
+                        : spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
         Files.move(ready, root.resolve("ready.json"), StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING);
     }

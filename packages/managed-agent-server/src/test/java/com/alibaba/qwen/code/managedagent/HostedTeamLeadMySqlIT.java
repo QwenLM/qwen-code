@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.net.BindException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -769,40 +770,56 @@ class HostedTeamLeadMySqlIT {
         Files.createDirectory(workspace.resolve("child"));
         // Keep initialized-root mtime distinct from birth time without relying on sleeps.
         Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
-        int harnessPort = freePort();
-        int brokerPort = freePort();
+        int harnessPort;
+        int brokerPort;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         // Held member replies must not block the lead's requests.
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        // freePort() lets the port go before the Spring server and the embedded
-        // broker bind to it, and a contended CI runner can hand the port out
-        // again in that gap: boot with fresh ports when the bind loses the race.
+        // Sockets open at the same instant get distinct ports, but they are
+        // released before their consumers bind, so a contended runner can
+        // hand one out again; retry the whole attempt with fresh ports when
+        // it does. The harness moves to the next port instead of failing, so
+        // startHarness reports that move too. A retry re-runs storage
+        // registration, which only replays idempotently for a stable
+        // operationId.
+        String storageOperation = UUID.randomUUID().toString();
         for (int attempt = 0; ; attempt++) {
-            port = freePort();
+            try (ServerSocket springSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+                    ServerSocket harnessSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+                    ServerSocket brokerSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+                port = springSocket.getLocalPort();
+                harnessPort = harnessSocket.getLocalPort();
+                brokerPort = brokerSocket.getLocalPort();
+            }
             try {
-                startSpring(cli, node, decoy, workspace, harnessPort, brokerPort);
+                startSpring(cli, node, decoy, workspace, harnessPort, brokerPort, storageOperation);
+                jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                        + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
+                        + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
+                        WorkspaceExecutionProfile.POLICY_REF);
+                jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, 'workspace-0', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+                startHarness(cli, node, decoy, harnessPort, brokerPort);
                 break;
             } catch (RuntimeException error) {
+                try {
+                    abortBoot();
+                } catch (Exception teardown) {
+                    error.addSuppressed(teardown);
+                }
                 if (attempt >= 2 || !bindConflict(error)) {
                     throw error;
                 }
-                harnessPort = freePort();
-                brokerPort = freePort();
+                System.out.println("boot attempt " + attempt + " lost its ports, retrying: " + error);
             }
         }
-        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
-                + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES (?, 'workspace-0', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
-        startHarness(cli, node, decoy, harnessPort, brokerPort);
     }
 
-    private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort) {
+    private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort,
+            String storageOperation) {
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -847,14 +864,14 @@ class HostedTeamLeadMySqlIT {
         .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
-            spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
-                    .register(tenant, "storage-0", UUID.randomUUID().toString());
+            spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
+                    .register(tenant, "storage-0", storageOperation);
         }
     }
 
     private void startHarness(Path cli, String node, Path decoy, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectory(temporary.resolve("home"));
-        Path config = Files.createDirectory(home.resolve(".qwen"));
+        Path home = Files.createDirectories(temporary.resolve("home"));
+        Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
         Files.writeString(config.resolve("settings.json"), json.writeValueAsString(Map.of(
                 "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", "h4eb1-fixture"),
@@ -883,9 +900,13 @@ class HostedTeamLeadMySqlIT {
             environment.put(name, temporary.resolve(name + ".json").toString());
         }
         harness = builder.start();
+        Pattern moved = Pattern.compile("port " + harnessPort + " is in use, trying");
         waiting().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             if (!harness.isAlive()) {
                 throw new IllegalStateException("Hosted Harness exited: " + Files.readString(log));
+            }
+            if (moved.matcher(Files.readString(log)).find()) {
+                throw new HarnessPortConflict("Hosted Harness lost the port race on " + harnessPort);
             }
             int status;
             try {
@@ -933,15 +954,10 @@ class HostedTeamLeadMySqlIT {
         return json.readTree(response.body());
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
-
     private static boolean bindConflict(Throwable error) {
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
             if (cause instanceof BindException
+                    || cause instanceof HarnessPortConflict
                     || String.valueOf(cause.getMessage()).contains("Address already in use")) {
                 return true;
             }
@@ -949,46 +965,93 @@ class HostedTeamLeadMySqlIT {
         return false;
     }
 
+    private static final class HarnessPortConflict extends RuntimeException {
+        HarnessPortConflict(String message) {
+            super(message);
+        }
+    }
+
+    private void destroyHarness() throws InterruptedException {
+        if (harness == null) {
+            return;
+        }
+        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+        harness.destroyForcibly();
+        harness.waitFor(10, TimeUnit.SECONDS);
+    }
+
+    private void stopSpringAndWorkers() throws Exception {
+        try {
+            if (spring != null) {
+                spring.close();
+            }
+        } finally {
+            // Each Session's Broker worker is durable and outlives Spring.
+            HostedDurableWorkers.stop(temporary.resolve("broker"), json);
+        }
+    }
+
+    /** Stops a failed boot attempt before retrying with fresh ports. */
+    private void abortBoot() throws Exception {
+        try {
+            destroyHarness();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            harness = null;
+            try {
+                if (jdbc != null) {
+                    settleTenantWork();
+                    jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", tenant);
+                    jdbc.update("DELETE FROM ma_workspace WHERE tenant_id = ?", tenant);
+                }
+            } catch (RuntimeException ignored) {
+                // The next attempt re-creates the rows; keep the boot error.
+            }
+            try {
+                stopSpringAndWorkers();
+            } finally {
+                spring = null;
+                jdbc = null;
+            }
+        }
+    }
+
+    /**
+     * A failed case leaves its tenant's work owed, and the next Spring
+     * context in the fork scans every tenant; end that work here (a settled
+     * case matches nothing).
+     */
+    private void settleTenantWork() {
+        jdbc.update("UPDATE ma_operation SET delivery_state = 'CONFIRMED' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id = ?"
+                + " AND delivery_state IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
+        jdbc.update("UPDATE ma_operation SET state = 'orphaned' WHERE operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') AND tenant_id = ?"
+                + " AND state NOT IN ('done', 'orphaned', 'unknown')", tenant);
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED' WHERE tenant_id = ?"
+                + " AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
+    }
+
     @AfterEach
     void stop() throws Exception {
         releases.values().forEach(CountDownLatch::countDown);
         try {
-            if (harness != null) {
-                harness.descendants().forEach(ProcessHandle::destroyForcibly);
-                harness.destroyForcibly();
-                harness.waitFor(10, TimeUnit.SECONDS);
-            }
+            destroyHarness();
         } finally {
             try {
                 if (jdbc != null) {
-                    // A failed case leaves its tenant's work owed, and the
-                    // next Spring context in the fork scans every tenant;
-                    // end that work here (a settled case matches nothing).
-                    jdbc.update("UPDATE ma_operation SET delivery_state = 'CONFIRMED' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id = ?"
-                            + " AND delivery_state IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
-                    jdbc.update("UPDATE ma_operation SET state = 'orphaned' WHERE operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') AND tenant_id = ?"
-                            + " AND state NOT IN ('done', 'orphaned', 'unknown')", tenant);
-                    jdbc.update("UPDATE ma_turn SET status = 'FAILED' WHERE tenant_id = ?"
-                            + " AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
+                    settleTenantWork();
                 }
             } finally {
                 try {
-                    if (spring != null) {
-                        spring.close();
-                    }
+                    stopSpringAndWorkers();
                 } finally {
-                    try {
-                        // Each Session's Broker worker is durable and outlives Spring.
-                        HostedDurableWorkers.stop(temporary.resolve("broker"), json);
-                    } finally {
-                        if (model != null) {
-                            model.stop(0);
-                        }
-                        if (modelThreads != null) {
-                            modelThreads.shutdownNow();
-                        }
-                        http.close();
+                    if (model != null) {
+                        model.stop(0);
                     }
+                    if (modelThreads != null) {
+                        modelThreads.shutdownNow();
+                    }
+                    http.close();
                 }
             }
         }

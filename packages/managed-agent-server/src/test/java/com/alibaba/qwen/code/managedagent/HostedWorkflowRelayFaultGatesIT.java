@@ -6,11 +6,11 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +33,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -73,6 +74,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -431,9 +433,12 @@ class HostedWorkflowRelayFaultGatesIT {
      * completed — the result revision (`result-revision-refused`) or the
      * acceptance that lands the notification (`notification-refused`). The
      * subagent is held until the lead's own Turn settled, so the refusal
-     * latches an idle lead (a Turn still open there would keep its
+     * meets an idle lead (a Turn still open there would keep its
      * workspace with the dead owner across the restart) and lands after
      * the child's run, never across it (that is FG10d's ground).
+     * The refused commit stays unsettled rather than latching (#14570):
+     * each settle that finds the revision absent retries it, so the fire
+     * count is a multiple of the bounded retry, not exactly one batch.
      */
     private void refusedAfterChild(String name, String event,
             String condition) throws Exception {
@@ -456,7 +461,7 @@ class HostedWorkflowRelayFaultGatesIT {
         assertThat(turnStatus(child, onlyTurn(child)))
                 .as("the child's run completed before the refusal")
                 .isEqualTo("COMPLETED");
-        // Latched, not advanced: nothing delivered, nothing woken.
+        // Unsettled, not advanced: nothing delivered, nothing woken.
         JsonNode record = childRun(lead);
         if ("result-revision-refused".equals(name)) {
             assertThat(childRunRevision(lead)).isEqualTo(3L);
@@ -476,7 +481,7 @@ class HostedWorkflowRelayFaultGatesIT {
         restartHarness(lead);
         awaitConsumed(lead);
         assertOneWorkflowInstance(lead);
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
     }
 
     // ------------------------------------------------ cases: FG10d-1, -2
@@ -1014,12 +1019,14 @@ class HostedWorkflowRelayFaultGatesIT {
     }
 
     /** Every attempt of the store client's bounded retry met the
-     * refusal; past it the lead latches its writes and sends no more. */
+     * refusal; past it the lead keeps the append unsettled and sends no
+     * more until the refusal drops (#14570). A settle that fires before
+     * the drop retries the same commit, so only the lower bound is exact. */
     private void awaitRefusals(String name) {
         waiting().atMost(Duration.ofSeconds(90))
                 .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
                     assertNoModelFailure();
-                    assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+                    assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
                 });
     }
 
@@ -1156,19 +1163,6 @@ class HostedWorkflowRelayFaultGatesIT {
             }
         });
         return json.readTree(json.writeValueAsString(node));
-    }
-
-    private static String camel(String key) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < key.length(); i++) {
-            char c = key.charAt(i);
-            if (c == '_' && i + 1 < key.length()) {
-                out.append(Character.toUpperCase(key.charAt(++i)));
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
     }
 
     private void awaitTerminal(String session, String turn) {
@@ -1832,7 +1826,7 @@ class HostedWorkflowRelayFaultGatesIT {
     }
 
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it",
-                () -> Thread.currentThread().isInterrupted());
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 }

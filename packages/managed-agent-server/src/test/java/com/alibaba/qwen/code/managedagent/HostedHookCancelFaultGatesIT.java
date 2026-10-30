@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,7 +22,6 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -48,6 +47,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -194,7 +195,10 @@ class HostedHookCancelFaultGatesIT {
     @Test
     @Timeout(300)
     void fg13dCancelWithDroppedReplySettlesThroughStatusOnMySql() throws Exception {
-        boot("60000", "-1", "hook-ignore-term");
+        // A dropped cancel reply keeps the route waiting on the Broker's
+        // request timeout; give the command enough life that only the
+        // delivered cancellation, never its own timeout, can settle it.
+        boot("180000", "-1", "hook-ignore-term");
         proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
                 (method, path, body) -> path.contains("/control") && body.contains("\"kind\":\"hook-cancel\""),
                 "hook-cancel-reply"));
@@ -214,7 +218,8 @@ class HostedHookCancelFaultGatesIT {
         cancelHook(session, executionId);
         // The cancel reply is gone, but the poll through the record's owner
         // resolves the same cancellation, and the gate drains exactly once.
-        awaitTerminalDrained(session, "cancelled", child);
+        awaitTerminalDrained(session, "cancelled", child,
+                Duration.ofSeconds(120));
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("cancelled");
@@ -287,7 +292,12 @@ class HostedHookCancelFaultGatesIT {
     // inspect the first observation, not a later poll, so a regression that
     // settles early while the drain continues still fails the cell.
     private void awaitTerminalDrained(String session, String state, JsonNode child) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        awaitTerminalDrained(session, state, child, Duration.ofSeconds(60));
+    }
+
+    private void awaitTerminalDrained(String session, String state, JsonNode child,
+            Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
             JsonNode execution = hookExecution(session);
             if (state.equals(execution.at("/run/state").asText())) {
@@ -455,31 +465,15 @@ class HostedHookCancelFaultGatesIT {
         return json.readTree(body);
     }
 
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
-    private record HarnessAttach(String clientId, String bootId) {}
-
-    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
-        Field field = connector.getClass().getDeclaredField("attachments");
-        field.setAccessible(true);
-        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
-            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
-            }
-        }
-        return null;
-    }
-
     private JsonNode cancelHook(String session, String executionId) throws Exception {
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment before cancel").isNotNull();
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId + "/cancel"))
                 .timeout(Duration.ofSeconds(90)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId())
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId())
                 .POST(HttpRequest.BodyPublishers.noBody()).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("hook cancel: %s", response.body()).isEqualTo(200);
@@ -653,10 +647,6 @@ class HostedHookCancelFaultGatesIT {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
         }).untilAsserted(assertion::execute);
-    }
-
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
     }
 
     @AfterEach

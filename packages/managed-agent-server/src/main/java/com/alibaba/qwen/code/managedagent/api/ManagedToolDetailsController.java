@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellToolDetails;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellToolResultRequest;
-import com.alibaba.qwen.code.managedagent.service.ManagedToolDetailsService;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedToolDetailsService;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellToolDetails;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellToolResultRequest;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;

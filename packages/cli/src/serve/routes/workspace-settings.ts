@@ -26,6 +26,7 @@ import {
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
@@ -45,6 +46,7 @@ import {
 } from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
+  'experimental.mods',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
@@ -59,9 +61,27 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
-  'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
 ]);
+
+// Served to hosts so they can display the effective value, but never written
+// here: persisting this key alone would leave `output-language.md` and running
+// sessions stale. The language command (`/language output`) is the only
+// supported write path.
+const READ_ONLY_SETTINGS = new Set(['general.outputLanguage']);
+
+// Suggestions for the output-language row. Values are the full names
+// `normalizeOutputLanguage` persists; hosts still accept free-form input
+// because the setting supports any language name.
+const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
+  ({ fullName, nativeName }) => ({
+    value: fullName,
+    label:
+      nativeName && nativeName !== fullName
+        ? `${nativeName} (${fullName})`
+        : fullName,
+  }),
+);
 
 // `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
 // not in the dialog allowlist), but the Web Shell settings panel still renders
@@ -70,6 +90,7 @@ const TUI_ONLY_SETTINGS = new Set([
 const WEB_SHELL_SETTINGS = new Set([
   'ui.allowedApprovalModes',
   'ui.compactMode',
+  'serve.maxSessions',
   'voiceModel',
   'imageModel',
   'advisorModel',
@@ -177,6 +198,20 @@ export function getAllowedKeys(includeLiveVoice = false): Set<string> {
   return keys;
 }
 
+/**
+ * Keys served by GET: the writable set plus read-only keys, in the settings
+ * dialog's order so a read-only row sits next to its siblings instead of at
+ * the end of the category.
+ */
+function getReadableKeys(allowedKeys: ReadonlySet<string>): Set<string> {
+  const keys = new Set<string>();
+  for (const key of getDialogSettingKeys()) {
+    if (allowedKeys.has(key) || READ_ONLY_SETTINGS.has(key)) keys.add(key);
+  }
+  for (const key of allowedKeys) keys.add(key);
+  return keys;
+}
+
 function buildSettingsResponse(
   boundWorkspace: string,
   keys: ReadonlySet<string>,
@@ -224,6 +259,14 @@ function buildSettingsResponse(
       values.workspace = publicValue(wsVal);
     }
 
+    // `general.outputLanguage` declares no schema options, but hosts render a
+    // combobox, so it ships the supported language names as suggestions.
+    const options = def.options?.length
+      ? def.options
+      : key === 'general.outputLanguage'
+        ? OUTPUT_LANGUAGE_OPTIONS
+        : undefined;
+
     settings.push({
       key,
       type: def.type,
@@ -232,7 +275,7 @@ function buildSettingsResponse(
       ...(def.description ? { description: def.description } : {}),
       requiresRestart: def.requiresRestart,
       default: def.default,
-      ...(def.options?.length ? { options: def.options } : {}),
+      ...(options?.length ? { options } : {}),
       values,
     });
   }
@@ -513,6 +556,7 @@ export function registerWorkspaceSettingsRoutes(
   } = deps;
 
   const allowedKeys = getAllowedKeys(deps.includeLiveVoice === true);
+  const readableKeys = getReadableKeys(allowedKeys);
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
@@ -521,7 +565,7 @@ export function registerWorkspaceSettingsRoutes(
       assertGenerationOpen();
       const response = buildSettingsResponse(
         boundWorkspace,
-        allowedKeys,
+        readableKeys,
         deps.isWorkspaceTrusted?.() ?? true,
       );
       res.status(200).json(response);
@@ -800,6 +844,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   },
 ): void {
   const allowedKeys = getAllowedKeys(false);
+  const readableKeys = getReadableKeys(allowedKeys);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
@@ -812,7 +857,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     // the Phase 3 core-route trust gate.
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
+      const response = buildSettingsResponse(
+        runtime.workspaceCwd,
+        readableKeys,
+      );
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(

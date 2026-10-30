@@ -5,11 +5,11 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
+import { readHarnessCheckpoint } from './managed-checkpoint-history.js';
 import { readOnlyManagedSessionSnapshot } from './http-managed-session-store.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import {
   HARNESS_TURN_COMPLETE_BOUNDARY,
-  parseHarnessCheckpointV1,
   type HarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 import {
@@ -201,9 +201,7 @@ export async function inspectOriginalReceiptCheckpointCoverage(
         event.payload['stateRef'],
         'checkpoint state',
       );
-      const state = parseHarnessCheckpointV1(
-        await snapshot.resources.read(ref),
-      );
+      const state = await readHarnessCheckpoint(snapshot.resources, ref);
       requireFact(
         ref.kind === 'managed-checkpoint' &&
           ref.schemaVersion === 1 &&

@@ -1,3 +1,4 @@
+// Portions adapted from trycua/cua 0.35.4, Copyright (c) 2025 Cua AI. MIT license.
 //! Background input injection for Linux via X11 XSendEvent.
 //!
 //! XSendEvent sends synthetic events directly to a window without changing
@@ -14,10 +15,24 @@
 /// Shared `delivery_mode` contract (background|foreground) — mirrors macOS
 /// `tools::DeliveryMode` and Windows `input::delivery`.
 pub mod delivery;
+pub mod focus_guard;
+mod keymap_barrier;
+mod mpx_keyboard;
+mod mpx_owner;
+mod user_input;
+
+pub use focus_guard::{BackgroundFocusGuard, FocusGuardReport, FocusSnapshot, SameAppWindow};
+pub(crate) use keymap_barrier::delivery_is_unconfirmed;
+pub(crate) use mpx_keyboard::check_keyboard_background;
+pub use mpx_keyboard::{
+    real_keyboard_input_available, send_virtual_keyboard_key, send_virtual_keyboard_text,
+    KeyboardDeliveryReport, MPX_UINPUT_PATH,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, Key, RelativeAxisType};
+use keymap_barrier::KeymapBarrier;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -34,6 +49,7 @@ use x11rb::rust_connection::RustConnection;
 const CLICK_DELAY_MS: u64 = 35;
 const DOUBLE_CLICK_DELAY_MS: u64 = 50;
 const KEY_DELAY_MS: u64 = 10;
+static KEYMAP_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug)]
 pub struct VirtualPointerDrag {
@@ -115,26 +131,49 @@ fn point_on_path(path: &[(i32, i32)], cum: &[f64], total: f64, t: f64) -> (i32, 
     (x.round() as i32, y.round() as i32)
 }
 
+/// One session's XI2 master pair (XIAddMaster always creates a pointer AND a
+/// keyboard) plus the uinput slaves attached to it. The keyboard slave is
+/// created lazily by `mpx_keyboard::ensure_master_keyboard`, so a pointer-only
+/// click never pays for a second device hotplug.
 #[derive(Clone, Copy, Debug)]
 struct MasterPointerIds {
     pointer_id: i32,
-    _keyboard_id: i32,
+    keyboard_id: i32,
     _slave_pointer_id: i32,
+    slave_keyboard_id: Option<i32>,
 }
 
 static MPX_POINTERS: OnceLock<Mutex<HashMap<String, MasterPointerIds>>> = OnceLock::new();
 static UINPUT_POINTERS: OnceLock<Mutex<HashMap<String, Arc<Mutex<VirtualDevice>>>>> =
     OnceLock::new();
 static XLIB_THREADS_READY: OnceLock<Result<(), String>> = OnceLock::new();
+/// Serialises every MPX operation against the idle reaper (and each other),
+/// so a retained master pair is never torn down while a call is using it.
+static MPX_OP_LOCK: Mutex<()> = Mutex::new(());
+static MPX_LAST_USE: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+static MPX_IDLE_REAPER: std::sync::Once = std::sync::Once::new();
+/// A session's retained master pair is removed after this much inactivity;
+/// `end_session` and the startup reaper cover the explicit and crash cases.
+/// `XIRemoveMaster` churns the XInput hierarchy, and mutter 42.x segfaults when
+/// it processes that churn (the same reason per-call teardown crashes LibreOffice
+/// VCL), so the pair must outlive the inter-action idle of a live session; a
+/// long terminal-only stretch leaves the pointer unused far past a few minutes.
+/// The window is only a leak backstop for a client that dies without
+/// `end_session`; the startup reaper reclaims anything it misses.
+const MPX_IDLE_TTL: Duration = Duration::from_secs(1800);
+const MPX_IDLE_REAPER_PERIOD: Duration = Duration::from_secs(60);
 static MPX_NAME_COUNTER: AtomicU64 = AtomicU64::new(1);
 // evdev 0.12.2 asserts `name.len() + 1 < UINPUT_MAX_NAME_SIZE` while building
 // a device. Linux defines UINPUT_MAX_NAME_SIZE as 80, leaving 78 usable bytes.
 const EVDEV_UINPUT_NAME_MAX_BYTES: usize = 78;
 const UINPUT_POINTER_SUFFIX: &str = " uinput pointer";
 pub const UINPUT_UNAVAILABLE_CODE: &str = "uinput_unavailable";
+/// Result `path` for pointer actions delivered as real button events from the
+/// session's MPX virtual master pointer.
+pub const MPX_POINTER_PATH: &str = "mpx_pointer";
 
 #[derive(Debug, thiserror::Error)]
-#[error("Linux uinput pointer unavailable: {reason}")]
+#[error("Linux uinput device unavailable: {reason}")]
 struct UinputUnavailable {
     reason: String,
 }
@@ -143,12 +182,67 @@ fn mpx_pointers() -> &'static Mutex<HashMap<String, MasterPointerIds>> {
     MPX_POINTERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn mpx_last_use() -> &'static Mutex<HashMap<String, std::time::Instant>> {
+    MPX_LAST_USE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Take the MPX operation lock for one call on `cursor_id`, stamp its last
+/// use, and make sure the idle reaper is running. Hold the guard for the
+/// whole operation.
+fn mpx_op_guard(cursor_id: &str) -> std::sync::MutexGuard<'static, ()> {
+    let guard = MPX_OP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    mpx_last_use()
+        .lock()
+        .unwrap()
+        .insert(cursor_id.to_owned(), std::time::Instant::now());
+    MPX_IDLE_REAPER.call_once(|| {
+        std::thread::Builder::new()
+            .name("cua-mpx-idle-reaper".into())
+            .spawn(|| loop {
+                sleep(MPX_IDLE_REAPER_PERIOD);
+                let _op = MPX_OP_LOCK
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let stale = {
+                    let last_use = mpx_last_use().lock().unwrap();
+                    stale_cursor_ids(&last_use, std::time::Instant::now(), MPX_IDLE_TTL)
+                };
+                for cursor_id in stale {
+                    tracing::info!(cursor_id, "removing idle MPX master pair");
+                    forget_master_pointer_inner(&cursor_id);
+                }
+            })
+            .ok();
+    });
+    guard
+}
+
+/// Sessions whose last MPX use is older than `ttl`.
+fn stale_cursor_ids(
+    last_use: &HashMap<String, std::time::Instant>,
+    now: std::time::Instant,
+    ttl: Duration,
+) -> Vec<String> {
+    last_use
+        .iter()
+        .filter(|(_, at)| now.saturating_duration_since(**at) >= ttl)
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 fn uinput_pointers() -> &'static Mutex<HashMap<String, Arc<Mutex<VirtualDevice>>>> {
     UINPUT_POINTERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn master_pointer_name(cursor_id: &str) -> String {
     let nonce = MPX_NAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if let Ok(owner) = mpx_owner::Owner::current() {
+        return owner.master_name(nonce);
+    }
+    // Unknown procfs identity cannot safely participate in automatic recovery.
+    // Preserve ordinary operation, with the legacy name and cleanup behavior.
     let prefix = "CUA ";
     let suffix = format!(" mp-{}-{nonce}", std::process::id());
     let max_cursor_bytes = EVDEV_UINPUT_NAME_MAX_BYTES
@@ -390,11 +484,74 @@ fn real_pointer_capabilities_available(
     server_supported: bool,
     xvfb: bool,
     uinput_accessible: bool,
+    unsafe_hotplug_session: bool,
 ) -> bool {
-    server_supported && !xvfb && uinput_accessible
+    server_supported && !xvfb && uinput_accessible && !unsafe_hotplug_session
 }
 
-fn uinput_accessible() -> bool {
+fn nonempty(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn desktop_value_is_kde(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        value
+            .split([':', ';', ','])
+            .map(str::trim)
+            .any(|token| token.eq_ignore_ascii_case("kde") || token.eq_ignore_ascii_case("plasma"))
+    })
+}
+
+/// KDE Plasma 6 / Qt 6.11 applications on X11 can crash session-wide when an
+/// ephemeral uinput pointer is hotplugged into Xorg. Foreground input does not
+/// need that device: the click, drag, scroll, and keyboard tools already use
+/// XTEST after activating the target window. Disable only the MPX/uinput
+/// capability here so callers retain their existing foreground escalation and
+/// XSendEvent fallback behavior.
+fn kde_x11_uinput_hotplug_is_unsafe(
+    session_type: Option<&str>,
+    current_desktop: Option<&str>,
+    session_desktop: Option<&str>,
+    desktop_session: Option<&str>,
+    kde_full_session: Option<&str>,
+    display: Option<&str>,
+    _other_display: Option<&str>,
+) -> bool {
+    let explicit_x11 = session_type.is_some_and(|value| value.eq_ignore_ascii_case("x11"));
+    let x11 = explicit_x11 || nonempty(display);
+    let kde = desktop_value_is_kde(current_desktop)
+        || desktop_value_is_kde(session_desktop)
+        || desktop_value_is_kde(desktop_session)
+        || kde_full_session.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        });
+
+    x11 && kde
+}
+
+fn kde_x11_uinput_hotplug_is_unsafe_from_env() -> bool {
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+    let session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+    let desktop_session = std::env::var("DESKTOP_SESSION").ok();
+    let kde_full_session = std::env::var("KDE_FULL_SESSION").ok();
+    let display = std::env::var("DISPLAY").ok();
+
+    kde_x11_uinput_hotplug_is_unsafe(
+        session_type.as_deref(),
+        current_desktop.as_deref(),
+        session_desktop.as_deref(),
+        desktop_session.as_deref(),
+        kde_full_session.as_deref(),
+        display.as_deref(),
+        None,
+    )
+}
+
+pub(crate) fn uinput_accessible() -> bool {
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -403,6 +560,13 @@ fn uinput_accessible() -> bool {
 }
 
 pub fn real_pointer_input_available() -> bool {
+    // Do not even probe /dev/uinput on an affected KDE/X11 session. Creating
+    // the device is itself the dangerous operation; a later fallback is too
+    // late once Xorg has announced the hotplug to Qt clients.
+    if kde_x11_uinput_hotplug_is_unsafe_from_env() {
+        return false;
+    }
+
     // `ensure_master_pointer` creates an XI2 master before attaching the
     // uinput slave. If this process cannot open /dev/uinput, attempting that
     // path on every click/scroll would create and abandon an XInput master
@@ -418,12 +582,26 @@ pub fn real_pointer_input_available() -> bool {
         supports_parallel_pointer_injection(display).is_ok(),
         is_xvfb_process_running(),
         true,
+        false,
     );
     unsafe { x11::xlib::XCloseDisplay(display) };
     supported
 }
 
 fn ensure_master_pointer(cursor_id: &str) -> Result<MasterPointerIds> {
+    ensure_master_pointer_for_session(cursor_id, kde_x11_uinput_hotplug_is_unsafe_from_env())
+}
+
+fn ensure_master_pointer_for_session(
+    cursor_id: &str,
+    unsafe_hotplug_session: bool,
+) -> Result<MasterPointerIds> {
+    if unsafe_hotplug_session {
+        return Err(uinput_unavailable(
+            "disabled on KDE Plasma X11; retry with delivery_mode='foreground'",
+        ));
+    }
+
     if let Some(ids) = mpx_pointers().lock().unwrap().get(cursor_id).copied() {
         return Ok(ids);
     }
@@ -490,15 +668,31 @@ fn ensure_master_pointer(cursor_id: &str) -> Result<MasterPointerIds> {
     let keyboard_id = keyboard_id
         .ok_or_else(|| anyhow!("failed to locate created master keyboard for '{cursor_id}'"))?;
 
-    let slave_pointer_id = wait_for_slave_pointer_id(display, &device_name)?;
+    let slave_pointer_id = match wait_for_slave_id(
+        display,
+        &device_name,
+        x11::xinput2::XISlavePointer,
+        Duration::from_secs(5),
+    ) {
+        Ok(id) => id,
+        Err(error) => {
+            // Never leave the fresh master pair behind when the slave never
+            // hotplugs (no udev/libinput on this server): a stray master with
+            // nothing attached is exactly the leak the startup reaper exists for.
+            let _ = remove_master_pointer(display, pointer_id);
+            unsafe { x11::xlib::XCloseDisplay(display) };
+            return Err(error);
+        }
+    };
     attach_slave_to_master(display, slave_pointer_id, pointer_id)?;
     set_flat_pointer_accel(display, slave_pointer_id);
     unsafe { x11::xlib::XCloseDisplay(display) };
 
     let ids = MasterPointerIds {
         pointer_id,
-        _keyboard_id: keyboard_id,
+        keyboard_id,
         _slave_pointer_id: slave_pointer_id,
+        slave_keyboard_id: None,
     };
     mpx_pointers()
         .lock()
@@ -512,7 +706,19 @@ fn ensure_master_pointer(cursor_id: &str) -> Result<MasterPointerIds> {
 }
 
 pub fn forget_master_pointer(cursor_id: &str) {
+    let _op = MPX_OP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    forget_master_pointer_inner(cursor_id);
+}
+
+fn forget_master_pointer_inner(cursor_id: &str) {
+    mpx_last_use().lock().unwrap().remove(cursor_id);
+    // Drop the uinput slaves first: closing the fds unplugs them, so the master
+    // removal below never has to hand a live slave back to the user's core
+    // devices (XIAttachToMaster only re-homes slaves that still exist).
     uinput_pointers().lock().unwrap().remove(cursor_id);
+    mpx_keyboard::forget_uinput_keyboard(cursor_id);
     let Some(ids) = mpx_pointers().lock().unwrap().remove(cursor_id) else {
         return;
     };
@@ -520,11 +726,12 @@ pub fn forget_master_pointer(cursor_id: &str) {
     let Ok(display) = open_display() else {
         return;
     };
+    let _ = remove_master_pointer(display, ids.pointer_id);
+    unsafe { x11::xlib::XCloseDisplay(display) };
+}
 
-    let Ok(devices) = xi2_query_devices(display) else {
-        unsafe { x11::xlib::XCloseDisplay(display) };
-        return;
-    };
+fn remove_master_pointer(display: *mut x11::xlib::Display, pointer_id: i32) -> Result<()> {
+    let devices = xi2_query_devices(display)?;
 
     let mut virtual_core_pointer = None;
     let mut virtual_core_keyboard = None;
@@ -539,21 +746,71 @@ pub fn forget_master_pointer(cursor_id: &str) {
     let (Some(return_pointer), Some(return_keyboard)) =
         (virtual_core_pointer, virtual_core_keyboard)
     else {
-        unsafe { x11::xlib::XCloseDisplay(display) };
-        return;
+        bail!("cannot remove MPX master without its virtual core return devices");
     };
 
     let mut change = x11::xinput2::XIAnyHierarchyChangeInfo::default();
     unsafe {
         let remove = change.remove();
         (*remove)._type = x11::xinput2::XIRemoveMaster;
-        (*remove).deviceid = ids.pointer_id;
+        (*remove).deviceid = pointer_id;
         (*remove).return_mode = x11::xinput2::XIAttachToMaster;
         (*remove).return_pointer = return_pointer;
         (*remove).return_keyboard = return_keyboard;
-        let _ = x11::xinput2::XIChangeHierarchy(display, &mut change, 1);
+        let rc = x11::xinput2::XIChangeHierarchy(display, &mut change, 1);
+        x11::xlib::XSync(display, 0);
+        if rc != 0 {
+            bail!("XIChangeHierarchy(XIRemoveMaster) failed with status {rc}");
+        }
+    }
+    Ok(())
+}
+
+/// Recover only versioned masters whose local owner is provably gone. A PID
+/// alone cannot identify an owner on a shared/remote X server or across restarts.
+pub(crate) fn reap_orphaned_master_pointers() {
+    let Ok(owner) = mpx_owner::Owner::current() else {
+        return;
+    };
+    let Ok(display) = open_display() else {
+        return;
+    };
+    // Prevent an ID from being removed/reused by another X client between our
+    // enumeration and removal. No network or arbitrary filesystem reads occur
+    // under this grab: owner checks inspect local procfs and kill(pid, 0).
+    unsafe {
+        x11::xlib::XGrabServer(display);
+    }
+    // A panic while the server is grabbed would freeze every other X client
+    // (the whole desktop) until this process dies. Catch it so the ungrab
+    // below always runs, and report it like any other incomplete recovery.
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
+        for (id, use_, name) in xi2_query_devices(display)? {
+            if use_ != x11::xinput2::XIMasterPointer {
+                continue;
+            }
+            let Some(candidate) = mpx_owner::Owner::from_pointer_name(&name) else {
+                continue;
+            };
+            if candidate.stale_in(&owner) {
+                remove_master_pointer(display, id)?;
+                tracing::info!(device_id = id, "removed orphaned Cua MPX master pair");
+            }
+        }
+        Ok(())
+    }));
+    unsafe {
+        x11::xlib::XUngrabServer(display);
         x11::xlib::XSync(display, 0);
         x11::xlib::XCloseDisplay(display);
+    }
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!("MPX orphan recovery incomplete: {error}"),
+        Err(payload) => tracing::warn!(
+            "MPX orphan recovery panicked (server grab released): {}",
+            panic_payload_message(payload.as_ref())
+        ),
     }
 }
 
@@ -582,16 +839,25 @@ fn create_uinput_pointer(name: &str) -> Result<VirtualDevice> {
     })
 }
 
-fn wait_for_slave_pointer_id(display: *mut x11::xlib::Display, device_name: &str) -> Result<i32> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+/// Poll `XIQueryDevice` until the X server has hot-added the uinput device
+/// named `device_name` as a slave of kind `use_` (`XISlavePointer` /
+/// `XISlaveKeyboard`). udev + xf86-input-libinput do the hotplug on a real
+/// Xorg; Xvfb/Xtigervnc never will, which is what the timeout covers.
+fn wait_for_slave_id(
+    display: *mut x11::xlib::Display,
+    device_name: &str,
+    use_: i32,
+    timeout: Duration,
+) -> Result<i32> {
+    let deadline = std::time::Instant::now() + timeout;
     loop {
-        for (device_id, use_, seen_name) in xi2_query_devices(display)? {
-            if use_ == x11::xinput2::XISlavePointer && seen_name == device_name {
+        for (device_id, seen_use, seen_name) in xi2_query_devices(display)? {
+            if seen_use == use_ && seen_name == device_name {
                 return Ok(device_id);
             }
         }
         if std::time::Instant::now() >= deadline {
-            bail!("timed out waiting for X input slave pointer '{device_name}'");
+            bail!("timed out waiting for X input slave device '{device_name}'");
         }
         sleep(Duration::from_millis(50));
     }
@@ -705,10 +971,79 @@ fn warp_master_pointer(
     Ok(())
 }
 
-/// XIAnyModifier (1u32 << 31). The x11 crate doesn't export it.
-const XI_ANY_MODIFIER: std::os::raw::c_int = 0x8000_0000u32 as std::os::raw::c_int;
+/// True when `window` is override-redirect — a menu, tooltip, or other popup
+/// the WM does not manage. Such a window takes its own active pointer grab, so
+/// the shield-grab-and-replay dance cannot deliver into it; a plain warp+press
+/// on the virtual master is what reaches it (and there is no WM focus to steal).
+fn is_override_redirect(display: *mut x11::xlib::Display, window: x11::xlib::Window) -> bool {
+    let mut attrs: x11::xlib::XWindowAttributes = unsafe { std::mem::zeroed() };
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let rc = unsafe { x11::xlib::XGetWindowAttributes(display, window, &mut attrs) };
+    unsafe { x11::xlib::XSetErrorHandler(previous_handler) };
+    rc != 0 && attrs.override_redirect != 0
+}
 
-fn xi_mask_len() -> usize {
+/// Direct child of the root window under screen point `(x, y)`: the WM frame
+/// of a managed toplevel, or an override-redirect popup (menu, tooltip).
+fn root_child_under_point(
+    display: *mut x11::xlib::Display,
+    x: i32,
+    y: i32,
+) -> Option<x11::xlib::Window> {
+    let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
+    let mut child: x11::xlib::Window = 0;
+    let mut dx = 0;
+    let mut dy = 0;
+    let rc = unsafe {
+        x11::xlib::XTranslateCoordinates(display, root, root, x, y, &mut dx, &mut dy, &mut child)
+    };
+    (rc != 0 && child != 0).then_some(child)
+}
+
+/// The root child (WM frame or the window itself) that contains `window`.
+fn root_child_of(
+    display: *mut x11::xlib::Display,
+    window: x11::xlib::Window,
+) -> Option<x11::xlib::Window> {
+    let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let mut current = window;
+    let mut result = None;
+    for _ in 0..64 {
+        let mut root_ret: x11::xlib::Window = 0;
+        let mut parent: x11::xlib::Window = 0;
+        let mut children: *mut x11::xlib::Window = ptr::null_mut();
+        let mut count: std::os::raw::c_uint = 0;
+        let rc = unsafe {
+            x11::xlib::XQueryTree(
+                display,
+                current,
+                &mut root_ret,
+                &mut parent,
+                &mut children,
+                &mut count,
+            )
+        };
+        if !children.is_null() {
+            unsafe { x11::xlib::XFree(children as *mut _) };
+        }
+        if rc == 0 || parent == 0 {
+            break;
+        }
+        if parent == root {
+            result = Some(current);
+            break;
+        }
+        current = parent;
+    }
+    unsafe {
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
+    result
+}
+
+pub(super) fn xi_mask_len() -> usize {
     (x11::xinput2::XI_LASTEVENT as usize >> 3) + 1
 }
 
@@ -732,125 +1067,127 @@ fn xinput_opcode(display: *mut x11::xlib::Display) -> Option<std::os::raw::c_int
     }
 }
 
-/// Install a device-specific XI2 synchronous passive button grab on `window`
-/// for `device_id`. This shields the drag: the grab is newer than (and thus
-/// checked before) the window manager's click-to-focus grab on the same
-/// window, and being device-specific it does not conflict with the WM's
-/// core/all-master grabs. The matching press freezes the device and is
-/// delivered to us; replaying it (XIReplayDevice) re-checks grabs only
-/// *below* this window and then delivers the event normally to the app, so
-/// the WM never sees the press and never steals focus.
-fn install_shield_grab(
+/// Modifier evdev codes the virtual keyboard may hold mid-chord.
+const MODIFIER_EVDEV_CODES: [u16; 8] = [42, 54, 29, 97, 56, 100, 125, 126];
+
+/// Buttons (1..=3) currently held on the master pointer `pointer_id`, plus the
+/// paired master keyboard's modifier state, via `XIQueryPointer`.
+fn virtual_master_input_state(
     display: *mut x11::xlib::Display,
-    device_id: i32,
-    window: x11::xlib::Window,
-    button: u8,
-) -> Result<()> {
-    let mut mask_bits = vec![0u8; xi_mask_len()];
-    x11::xinput2::XISetMask(&mut mask_bits, x11::xinput2::XI_ButtonPress);
-    let mut evmask = x11::xinput2::XIEventMask {
-        deviceid: device_id,
-        mask_len: mask_bits.len() as std::os::raw::c_int,
-        mask: mask_bits.as_mut_ptr(),
-    };
-    let mut mods = x11::xinput2::XIGrabModifiers {
-        modifiers: XI_ANY_MODIFIER,
-        status: 0,
-    };
+    pointer_id: i32,
+) -> (Vec<u8>, x11::xinput2::XIModifierState) {
+    let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
+    let mut root_ret = 0;
+    let mut child_ret = 0;
+    let (mut rx, mut ry, mut wx, mut wy) = (0f64, 0f64, 0f64, 0f64);
+    let mut buttons = x11::xinput2::XIButtonState::default();
+    let mut mods = x11::xinput2::XIModifierState::default();
+    let mut group = x11::xinput2::XIModifierState::default();
+    let prev = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
     let rc = unsafe {
-        x11::xinput2::XIGrabButton(
+        x11::xinput2::XIQueryPointer(
             display,
-            device_id,
-            button as std::os::raw::c_int,
-            window,
-            0,                             // cursor: None
-            x11::xinput2::XIGrabModeSync,  // freeze the pointer on press
-            x11::xinput2::XIGrabModeAsync, // leave the paired keyboard alone
-            x11::xlib::False,              // owner_events: deliver to us
-            &mut evmask,
-            1,
+            pointer_id,
+            root,
+            &mut root_ret,
+            &mut child_ret,
+            &mut rx,
+            &mut ry,
+            &mut wx,
+            &mut wy,
+            &mut buttons,
             &mut mods,
+            &mut group,
         )
     };
-    unsafe { x11::xlib::XSync(display, 0) };
-    if rc != 0 {
-        bail!("XIGrabButton(shield) failed with status {rc}");
+    unsafe { x11::xlib::XSetErrorHandler(prev) };
+    let mut held = Vec::new();
+    if rc != 0 && !buttons.mask.is_null() && buttons.mask_len > 0 {
+        let mask = unsafe { std::slice::from_raw_parts(buttons.mask, buttons.mask_len as usize) };
+        for button in 1u8..=3 {
+            let byte = (button / 8) as usize;
+            if mask.get(byte).is_some_and(|b| b & (1 << (button % 8)) != 0) {
+                held.push(button);
+            }
+        }
+        unsafe { x11::xlib::XFree(buttons.mask as *mut _) };
     }
-    Ok(())
+    (held, mods)
 }
 
-fn remove_shield_grab(
+/// Release anything the session's virtual master still holds from an earlier
+/// aborted action: pointer buttons (a shield replay that timed out returned
+/// before the release) and keyboard modifiers (a chord interrupted mid-way).
+///
+/// A held button is not cosmetic: every key event from the paired virtual
+/// keyboard then carries `Button1Mask` (bit 8) in its core `state`, which
+/// at-spi2 forwards verbatim and Orca reads as its `ORCA_MODIFIER_MASK`
+/// (`1 << 8`) — a plain space becomes "Orca+space" and opens the Screen
+/// Reader Preferences. Returns what was released, for the tool's report.
+fn release_stuck_virtual_input(
+    cursor_id: &str,
     display: *mut x11::xlib::Display,
-    device_id: i32,
-    window: x11::xlib::Window,
-    button: u8,
-) {
-    let mut mods = x11::xinput2::XIGrabModifiers {
-        modifiers: XI_ANY_MODIFIER,
-        status: 0,
-    };
-    unsafe {
-        let prev = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
-        x11::xinput2::XIUngrabButton(
-            display,
-            device_id,
-            button as std::os::raw::c_int,
-            window,
-            1,
-            &mut mods,
-        );
-        x11::xlib::XSync(display, 0);
-        x11::xlib::XSetErrorHandler(prev);
-    }
-}
-
-/// Drain the frozen shield presses for `pending_devices` and replay each so
-/// it continues to the application. Returns the set of device ids we failed
-/// to see within the timeout (their drags still proceed; the focus-restore
-/// safety net covers any leak).
-fn replay_shielded_presses(
-    display: *mut x11::xlib::Display,
-    xi_opcode: std::os::raw::c_int,
-    pending_devices: &mut std::collections::HashSet<i32>,
-    timeout: Duration,
-) {
-    let deadline = std::time::Instant::now() + timeout;
-    while !pending_devices.is_empty() && std::time::Instant::now() < deadline {
-        // Only block on XNextEvent when something is queued, so a missing
-        // press can't hang us past the deadline.
-        if unsafe { x11::xlib::XPending(display) } == 0 {
-            sleep(Duration::from_millis(2));
-            continue;
-        }
-        let mut ev: x11::xlib::XEvent = unsafe { std::mem::zeroed() };
-        unsafe { x11::xlib::XNextEvent(display, &mut ev) };
-        if unsafe { ev.type_ } != x11::xlib::GenericEvent {
-            continue;
-        }
-        let mut cookie = unsafe { ev.generic_event_cookie };
-        if cookie.extension != xi_opcode || cookie.evtype != x11::xinput2::XI_ButtonPress {
-            continue;
-        }
-        if unsafe { x11::xlib::XGetEventData(display, &mut cookie) } == 0 {
-            continue;
-        }
-        let de = cookie.data as *const x11::xinput2::XIDeviceEvent;
-        if !de.is_null() {
-            let device_id = unsafe { (*de).deviceid };
-            let time = unsafe { (*de).time };
-            if pending_devices.remove(&device_id) {
-                unsafe {
-                    x11::xinput2::XIAllowEvents(
-                        display,
-                        device_id,
-                        x11::xinput2::XIReplayDevice,
-                        time,
-                    );
-                    x11::xlib::XSync(display, 0);
+    ids: MasterPointerIds,
+    keyboard: &Mutex<VirtualDevice>,
+) -> Vec<String> {
+    let mut released = Vec::new();
+    let (held, mods) = virtual_master_input_state(display, ids.pointer_id);
+    if !held.is_empty() {
+        if let Some(pointer) = uinput_pointers().lock().unwrap().get(cursor_id).cloned() {
+            let mut pointer = pointer.lock().unwrap();
+            for &button in &held {
+                if emit_button(&mut pointer, button, false).is_ok() {
+                    released.push(format!("button{button}"));
                 }
             }
         }
-        unsafe { x11::xlib::XFreeEventData(display, &mut cookie) };
+    }
+    if mods.base != 0 {
+        let mut keyboard = keyboard.lock().unwrap();
+        let mut any = false;
+        for code in MODIFIER_EVDEV_CODES {
+            any |= keyboard
+                .emit(&[InputEvent::new(EventType::KEY, code, 0)])
+                .is_ok();
+        }
+        if any {
+            released.push(format!("modifiers(base=0x{:x})", mods.base));
+        }
+    }
+    if mods.locked != 0 || mods.latched != 0 {
+        // A locked/latched modifier on the virtual master (CapsLock leaked
+        // from an interrupted chord) would shift every later character.
+        unsafe {
+            let prev = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+            x11::xlib::XkbLockModifiers(display, ids.keyboard_id as u32, 0xff, 0);
+            x11::xlib::XkbLatchModifiers(display, ids.keyboard_id as u32, 0xff, 0);
+            x11::xlib::XSetErrorHandler(prev);
+        }
+        released.push(format!(
+            "locked/latched modifiers (0x{:x}/0x{:x})",
+            mods.locked, mods.latched
+        ));
+    }
+    if !released.is_empty() {
+        unsafe { x11::xlib::XSync(display, 0) };
+        tracing::warn!(cursor_id, ?released, "released stuck virtual input state");
+        sleep(Duration::from_millis(20));
+    }
+    released
+}
+
+/// Release a device frozen by a synchronous grab; harmless when not frozen.
+fn thaw_device(display: *mut x11::xlib::Display, device_id: i32) {
+    unsafe {
+        let prev = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+        x11::xinput2::XIAllowEvents(
+            display,
+            device_id,
+            x11::xinput2::XIAsyncDevice,
+            x11::xlib::CurrentTime,
+        );
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(prev);
     }
 }
 
@@ -959,6 +1296,7 @@ fn ewmh_activate_window(
     }
 }
 
+/// Prepare the exact X11 window without resetting an already focused child.
 fn prepare_x11_focus(display: *mut x11::xlib::Display, target: x11::xlib::Window) {
     let active = ewmh_active_window(display);
     if active != Some(target) {
@@ -995,15 +1333,35 @@ fn prepare_x11_focus(display: *mut x11::xlib::Display, target: x11::xlib::Window
 /// `settle_ms` is retained as a compatibility hint and folded into the bounded
 /// confirmation timeout; it is no longer an unconditional sleep.
 /// If the target already holds focus, keep focus changes made by the action.
+static FOREGROUND_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn note_intentional_foreground() {
+    FOREGROUND_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+static FOREGROUND_TRANSACTION: Mutex<()> = Mutex::new(());
+
 pub fn with_x11_foreground<T>(
     xid: u64,
     settle_ms: u64,
     body: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    note_intentional_foreground();
+    let _foreground = FOREGROUND_TRANSACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let display = unsafe { x11::xlib::XOpenDisplay(ptr::null()) };
     if display.is_null() {
         bail!("foreground_unavailable: cannot open DISPLAY to verify exact X11 input focus");
     }
+    let _user_input = match user_input::Guard::start() {
+        Ok(guard) => guard,
+        Err(error) => {
+            unsafe {
+                x11::xlib::XCloseDisplay(display);
+            }
+            return Err(anyhow!("foreground_unavailable: physical-input observer could not start; no input was sent: {error}"));
+        }
+    };
     let prior = ewmh_active_window(display);
     let mut prior_core_focus: x11::xlib::Window = 0;
     let mut prior_revert = 0;
@@ -1020,7 +1378,12 @@ pub fn with_x11_foreground<T>(
     let target_owner = x11_transient_owner(display, target);
     let restore_focus = prior != Some(target) || !x11_focus_is_within(display, target);
     prepare_x11_focus(display, target);
+    let mut interrupted = None;
     let focused = loop {
+        if let Err(error) = user_input::checkpoint() {
+            interrupted = Some(error);
+            break false;
+        }
         let active = ewmh_active_window(display) == Some(target);
         if active && x11_focus_is_within(display, target) {
             break true;
@@ -1036,8 +1399,12 @@ pub fn with_x11_foreground<T>(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    let result = if focused {
-        body()
+    let result = if let Some(error) = interrupted {
+        Err(error)
+    } else if focused {
+        user_input::checkpoint()
+            .and_then(|()| body())
+            .and_then(|value| user_input::checkpoint().map(|()| value))
     } else {
         let active = ewmh_active_window(display).unwrap_or(0);
         Err(anyhow::anyhow!(
@@ -1254,6 +1621,17 @@ fn emit_button(device: &mut VirtualDevice, button: u8, press: bool) -> Result<()
     Ok(())
 }
 
+/// Emit a release for `button` regardless of state; the kernel drops a
+/// release for a button that is not held, so this is safe to call on every
+/// exit path of a press train or gesture.
+fn release_button_best_effort(device: &Arc<Mutex<VirtualDevice>>, button: u8) {
+    if let Ok(mut device) = device.lock() {
+        if let Err(error) = emit_button(&mut device, button, false) {
+            tracing::warn!("virtual pointer button {button} release failed: {error:#}");
+        }
+    }
+}
+
 fn emit_relative_motion(device: &mut VirtualDevice, dx: i32, dy: i32) -> Result<()> {
     let mut events = Vec::with_capacity(2);
     if dx != 0 {
@@ -1291,9 +1669,20 @@ fn emit_scroll(device: &mut VirtualDevice, horizontal: bool, value: i32) -> Resu
 }
 
 pub fn send_parallel_virtual_pointer_drags(drags: &[(String, VirtualPointerDrag)]) -> Result<()> {
+    let _op = mpx_op_guard(
+        drags
+            .first()
+            .map(|(id, _)| id.as_str())
+            .unwrap_or("default"),
+    );
+    {
+        let mut last_use = mpx_last_use().lock().unwrap();
+        for (cursor_id, _) in drags {
+            last_use.insert(cursor_id.clone(), std::time::Instant::now());
+        }
+    }
     let display = open_display()?;
     supports_parallel_pointer_injection(display)?;
-    let xi_opcode = xinput_opcode(display);
 
     struct ActiveDrag {
         cursor_id: String,
@@ -1313,11 +1702,18 @@ pub fn send_parallel_virtual_pointer_drags(drags: &[(String, VirtualPointerDrag)
     let start_at = std::time::Instant::now() + Duration::from_millis(120);
     let mut active = Vec::with_capacity(drags.len());
 
-    // Click-to-focus WMs grab buttons for XIAllMasterDevices, so the drag's
-    // press activates the target window exactly like a user click would.
-    // Remember the focus state and hand it back afterwards so parallel
-    // drags don't steal it.
-    let saved_focus = save_focus_state(display);
+    // A click-to-focus WM that grabs buttons for every master device would
+    // activate the target on the press. Remember the focus state and hand it
+    // back afterwards so parallel drags don't steal it (mutter grabs for the
+    // Virtual Core Pointer only, so there the restore is a no-op).
+    let mut saved_focus = save_focus_state(display);
+    saved_focus.target_pids = drags
+        .iter()
+        .map(|(_, drag)| drag.target_window)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(crate::x11::window_pid)
+        .collect();
 
     let result = (|| -> Result<()> {
         for (cursor_id, drag) in drags {
@@ -1355,44 +1751,28 @@ pub fn send_parallel_virtual_pointer_drags(drags: &[(String, VirtualPointerDrag)
             std::thread::sleep(start_at - now);
         }
 
-        // Shield each drag from the WM's click-to-focus grab, then press.
-        // Per item: install a device-specific sync grab on the target window,
-        // warp, press, and immediately replay the frozen press so it reaches
-        // the app while the WM stays blind to it. We replay each press before
-        // emitting the next so only ONE device is ever frozen at a time — the
-        // X server drops replayed presses when several devices are frozen on
-        // the same window and replayed together. The few-ms stagger this adds
-        // to the presses is invisible; the concurrency that matters is motion.
-        // Shielding is mandatory: if install/replay fails, abort instead of
-        // continuing with a drag that could steal focus and rely on restore.
-        let mut shielded = std::collections::HashSet::new();
+        // Press each drag straight from its virtual master (see
+        // `send_virtual_pointer_click` for why there is no XI2 shield grab:
+        // on this server the grab-and-replay swallowed the press). The press
+        // point must not be covered by another toplevel.
         for item in &active {
-            let opcode = xi_opcode.ok_or_else(|| {
-                anyhow!("parallel_mouse_drag requires XInput/XI2 shield grabs for no-focus-steal operation")
-            })?;
-            install_shield_grab(
-                display,
-                item.ids.pointer_id,
-                item.drag.target_window as x11::xlib::Window,
-                item.drag.button,
-            )
-            .with_context(|| format!("shield grab failed for '{}'", item.cursor_id))?;
-            shielded.insert(item.ids.pointer_id);
             let start = *item.drag.path.first().unwrap_or(&(0, 0));
+            if let PointCover::Occluded(occluded) = occluding_window(
+                display,
+                item.drag.target_window as x11::xlib::Window,
+                start.0,
+                start.1,
+            )? {
+                return Err(occluded.into());
+            }
+            thaw_device(display, item.ids.pointer_id);
             warp_master_pointer(display, item.ids, start.0, start.1)?;
             {
                 let mut device = item.device.lock().unwrap();
                 emit_button(&mut device, item.drag.button, true)?;
             }
-            let mut pending = std::collections::HashSet::from([item.ids.pointer_id]);
-            replay_shielded_presses(display, opcode, &mut pending, Duration::from_millis(1000));
-            if !pending.is_empty() {
-                return Err(anyhow!(
-                    "shield replay timed out before XI_ButtonPress arrived for '{}'",
-                    item.cursor_id
-                ));
-            }
         }
+        sleep(Duration::from_millis(40));
 
         while active.iter().any(|item| item.current_step < item.steps) {
             let now = std::time::Instant::now();
@@ -1450,28 +1830,22 @@ pub fn send_parallel_virtual_pointer_drags(drags: &[(String, VirtualPointerDrag)
             let mut device = item.device.lock().unwrap();
             emit_button(&mut device, item.drag.button, false)?;
         }
-
-        // Remove the shields now that the drag is done. The button is only
-        // grabbed for ButtonPress, so the shield is dormant during motion and
-        // release; this just stops it matching the next gesture's press.
-        for item in &active {
-            if shielded.contains(&item.ids.pointer_id) {
-                remove_shield_grab(
-                    display,
-                    item.ids.pointer_id,
-                    item.drag.target_window as x11::xlib::Window,
-                    item.drag.button,
-                );
-            }
-        }
         Ok(())
     })();
-    // Remove the per-session masters before handing focus back: non-MPX-aware
-    // WMs (xfwm4, openbox) desync their focus bookkeeping while foreign
-    // master keyboards linger, and the next call recreates masters cheaply.
-    for (cursor_id, _) in drags {
-        forget_master_pointer(cursor_id);
+    // Whatever happened above, no virtual master may keep a button held
+    // (a stuck Button1 poisons the core modifier state for later chords).
+    for (cursor_id, drag) in drags {
+        if let Some(device) = uinput_pointers().lock().unwrap().get(cursor_id).cloned() {
+            release_button_best_effort(&device, drag.button);
+        }
     }
+    // The per-session master pair is retained for reuse (torn down on
+    // end_session / idle / startup reap). Creating and destroying an XI2 master
+    // plus hot-plugging a uinput slave on every call churns the XInput
+    // hierarchy hard enough to crash fragile toolkits (LibreOffice VCL); one
+    // long-lived pair per session avoids that and is cheaper. The focus is
+    // still saved and restored around each gesture.
+    let _ = drags;
     restore_focus_state(display, &saved_focus);
     unsafe {
         x11::xlib::XCloseDisplay(display);
@@ -1481,16 +1855,22 @@ pub fn send_parallel_virtual_pointer_drags(drags: &[(String, VirtualPointerDrag)
 
 /// A discrete no-focus-steal pointer click driven through the same real-input
 /// pipeline as [`send_parallel_virtual_pointer_drags`] — MPX master pointer +
-/// uinput slave + XI2 shield grab — reduced to a press/release (or a short
-/// press/release train for `count` > 1) at one screen point.
+/// uinput slave — reduced to a press/release (or a short press/release train
+/// for `count` > 1) at one screen point.
 ///
 /// This is what lands **right / middle / double** clicks (and any left click
-/// the AT-SPI path can't actuate) on XInput2 toolkits: GTK3/4 silently drop
-/// synthetic `XSendEvent` pointer events and never see XTEST core events, so
-/// those clicks are otherwise no-ops. Coordinates are screen-absolute;
-/// `target_window` is the X11 window the shield grab is installed on so the WM
-/// never sees the press and never steals focus. `button` is an X button number
-/// (1=left, 2=middle, 3=right); `count` >= 1 (2 = double-click).
+/// the AT-SPI path can't actuate) on XInput2 toolkits: GTK3/4, VCL, Qt and
+/// Chromium silently drop synthetic `XSendEvent` pointer events, so those
+/// clicks are otherwise no-ops. Coordinates are screen-absolute;
+/// `target_window` is the X11 toplevel the caller means to hit. The press is
+/// delivered straight from the virtual master: no XI2 shield grab. On GNOME
+/// (mutter) the click-to-focus passive grab is installed for the Virtual Core
+/// Pointer only, so a second master's press never activates the window; the
+/// grab-and-replay "shield" that was meant to hide the press from the WM
+/// instead swallowed it on this server (the replayed press never reached the
+/// application) and left the device frozen. Focus is still saved and restored
+/// around the click for WMs that do grab every master device. `button` is an
+/// X button number (1=left, 2=middle, 3=right); `count` >= 1 (2 = double-click).
 #[derive(Clone, Debug)]
 pub struct VirtualPointerClick {
     pub target_window: u64,
@@ -1500,20 +1880,792 @@ pub struct VirtualPointerClick {
     pub count: usize,
 }
 
+/// The screen point the caller aimed at is covered by another toplevel, so a
+/// real pointer press there would land on the covering window, not the
+/// target. Refused before any input is sent.
+#[derive(Debug, Clone)]
+pub struct TargetOccluded {
+    pub target_window: u64,
+    pub covering_window: u64,
+    pub covering_title: String,
+    pub covering_pid: Option<u32>,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl std::fmt::Display for TargetOccluded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "screen point ({}, {}) over window {} is covered by window {}{}{}; a real pointer \
+             press there would land on the covering window",
+            self.x,
+            self.y,
+            self.target_window,
+            self.covering_window,
+            if self.covering_title.is_empty() {
+                String::new()
+            } else {
+                format!(" \"{}\"", self.covering_title)
+            },
+            self.covering_pid
+                .map(|pid| format!(" (pid {pid})"))
+                .unwrap_or_default(),
+        )
+    }
+}
+impl std::error::Error for TargetOccluded {}
+
+/// A mapped override-redirect toplevel: a popup menu, popover, combo list
+/// or tooltip. The WM does not manage it, so it is absent from
+/// `list_windows`; the pointer tools name it so a caller can walk it with
+/// `get_window_state(pid, window_id=<window>)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PopupWindow {
+    pub window: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+    pub pid: Option<u32>,
+}
+
+impl PopupWindow {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "window_id": self.window,
+            "bounds": { "x": self.x, "y": self.y, "width": self.width, "height": self.height },
+            "title": self.title,
+            "pid": self.pid,
+        })
+    }
+
+    /// `popup window 12345678 "Edit" (220x340 at 410,220)`.
+    pub fn describe(&self) -> String {
+        format!(
+            "popup window {}{} ({}x{} at {},{})",
+            self.window,
+            if self.title.is_empty() {
+                String::new()
+            } else {
+                format!(" \"{}\"", self.title)
+            },
+            self.width,
+            self.height,
+            self.x,
+            self.y
+        )
+    }
+}
+
+/// The caller's window-local point does not lie inside the window: a
+/// coordinate-frame mistake (screen pixels passed as window pixels, or the
+/// wrong window_id), refused before any input is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointOutsideWindow {
+    pub target_window: u64,
+    pub screen_x: i32,
+    pub screen_y: i32,
+    pub window_x: i32,
+    pub window_y: i32,
+    /// Screen-space `(x, y, width, height)` of the window.
+    pub bounds: (i32, i32, u32, u32),
+}
+
+impl std::fmt::Display for PointOutsideWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (bx, by, bw, bh) = self.bounds;
+        write!(
+            f,
+            "window-local point ({}, {}) of window {} resolves to screen ({}, {}), outside \
+             the window's bounds (x={bx}, y={by}, {bw}x{bh}); no input was sent",
+            self.window_x, self.window_y, self.target_window, self.screen_x, self.screen_y
+        )
+    }
+}
+impl std::error::Error for PointOutsideWindow {}
+
+/// Screen-space `(x, y, width, height)` of `window`, or `None` when it is
+/// gone.
+fn window_screen_bounds(
+    display: *mut x11::xlib::Display,
+    window: x11::xlib::Window,
+) -> Option<(i32, i32, u32, u32)> {
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let mut root: x11::xlib::Window = 0;
+    let (mut gx, mut gy) = (0i32, 0i32);
+    let (mut width, mut height, mut border, mut depth) = (0u32, 0u32, 0u32, 0u32);
+    let rc = unsafe {
+        x11::xlib::XGetGeometry(
+            display,
+            window,
+            &mut root,
+            &mut gx,
+            &mut gy,
+            &mut width,
+            &mut height,
+            &mut border,
+            &mut depth,
+        )
+    };
+    let mut result = None;
+    if rc != 0 && root != 0 {
+        let (mut dx, mut dy) = (0i32, 0i32);
+        let mut child: x11::xlib::Window = 0;
+        let ok = unsafe {
+            x11::xlib::XTranslateCoordinates(
+                display, window, root, 0, 0, &mut dx, &mut dy, &mut child,
+            )
+        };
+        if ok != 0 {
+            result = Some((dx, dy, width, height));
+        }
+    }
+    unsafe {
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
+    result
+}
+
+fn bounds_contain(bounds: (i32, i32, u32, u32), x: i32, y: i32) -> bool {
+    let (bx, by, bw, bh) = bounds;
+    x >= bx && y >= by && x < bx.saturating_add(bw as i32) && y < by.saturating_add(bh as i32)
+}
+
+/// Describe a mapped override-redirect root child as a [`PopupWindow`].
+fn popup_info(display: *mut x11::xlib::Display, child: x11::xlib::Window) -> Option<PopupWindow> {
+    let mut attrs: x11::xlib::XWindowAttributes = unsafe { std::mem::zeroed() };
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let rc = unsafe { x11::xlib::XGetWindowAttributes(display, child, &mut attrs) };
+    unsafe {
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
+    if rc == 0 || attrs.override_redirect == 0 || attrs.map_state != x11::xlib::IsViewable {
+        return None;
+    }
+    if attrs.width <= 1 || attrs.height <= 1 {
+        return None;
+    }
+    let pid = crate::x11::window_pid(child).or_else(|| {
+        window_children(display, child)
+            .into_iter()
+            .find_map(crate::x11::window_pid)
+    });
+    Some(PopupWindow {
+        window: child,
+        x: attrs.x,
+        y: attrs.y,
+        width: attrs.width as u32,
+        height: attrs.height as u32,
+        title: window_title_for_report(display, child),
+        pid,
+    })
+}
+
+/// Every mapped override-redirect child of the root, bottom to top.
+fn mapped_popups(display: *mut x11::xlib::Display) -> Vec<PopupWindow> {
+    let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
+    window_children(display, root)
+        .into_iter()
+        .filter_map(|child| popup_info(display, child))
+        .collect()
+}
+
+/// The mapped override-redirect popup (menu, popover, combo list) under the
+/// screen point, if any.
+pub fn popup_under_screen_point(x: i32, y: i32) -> Option<PopupWindow> {
+    let display = open_display().ok()?;
+    let popup = root_child_under_point(display, x, y).and_then(|child| popup_info(display, child));
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    popup
+}
+
+/// `xid` described as a popup when it is a mapped override-redirect window.
+pub fn popup_window_info(xid: u64) -> Option<PopupWindow> {
+    let display = open_display().ok()?;
+    let popup = popup_info(display, xid as x11::xlib::Window);
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    popup
+}
+
+/// Mapped popups on the screen right now (bottom to top), for a caller that
+/// wants "the menu that is open" without a window id.
+pub fn mapped_popup_windows() -> Vec<PopupWindow> {
+    let Ok(display) = open_display() else {
+        return Vec::new();
+    };
+    let popups = mapped_popups(display);
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    popups
+}
+
+/// `_NET_WM_WINDOW_TYPE` says the popup is a tooltip / notification / DND
+/// icon: mapped and override-redirect, but nobody's grab.
+fn popup_is_passive(display: *mut x11::xlib::Display, window: x11::xlib::Window) -> bool {
+    let type_atom = intern_atom(display, "_NET_WM_WINDOW_TYPE");
+    let passive: Vec<x11::xlib::Atom> = [
+        "_NET_WM_WINDOW_TYPE_TOOLTIP",
+        "_NET_WM_WINDOW_TYPE_NOTIFICATION",
+        "_NET_WM_WINDOW_TYPE_DND",
+    ]
+    .iter()
+    .map(|name| intern_atom(display, name))
+    .collect();
+    let mut actual_type: x11::xlib::Atom = 0;
+    let mut actual_format: std::os::raw::c_int = 0;
+    let mut nitems: std::os::raw::c_ulong = 0;
+    let mut bytes_after: std::os::raw::c_ulong = 0;
+    let mut prop: *mut std::os::raw::c_uchar = ptr::null_mut();
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let rc = unsafe {
+        x11::xlib::XGetWindowProperty(
+            display,
+            window,
+            type_atom,
+            0,
+            8,
+            0,
+            x11::xlib::XA_ATOM,
+            &mut actual_type,
+            &mut actual_format,
+            &mut nitems,
+            &mut bytes_after,
+            &mut prop,
+        )
+    };
+    unsafe {
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
+    let mut result = false;
+    if rc == 0 && !prop.is_null() {
+        if actual_format == 32 && nitems > 0 {
+            let atoms = unsafe {
+                std::slice::from_raw_parts(prop as *const std::os::raw::c_ulong, nitems as usize)
+            };
+            result = atoms
+                .iter()
+                .any(|atom| passive.contains(&(*atom as x11::xlib::Atom)));
+        }
+        unsafe { x11::xlib::XFree(prop as *mut _) };
+    }
+    result
+}
+
+fn intern_atom(display: *mut x11::xlib::Display, name: &str) -> x11::xlib::Atom {
+    let cname = CString::new(name).unwrap_or_default();
+    unsafe { x11::xlib::XInternAtom(display, cname.as_ptr(), 0) }
+}
+
+/// The topmost mapped override-redirect popup that `pid` owns (a Qt combo
+/// list or completer, a GTK/VCL menu) — the toolkit behind it holds an
+/// active keyboard grab that makes the X server drop core key events from
+/// any *other* master keyboard aimed at that client (`IsInterferingGrab`),
+/// so the virtual master keyboard route is silently lost while it is up.
+/// Tooltips / notifications are not grabs and do not count.
+pub fn popup_of_pid(pid: u32) -> Option<PopupWindow> {
+    let display = open_display().ok()?;
+    let popup = mapped_popups(display)
+        .into_iter()
+        .rev()
+        .filter(|popup| popup.pid == Some(pid))
+        .find(|popup| !popup_is_passive(display, popup.window as x11::xlib::Window));
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    popup
+}
+
+/// `_NET_WM_PID` of the window holding the core keyboard focus, walking up
+/// its X parents (the focus often sits on a child of the client toplevel).
+pub fn core_focus_owner_pid() -> Option<u32> {
+    let display = open_display().ok()?;
+    let mut focus: x11::xlib::Window = 0;
+    let mut revert: std::os::raw::c_int = 0;
+    unsafe { x11::xlib::XGetInputFocus(display, &mut focus, &mut revert) };
+    let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
+    let mut owner = None;
+    let mut current = focus;
+    for _ in 0..8 {
+        if current == 0 || current == root || current == x11::xlib::PointerRoot as x11::xlib::Window
+        {
+            break;
+        }
+        if let Some(pid) = crate::x11::window_pid(current as u64) {
+            owner = Some(pid);
+            break;
+        }
+        let mut parent: x11::xlib::Window = 0;
+        let mut qroot: x11::xlib::Window = 0;
+        let mut children: *mut x11::xlib::Window = ptr::null_mut();
+        let mut n: std::os::raw::c_uint = 0;
+        let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+        let rc = unsafe {
+            x11::xlib::XQueryTree(
+                display,
+                current,
+                &mut qroot,
+                &mut parent,
+                &mut children,
+                &mut n,
+            )
+        };
+        unsafe {
+            x11::xlib::XSync(display, 0);
+            x11::xlib::XSetErrorHandler(previous_handler);
+        }
+        if !children.is_null() {
+            unsafe { x11::xlib::XFree(children as *mut _) };
+        }
+        if rc == 0 || parent == current {
+            break;
+        }
+        current = parent;
+    }
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    owner
+}
+
+/// Delivery path name for keys sent on the core keyboard while the target's
+/// own popup holds the keyboard grab.
+pub const XTEST_CORE_GRAB_PATH: &str = "xtest_core_grab";
+
+/// A popup of the target pid holds the keyboard grab and the core focus is
+/// not the target's, so no route reaches the target without stealing input
+/// from the focused application; refused before any key was sent.
+#[derive(Debug, Clone)]
+pub struct PopupKeyboardGrab {
+    pub pid: u32,
+    pub popup: PopupWindow,
+    pub focus_owner: Option<u32>,
+}
+
+impl std::fmt::Display for PopupKeyboardGrab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pid {} has {} open, which holds a keyboard grab that drops keys from the virtual \
+             keyboard, and the core focus belongs to {}; no key was sent",
+            self.pid,
+            self.popup.describe(),
+            match self.focus_owner {
+                Some(pid) => format!("pid {pid}"),
+                None => "no window".to_owned(),
+            }
+        )
+    }
+}
+impl std::error::Error for PopupKeyboardGrab {}
+
+/// Keys for a target whose own popup (`popup`) holds the keyboard grab: the
+/// X server routes the *core* keyboard to the grab holder, which is the
+/// target itself, so XTest on the core keyboard reaches it without any
+/// focus change — verified afterwards on the core focus and the active
+/// window. Refused (`PopupKeyboardGrab`) when the core focus belongs to
+/// another pid: then a missing grab would send the keys elsewhere.
+pub fn send_keys_under_popup_grab(
+    pid: u32,
+    popup: PopupWindow,
+    send: impl FnOnce() -> Result<()>,
+) -> Result<KeyboardDeliveryReport> {
+    let focus_owner = core_focus_owner_pid();
+    if focus_owner != Some(pid) {
+        return Err(PopupKeyboardGrab {
+            pid,
+            popup,
+            focus_owner,
+        }
+        .into());
+    }
+    let display = open_display()?;
+    let saved = save_focus_state(display);
+    let sent = send();
+    unsafe { x11::xlib::XSync(display, 0) };
+    let unchanged = focus_state_unchanged(display, &saved);
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    sent?;
+    Ok(KeyboardDeliveryReport {
+        virtual_focus_held: true,
+        core_focus_unchanged: unchanged,
+        delivery_confirmed: true,
+        key_events: 0,
+        skipped_characters: Vec::new(),
+        focus_guard: None,
+        released_stuck: Vec::new(),
+        path: XTEST_CORE_GRAB_PATH,
+        grab_popup: Some(popup),
+    })
+}
+
+/// Dispatch metadata. Effects are checked by the next observation, not by input calls.
+#[derive(Clone, Debug, Default)]
+pub struct PointerEffect {
+    /// `_NET_ACTIVE_WINDOW` and the core input focus were the same after the
+    /// action as before it (sampled before the safety-net restore).
+    pub focus_unchanged: bool,
+    /// Legacy diagnostic field; actions no longer capture pixels to infer effects.
+    pub region_diff_pct: Option<f64>,
+    /// Real screen point the pointer acted at.
+    pub x: i32,
+    pub y: i32,
+    /// Mapped override-redirect toplevels (menus, popovers, combo lists,
+    /// tooltips) that appeared between the press and the post-check. A
+    /// context menu opening is a window change the contract accepts as
+    /// evidence of a landed click.
+    pub popups_appeared: usize,
+    /// Background focus-guard outcome when the tool ran the action under
+    /// [`focus_guard`]: whether the application moved the desktop focus after
+    /// the press (a menu grab, a dialog) and whether it was restored.
+    pub focus_guard: Option<FocusGuardReport>,
+    /// The point was under another window of the target's own pid (its
+    /// dialog over its main window) and the press went to that window.
+    pub retargeted_to: Option<SameAppCover>,
+    /// The popups behind `popups_appeared`, so the tool can name them.
+    pub popups: Vec<PopupWindow>,
+    /// The window-local point the caller asked for, when it had one.
+    pub window_point: Option<(i32, i32)>,
+    /// A toplevel of ANOTHER pid under the action point (a drop target, the
+    /// window a drag ended on): what it did during the action.
+    pub foreign_window: Option<ForeignWindowEffect>,
+}
+
+/// What a toplevel of another pid under the action point did during the
+/// action: its title before/after and the windows its pid mapped meanwhile.
+/// The focus guard only watches the target pid, so a file dropped onto VLC
+/// (auto-played, title changed) would otherwise be invisible.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForeignWindowEffect {
+    pub window: u64,
+    pub pid: u32,
+    pub title_before: String,
+    pub title_after: String,
+    pub new_windows: Vec<(u64, String)>,
+}
+
+impl ForeignWindowEffect {
+    pub fn changed(&self) -> bool {
+        self.title_before != self.title_after || !self.new_windows.is_empty()
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "window_id": self.window,
+            "pid": self.pid,
+            "title_before": self.title_before,
+            "title_after": self.title_after,
+            "new_windows": self.new_windows.iter().map(|(id, title)| serde_json::json!({"window_id": id, "title": title})).collect::<Vec<_>>(),
+        })
+    }
+
+    /// One sentence for the tool text.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.title_before != self.title_after {
+            parts.push(format!(
+                "its title changed from \"{}\" to \"{}\"",
+                self.title_before, self.title_after
+            ));
+        }
+        if !self.new_windows.is_empty() {
+            parts.push(format!(
+                "it opened {}",
+                self.new_windows
+                    .iter()
+                    .map(|(id, title)| format!("window {id} \"{title}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        format!(
+            "The point was over window {} of another application (pid {}); {}.",
+            self.window,
+            self.pid,
+            if parts.is_empty() {
+                "it did not visibly react (title unchanged, no new window)".to_owned()
+            } else {
+                parts.join(" and ")
+            }
+        )
+    }
+}
+
+impl PointerEffect {
+    /// A region that changed more than this has plainly reacted to the click
+    /// (a menu, a caret, a selection, a pressed button). Below it the click
+    /// may still have landed without a visible reaction.
+    pub const LANDED_THRESHOLD_PCT: f64 = 0.4;
+
+    pub fn landed(&self) -> bool {
+        self.popups_appeared > 0
+            || self
+                .region_diff_pct
+                .is_some_and(|pct| pct >= Self::LANDED_THRESHOLD_PCT)
+    }
+}
+
+/// Debug overrides for the multi-click cadence (milliseconds), read once.
+fn click_cadence() -> (u64, u64) {
+    fn env_ms(name: &str, default: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+    (
+        env_ms("CUA_MPX_PRESS_MS", 12),
+        env_ms("CUA_MPX_CLICK_GAP_MS", CLICK_DELAY_MS),
+    )
+}
+
+/// Best-effort `_NET_WM_NAME` / `WM_NAME` of a window (or of a child, for a
+/// WM frame), for naming a covering window in a refusal.
+fn window_title_for_report(display: *mut x11::xlib::Display, window: x11::xlib::Window) -> String {
+    fn name_of(display: *mut x11::xlib::Display, window: x11::xlib::Window) -> Option<String> {
+        unsafe {
+            let net_name =
+                x11::xlib::XInternAtom(display, c"_NET_WM_NAME".as_ptr(), x11::xlib::True);
+            for prop in [net_name, x11::xlib::XA_WM_NAME] {
+                if prop == 0 {
+                    continue;
+                }
+                let mut type_ret: x11::xlib::Atom = 0;
+                let mut format_ret = 0;
+                let mut nitems: std::os::raw::c_ulong = 0;
+                let mut bytes_after: std::os::raw::c_ulong = 0;
+                let mut data: *mut std::os::raw::c_uchar = std::ptr::null_mut();
+                let rc = x11::xlib::XGetWindowProperty(
+                    display,
+                    window,
+                    prop,
+                    0,
+                    256,
+                    x11::xlib::False,
+                    x11::xlib::AnyPropertyType as x11::xlib::Atom,
+                    &mut type_ret,
+                    &mut format_ret,
+                    &mut nitems,
+                    &mut bytes_after,
+                    &mut data,
+                );
+                if rc == x11::xlib::Success as i32 && !data.is_null() {
+                    let text = if format_ret == 8 && nitems > 0 {
+                        Some(
+                            String::from_utf8_lossy(std::slice::from_raw_parts(
+                                data,
+                                nitems as usize,
+                            ))
+                            .into_owned(),
+                        )
+                    } else {
+                        None
+                    };
+                    x11::xlib::XFree(data as *mut _);
+                    if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+        None
+    }
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let mut title = name_of(display, window);
+    if title.is_none() {
+        title = window_children(display, window)
+            .into_iter()
+            .rev()
+            .find_map(|kid| name_of(display, kid));
+    }
+    unsafe {
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
+    title.unwrap_or_default()
+}
+
+/// Direct children of `window` (empty on error). Caller installs the error
+/// handler.
+fn window_children(
+    display: *mut x11::xlib::Display,
+    window: x11::xlib::Window,
+) -> Vec<x11::xlib::Window> {
+    let mut root_ret: x11::xlib::Window = 0;
+    let mut parent: x11::xlib::Window = 0;
+    let mut children: *mut x11::xlib::Window = ptr::null_mut();
+    let mut count: std::os::raw::c_uint = 0;
+    let rc = unsafe {
+        x11::xlib::XQueryTree(
+            display,
+            window,
+            &mut root_ret,
+            &mut parent,
+            &mut children,
+            &mut count,
+        )
+    };
+    if rc == 0 || children.is_null() {
+        return Vec::new();
+    }
+    let kids = unsafe { std::slice::from_raw_parts(children, count as usize) }.to_vec();
+    unsafe { x11::xlib::XFree(children as *mut _) };
+    kids
+}
+
+/// The toplevel (root child) the virtual pointer would press on at `(x, y)`
+/// when the caller means `window`. `Ok(None)` when the point is over the
+/// target itself (its WM frame) or over an override-redirect popup (a menu or
+/// combo list the click is meant to reach, or the agent-cursor overlay);
+/// `Ok(Some(_))` names the window that covers the point instead.
+fn occluding_window(
+    display: *mut x11::xlib::Display,
+    window: x11::xlib::Window,
+    x: i32,
+    y: i32,
+) -> Result<PointCover> {
+    if let Some(bounds) = window_screen_bounds(display, window) {
+        if !bounds_contain(bounds, x, y) {
+            return Ok(PointCover::Outside(PointOutsideWindow {
+                target_window: window,
+                screen_x: x,
+                screen_y: y,
+                window_x: x - bounds.0,
+                window_y: y - bounds.1,
+                bounds,
+            }));
+        }
+    }
+    let under = root_child_under_point(display, x, y);
+    let frame = root_child_of(display, window);
+    match (under, frame) {
+        (Some(under), Some(frame)) if under != frame && !is_override_redirect(display, under) => {
+            let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+            let covering_client = window_children(display, under)
+                .into_iter()
+                .find(|kid| crate::x11::window_pid(*kid).is_some());
+            let covering_pid = crate::x11::window_pid(under)
+                .or_else(|| covering_client.and_then(crate::x11::window_pid));
+            unsafe {
+                x11::xlib::XSync(display, 0);
+                x11::xlib::XSetErrorHandler(previous_handler);
+            }
+            let target_pid = crate::x11::window_pid(window);
+            let title = window_title_for_report(display, under);
+            // The app's own window (a dialog, a file chooser) sits over the
+            // point: the press goes where the caller can see it, on that
+            // window, and the effect reports the retarget.
+            if target_pid.is_some() && covering_pid == target_pid {
+                return Ok(PointCover::SameApp(SameAppCover {
+                    window: covering_client.unwrap_or(under),
+                    title,
+                }));
+            }
+            Ok(PointCover::Occluded(TargetOccluded {
+                target_window: window,
+                covering_window: under,
+                covering_title: title,
+                covering_pid,
+                x,
+                y,
+            }))
+        }
+        (Some(_), Some(_)) | (None, _) => Ok(PointCover::Clear),
+        (Some(_), None) => bail!("target window {window} is not mapped on this screen"),
+    }
+}
+
+/// What sits over the screen point a background pointer action aims at.
+#[derive(Debug, Clone)]
+enum PointCover {
+    /// The target (or a popup meant to receive the press).
+    Clear,
+    /// A window of the target's own pid; the press is retargeted to it.
+    SameApp(SameAppCover),
+    /// Another application's window; refused.
+    Occluded(TargetOccluded),
+    /// The point is not inside the target window at all; refused.
+    Outside(PointOutsideWindow),
+}
+
+/// The target application's own window that received a press aimed at a
+/// point of another of its windows (its dialog over its main window).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SameAppCover {
+    /// Client window id (the `list_windows` id, not the WM frame).
+    pub window: u64,
+    pub title: String,
+}
+
+/// True when neither the EWMH active window nor the core focus moved since
+/// `saved` was taken.
+fn focus_state_unchanged(display: *mut x11::xlib::Display, saved: &SavedFocus) -> bool {
+    unsafe { x11::xlib::XSync(display, 0) };
+    let mut core_focus: x11::xlib::Window = 0;
+    let mut revert_to: std::os::raw::c_int = 0;
+    unsafe {
+        x11::xlib::XGetInputFocus(display, &mut core_focus, &mut revert_to);
+    }
+    ewmh_active_window(display) == saved.ewmh_active && core_focus == saved.core_focus
+}
+
+fn pointer_effect(
+    display: *mut x11::xlib::Display,
+    saved: &SavedFocus,
+    x: i32,
+    y: i32,
+) -> PointerEffect {
+    PointerEffect {
+        focus_unchanged: focus_state_unchanged(display, saved),
+        x,
+        y,
+        ..Default::default()
+    }
+}
+
 /// Land a discrete click via the MPX real-input pipeline (see
-/// [`VirtualPointerClick`]). Mirrors the per-item press/replay logic of
-/// `send_parallel_virtual_pointer_drags`: install a device-specific synchronous
-/// XI2 shield grab on the target window, warp the master pointer, then for each
-/// press freeze→replay it so the application receives a real button event while
-/// the WM stays blind to it. The master is torn down and focus restored on exit
-/// (matching the drag) to keep non-MPX WMs' focus bookkeeping consistent.
+/// [`VirtualPointerClick`]). Refuses with [`TargetOccluded`] when another
+/// toplevel covers the point. Returns the post-checks the tool reports.
 pub fn send_virtual_pointer_click(cursor_id: &str, click: &VirtualPointerClick) -> Result<()> {
+    send_virtual_pointer_click_report(cursor_id, click).map(|_| ())
+}
+
+pub fn send_virtual_pointer_click_report(
+    cursor_id: &str,
+    click: &VirtualPointerClick,
+) -> Result<PointerEffect> {
+    let _op = mpx_op_guard(cursor_id);
+    mpx_last_use()
+        .lock()
+        .unwrap()
+        .insert(cursor_id.to_owned(), std::time::Instant::now());
     let display = open_display()?;
     supports_parallel_pointer_injection(display)?;
-    let xi_opcode = xinput_opcode(display);
-    let saved_focus = save_focus_state(display);
+    let mut saved_focus = save_focus_state(display);
+    saved_focus.target_pids = vec![click.target_window]
+        .into_iter()
+        .filter_map(crate::x11::window_pid)
+        .collect();
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<PointerEffect> {
+        let window = click.target_window as x11::xlib::Window;
+        let retargeted_to = match occluding_window(display, window, click.x, click.y)? {
+            PointCover::Clear => None,
+            PointCover::SameApp(cover) => Some(cover),
+            PointCover::Occluded(occluded) => return Err(occluded.into()),
+            PointCover::Outside(outside) => return Err(outside.into()),
+        };
         let ids = ensure_master_pointer(cursor_id)?;
         let device = uinput_pointers()
             .lock()
@@ -1521,50 +2673,139 @@ pub fn send_virtual_pointer_click(cursor_id: &str, click: &VirtualPointerClick) 
             .get(cursor_id)
             .cloned()
             .ok_or_else(|| anyhow!("missing uinput pointer for '{cursor_id}'"))?;
-        let opcode = xi_opcode
-            .ok_or_else(|| anyhow!("no-focus-steal click requires XInput/XI2 shield grabs"))?;
-
-        let window = click.target_window as x11::xlib::Window;
-        install_shield_grab(display, ids.pointer_id, window, click.button)
-            .with_context(|| format!("shield grab failed for '{cursor_id}'"))?;
-        // Run the press train under a guard so the shield is always removed,
-        // even on an early error mid-train.
-        let click_result = (|| -> Result<()> {
-            warp_master_pointer(display, ids, click.x, click.y)?;
-            let count = click.count.max(1);
+        let count = click.count.max(1);
+        // A device left frozen by an earlier synchronous grab (a WM that never
+        // replayed) would queue this press forever.
+        thaw_device(display, ids.pointer_id);
+        warp_master_pointer(display, ids, click.x, click.y)?;
+        let (press_ms, gap_ms) = click_cadence();
+        let train = (|| -> Result<()> {
             for i in 0..count {
                 {
                     let mut device = device.lock().unwrap();
                     emit_button(&mut device, click.button, true)?;
-                }
-                // The shield grab freezes the device on every press; drain and
-                // replay this one so it reaches the app (and re-arms for the
-                // next press in a multi-click train).
-                let mut pending = std::collections::HashSet::from([ids.pointer_id]);
-                replay_shielded_presses(display, opcode, &mut pending, Duration::from_millis(1000));
-                if !pending.is_empty() {
-                    return Err(anyhow!(
-                        "shield replay timed out before XI_ButtonPress arrived for '{cursor_id}'"
-                    ));
-                }
-                {
-                    let mut device = device.lock().unwrap();
+                    // A real press and release are separate evdev frames; give
+                    // the toolkit a press it can see before the release lands.
+                    sleep(Duration::from_millis(press_ms));
                     emit_button(&mut device, click.button, false)?;
                 }
                 // Multi-click cadence: keep press→press well under the toolkit
                 // double-click threshold (GTK default 250 ms) so count=2 lands
                 // as a real double-click, not two singles.
                 if count > 1 && i + 1 < count {
-                    sleep(Duration::from_millis(CLICK_DELAY_MS));
+                    sleep(Duration::from_millis(gap_ms));
                 }
             }
             Ok(())
         })();
-        remove_shield_grab(display, ids.pointer_id, window, click.button);
-        click_result
+        // Never leave the button held: a stuck Button1 on the virtual master
+        // sets bit 8 of the core modifier state (Orca's modifier), so every
+        // later virtual-keyboard chord would open Orca's preferences.
+        release_button_best_effort(&device, click.button);
+        train?;
+        let mut effect = pointer_effect(display, &saved_focus, click.x, click.y);
+        effect.retargeted_to = retargeted_to;
+        Ok(effect)
     })();
 
-    forget_master_pointer(cursor_id);
+    restore_focus_state(display, &saved_focus);
+    unsafe {
+        x11::xlib::XCloseDisplay(display);
+    }
+    result
+}
+
+/// One held drag on the session's virtual master pointer: press at
+/// `path[0]`, glide through the waypoints, release at the end. Same delivery
+/// rules as [`send_virtual_pointer_click`] (no shield grab, occlusion refusal
+/// at the press point, focus saved and restored).
+pub fn send_virtual_pointer_drag(
+    cursor_id: &str,
+    drag: &VirtualPointerDrag,
+) -> Result<PointerEffect> {
+    let _op = mpx_op_guard(cursor_id);
+    mpx_last_use()
+        .lock()
+        .unwrap()
+        .insert(cursor_id.to_owned(), std::time::Instant::now());
+    let display = open_display()?;
+    supports_parallel_pointer_injection(display)?;
+    let mut saved_focus = save_focus_state(display);
+    saved_focus.target_pids = vec![drag.target_window]
+        .into_iter()
+        .filter_map(crate::x11::window_pid)
+        .collect();
+
+    let result = (|| -> Result<PointerEffect> {
+        if drag.path.len() < 2 {
+            bail!("drag path needs at least 2 points");
+        }
+        let window = drag.target_window as x11::xlib::Window;
+        let start = drag.path[0];
+        let end = drag.path[drag.path.len() - 1];
+        let retargeted_to = match occluding_window(display, window, start.0, start.1)? {
+            PointCover::Clear => None,
+            PointCover::SameApp(cover) => Some(cover),
+            PointCover::Occluded(occluded) => return Err(occluded.into()),
+            PointCover::Outside(outside) => return Err(outside.into()),
+        };
+        let ids = ensure_master_pointer(cursor_id)?;
+        let device = uinput_pointers()
+            .lock()
+            .unwrap()
+            .get(cursor_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing uinput pointer for '{cursor_id}'"))?;
+        let (cum, total) = path_cumulative(&drag.path);
+        let steps = drag.steps.max(1);
+        let step_delay = Duration::from_millis(drag.duration_ms / steps as u64);
+        thaw_device(display, ids.pointer_id);
+        warp_master_pointer(display, ids, start.0, start.1)?;
+        let gesture = (|| -> Result<()> {
+            {
+                let mut device = device.lock().unwrap();
+                emit_button(&mut device, drag.button, true)?;
+            }
+            // Let the toolkit register the press (and arm its drag threshold)
+            // before the first motion.
+            sleep(Duration::from_millis(40));
+            let (mut last_x, mut last_y) = start;
+            for step in 1..=steps {
+                let t = step as f64 / steps as f64;
+                let (ix, iy) = point_on_path(&drag.path, &cum, total, t);
+                let (dx, dy) = (ix - last_x, iy - last_y);
+                if dx != 0 || dy != 0 {
+                    let mut device = device.lock().unwrap();
+                    emit_relative_motion(&mut device, dx, dy)?;
+                    crate::overlay::send_command_for(
+                        cursor_id.to_owned(),
+                        cursor_overlay::OverlayCommand::SnapTo {
+                            x: ix as f64,
+                            y: iy as f64,
+                            heading_radians: Some((dy as f64).atan2(dx as f64)),
+                        },
+                    );
+                }
+                last_x = ix;
+                last_y = iy;
+                sleep(step_delay);
+            }
+            // Relative motion accumulates libinput rounding; pin the release
+            // to the exact end point before letting go.
+            warp_master_pointer(display, ids, end.0, end.1)?;
+            sleep(Duration::from_millis(20));
+            let mut device = device.lock().unwrap();
+            emit_button(&mut device, drag.button, false)?;
+            Ok(())
+        })();
+        // Release on every exit path (see `send_virtual_pointer_click`).
+        release_button_best_effort(&device, drag.button);
+        gesture?;
+        let mut effect = pointer_effect(display, &saved_focus, end.0, end.1);
+        effect.retargeted_to = retargeted_to;
+        Ok(effect)
+    })();
+
     restore_focus_state(display, &saved_focus);
     unsafe {
         x11::xlib::XCloseDisplay(display);
@@ -1593,9 +2834,14 @@ pub struct VirtualPointerScroll {
 /// point, then emits `|ticks|` wheel detents on the uinput slave. The master is
 /// torn down and focus restored on exit, matching the click/drag paths.
 pub fn send_virtual_pointer_scroll(cursor_id: &str, scroll: &VirtualPointerScroll) -> Result<()> {
+    let _op = mpx_op_guard(cursor_id);
     let display = open_display()?;
     supports_parallel_pointer_injection(display)?;
-    let saved_focus = save_focus_state(display);
+    let mut saved_focus = save_focus_state(display);
+    saved_focus.target_pids = vec![scroll.target_window]
+        .into_iter()
+        .filter_map(crate::x11::window_pid)
+        .collect();
 
     let result = (|| -> Result<()> {
         let ids = ensure_master_pointer(cursor_id)?;
@@ -1622,7 +2868,7 @@ pub fn send_virtual_pointer_scroll(cursor_id: &str, scroll: &VirtualPointerScrol
         Ok(())
     })();
 
-    forget_master_pointer(cursor_id);
+    let _ = cursor_id; // master pair retained for reuse (see the drag path).
     restore_focus_state(display, &saved_focus);
     unsafe {
         x11::xlib::XCloseDisplay(display);
@@ -1636,15 +2882,20 @@ struct SavedFocus {
     ewmh_active: Option<x11::xlib::Window>,
     core_focus: x11::xlib::Window,
     core_revert_to: std::os::raw::c_int,
+    target_pids: Vec<u32>,
+    user_input: Option<user_input::Observer>,
 }
 
 fn save_focus_state(display: *mut x11::xlib::Display) -> SavedFocus {
+    let user_input = user_input::Observer::start().ok();
     let mut core_focus: x11::xlib::Window = 0;
     let mut core_revert_to: std::os::raw::c_int = 0;
     unsafe {
         x11::xlib::XGetInputFocus(display, &mut core_focus, &mut core_revert_to);
     }
     SavedFocus {
+        user_input,
+        target_pids: Vec::new(),
         ewmh_active: ewmh_active_window(display),
         core_focus,
         core_revert_to,
@@ -1659,77 +2910,43 @@ unsafe extern "C" fn ignore_x_error(
 }
 
 fn restore_focus_state(display: *mut x11::xlib::Display, saved: &SavedFocus) {
-    // Let the release/focus events from the drag settle before reading the
-    // post-drag state, so we don't race the WM's own focus update.
-    unsafe { x11::xlib::XSync(display, 0) };
-
-    if let Some(prev) = saved.ewmh_active {
-        // EWMH path: ask the WM to re-activate, so its active-window
-        // bookkeeping (decorations, stacking) stays consistent. The WM
-        // processes its own click-to-focus for the drag asynchronously and
-        // can re-activate the dragged window even after one re-activation of
-        // ours has landed — so don't stop at first success: require the
-        // active window to hold stable for consecutive checks, re-sending on
-        // every regression, within a bounded budget.
-        sleep(Duration::from_millis(300));
-        let mut stable = 0;
-        for attempt in 0..15 {
-            let now = ewmh_active_window(display);
-            if now == Some(prev) {
-                stable += 1;
-                if stable >= 3 {
-                    return;
-                }
-            } else {
-                stable = 0;
-                // MPX clicks can leave a core-protocol WM believing the
-                // dragged window is focused while the core focus never moved
-                // there: its XSetInputFocus for our activation is then a
-                // no-op, no FocusIn arrives, and its bookkeeping never
-                // updates. Bounce the core focus onto the window the WM
-                // believes active so the activation produces a real focus
-                // transition the WM can observe.
-                if attempt >= 2 {
-                    if let Some(now_win) = now {
-                        unsafe {
-                            let prev_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
-                            x11::xlib::XSetInputFocus(
-                                display,
-                                now_win,
-                                x11::xlib::RevertToParent,
-                                x11::xlib::CurrentTime,
-                            );
-                            x11::xlib::XSync(display, 0);
-                            x11::xlib::XSetErrorHandler(prev_handler);
-                        }
-                        sleep(Duration::from_millis(100));
-                    }
-                }
-                ewmh_activate_window(display, prev, now.unwrap_or(0));
-            }
-            sleep(Duration::from_millis(200));
-        }
-        if stable == 0 {
-            tracing::warn!("focus restore: WM did not re-activate 0x{prev:x}");
-        }
+    if saved
+        .user_input
+        .as_ref()
+        .is_none_or(user_input::Observer::interrupted)
+    {
         return;
     }
-
-    // No EWMH WM (bare X / minimal WM): restore the core input focus
-    // directly. The saved window may have been destroyed meanwhile, and
-    // Xlib's default error handler exits the process on BadWindow, so the
-    // restore runs under a scoped ignore-errors handler.
-    if saved.core_focus == 0 {
+    unsafe { x11::xlib::XSync(display, 0) };
+    let belongs_to_target =
+        |window| crate::x11::window_pid(window).is_some_and(|pid| saved.target_pids.contains(&pid));
+    if let Some(previous) = saved.ewmh_active {
+        let current = ewmh_active_window(display);
+        if current.is_some_and(|window| window != previous && !belongs_to_target(window)) {
+            return;
+        }
+        if current != Some(previous) {
+            ewmh_activate_window(display, previous, current.unwrap_or(0));
+        }
+    }
+    if saved.core_focus <= 1 {
         return;
     }
     unsafe {
-        let mut now_focus: x11::xlib::Window = 0;
-        let mut now_revert: std::os::raw::c_int = 0;
-        x11::xlib::XGetInputFocus(display, &mut now_focus, &mut now_revert);
-        if now_focus == saved.core_focus {
+        let mut current = 0;
+        let mut revert = 0;
+        x11::xlib::XGetInputFocus(display, &mut current, &mut revert);
+        if current == saved.core_focus || !belongs_to_target(current) {
             return;
         }
-        let prev_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+        if saved
+            .user_input
+            .as_ref()
+            .is_none_or(user_input::Observer::interrupted)
+        {
+            return;
+        }
+        let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
         x11::xlib::XSetInputFocus(
             display,
             saved.core_focus,
@@ -1737,7 +2954,7 @@ fn restore_focus_state(display: *mut x11::xlib::Display, saved: &SavedFocus) {
             x11::xlib::CurrentTime,
         );
         x11::xlib::XSync(display, 0);
-        x11::xlib::XSetErrorHandler(prev_handler);
+        x11::xlib::XSetErrorHandler(previous_handler);
     }
 }
 
@@ -1778,11 +2995,58 @@ fn deepest_child_at_point(
     Ok((window, local_x, local_y))
 }
 
-fn resolve_event_target(conn: &RustConnection, xid: u64, x: i32, y: i32) -> Result<EventTarget> {
+fn window_path_at_point(
+    conn: &RustConnection,
+    window: Window,
+    local_x: i32,
+    local_y: i32,
+) -> Result<Vec<(Window, i32, i32, EventMask)>> {
+    let attributes = conn.get_window_attributes(window)?.reply()?;
+    let mut path = vec![(window, local_x, local_y, attributes.all_event_masks)];
+    let tree = conn.query_tree(window)?.reply()?;
+    for child in tree.children.iter().rev() {
+        let Ok(geom) = conn.get_geometry(*child)?.reply() else {
+            continue;
+        };
+        if !point_in_rect(local_x, local_y, &geom) {
+            continue;
+        }
+        let child_x = local_x - geom.x as i32;
+        let child_y = local_y - geom.y as i32;
+        path.extend(window_path_at_point(conn, *child, child_x, child_y)?);
+        break;
+    }
+    Ok(path)
+}
+
+fn deepest_event_target(
+    path: &[(Window, i32, i32, EventMask)],
+    required_masks: EventMask,
+) -> (Window, i32, i32) {
+    path.iter()
+        .rev()
+        .find(|(_, _, _, selected)| selected.contains(required_masks))
+        .or_else(|| path.last())
+        .map(|&(window, x, y, _)| (window, x, y))
+        .expect("window path always contains its toplevel")
+}
+
+fn click_event_target(path: &[(Window, i32, i32, EventMask)]) -> (Window, i32, i32) {
+    deepest_event_target(path, EventMask::BUTTON_PRESS)
+}
+
+fn build_event_target(
+    conn: &RustConnection,
+    xid: u64,
+    x: i32,
+    y: i32,
+    window: Window,
+    local_x: i32,
+    local_y: i32,
+) -> Result<EventTarget> {
     let top = xid as Window;
     let root = conn.setup().roots[0].root;
     let root_pos = conn.translate_coordinates(top, root, 0, 0)?.reply()?;
-    let (window, local_x, local_y) = deepest_child_at_point(conn, top, x, y)?;
     Ok(EventTarget {
         window,
         local_x: local_x as i16,
@@ -1790,6 +3054,28 @@ fn resolve_event_target(conn: &RustConnection, xid: u64, x: i32, y: i32) -> Resu
         root_x: (root_pos.dst_x as i32 + x) as i16,
         root_y: (root_pos.dst_y as i32 + y) as i16,
     })
+}
+
+fn resolve_event_target(conn: &RustConnection, xid: u64, x: i32, y: i32) -> Result<EventTarget> {
+    let top = xid as Window;
+    let (window, local_x, local_y) = deepest_child_at_point(conn, top, x, y)?;
+    build_event_target(conn, xid, x, y, window, local_x, local_y)
+}
+
+fn resolve_click_event_target(
+    conn: &RustConnection,
+    xid: u64,
+    x: i32,
+    y: i32,
+) -> Result<EventTarget> {
+    let top = xid as Window;
+    let path = window_path_at_point(conn, top, x, y)?;
+    // Button bindings commonly select only ButtonPress (Tk's <Button-1> is one
+    // example). Route the complete synthetic click to that same client-owned
+    // window: splitting release onto a different geometric leaf does not form a
+    // coherent toolkit click sequence.
+    let target = click_event_target(&path);
+    build_event_target(conn, xid, x, y, target.0, target.1, target.2)
 }
 
 fn button_state_mask(button: u8) -> KeyButMask {
@@ -1803,16 +3089,9 @@ fn button_state_mask(button: u8) -> KeyButMask {
     }
 }
 
-/// Open an X11 connection for background input injection, failing *loudly* and
-/// actionably when input cannot be delivered — rather than letting a pure
-/// Wayland session fall through to an X11 path that silently no-ops yet reports
-/// success (#1921). On a pure Wayland session with the native backend off, this
-/// returns a clear error naming the fix; otherwise it connects and, on any
-/// connect failure, surfaces DISPLAY so the cause is diagnosable.
+/// Open an authenticated X11 connection. XWayland X11 applications use the same path.
 fn connect_x11_for_input() -> Result<(RustConnection, usize)> {
-    if let Some(reason) = crate::wayland::wayland_input_unavailable_reason() {
-        bail!("{reason}");
-    }
+    crate::require_x11()?;
     RustConnection::connect(None).map_err(|e| {
         anyhow!(
             "cannot inject input: X11 connection failed (DISPLAY={:?}): {e}",
@@ -1836,16 +3115,26 @@ pub fn send_focus_in(xid: u64) -> Result<()> {
         mode: NotifyMode::NORMAL,
     };
 
-    conn.send_event(false, window, EventMask::FOCUS_CHANGE, &focus_in)?;
+    conn.send_event(false, window, EventMask::FOCUS_CHANGE, focus_in)?;
     conn.flush()?;
     Ok(())
 }
 
 /// Send a synthetic FocusOut event to restore focus state after send_focus_in.
 pub fn send_focus_out(xid: u64) -> Result<()> {
-    let (conn, _) = connect_x11_for_input()?;
+    let (conn, screen_num) = connect_x11_for_input()?;
     let window = xid as u32;
 
+    let mut focus = conn.get_input_focus()?.reply()?.focus;
+    for _ in 0..32 {
+        if focus == xid as u32 {
+            return Ok(());
+        }
+        if focus == 0 || focus == conn.setup().roots[screen_num].root {
+            break;
+        }
+        focus = conn.query_tree(focus)?.reply()?.parent;
+    }
     let focus_out = FocusOutEvent {
         response_type: FOCUS_OUT_EVENT,
         detail: NotifyDetail::NONLINEAR,
@@ -1854,9 +3143,19 @@ pub fn send_focus_out(xid: u64) -> Result<()> {
         mode: NotifyMode::NORMAL,
     };
 
-    conn.send_event(false, window, EventMask::FOCUS_CHANGE, &focus_out)?;
+    conn.send_event(false, window, EventMask::FOCUS_CHANGE, focus_out)?;
     conn.flush()?;
     Ok(())
+}
+
+/// Round-trip to the X server before the short-lived connection that sent
+/// synthetic events is dropped. A bare flush is not enough: the server may
+/// discard the tail of a client's request stream when the connection closes,
+/// which drops the last key or button event (observed under Xvfb).
+fn settle_synthetic_events(conn: &RustConnection) {
+    if let Ok(cookie) = conn.get_input_focus() {
+        let _ = cookie.reply();
+    }
 }
 
 /// Send a button click (down + up) to a window at window-local coordinates.
@@ -1880,7 +3179,7 @@ pub fn send_click_with_modifiers(
     let modifier_state = modifiers_to_state(modifiers);
 
     for _ in 0..count {
-        let target = resolve_event_target(&conn, xid, x, y)?;
+        let target = resolve_click_event_target(&conn, xid, x, y)?;
         let press = ButtonPressEvent {
             response_type: BUTTON_PRESS_EVENT,
             detail: button,
@@ -1915,15 +3214,20 @@ pub fn send_click_with_modifiers(
             same_screen: true,
         };
 
-        conn.send_event(false, target.window, EventMask::BUTTON_PRESS, &press)?;
+        // The event mask selects recipients independently of the payload type.
+        // Select the press client for both payloads so a press-only toolkit
+        // binding (such as Tk's <Button-1>) receives one coherent click.
+        conn.send_event(false, target.window, EventMask::BUTTON_PRESS, press)?
+            .check()?;
         sleep(Duration::from_millis(CLICK_DELAY_MS));
-        conn.send_event(false, target.window, EventMask::BUTTON_RELEASE, &release)?;
-        conn.flush()?;
+        conn.send_event(false, target.window, EventMask::BUTTON_PRESS, release)?
+            .check()?;
 
         if count > 1 {
             sleep(Duration::from_millis(80));
         }
     }
+    settle_synthetic_events(&conn);
     Ok(())
 }
 
@@ -1934,14 +3238,13 @@ pub fn send_click_with_modifiers(
 /// `button` — X11 button number (1=left, 2=middle, 3=right).
 pub fn send_drag(
     xid: u64,
-    from_x: i32,
-    from_y: i32,
-    to_x: i32,
-    to_y: i32,
+    from: (i32, i32),
+    to: (i32, i32),
     duration_ms: u64,
     steps: usize,
     button: u8,
 ) -> Result<()> {
+    let ((from_x, from_y), (to_x, to_y)) = (from, to);
     let (conn, _) = connect_x11_for_input()?;
     let root = conn.setup().roots[0].root;
     let steps = steps.max(1);
@@ -1968,7 +3271,7 @@ pub fn send_drag(
         state: KeyButMask::from(0u16),
         same_screen: true,
     };
-    conn.send_event(false, press_target.window, EventMask::BUTTON_PRESS, &press)?;
+    conn.send_event(false, press_target.window, EventMask::BUTTON_PRESS, press)?;
     conn.flush()?;
     sleep(Duration::from_millis(CLICK_DELAY_MS));
 
@@ -1993,7 +3296,7 @@ pub fn send_drag(
             state: button_state_mask(button),
             same_screen: true,
         };
-        conn.send_event(false, target.window, EventMask::POINTER_MOTION, &motion)?;
+        conn.send_event(false, target.window, EventMask::POINTER_MOTION, motion)?;
         conn.flush()?;
         if step_delay_ms > 0 {
             sleep(Duration::from_millis(step_delay_ms));
@@ -2021,9 +3324,10 @@ pub fn send_drag(
         false,
         release_target.window,
         EventMask::BUTTON_RELEASE,
-        &release,
+        release,
     )?;
     conn.flush()?;
+    settle_synthetic_events(&conn);
     Ok(())
 }
 
@@ -2046,8 +3350,9 @@ pub fn send_button_down(xid: u64, x: i32, y: i32, button: u8) -> Result<()> {
         state: KeyButMask::from(0u16),
         same_screen: true,
     };
-    conn.send_event(false, target.window, EventMask::BUTTON_PRESS, &press)?;
-    conn.flush()?;
+    conn.send_event(false, target.window, EventMask::BUTTON_PRESS, &press)?
+        .check()?;
+    settle_synthetic_events(&conn);
     Ok(())
 }
 
@@ -2072,8 +3377,9 @@ pub fn send_motion(xid: u64, x: i32, y: i32, button: Option<u8>) -> Result<()> {
             .unwrap_or_else(|| KeyButMask::from(0u16)),
         same_screen: true,
     };
-    conn.send_event(false, target.window, EventMask::POINTER_MOTION, &motion)?;
+    conn.send_event(false, target.window, EventMask::POINTER_MOTION, motion)?;
     conn.flush()?;
+    settle_synthetic_events(&conn);
     Ok(())
 }
 
@@ -2096,8 +3402,9 @@ pub fn send_button_up(xid: u64, x: i32, y: i32, button: u8) -> Result<()> {
         state: button_state_mask(button),
         same_screen: true,
     };
-    conn.send_event(false, target.window, EventMask::BUTTON_RELEASE, &release)?;
-    conn.flush()?;
+    conn.send_event(false, target.window, EventMask::BUTTON_RELEASE, &release)?
+        .check()?;
+    settle_synthetic_events(&conn);
     Ok(())
 }
 
@@ -2107,64 +3414,149 @@ pub fn send_type_text(xid: u64, text: &str) -> Result<()> {
 }
 
 /// Type a string with an additional `inter_char_ms` delay between each character.
+fn keysym_for_char(ch: char) -> u32 {
+    match ch {
+        '\n' | '\r' => 0xff0d,
+        '\t' => 0xff09,
+        c if (c as u32) < 0x100 => c as u32,
+        c => 0x0100_0000 | c as u32,
+    }
+}
+fn type_text_with_preflight<G>(
+    text: &str,
+    keymap: &GetKeyboardMappingReply,
+    mut remap: impl FnMut(char, &mut GetKeyboardMappingReply) -> Result<(u8, Option<G>)>,
+    mut send: impl FnMut(u8, bool) -> Result<()>,
+    finish: impl FnOnce() -> Result<()>,
+) -> Result<Vec<G>> {
+    let mut mapping = keymap.clone();
+    let mut guards = Vec::new();
+    let mut resolved = std::collections::HashMap::new();
+    let mut keys = Vec::new();
+    for ch in text.chars() {
+        let key = match resolved.get(&ch).copied() {
+            Some(key) => key,
+            None => {
+                let key = match char_to_keycode_shift(&mapping, keysym_for_char(ch)) {
+                    Some(key) => key,
+                    None => {
+                        let (keycode, guard) = remap(ch, &mut mapping).map_err(|error| {
+                            let needed = text
+                                .chars()
+                                .map(keysym_for_char)
+                                .filter(|keysym| !keymap.keysyms.contains(keysym))
+                                .collect::<std::collections::HashSet<_>>()
+                                .len();
+                            anyhow::anyhow!(
+                                "typed 0 of {} characters: the text needs {needed} spare keycodes: {error:#}",
+                                text.chars().count()
+                            )
+                        })?;
+                        guards.extend(guard);
+                        (keycode, false)
+                    }
+                };
+                resolved.insert(ch, key);
+                key
+            }
+        };
+        keys.push(key);
+    }
+    let mut dispatched = false;
+    let sent = keys.into_iter().try_for_each(|(keycode, shift)| {
+        send(keycode, shift)?;
+        dispatched = true;
+        Ok(())
+    });
+    // Even a partial dispatch must keep its mappings while the client drains.
+    let finished = finish();
+    let result = sent.and(finished);
+    if dispatched {
+        result.map_err(|error| keymap_barrier::unconfirmed(format!("{error:#}")))?;
+    } else {
+        result?;
+    }
+    Ok(guards)
+}
+
 pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Result<()> {
+    let _keymap = KEYMAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (conn, _) = connect_x11_for_input()?;
     let window = xid as u32;
     let root = conn.setup().roots[0].root;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let barrier = KeymapBarrier::prepare(
+        &conn,
+        Some(window),
+        &mapping,
+        text.chars().map(keysym_for_char),
+    )?;
+    let _guards = type_text_with_preflight(
+        text,
+        &mapping,
+        |ch, mapping| keycode_for_keysym(&conn, mapping, keysym_for_char(ch), &ch.to_string()),
+        |keycode, needs_shift| {
+            user_input::checkpoint()?;
+            keymap_barrier::dispatch(|| {
+                let state = if needs_shift {
+                    KeyButMask::SHIFT
+                } else {
+                    KeyButMask::from(0u16)
+                };
 
-    for ch in text.chars() {
-        // Resolve the keycode and whether Shift must be held — without it,
-        // uppercase and shifted symbols would otherwise type their unshifted
-        // form (e.g. "A" arriving as "a").
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, ch as u32) else {
-            continue;
-        };
-        let state = if needs_shift {
-            KeyButMask::SHIFT
-        } else {
-            KeyButMask::from(0u16)
-        };
+                let press = KeyPressEvent {
+                    response_type: KEY_PRESS_EVENT,
+                    detail: keycode,
+                    sequence: 0,
+                    time: x11rb::CURRENT_TIME,
+                    root,
+                    event: window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 0,
+                    event_y: 0,
+                    state,
+                    same_screen: true,
+                };
+                let release = KeyReleaseEvent {
+                    response_type: KEY_RELEASE_EVENT,
+                    detail: keycode,
+                    sequence: 0,
+                    time: x11rb::CURRENT_TIME,
+                    root,
+                    event: window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 0,
+                    event_y: 0,
+                    state,
+                    same_screen: true,
+                };
 
-        let press = KeyPressEvent {
-            response_type: KEY_PRESS_EVENT,
-            detail: keycode,
-            sequence: 0,
-            time: x11rb::CURRENT_TIME,
-            root,
-            event: window,
-            child: x11rb::NONE,
-            root_x: 0,
-            root_y: 0,
-            event_x: 0,
-            event_y: 0,
-            state,
-            same_screen: true,
-        };
-        let release = KeyReleaseEvent {
-            response_type: KEY_RELEASE_EVENT,
-            detail: keycode,
-            sequence: 0,
-            time: x11rb::CURRENT_TIME,
-            root,
-            event: window,
-            child: x11rb::NONE,
-            root_x: 0,
-            root_y: 0,
-            event_x: 0,
-            event_y: 0,
-            state,
-            same_screen: true,
-        };
-
-        conn.send_event(false, window, EventMask::KEY_PRESS, &press)?;
-        sleep(Duration::from_millis(KEY_DELAY_MS));
-        conn.send_event(false, window, EventMask::KEY_RELEASE, &release)?;
-        conn.flush()?;
-        if inter_char_ms > 0 {
-            sleep(Duration::from_millis(inter_char_ms));
-        }
-    }
+                conn.send_event(false, window, EventMask::KEY_PRESS, press)?;
+                // Start the hold interval after sending the press, not while it is buffered.
+                conn.flush()?;
+                sleep(Duration::from_millis(KEY_DELAY_MS));
+                conn.send_event(false, window, EventMask::KEY_RELEASE, release)?;
+                conn.flush()?;
+                if inter_char_ms > 0 {
+                    sleep(Duration::from_millis(inter_char_ms));
+                }
+                Ok(())
+            })
+        },
+        || {
+            conn.get_input_focus()?.reply()?;
+            if let Some(barrier) = &barrier {
+                barrier.wait()?;
+            }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -2176,9 +3568,13 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
 /// argument because XTest always delivers to the focused window; the caller
 /// focuses the target by clicking it first. `\n`/`\t` map to Return/Tab.
 pub fn send_type_text_xtest(text: &str) -> Result<()> {
+    let _keymap = KEYMAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, _) = connect_x11_for_input()?;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let barrier = KeymapBarrier::prepare(&conn, None, &mapping, text.chars().map(keysym_for_char))?;
     // Shift keycode (modifier index 0) for shifted characters.
     let modmap = conn.get_modifier_mapping()?.reply()?;
     let kpm = modmap.keycodes_per_modifier() as usize;
@@ -2187,30 +3583,37 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
-    for ch in text.chars() {
-        let cp = match ch {
-            '\n' => 0xff0d, // XK_Return
-            '\t' => 0xff09, // XK_Tab
-            c => c as u32,
-        };
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, cp) else {
-            continue;
-        };
-        if needs_shift {
-            conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
-        }
-        conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-        conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-        if needs_shift {
-            conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
-        }
-        conn.flush()?;
-        sleep(Duration::from_millis(KEY_DELAY_MS));
-    }
-    // Round-trip so the server delivers the final character's key events before
-    // this short-lived connection drops (see send_key_xtest — keyboard XTEST
-    // events queued on a connection that closes immediately can be lost).
-    let _ = conn.get_input_focus()?.reply();
+    let _guards = type_text_with_preflight(
+        text,
+        &mapping,
+        |ch, mapping| keycode_for_keysym(&conn, mapping, keysym_for_char(ch), &ch.to_string()),
+        |keycode, needs_shift| {
+            user_input::checkpoint()?;
+            if let Some(barrier) = &barrier {
+                barrier.check_focus()?;
+            }
+            keymap_barrier::dispatch(|| {
+                if needs_shift {
+                    conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
+                }
+                conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+                conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+                if needs_shift {
+                    conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
+                }
+                conn.flush()?;
+                sleep(Duration::from_millis(KEY_DELAY_MS));
+                Ok(())
+            })
+        },
+        || {
+            conn.get_input_focus()?.reply()?;
+            if let Some(barrier) = &barrier {
+                barrier.wait()?;
+            }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -2229,9 +3632,19 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
 /// that lack a keysym borrow a spare keycode (xdotool-style) via
 /// [`keycode_for_keysym`]; the returned guards restore the map on drop.
 pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
+    let _keymap = KEYMAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    user_input::checkpoint()?;
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, _) = connect_x11_for_input()?;
-    let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+
+    let requested = std::iter::once(key)
+        .chain(modifiers.iter().copied())
+        .map(key_name_to_keysym)
+        .collect::<Result<Vec<_>>>()?;
+    let barrier = KeymapBarrier::prepare(&conn, None, &mapping, requested)?;
 
     // Resolve modifier keycodes first. Keep any spare-keycode remap guards alive
     // until after the events are delivered (drop at end of fn).
@@ -2239,7 +3652,7 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
     let mut mod_keycodes = Vec::new();
     for m in modifiers {
         let ks = key_name_to_keysym(m)?;
-        let (kc, guard) = keycode_for_keysym(&conn, &mapping, ks, m)?;
+        let (kc, guard) = keycode_for_keysym(&conn, &mut mapping, ks, m)?;
         if let Some(g) = guard {
             guards.push(g);
         }
@@ -2257,7 +3670,7 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
     let (keycode, needs_shift) = match char_to_keycode_shift(&mapping, keysym) {
         Some(found) => found,
         None => {
-            let (kc, guard) = keycode_for_keysym(&conn, &mapping, keysym, key)?;
+            let (kc, guard) = keycode_for_keysym(&conn, &mut mapping, keysym, key)?;
             if let Some(g) = guard {
                 guards.push(g);
             }
@@ -2281,38 +3694,44 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
     };
 
     // Press modifiers (+ auto-Shift), tap the key, release in reverse order.
-    for &kc in &mod_keycodes {
-        conn.xtest_fake_input(KEY_PRESS_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
+    if let Some(barrier) = &barrier {
+        barrier.check_focus()?;
     }
-    if let Some(sk) = auto_shift_kc {
-        conn.xtest_fake_input(KEY_PRESS_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
-    }
-    conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-    sleep(Duration::from_millis(KEY_DELAY_MS));
-    conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-    if let Some(sk) = auto_shift_kc {
-        conn.xtest_fake_input(KEY_RELEASE_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
-    }
-    for &kc in mod_keycodes.iter().rev() {
-        conn.xtest_fake_input(KEY_RELEASE_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
-    }
-    conn.flush()?;
-
-    // Round-trip so the server actually PROCESSES (delivers) the injected XTEST
-    // key events before this function returns and drops its short-lived
-    // connection. `flush()` only writes the requests to the socket; without a
-    // following reply-bearing request the connection can close before the server
-    // routes the KeyPress/KeyRelease to the focused window, and the events are
-    // dropped. Observed under Xtigervnc: identical raw `xtest_fake_input` calls
-    // deliver when the connection stays alive but vanish from this short-lived
-    // one — pointer events (send_click_xtest_desktop) survive, keyboard events do
-    // not. Unconditional (previously only ran for spare-keycode remaps).
-    let _ = conn.get_input_focus()?.reply();
-    if !guards.is_empty() {
-        // Spare-keycode remap: give the target a beat to translate the events
-        // under the temporary mapping before the guards restore it on drop.
+    keymap_barrier::dispatch(|| {
+        for &kc in &mod_keycodes {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        if let Some(sk) = auto_shift_kc {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?
+            .check()?;
+        conn.flush()?;
         sleep(Duration::from_millis(KEY_DELAY_MS));
-    }
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+        if let Some(sk) = auto_shift_kc {
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        for &kc in mod_keycodes.iter().rev() {
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        conn.flush()?;
+
+        // Round-trip so the server actually PROCESSES (delivers) the injected XTEST
+        // key events before this function returns and drops its short-lived
+        // connection. `flush()` only writes the requests to the socket; without a
+        // following reply-bearing request the connection can close before the server
+        // routes the KeyPress/KeyRelease to the focused window, and the events are
+        // dropped. Observed under Xtigervnc: identical raw `xtest_fake_input` calls
+        // deliver when the connection stays alive but vanish from this short-lived
+        // one — pointer events (send_click_xtest_desktop) survive, keyboard events do
+        // not. Unconditional (previously only ran for spare-keycode remaps).
+        conn.get_input_focus()?.reply()?;
+        if let Some(barrier) = &barrier {
+            barrier.wait()?;
+        }
+        Ok(())
+    })?;
     drop(guards);
     Ok(())
 }
@@ -2341,21 +3760,29 @@ pub fn send_click_xtest_desktop_with_modifiers(
     count: usize,
     modifiers: &[&str],
 ) -> Result<()> {
+    let _keymap = KEYMAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    user_input::checkpoint()?;
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, screen_num) = connect_x11_for_input()?;
     let root = conn.setup().roots[screen_num].root;
-    let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
     let mut guards = Vec::new();
     let mut modifier_keycodes = Vec::new();
     for modifier in modifiers {
         let keysym = key_name_to_keysym(modifier)?;
-        let (keycode, guard) = keycode_for_keysym(&conn, &mapping, keysym, modifier)?;
+        if !mapping.keysyms.contains(&keysym) {
+            bail!("not_settable: pointer modifiers must exist in the X11 keyboard map; no input was sent");
+        }
+        let (keycode, guard) = keycode_for_keysym(&conn, &mut mapping, keysym, modifier)?;
         if let Some(guard) = guard {
             guards.push(guard);
         }
         modifier_keycodes.push(keycode);
     }
     let mut pressed = Vec::new();
+    let mut button_pressed = false;
     let gesture_result = (|| -> Result<()> {
         for &keycode in &modifier_keycodes {
             conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
@@ -2366,8 +3793,15 @@ pub fn send_click_xtest_desktop_with_modifiers(
         conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
         let count = count.max(1);
         for click_index in 0..count {
-            conn.xtest_fake_input(BUTTON_PRESS_EVENT, button, 0, root, x as i16, y as i16, 0)?;
-            conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)?;
+            user_input::checkpoint()?;
+            conn.xtest_fake_input(BUTTON_PRESS_EVENT, button, 0, root, x as i16, y as i16, 0)?
+                .check()?;
+            button_pressed = true;
+            conn.flush()?;
+            sleep(Duration::from_millis(CLICK_DELAY_MS));
+            conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)?
+                .check()?;
+            button_pressed = false;
             if click_index + 1 < count {
                 // Chromium needs the first pair to reach the server before the
                 // second pair. A zero-gap batch produces two click events but
@@ -2383,6 +3817,9 @@ pub fn send_click_xtest_desktop_with_modifiers(
     // including when a later pointer request fails. A failed gesture must not
     // leave the desktop with a logically stuck Ctrl/Shift/Alt/Super key.
     let mut release_result: Result<()> = Ok(());
+    if button_pressed {
+        let _ = conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, 0, 0, 0);
+    }
     for &keycode in pressed.iter().rev() {
         if let Err(error) =
             conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)
@@ -2406,6 +3843,7 @@ pub fn send_click_xtest_desktop_with_modifiers(
 
 /// Move the real X11 pointer to a screen-absolute desktop coordinate.
 pub fn send_move_xtest_desktop(x: i32, y: i32) -> Result<()> {
+    user_input::checkpoint()?;
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, screen_num) = connect_x11_for_input()?;
     let root = conn.setup().roots[screen_num].root;
@@ -2418,6 +3856,7 @@ pub fn send_move_xtest_desktop(x: i32, y: i32) -> Result<()> {
 /// Scroll the window under a screen-absolute point via real XTest wheel-button
 /// events. X11 buttons 4/5 are vertical up/down and 6/7 horizontal left/right.
 pub fn send_scroll_xtest_desktop(x: i32, y: i32, direction: &str, amount: usize) -> Result<()> {
+    user_input::checkpoint()?;
     use x11rb::protocol::xtest::ConnectionExt as _;
     let button = match direction {
         "up" => 4,
@@ -2430,6 +3869,7 @@ pub fn send_scroll_xtest_desktop(x: i32, y: i32, direction: &str, amount: usize)
     let root = conn.setup().roots[screen_num].root;
     conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
     for _ in 0..amount.max(1) {
+        user_input::checkpoint()?;
         conn.xtest_fake_input(BUTTON_PRESS_EVENT, button, 0, root, x as i16, y as i16, 0)?;
         conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)?;
     }
@@ -2450,6 +3890,7 @@ pub fn send_drag_xtest_desktop(
     duration_ms: u64,
     steps: usize,
 ) -> Result<()> {
+    user_input::checkpoint()?;
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, screen_num) = connect_x11_for_input()?;
     let root = conn.setup().roots[screen_num].root;
@@ -2475,7 +3916,12 @@ pub fn send_drag_xtest_desktop(
         0,
     )?;
     conn.flush()?;
+    let mut interrupted = None;
     for step in 1..=steps {
+        if let Err(error) = user_input::checkpoint() {
+            interrupted = Some(error);
+            break;
+        }
         let t = step as f64 / steps as f64;
         let x = from_x as f64 + (to_x - from_x) as f64 * t;
         let y = from_y as f64 + (to_y - from_y) as f64 * t;
@@ -2493,18 +3939,57 @@ pub fn send_drag_xtest_desktop(
             sleep(Duration::from_millis(delay));
         }
     }
-    conn.xtest_fake_input(
-        BUTTON_RELEASE_EVENT,
-        button,
-        0,
-        root,
-        to_x as i16,
-        to_y as i16,
-        0,
-    )?;
+    conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, 0, 0, 0)?;
     conn.flush()?;
     let _ = conn.get_input_focus()?.reply();
+    if let Some(error) = interrupted {
+        return Err(error);
+    }
     Ok(())
+}
+pub fn send_drag_xtest_desktop_with_modifiers(
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+    button: u8,
+    duration_ms: u64,
+    steps: usize,
+    modifiers: &[&str],
+) -> Result<()> {
+    let _keymap = KEYMAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    let (conn, _) = connect_x11_for_input()?;
+    let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let mut guards = Vec::new();
+    let mut codes = Vec::new();
+    for modifier in modifiers {
+        let keysym = key_name_to_keysym(modifier)?;
+        if !mapping.keysyms.contains(&keysym) {
+            bail!("not_settable: pointer modifiers must exist in the X11 keyboard map; no input was sent");
+        }
+        let (code, guard) = keycode_for_keysym(&conn, &mut mapping, keysym, modifier)?;
+        guards.extend(guard);
+        codes.push(code);
+    }
+    let mut pressed = Vec::new();
+    let result = (|| {
+        user_input::checkpoint()?;
+        for &code in &codes {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, x11rb::NONE, 0, 0, 0)?;
+            pressed.push(code);
+        }
+        conn.flush()?;
+        send_drag_xtest_desktop(from_x, from_y, to_x, to_y, button, duration_ms, steps)
+    })();
+    for code in pressed.into_iter().rev() {
+        let _ = conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, x11rb::NONE, 0, 0, 0);
+    }
+    let _ = conn.flush();
+    let _ = conn.get_input_focus()?.reply();
+    result
 }
 
 /// Send a named key press to a window.
@@ -2526,6 +4011,9 @@ fn send_key_to_target(
     key: &str,
     modifiers: &[&str],
 ) -> Result<()> {
+    let _keymap = KEYMAP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (conn, _) = connect_x11_for_input()?;
     let target = point
         .map(|(x, y)| resolve_event_target(&conn, xid, x, y))
@@ -2539,8 +4027,13 @@ fn send_key_to_target(
     // `keycode_for_keysym` instead borrows a spare keycode and hands back a guard
     // that restores the original mapping once the event has been delivered.
     let keysym = key_name_to_keysym(key)?;
-    let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
-    let (keycode, remap_guard) = keycode_for_keysym(&conn, &mapping, keysym, key)?;
+    let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let requested = std::iter::once(key)
+        .chain(modifiers.iter().copied())
+        .map(key_name_to_keysym)
+        .collect::<Result<Vec<_>>>()?;
+    let barrier = KeymapBarrier::prepare(&conn, Some(window), &mapping, requested)?;
+    let (keycode, remap_guard) = keycode_for_keysym(&conn, &mut mapping, keysym, key)?;
 
     // XSendEvent's state mask describes modifiers for one key event, but does
     // not update Chromium's internal modifier state by itself. Emit the
@@ -2552,7 +4045,7 @@ fn send_key_to_target(
     for modifier in modifiers {
         let modifier_keysym = key_name_to_keysym(modifier)?;
         let (modifier_keycode, guard) =
-            keycode_for_keysym(&conn, &mapping, modifier_keysym, modifier)?;
+            keycode_for_keysym(&conn, &mut mapping, modifier_keysym, modifier)?;
         if let Some(guard) = guard {
             remap_guards.push(guard);
         }
@@ -2578,41 +4071,39 @@ fn send_key_to_target(
         conn.send_event(false, window, event_mask, &event)
     };
 
-    let mut state_bits = 0u16;
-    for &(modifier_keycode, modifier_mask) in &modifier_keycodes {
-        send_key_event(
-            KEY_PRESS_EVENT,
-            modifier_keycode,
-            KeyButMask::from(state_bits),
-            EventMask::KEY_PRESS,
-        )?;
-        state_bits |= u16::from(modifier_mask);
-    }
-    let state = KeyButMask::from(state_bits);
-    send_key_event(KEY_PRESS_EVENT, keycode, state, EventMask::KEY_PRESS)?;
-    sleep(Duration::from_millis(KEY_DELAY_MS));
-    send_key_event(KEY_RELEASE_EVENT, keycode, state, EventMask::KEY_RELEASE)?;
-    for &(modifier_keycode, modifier_mask) in modifier_keycodes.iter().rev() {
-        send_key_event(
-            KEY_RELEASE_EVENT,
-            modifier_keycode,
-            KeyButMask::from(state_bits),
-            EventMask::KEY_RELEASE,
-        )?;
-        state_bits &= !u16::from(modifier_mask);
-    }
-    conn.flush()?;
-
-    // If we borrowed a spare keycode for this keysym, give the target client a
-    // moment to translate the synthetic event under the temporary mapping before
-    // we restore it. The keycode->keysym lookup is client-side, so restoring too
-    // eagerly would race delivery. A server round-trip (which only returns once
-    // our queued requests have been processed) plus a short settle keeps that
-    // race closed; the guard then reinstates the original keysyms on drop.
-    if remap_guard.is_some() || !remap_guards.is_empty() {
-        let _ = conn.get_input_focus()?.reply();
+    keymap_barrier::dispatch(|| {
+        let mut state_bits = 0u16;
+        for &(modifier_keycode, modifier_mask) in &modifier_keycodes {
+            send_key_event(
+                KEY_PRESS_EVENT,
+                modifier_keycode,
+                KeyButMask::from(state_bits),
+                EventMask::KEY_PRESS,
+            )?;
+            state_bits |= u16::from(modifier_mask);
+        }
+        let state = KeyButMask::from(state_bits);
+        send_key_event(KEY_PRESS_EVENT, keycode, state, EventMask::KEY_PRESS)?.check()?;
+        conn.flush()?;
         sleep(Duration::from_millis(KEY_DELAY_MS));
-    }
+        send_key_event(KEY_RELEASE_EVENT, keycode, state, EventMask::KEY_RELEASE)?;
+        for &(modifier_keycode, modifier_mask) in modifier_keycodes.iter().rev() {
+            send_key_event(
+                KEY_RELEASE_EVENT,
+                modifier_keycode,
+                KeyButMask::from(state_bits),
+                EventMask::KEY_RELEASE,
+            )?;
+            state_bits &= !u16::from(modifier_mask);
+        }
+        conn.flush()?;
+
+        conn.get_input_focus()?.reply()?;
+        if let Some(barrier) = &barrier {
+            barrier.wait()?;
+        }
+        Ok(())
+    })?;
     drop(remap_guard);
     Ok(())
 }
@@ -2640,7 +4131,11 @@ fn char_to_keycode_shift(mapping: &GetKeyboardMappingReply, keysym: u32) -> Opti
 /// Map a human key name (e.g. "Return", "F5", "a") to its X11 keysym. Pure name
 /// resolution — no server interaction — split out from keycode lookup so the
 /// keysym can be remapped onto a spare keycode when the keymap lacks it.
-fn key_name_to_keysym(key: &str) -> Result<u32> {
+/// Resolve a key name in the shared X keysym vocabulary, or error on an
+/// unknown name. Exposed crate-wide so input-adjacent paths (e.g. the
+/// press_key terminal short-circuit gate) can test key identity against
+/// this canonical mapping instead of a local string comparison.
+pub(crate) fn key_name_to_keysym(key: &str) -> Result<u32> {
     // Common X11 keysym names.
     let keysym: u32 = match key.to_lowercase().as_str() {
         "return" | "enter" => 0xFF0D,
@@ -2652,8 +4147,8 @@ fn key_name_to_keysym(key: &str) -> Result<u32> {
         "insert" | "ins" => 0xFF63,
         "home" => 0xFF50,
         "end" => 0xFF57,
-        "pageup" | "pgup" => 0xFF55,
-        "pagedown" | "pgdn" => 0xFF56,
+        "pageup" | "pgup" | "page_up" => 0xFF55,
+        "pagedown" | "pgdn" | "page_down" => 0xFF56,
         "up" => 0xFF52,
         "down" => 0xFF54,
         "left" => 0xFF51,
@@ -2673,7 +4168,7 @@ fn key_name_to_keysym(key: &str) -> Result<u32> {
         "shift" => 0xFFE1,
         "ctrl" | "control" => 0xFFE3,
         "alt" => 0xFFE9,
-        "super" | "meta" | "win" => 0xFFEB,
+        "super" | "meta" | "win" | "cmd" => 0xFFEB,
         "capslock" => 0xFFE5,
         "numlock" => 0xFF7F,
         // Common X keysym names for punctuation. The single-char branch below
@@ -2699,12 +4194,305 @@ fn key_name_to_keysym(key: &str) -> Result<u32> {
     Ok(keysym)
 }
 
+#[cfg(test)]
+mod key_name_alias_tests {
+    use super::{
+        char_to_keycode_shift, key_name_to_keysym, reserve_spare_keycode, type_text_with_preflight,
+        GetKeyboardMappingReply,
+    };
+
+    #[test]
+    fn text_preflight_failure_leaves_target_and_events_unchanged() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 2,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32],
+        };
+        for text in ["約ab", "aa約", "a約a"] {
+            let mut target = String::from("existing");
+            let mut events = Vec::new();
+            let result = type_text_with_preflight::<()>(
+                text,
+                &mapping,
+                |_, _| anyhow::bail!("no spare keycode"),
+                |keycode, shift| {
+                    events.extend([keycode, keycode]);
+                    target.push(if shift { 'A' } else { 'a' });
+                    Ok(())
+                },
+                || Ok(()),
+            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .starts_with("typed 0 of 3 characters"));
+            assert!(events.is_empty());
+            assert_eq!(target, "existing");
+        }
+    }
+
+    #[test]
+    fn text_preflight_requires_a_spare_for_each_distinct_unmapped_character() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 2,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32, 0, 0],
+        };
+        let mut target = String::from("existing");
+        let mut events = Vec::new();
+        let error = type_text_with_preflight::<()>(
+            "a你好",
+            &mapping,
+            |ch, mapping| {
+                reserve_spare_keycode(
+                    mapping,
+                    super::mpx_keyboard::keysym_for_char(ch),
+                    |_, _, _, _| Ok(()),
+                )
+                .map(|(keycode, guard)| (keycode, Some(guard)))
+            },
+            |keycode, _| {
+                events.push(keycode);
+                target.push('a');
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "typed 0 of 3 characters: the text needs 2 spare keycodes: no spare keycode available to remap keysym 0x{:X}",
+                super::mpx_keyboard::keysym_for_char('好')
+            )
+        );
+        assert!(events.is_empty());
+        assert_eq!(target, "existing");
+    }
+
+    struct Restore<'a>(&'a std::cell::Cell<usize>);
+
+    #[test]
+    fn text_preflight_marks_errors_after_a_sent_prefix_as_unconfirmed() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 2,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32],
+        };
+        for (fail_at, finish_fails, unconfirmed) in [
+            (Some(0), false, false),
+            (Some(0), true, false),
+            (Some(1), false, true),
+            (Some(1), true, true),
+            (None, true, true),
+        ] {
+            let mut sent = 0;
+            let mut finished = false;
+            let error = type_text_with_preflight::<()>(
+                "aa",
+                &mapping,
+                |_, _| unreachable!(),
+                |_, _| {
+                    if fail_at == Some(sent) {
+                        anyhow::bail!("focus changed before next character");
+                    }
+                    sent += 1;
+                    Ok(())
+                },
+                || {
+                    finished = true;
+                    if finish_fails {
+                        anyhow::bail!("client queue read failed");
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(finished, "even partial input must finish its queue barrier");
+            assert_eq!(
+                super::delivery_is_unconfirmed(&error),
+                unconfirmed,
+                "sent={sent}, finish_fails={finish_fails}: {error:#}"
+            );
+        }
+    }
+
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn text_preflight_restores_every_remap_after_success_and_failure() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 2,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32, 0, 0, 0, 0],
+        };
+        for (text, fail_send, ok, sent) in [
+            ("你好你a", false, true, 4),
+            ("你好约", false, false, 0),
+            ("你好", true, false, 1),
+        ] {
+            let restored = std::cell::Cell::new(0);
+            let mut events = 0;
+            let result = type_text_with_preflight(
+                text,
+                &mapping,
+                |ch, mapping| {
+                    reserve_spare_keycode(
+                        mapping,
+                        super::mpx_keyboard::keysym_for_char(ch),
+                        |_, _, _, _| Ok(Restore(&restored)),
+                    )
+                    .map(|(keycode, guard)| (keycode, Some(guard)))
+                },
+                |_, _| {
+                    events += 1;
+                    if fail_send {
+                        anyhow::bail!("send failed");
+                    }
+                    Ok(())
+                },
+                || {
+                    assert_eq!(
+                        restored.get(),
+                        0,
+                        "restore must follow client queue completion"
+                    );
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_ok(), ok, "{text}");
+            drop(result);
+            assert_eq!(restored.get(), 2, "{text}");
+            assert_eq!(events, sent, "{text}");
+        }
+    }
+
+    #[test]
+    fn text_preflight_preserves_shift_order_and_reuses_remaps() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 2,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32, 0, 0, 0, 0],
+        };
+        let mut remaps = 0;
+        let mut events = Vec::new();
+        type_text_with_preflight::<()>(
+            "aA你好你",
+            &mapping,
+            |ch, mapping| {
+                remaps += 1;
+                reserve_spare_keycode(
+                    mapping,
+                    super::mpx_keyboard::keysym_for_char(ch),
+                    |_, _, _, _| Ok(()),
+                )
+                .map(|(keycode, guard)| (keycode, Some(guard)))
+            },
+            |keycode, shift| {
+                events.push((keycode, shift));
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(remaps, 2);
+        assert_eq!(
+            events,
+            [(8, false), (8, true), (10, false), (9, false), (10, false)]
+        );
+    }
+
+    #[test]
+    fn text_preflight_preserves_keys_with_symbols_in_later_columns() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 4,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32, 'b' as u32, 0],
+        };
+        let mut events = Vec::new();
+        type_text_with_preflight::<()>(
+            "bAa",
+            &mapping,
+            |ch, mapping| {
+                assert_eq!(ch, 'b');
+                assert!(mapping.keysyms.contains(&(ch as u32)));
+                Ok((8, None))
+            },
+            |keycode, shift| {
+                events.push((keycode, shift));
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(events, [(8, false), (8, true), (8, false)]);
+    }
+
+    #[test]
+    fn shifted_column_glyphs_need_shift_and_base_glyphs_do_not() {
+        let per = 2usize;
+        let mut keysyms = vec![0u32; (248 - 8 + 1) * per];
+        let mut set = |keycode: usize, syms: [u32; 2]| {
+            let idx = (keycode - 8) * per;
+            keysyms[idx..idx + per].copy_from_slice(&syms);
+        };
+        set(43, [0x68, 0x48]);
+        set(11, [0x32, 0x40]);
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: per as u8,
+            sequence: 0,
+            keysyms,
+        };
+        for (ch, keycode, needs_shift) in [
+            ('H', 43, true),
+            ('@', 11, true),
+            ('h', 43, false),
+            ('2', 11, false),
+        ] {
+            assert_eq!(
+                char_to_keycode_shift(&mapping, ch as u32),
+                Some((keycode, needs_shift)),
+                "{ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn common_key_name_aliases_resolve_to_the_expected_keysym() {
+        // Page_Up / Page_Down: the underscore form is the literal X11 keysym
+        // name and a common cross-platform prompt spelling; only the
+        // no-underscore "pageup"/"pgup" aliases existed before.
+        assert_eq!(key_name_to_keysym("Page_Up").unwrap(), 0xFF55);
+        assert_eq!(key_name_to_keysym("page_up").unwrap(), 0xFF55);
+        assert_eq!(
+            key_name_to_keysym("Page_Up").unwrap(),
+            key_name_to_keysym("pageup").unwrap()
+        );
+        assert_eq!(key_name_to_keysym("Page_Down").unwrap(), 0xFF56);
+        assert_eq!(
+            key_name_to_keysym("Page_Down").unwrap(),
+            key_name_to_keysym("pgdn").unwrap()
+        );
+        // "cmd": common cross-platform prompt name for the Super/Meta/Windows
+        // key; must alias to the same keysym as "super"/"meta"/"win".
+        assert_eq!(key_name_to_keysym("cmd").unwrap(), 0xFFEB);
+        assert_eq!(
+            key_name_to_keysym("cmd").unwrap(),
+            key_name_to_keysym("super").unwrap()
+        );
+    }
+}
+
 /// A keycode we have *temporarily* rebound to host a keysym that is absent from
 /// the current X keyboard map (sparse/headless keymaps such as a minimal
 /// Xwayland). On drop it reinstates the keycode's original keysyms so the
-/// server's mapping is left exactly as we found it. Modelled on xdotool's
-/// remap-a-spare-keycode trick (`_xdo_charcodemap` / `XChangeKeyboardMapping`).
-struct RemappedKeycode<'a> {
+/// server's mapping is left exactly as we found it. The remap goes through
+/// `XChangeKeyboardMapping` on a spare keycode.
+pub(crate) struct RemappedKeycode<'a> {
     conn: &'a RustConnection,
     keycode: u8,
     keysyms_per_keycode: u8,
@@ -2713,29 +4501,23 @@ struct RemappedKeycode<'a> {
 
 impl Drop for RemappedKeycode<'_> {
     fn drop(&mut self) {
-        // Best-effort restore: re-install the original keysyms for this keycode
-        // and flush. Errors are swallowed deliberately — Drop must not panic in
-        // the daemon, and the worst case of a failed restore is a single spare
-        // keycode left mapped (it was unused to begin with), never a crash.
         let _ = self.conn.change_keyboard_mapping(
             1,
             self.keycode,
             self.keysyms_per_keycode,
             &self.original_keysyms,
         );
-        let _ = self.conn.flush();
+        let _ = self.conn.get_input_focus().map(|cookie| cookie.reply());
     }
 }
 
-/// Temporarily bind `keysym` onto a spare (fully unused) keycode so it can be
-/// injected even when no existing keycode emits it. Returns a guard that
-/// restores the original mapping on drop. Errors only if the keymap has no free
-/// keycode left to borrow.
-fn remap_spare_keycode<'a>(
-    conn: &'a RustConnection,
-    mapping: &GetKeyboardMappingReply,
+/// Reserve a fully unused keycode for `keysym`, calling `bind` before updating
+/// the local mapping. Returns the keycode and the value produced by `bind`.
+fn reserve_spare_keycode<G>(
+    mapping: &mut GetKeyboardMappingReply,
     keysym: u32,
-) -> Result<RemappedKeycode<'a>> {
+    mut bind: impl FnMut(u8, u8, &[u32], &[u32]) -> Result<G>,
+) -> Result<(u8, G)> {
     let per = mapping.keysyms_per_keycode as usize;
     if per == 0 {
         bail!("empty keyboard mapping; cannot remap keysym 0x{keysym:X}");
@@ -2759,17 +4541,9 @@ fn remap_spare_keycode<'a>(
     let idx = (spare as usize - 8) * per;
     let original_keysyms = mapping.keysyms[idx..idx + per].to_vec();
     let new_keysyms = vec![keysym; per];
-    conn.change_keyboard_mapping(1, spare, per as u8, &new_keysyms)?;
-    // Round-trip so the server has installed the new mapping before we emit the
-    // key event against it.
-    let _ = conn.get_input_focus()?.reply();
-
-    Ok(RemappedKeycode {
-        conn,
-        keycode: spare,
-        keysyms_per_keycode: per as u8,
-        original_keysyms,
-    })
+    let guard = bind(spare, per as u8, &original_keysyms, &new_keysyms)?;
+    mapping.keysyms[idx..idx + per].copy_from_slice(&new_keysyms);
+    Ok((spare, guard))
 }
 
 /// Resolve `keysym` to a keycode usable in a synthetic key event. First scans
@@ -2779,24 +4553,34 @@ fn remap_spare_keycode<'a>(
 /// The guard is `None` when the keysym was already present (no cleanup needed).
 fn keycode_for_keysym<'a>(
     conn: &'a RustConnection,
-    mapping: &GetKeyboardMappingReply,
+    mapping: &mut GetKeyboardMappingReply,
     keysym: u32,
     key: &str,
 ) -> Result<(u8, Option<RemappedKeycode<'a>>)> {
     let per = mapping.keysyms_per_keycode as usize;
     if per > 0 {
         for (i, syms) in mapping.keysyms.chunks(per).enumerate() {
-            if syms.iter().any(|&s| s == keysym) {
+            if syms.contains(&keysym) {
                 return Ok(((8 + i) as u8, None));
             }
         }
     }
 
-    // Not in the map — fall back to remapping a spare keycode (xdotool-style).
-    let guard = remap_spare_keycode(conn, mapping, keysym).with_context(|| {
+    // Not in the map — fall back to remapping a spare keycode.
+    let (keycode, guard) = reserve_spare_keycode(mapping, keysym, |spare, per, original, new| {
+        conn.change_keyboard_mapping(1, spare, per, new)?;
+        let guard = RemappedKeycode {
+            conn,
+            keycode: spare,
+            keysyms_per_keycode: per,
+            original_keysyms: original.to_vec(),
+        };
+        let _ = conn.get_input_focus()?.reply();
+        Ok(guard)
+    })
+    .with_context(|| {
         format!("Keysym 0x{keysym:X} not in keyboard map for key '{key}' and no spare keycode could be remapped")
     })?;
-    let keycode = guard.keycode;
     Ok((keycode, Some(guard)))
 }
 
@@ -2916,12 +4700,93 @@ exit 0"#,
 #[cfg(test)]
 mod path_tests {
     use super::{
-        create_uinput_pointer, guarded_uinput_creation, is_uinput_unavailable, master_pointer_name,
-        modifiers_to_state, normalize_uinput_device_name, path_cumulative, point_on_path,
-        real_pointer_capabilities_available, sample_function, slave_pointer_name,
-        EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
+        click_event_target, create_uinput_pointer, ensure_master_pointer_for_session,
+        guarded_uinput_creation, is_uinput_unavailable, kde_x11_uinput_hotplug_is_unsafe,
+        master_pointer_name, modifiers_to_state, mpx_op_guard, normalize_uinput_device_name,
+        path_cumulative, point_on_path, real_pointer_capabilities_available, sample_function,
+        slave_pointer_name, EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
     };
-    use x11rb::protocol::xproto::KeyButMask;
+    use x11rb::protocol::xproto::{EventMask, KeyButMask};
+
+    /// Regression for the `XSetErrorHandler` swap race: every caller that
+    /// could swap the process-global X11 error handler while an MPX
+    /// operation is mid-swap (`send_virtual_pointer_*`, `deliver`, and now
+    /// `x11_activate_window_persistent`) must take `MPX_OP_LOCK` first. This
+    /// doesn't touch X11 (no display in CI), but proves the lock itself is
+    /// exclusive and not reentrant-by-accident: a second `mpx_op_guard` call
+    /// blocks until the first is dropped, exactly the property the handler
+    /// swap needs to be race-free.
+    #[test]
+    fn mpx_op_guard_is_mutually_exclusive() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let entered_second = Arc::new(AtomicBool::new(false));
+        let first = mpx_op_guard("test-a");
+        let entered_second_clone = entered_second.clone();
+        let handle = std::thread::spawn(move || {
+            let _second = mpx_op_guard("test-b");
+            entered_second_clone.store(true, Ordering::SeqCst);
+        });
+        // The second guard cannot have been acquired yet — it is blocked on
+        // the lock we are still holding.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !entered_second.load(Ordering::SeqCst),
+            "second guard acquired while the first was still held"
+        );
+        drop(first);
+        handle.join().unwrap();
+        assert!(entered_second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn synthetic_click_keeps_release_on_press_recipient() {
+        let path = [
+            (
+                10,
+                394,
+                220,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+            ),
+            (11, 24, 30, EventMask::BUTTON_PRESS),
+            (12, 6, 8, EventMask::BUTTON_RELEASE),
+        ];
+
+        assert_eq!(click_event_target(&path), (11, 24, 30));
+    }
+
+    #[test]
+    fn synthetic_click_uses_deepest_common_target_for_both_events() {
+        let path = [
+            (
+                10,
+                394,
+                220,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+            ),
+            (
+                11,
+                24,
+                30,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+            ),
+            (12, 6, 8, EventMask::NO_EVENT),
+        ];
+
+        assert_eq!(click_event_target(&path), (11, 24, 30));
+    }
+
+    #[test]
+    fn synthetic_click_preserves_recipient_local_coordinates_and_event_fallback() {
+        let path = [
+            (10, 394, 220, EventMask::BUTTON_PRESS),
+            (11, 24, 30, EventMask::NO_EVENT),
+            (12, 6, 8, EventMask::NO_EVENT),
+        ];
+
+        assert_eq!(click_event_target(&path), (10, 394, 220));
+    }
 
     #[test]
     fn click_modifier_state_combines_canonical_names_and_aliases() {
@@ -2935,6 +4800,23 @@ mod path_tests {
             modifiers_to_state(&["control", "alt"]),
             KeyButMask::from(u16::from(KeyButMask::CONTROL) | u16::from(KeyButMask::MOD1))
         );
+    }
+
+    #[test]
+    fn idle_reaper_selects_only_sessions_past_the_ttl() {
+        use super::{stale_cursor_ids, MPX_IDLE_TTL};
+        let now = std::time::Instant::now();
+        let mut last_use = std::collections::HashMap::new();
+        last_use.insert("fresh".to_owned(), now);
+        last_use.insert(
+            "old".to_owned(),
+            now - (MPX_IDLE_TTL + std::time::Duration::from_secs(60)),
+        );
+        last_use.insert("edge".to_owned(), now - MPX_IDLE_TTL);
+        let mut stale = stale_cursor_ids(&last_use, now, MPX_IDLE_TTL);
+        stale.sort();
+        assert_eq!(stale, vec!["edge".to_owned(), "old".to_owned()]);
+        assert!(stale_cursor_ids(&std::collections::HashMap::new(), now, MPX_IDLE_TTL).is_empty());
     }
 
     #[test]
@@ -3013,7 +4895,7 @@ mod path_tests {
         assert!(is_uinput_unavailable(&error));
         assert_eq!(
             error.to_string(),
-            "Linux uinput pointer unavailable: permission denied"
+            "Linux uinput device unavailable: permission denied"
         );
     }
 
@@ -3028,10 +4910,76 @@ mod path_tests {
 
     #[test]
     fn real_pointer_capabilities_require_uinput_access() {
-        assert!(real_pointer_capabilities_available(true, false, true));
-        assert!(!real_pointer_capabilities_available(true, false, false));
-        assert!(!real_pointer_capabilities_available(false, false, true));
-        assert!(!real_pointer_capabilities_available(true, true, true));
+        assert!(real_pointer_capabilities_available(
+            true, false, true, false
+        ));
+        assert!(!real_pointer_capabilities_available(
+            true, false, false, false
+        ));
+        assert!(!real_pointer_capabilities_available(
+            false, false, true, false
+        ));
+        assert!(!real_pointer_capabilities_available(
+            true, true, true, false
+        ));
+        assert!(!real_pointer_capabilities_available(
+            true, false, true, true
+        ));
+    }
+
+    #[test]
+    fn kde_x11_sessions_disable_uinput_pointer_hotplug() {
+        assert!(kde_x11_uinput_hotplug_is_unsafe(
+            Some("x11"),
+            Some("KDE"),
+            None,
+            None,
+            None,
+            Some(":0"),
+            None,
+        ));
+        assert!(kde_x11_uinput_hotplug_is_unsafe(
+            Some("x11"),
+            Some("KDE"),
+            None,
+            None,
+            None,
+            Some(":0"),
+            Some("wayland-0"),
+        ));
+        assert!(kde_x11_uinput_hotplug_is_unsafe(
+            None,
+            None,
+            Some("plasma"),
+            None,
+            Some("true"),
+            Some(":1"),
+            None,
+        ));
+
+        assert!(kde_x11_uinput_hotplug_is_unsafe(
+            Some("wayland"),
+            Some("KDE"),
+            None,
+            None,
+            Some("true"),
+            Some(":0"),
+            Some("wayland-0"),
+        ));
+        assert!(!kde_x11_uinput_hotplug_is_unsafe(
+            Some("x11"),
+            Some("GNOME"),
+            None,
+            None,
+            None,
+            Some(":0"),
+            None,
+        ));
+
+        let error = ensure_master_pointer_for_session("regression-test", true)
+            .expect_err("the creation choke point must refuse before opening X11 or uinput");
+        assert!(is_uinput_unavailable(&error));
+        assert!(error.to_string().contains("delivery_mode='foreground'"));
     }
 
     #[test]
@@ -3050,7 +4998,7 @@ mod path_tests {
             assert!((y - (2.0 * x + 1.0)).abs() < 1e-9);
         }
         // sin(x) parses and yields finite, bounded values.
-        let s = sample_function("100+50*sin(x)", 0.0, 6.28, 40).unwrap();
+        let s = sample_function("100+50*sin(x)", 0.0, std::f64::consts::TAU, 40).unwrap();
         assert!(s.iter().all(|(_, y)| (49.9..=150.1).contains(y)));
     }
 
@@ -3116,5 +5064,60 @@ mod path_tests {
         let (cum, total) = path_cumulative(&path);
         assert!((total - 0.0).abs() < 1e-9);
         assert_eq!(point_on_path(&path, &cum, total, 0.3), (5, 5));
+    }
+}
+
+pub struct DesktopKeyboard;
+impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
+    fn resolve(&self, key: &str) -> std::result::Result<u32, String> {
+        let _lock = KEYMAP_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let keysym = key_name_to_keysym(key).map_err(|error| error.to_string())?;
+        let (connection, _) = connect_x11_for_input().map_err(|error| error.to_string())?;
+        let mapping = connection
+            .get_keyboard_mapping(8, 248)
+            .map_err(|error| error.to_string())?
+            .reply()
+            .map_err(|error| error.to_string())?;
+        let width = mapping.keysyms_per_keycode as usize;
+        if width == 0 {
+            return Err("Empty X11 keyboard map".into());
+        }
+        mapping
+            .keysyms
+            .chunks(width)
+            .position(|codes| codes.contains(&keysym))
+            .map(|index| index as u32 + 8)
+            .ok_or_else(|| {
+                format!("Key {key} is not mapped. Held keys do not borrow temporary keycodes.")
+            })
+    }
+    fn transition(&self, code: u32, down: bool, _held: &[u32]) -> std::result::Result<(), String> {
+        use x11rb::protocol::xtest::ConnectionExt as _;
+        let _lock = KEYMAP_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let result = (|| -> Result<()> {
+            let (connection, _) = connect_x11_for_input()?;
+            connection
+                .xtest_fake_input(
+                    if down {
+                        KEY_PRESS_EVENT
+                    } else {
+                        KEY_RELEASE_EVENT
+                    },
+                    code as u8,
+                    0,
+                    x11rb::NONE,
+                    0,
+                    0,
+                    0,
+                )?
+                .check()?;
+            connection.get_input_focus()?.reply()?;
+            Ok(())
+        })();
+        result.map_err(|error| error.to_string())
     }
 }

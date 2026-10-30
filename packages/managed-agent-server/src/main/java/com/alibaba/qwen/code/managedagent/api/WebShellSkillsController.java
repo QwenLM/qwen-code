@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionSkills;
-import com.alibaba.qwen.code.managedagent.service.ManagedSkillCatalogService;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedSkillCatalogService;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionSkills;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import jakarta.validation.Valid;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;

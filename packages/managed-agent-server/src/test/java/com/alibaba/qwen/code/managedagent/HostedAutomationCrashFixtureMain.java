@@ -6,9 +6,9 @@
 
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.automation.AutomationScanner;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.AutomationScanner;
-import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +64,7 @@ public final class HostedAutomationCrashFixtureMain {
         int internalPort = Integer.parseInt(args[4]);
         int brokerPort = Integer.parseInt(args[5]);
         int publicPort = Integer.parseInt(args[6]);
+        int storeBasePort = Integer.parseInt(args[7]);
         ObjectMapper mapper = new ObjectMapper();
         Files.createDirectories(root.resolve("workspace-mount"));
         var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
@@ -74,7 +76,7 @@ public final class HostedAutomationCrashFixtureMain {
                 "--spring.datasource.password=" + System.getenv().getOrDefault(
                         "FG11C_MYSQL_PASSWORD", ""),
                 "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + internalPort,
+                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + storeBasePort,
                 "--qwen.managed-agent.session-store.workspace-id=workspace-0",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.base-url=" + System.getenv(
@@ -163,11 +165,14 @@ public final class HostedAutomationCrashFixtureMain {
         });
         control.start();
         Path ready = root.resolve("ready.tmp");
-        mapper.writeValue(ready.toFile(), Map.of(
-                "internalUrl", "http://127.0.0.1:" + internalPort,
-                "publicUrl", "http://127.0.0.1:" + publicPort,
-                "controlUrl", "http://127.0.0.1:"
-                        + control.getAddress().getPort()));
+        Map<String, Object> advertised = new LinkedHashMap<>();
+        advertised.put("publicUrl", "http://127.0.0.1:" + publicPort);
+        advertised.put("controlUrl", "http://127.0.0.1:"
+                + control.getAddress().getPort());
+        if (internalPort > 0) {
+            advertised.put("internalUrl", "http://127.0.0.1:" + internalPort);
+        }
+        mapper.writeValue(ready.toFile(), advertised);
         Files.move(ready, root.resolve("ready.json"),
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING);

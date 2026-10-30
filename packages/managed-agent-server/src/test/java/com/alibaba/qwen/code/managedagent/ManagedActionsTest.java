@@ -3,26 +3,26 @@ package com.alibaba.qwen.code.managedagent;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -34,6 +34,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -85,7 +86,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ManagedActionsTest {
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper json;
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ManagedSessionStore journals;
     @Autowired private ManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
@@ -114,8 +115,9 @@ class ManagedActionsTest {
     @TestConfiguration
     static class Configuration {
         @Bean @Primary
-        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
-                Clock clock, com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher publisher) {
+        ManagedAgentStore actionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
+                ManagedWorkspaceRegistry registry, @Qualifier("managedAgentClock") Clock clock,
+                com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
@@ -139,18 +141,57 @@ class ManagedActionsTest {
                 });
     }
 
+    @Test
+    void aggregatesDirectChildActionsWithOwnerAndScopeBoundPagination() throws Exception {
+        String tenant = tenant();
+        String root = session(tenant);
+        String child = session(tenant);
+        String other = session(tenant);
+        jdbc.update("UPDATE ma_session SET public_child_agents_version = 1 WHERE tenant_id = ? AND session_id = ?", tenant, root);
+        jdbc.update("UPDATE ma_session SET public_child_agents_version = 1, parent_session_id = ?, root_session_id = ?, parent_child_run_id = 'run-1', child_depth = 1 WHERE tenant_id = ? AND session_id = ?",
+                root, root, tenant, child);
+        long now = System.currentTimeMillis();
+        ActionJournal own = action(tenant, root, now, 9_007_199_254_740_991L);
+        ActionJournal nested = action(tenant, child, now + 1, 9_007_199_254_740_991L);
+        action(tenant, other, now + 2, 9_007_199_254_740_991L);
+        JsonNode first = read(auth(get("/v1/agents/sessions/" + root + "/actions")
+                .param("include_children", "true").param("limit", "1"), tenant, "owner"));
+        assertThat(first.path("data").get(0).path("id").asText()).isEqualTo(nested.id);
+        assertThat(first.path("data").get(0).path("session_id").asText()).isEqualTo(child);
+        String cursor = first.path("next_cursor").asText();
+        JsonNode second = read(auth(get("/v1/agents/sessions/" + root + "/actions")
+                .param("include_children", "true").param("cursor", cursor), tenant, "owner"));
+        assertThat(second.path("data").get(0).path("id").asText()).isEqualTo(own.id);
+        JsonNode legacy = read(auth(get("/v1/agents/sessions/" + root + "/actions"), tenant, "owner"));
+        assertThat(legacy.path("data").size()).isEqualTo(1);
+        mvc.perform(auth(get("/v1/agents/sessions/" + other + "/actions")
+                        .param("include_children", "true").param("cursor", cursor), tenant, "owner"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(auth(get("/v1/agents/sessions/" + root + "/actions")
+                        .param("cursor", cursor), tenant, "owner"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(auth(post(path(root, nested.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "wrong-owner").contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")))
+                .andExpect(status().isNotFound());
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
+    @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
+            "todo_write",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
         String tenant = tenant();
         String session = session(tenant);
         String arguments = switch (tool) {
+            case "web_fetch" -> "{ \"url\" : \"https://example.com/docs\", \"prompt\" : \"Summarize\" }";
             case "read_file" -> "{ \"file_path\" : \"notes.md\", \"offset\" : 1e2 }";
             case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
             case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
+            // #15076: the task list is the only preview this profile adds.
+            case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
@@ -276,7 +317,7 @@ class ManagedActionsTest {
             local.options.put("v", 2);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
             assertThatThrownBy(() -> local.change("requested", null))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("managed_session_resource_missing"));
             assertThat(actions.find(tenant, session, local.id)).isEmpty();
             ActionJournal committed = new ActionJournal(local, 100, 1000)
@@ -369,7 +410,7 @@ class ManagedActionsTest {
                 }
             }
             assertThatThrownBy(() -> journal.change("requested", null), "invalid inputRef (%s)", fault)
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("danglingRef".equals(fault)
                                     ? "managed_session_resource_missing" : "managed_session_action_rejected"));
             assertThat(actions.find(tenant, session, journal.id)).isEmpty();
@@ -484,7 +525,7 @@ class ManagedActionsTest {
                                             "extension-writer-token-0123456789",
                                             invalid))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
@@ -511,7 +552,7 @@ class ManagedActionsTest {
                                 .put("policyRevision", "hosted-tool-approval/2"))) {
             assertThatThrownBy(() -> journal.change("decided", response))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error ->
                                     assertThat(error.getCode())
                                             .isEqualTo("managed_session_action_rejected"));
@@ -916,16 +957,36 @@ class ManagedActionsTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getDispatch().setLeaseDuration(Duration.ofSeconds(3));
+        Duration lease = Duration.ofSeconds(3);
+        properties.getDispatch().setLeaseDuration(lease);
         // 4s > leaseDuration/3, so the coordinator's clamp (min → 1s) is
-        // what picks the period. Inverting the clamp (max → 4s) lets the 3s
-        // lease expire before the competing claim. The longer lease leaves
-        // room for a loaded runner to delay a renewal without expiring it.
+        // what picks the period. renewInterval > leaseDuration is deliberate
+        // (asserted below): only then does inverting the clamp (max → 4s)
+        // starve the lease — the first renewal comes after the lease has
+        // lapsed and can no longer be extended, so the competing replica must
+        // win it. HarnessCoordinator rejects this range (renew must be
+        // <= lease/2); ActionResponseCoordinator clamps instead, and this
+        // test pins the clamp. Two seconds of renewal slack per period —
+        // matching current `main` — keep scheduler jitter on a loaded CI
+        // runner from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
+        // Deriving the hold as lease + 6 clamped renewal periods keeps "hold
+        // outlasts the lease" structural under rescale and leaves six renewal
+        // ticks past the lease deadline, so a renewal loop that stops after
+        // <= 5 successful renewals still loses the claim; at 3 periods only
+        // <= 3 was caught, against 7 for the literal hold this replaced.
+        // The release latch and the hold await scale with the hold, so
+        // widening the lease cannot strand them on a stale literal ceiling.
+        long period = Math.max(1, Math.min(
+                properties.getDispatch().getLeaseRenewInterval().toMillis(),
+                lease.toMillis() / 3));
+        long holdMillis = lease.toMillis() + 6 * period;
+        long holdBudgetMillis = holdMillis + 5_000;
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;
         try {
+            assertThat(properties.getDispatch().getLeaseRenewInterval()).isGreaterThan(lease);
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
@@ -946,7 +1007,7 @@ class ManagedActionsTest {
                     }
                     calls.incrementAndGet();
                     entered.countDown();
-                    if (!release.await(5, TimeUnit.SECONDS)) {
+                    if (!release.await(holdBudgetMillis, TimeUnit.MILLISECONDS)) {
                         throw new IllegalStateException("held approval was not released");
                     }
                     journal.change("decided", call.getArgument(3));
@@ -956,10 +1017,14 @@ class ManagedActionsTest {
             });
             first = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
             sibling = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
-            long started = System.currentTimeMillis();
             first.dispatch(tenant, session, operation);
-            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-            await().atMost(Duration.ofSeconds(10)).until(() -> System.currentTimeMillis() - started >= 3500);
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            // The claim precedes resolveAction's entry, so anchoring the hold
+            // to `entered` guarantees the delivery is held past the lease
+            // deadline however long dispatch and claiming took.
+            long heldSince = System.currentTimeMillis();
+            await().atMost(Duration.ofMillis(holdBudgetMillis))
+                    .until(() -> System.currentTimeMillis() - heldSince >= holdMillis);
             var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
             assertThat(claimed.claimGeneration()).isEqualTo(1);
             assertThat(sessions.claimOperation(tenant, session, operation, "competing-replica", Duration.ofSeconds(1)))

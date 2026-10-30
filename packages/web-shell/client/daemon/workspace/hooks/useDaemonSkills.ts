@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useDaemonAvailability } from '../../availability-context.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   DaemonSkillInstallRequest,
@@ -31,6 +32,7 @@ function requireLegacyPrimary(workspaceMismatch: boolean): void {
 
 export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
   const { actions, capabilities, client, workspaceCwd } = useDaemonWorkspace();
+  const daemonAvailable = useDaemonAvailability() === 'available';
   const { workspaceCwd: requestedWorkspaceCwd, ...resourceOptions } = options;
   const targetWorkspaceCwd = requestedWorkspaceCwd ?? workspaceCwd;
   const workspaceClient = useMemo(
@@ -95,7 +97,12 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
     }
   }, [reloadRuntime, splitRuntimeAvailable, workspaceClient]);
   useEffect(() => {
-    if (!splitRuntimeAvailable || !workspaceClient || !coordinatorStatus) {
+    if (
+      !daemonAvailable ||
+      !splitRuntimeAvailable ||
+      !workspaceClient ||
+      !coordinatorStatus
+    ) {
       return;
     }
     let cancelled = false;
@@ -158,6 +165,7 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
     };
   }, [
     coordinatorStatus,
+    daemonAvailable,
     ensureRuntime,
     reloadConfig,
     reloadRuntime,

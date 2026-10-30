@@ -7,18 +7,19 @@ import com.alibaba.qwen.code.managedagent.api.ManagedToolDetailsController;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactService;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedToolDetailsService;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactService;
-import com.alibaba.qwen.code.managedagent.service.ManagedToolDetailsService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolDetailsStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolDetailsStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -69,7 +70,7 @@ class ManagedArtifactApiIntegrationTest {
         var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
         stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
         stderr = artifacts.stream().filter(a -> "stderr".equals(a.streamId())).findFirst().orElseThrow().descriptor();
-        itemId = fixture.sessions().findSnapshot("tenant-1", "session-1").orElseThrow()
+        itemId = fixture.sessions().findMessagePage("tenant-1", "session-1", null, 100, false)
                 .items().getFirst().itemId();
     }
 
@@ -92,11 +93,11 @@ class ManagedArtifactApiIntegrationTest {
         var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext();
         context.registerBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
                 fixture::properties);
-        context.registerBean(com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader.class,
+        context.registerBean(com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader.class,
                 fixture::reader);
-        context.registerBean(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class,
-                () -> mock(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class));
-        context.registerBean(java.time.Clock.class, () -> java.time.Clock.systemUTC());
+        context.registerBean(com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore.class,
+                () -> mock(com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore.class));
+        context.registerBean("managedAgentClock", java.time.Clock.class, () -> java.time.Clock.systemUTC());
         context.registerBean(ManagedAgentService.class, () -> sessions);
         context.refresh();
         context.close();
@@ -507,7 +508,7 @@ class ManagedArtifactApiIntegrationTest {
         var policy = org.mockito.Mockito.spy(fixture.policy());
         var service = new ManagedArtifactService(sessions, fixture.results(), reader, policy, fixture.properties());
         var response = new org.springframework.mock.web.MockHttpServletResponse();
-        service.content(new com.alibaba.qwen.code.managedagent.api.TenantContext("tenant-1", "reader"),
+        service.content(new com.alibaba.qwen.code.managedagent.model.TenantContext("tenant-1", "reader"),
                 "session-1", stdout.path("id").asText(), stdout.path("revision").asText(), "bytes=0-2", null, null, response);
         assertThat(response.getContentAsByteArray()).isEqualTo("abc".getBytes(StandardCharsets.UTF_8));
         org.mockito.Mockito.verify(reader, org.mockito.Mockito.times(1)).available(org.mockito.ArgumentMatchers.any());
@@ -580,8 +581,11 @@ class ManagedArtifactApiIntegrationTest {
         fixtureJson.set("toolResult", JSON.readTree(result));
         fixtureJson.set("artifactList", JSON.readTree(list));
         fixtureJson.set("transcript", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", null, 100)));
-        String before = Long.toString(fixture.sessions().requireSession("tenant-1", "session-1").lastSequence() + 1);
-        fixtureJson.set("events", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", before, 100).events()));
+        var events = fixture.sessions().findEvents("tenant-1", "session-1", 0, 100);
+        fixtureJson.set("events", JSON.valueToTree(events.stream().map(event -> new WebShellEvent(
+                event.schemaVersion(), event.projectionVersion(), event.sequence(), event.eventId(),
+                event.sessionId(), event.turnId(), event.itemId(), event.contentPartId(), event.type(),
+                event.createdAt(), event.data(), event.terminal())).toList()));
         String output = System.getProperty("qwen.o3.fixture-output");
         if (output != null) {
             Files.writeString(Path.of(output), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(fixtureJson));
@@ -794,14 +798,14 @@ class ManagedArtifactApiIntegrationTest {
         var reader = org.mockito.Mockito.spy(fixture.reader());
         org.mockito.Mockito.doAnswer(call -> {
             fixture.jdbc().update("UPDATE ma_session SET status = 'DELETED' WHERE session_id = X'73657373696f6e2d31'");
-            throw new com.alibaba.qwen.code.managedagent.api.ApiException(org.springframework.http.HttpStatus.CONFLICT,
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(org.springframework.http.HttpStatus.CONFLICT,
                     "tool_output_session_retired", "Retired during lease admission");
         }).when(reader).lease(org.mockito.ArgumentMatchers.any());
         var service = new ManagedArtifactService(sessions, fixture.results(), reader, fixture.policy(), fixture.properties());
-        assertThatThrownBy(() -> service.content(new com.alibaba.qwen.code.managedagent.api.TenantContext("tenant-1", "reader"),
+        assertThatThrownBy(() -> service.content(new com.alibaba.qwen.code.managedagent.model.TenantContext("tenant-1", "reader"),
                 "session-1", stdout.path("id").asText(), stdout.path("revision").asText(), null, null, null,
                 new org.springframework.mock.web.MockHttpServletResponse()))
-                .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
                         error -> assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.NOT_FOUND));
     }
 

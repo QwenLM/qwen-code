@@ -66,9 +66,9 @@ Four things were still missing:
   - An idle peer fails with the typed outcome and its bound.
   - A keepalive-only peer outlives the bound (probe 1 against a fake peer).
   - A consumer stall between reads is not charged (probe 3's delay inside tolerance).
-  - The abort lands inside the published window (probe 3's delay past it).
+  - The abort charges the full budget before firing and stays under a wall-clock sanity ceiling. The published upper side is nominal: scheduler and reader-wake latency can push the realized abort past it, so the interval formula and the queued period are pinned structurally instead.
   - A Harness without `event-keepalive/1` keeps the read unbounded (probe 6).
-  - Each check was mutation-tested: dropping the gate, a half-bound tick, and each of the three untyped throw sites each fail exactly the test that names them.
+  - Each check was mutation-tested: dropping the gate, a half-bound tick, and each of the three untyped throw sites each fail exactly the test that names them. The interval formula is asserted on both sides — the 100 ms floor and a tenth of the budget — so a changed divisor or floor fails without relying on wall-clock slack.
 - **Coordinator unit test** (`HarnessCoordinatorTest.anIdleStreamRetriesTheAdmittedTurnWithoutSettlingIt`): pins that the outcome schedules a retry, never fails or cancels the Turn, and logs the typed label.
 - **Packaged chain** (`HostedEventStreamLivenessIT`): Spring on MySQL 8.4, the packaged Hosted Harness, and a TCP relay between them that can hold the events connection half-open or stall it. It runs the shipped numbers.
 

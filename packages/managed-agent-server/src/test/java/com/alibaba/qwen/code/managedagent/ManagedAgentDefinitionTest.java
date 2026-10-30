@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
@@ -57,12 +58,14 @@ class ManagedAgentDefinitionTest {
     private ObjectMapper objectMapper;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
-    private com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore definitions;
+    private com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore definitions;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private org.springframework.transaction.PlatformTransactionManager transactionManager;
 
     @Test
@@ -300,8 +303,8 @@ class ManagedAgentDefinitionTest {
         String tenant = tenant();
         String agentId = json(create(tenant, "for-update", DEFINITION)
                 .andExpect(status().isAccepted())).path("id").asText();
-        com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore store =
-                new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(
+        com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore store =
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore(
                         new org.springframework.jdbc.core.JdbcTemplate(
                                 jdbc.getDataSource()), new RequestDigests());
         org.springframework.transaction.support.TransactionTemplate template =

@@ -163,9 +163,8 @@ migration once Sessions hold enough Turns for the sort to matter.
 ## 7. Validation
 
 - The Managed Agent server's `mvn test` (176 tests) and Checkstyle pass.
-- `ManagedAgentMySqlIT` passes 14/14 against `mariadb:10.11.18`, the image CI
-  uses, and against `mysql:8.4`. With the exact Turn ID comparison removed it
-  fails on both.
+- `ManagedAgentMySqlIT` passes 14/14 against both `mariadb:10.11.18` and
+  `mysql:8.4`. With the exact Turn ID comparison removed it fails on both.
 - Regenerating the managed API types leaves them unchanged.
 - Each of 24 mutations fails a test: an oldest-first order; no Turn ID
   tie-break; a cursor that repeats its Turn or skips a Turn created at the same

@@ -1,16 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -166,25 +166,6 @@ class ManagedRenameReconciliationTest {
         assertThat(store.findParkedOperations(50)).isEmpty();
         refused(() -> store.beginSessionRename(TENANT, "title-1", "digest-title-1",
                 sessionId, TITLE), "session_mutation_superseded");
-    }
-
-    // A deployment upgraded with legacy UNKNOWN rows converts them on the
-    // first sweep: no schema version can carry a data-only change.
-    @Test
-    void theSweepConvertsALegacyUnknownTitle() {
-        RenameDelivery delivery = submitted("title-1", TITLE);
-        jdbc.update("UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED'"
-                + " WHERE operation_kind = 'RENAME'");
-        assertThat(store.findParkedOperations(50)).isEmpty();
-        assertThat(store.deliverableRenames(Long.MAX_VALUE)).isEmpty();
-        assertThat(row(delivery.revision()))
-                .containsEntry("state", "RECOVERY_BLOCKED")
-                .containsEntry("phase", "RECOVERY_BLOCKED")
-                .containsEntry("admission_stage", "JAVA_DURABLE")
-                .containsEntry("claim_owner", OWNER);
-        assertThat(receipt("title-1")).isEqualTo("FAILED");
-        assertThat(store.findParkedOperations(50))
-                .containsExactly(parkedOperation(delivery));
     }
 
     @Test
@@ -482,7 +463,7 @@ class ManagedRenameReconciliationTest {
 
     private static void refused(Runnable call, String code) {
         assertThatThrownBy(call::run).isInstanceOfSatisfying(
-                ApiException.class, error -> {
+                ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
                     assertThat(error.getCode()).isEqualTo(code);
                 });

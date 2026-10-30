@@ -127,7 +127,7 @@ describe('EventTransport multi-node gates CI', () => {
     );
   });
 
-  it('routes like the MariaDB lane, with the JDK 17 the broker needs', () => {
+  it('routes like the non-Hosted MySQL lane, with the JDK 17 the broker needs', () => {
     // The evaluated routing matrix lives in ci-runner-routing.test.mjs.
     expect(job['runs-on']).toBe(workflow.jobs['mysql-integration']['runs-on']);
     const java = step('Set up Java').with['java-version'];
@@ -148,7 +148,7 @@ describe('EventTransport multi-node gates CI', () => {
 
   it('keeps setup-node and Corepack shims off the pool', () => {
     // nodejs.org may be unreachable from the pool. `corepack pnpm` needs no
-    // `corepack enable` (the MariaDB lane installs that way on both legs),
+    // `corepack enable` (the non-Hosted MySQL lane installs that way on both legs),
     // which would write global shims beside a shared host's Node.
     expect(step('Set up Node.js (hosted)').if).toBe(
       "${{ runner.environment == 'github-hosted' }}",
@@ -179,10 +179,14 @@ describe('EventTransport multi-node gates CI', () => {
   });
 
   it('installs the libfaketime the clock-skew row preloads', () => {
-    const library = /-Dqwen\.gate\.faketime\.library=(\S+)/.exec(
-      verify().run,
-    )[1];
-    expect(step('Install libfaketime').run).toContain(`test -f ${library}`);
+    // The pool mixes x64 and aarch64 hosts, so the multiarch directory is
+    // resolved at run time rather than pinned to one of them.
+    expect(verify().run).toContain(
+      '-Dqwen.gate.faketime.library="${FAKETIME_LIB}"',
+    );
+    const install = step('Install libfaketime').run;
+    expect(install).toContain('-name libfaketimeMT.so.1');
+    expect(install).toContain('echo "FAKETIME_LIB=${lib}"');
   });
 
   it('points the gate at the database its MySQL container creates', () => {

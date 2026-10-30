@@ -39,6 +39,9 @@ const { convertToFunctionResponse } = await import(
   core('core/coreToolScheduler')
 );
 const { ManagedCsiMount } = await import(cli('managed-csi-mount'));
+const { ManagedCsiRootDirectory } = await import(
+  cli('managed-csi-root-directory')
+);
 const { startManagedCsiFileWorker } = await import(
   cli('managed-csi-file-worker')
 );
@@ -129,11 +132,14 @@ const mappedAddress = (file) => {
 const originalMount = Object.getOwnPropertyDescriptors(
   ManagedCsiMount.prototype,
 );
+const originalRootDirectoryOpen = Object.getOwnPropertyDescriptor(
+  ManagedCsiRootDirectory,
+  'open',
+);
+const nativeRootDirectory = ManagedCsiMount.prototype.rootDirectory;
 const nativeListen = Server.prototype.listen;
-let worker,
-  stores,
-  session,
-  closedRoot = false;
+let retirementJoined = false;
+let worker, stores, session;
 try {
   await fs.writeFile(path.join(workspace, 'marker.txt'), 'alpha\n', {
     mode: 0o640,
@@ -161,23 +167,25 @@ try {
       return result;
     };
   }
-  Object.defineProperty(ManagedCsiMount.prototype, 'isAvailable', {
-    configurable: true,
-    get: () => !closedRoot,
+  ManagedCsiMount.prototype.kernelObservation = async () => ({
+    mountId: mount.mountId,
+    device: mount.device,
+    source: mount.source,
   });
-  ManagedCsiMount.prototype.rootDirectory = async () => workspace;
-  ManagedCsiMount.prototype.observe = async () => mount;
-  ManagedCsiMount.prototype.withVerifiedRoot = async function (operation) {
-    assert.equal(closedRoot, false);
-    assert.equal(
-      (await native.lstat(workspace, { bigint: true })).ino,
-      stats.ino,
+  ManagedCsiRootDirectory.open = async (mountRoot, device) => {
+    assert.equal(mountRoot, boot.context.mountRoot);
+    return originalRootDirectoryOpen.value.call(
+      ManagedCsiRootDirectory,
+      workspace,
+      device,
     );
-    const result = await operation(rootHandle, mount);
-    assert.equal((await rootHandle.stat({ bigint: true })).ino, stats.ino);
-    return result;
   };
-  ManagedCsiMount.prototype.close = async () => {};
+  ManagedCsiMount.prototype.rootDirectory = async function () {
+    const directory = await nativeRootDirectory.call(this);
+    if (directory === undefined) return undefined;
+    assert.equal(directory, boot.context.mountRoot);
+    return workspace;
+  };
   Server.prototype.listen = function () {
     return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
   };
@@ -375,6 +383,7 @@ try {
         prompt,
         index,
         mutation,
+        recoveryCut: input.recoveryCut,
         files: {
           broker: { baseUrl: input.broker, token: input.operatorToken },
           runtime: input.runtime,
@@ -480,7 +489,57 @@ try {
                 );
                 coldRefusalChecks++;
                 await waitForExpiry();
-                const successorWriter = randomUUID();
+                let successorWriter = randomUUID();
+                if (input.isolation) {
+                  const writers = [successorWriter, randomUUID()];
+                  await fixture('/fixture:cold-arm', { writers });
+                  const pending = writers.map(async (candidate) => {
+                    const response = await fetch(
+                      `${input.adapter}${prefix}/writers:acquire`,
+                      {
+                        method: 'POST',
+                        headers: storeHeaders,
+                        signal: AbortSignal.timeout(20000),
+                        body: JSON.stringify({
+                          workspaceId: key.workspaceId,
+                          writerId: candidate,
+                          leaseMillis: 300000,
+                        }),
+                      },
+                    );
+                    return {
+                      writerId: candidate,
+                      status: response.status,
+                      body: await response.json(),
+                    };
+                  });
+                  const contention = await fixture('/fixture:cold-release');
+                  const responses = await Promise.all(pending);
+                  assert.deepEqual(
+                    responses.map((response) => response.status).sort(),
+                    [200, 409],
+                  );
+                  const winner = responses.find(
+                    (response) => response.status === 200,
+                  );
+                  successorWriter = winner.writerId;
+                  assert.equal(winner.body.writerGeneration, 3);
+                  assert.equal(winner.body.activationEpoch, 1);
+                  const warmed = Object.values(contention.warmed);
+                  assert.equal(warmed.length, 2);
+                  assert.ok(
+                    warmed.every(
+                      (entry) =>
+                        entry.isolation === input.isolation &&
+                        entry.autoCommit === false &&
+                        entry.writerGeneration === 2,
+                    ),
+                  );
+                  await fs.writeFile(
+                    path.join(output, 'cold-contention.json'),
+                    JSON.stringify({ contention, responses }, null, 2),
+                  );
+                }
                 stores = createHttpManagedSessionStores({
                   baseUrl: input.adapter,
                   sessionKey: key,
@@ -544,11 +603,17 @@ try {
                 const { recoverHostedCsiReceipts } = await import(
                   cli('hosted-csi-cold-recovery')
                 );
-                const parts = await recoverHostedCsiReceipts(
+                const recovered = await recoverHostedCsiReceipts(
                   session,
                   { baseUrl: input.broker, token: input.operatorToken },
                   promptId,
                   prompt,
+                  {
+                    ...input.runtime,
+                    ...(await stores.publication.owner()),
+                    activationId: session.activation.activationId,
+                    activationEpoch: session.activation.epoch,
+                  },
                 );
                 assert.deepEqual(
                   (await fixture('/fixture:inspect')).executions,
@@ -558,7 +623,7 @@ try {
                   await fs.readFile(path.join(workspace, 'marker.txt')),
                   working,
                 );
-                return { session, parts };
+                return { session, ...recovered };
               },
             }
           : {}),
@@ -1126,6 +1191,36 @@ try {
   );
   assert.equal(finalBytes, 'gamma\n');
   assert.equal(observation.state.snapshots.length, 2);
+  const finalWriterGeneration = (await stores.publication.owner())
+    .writerGeneration;
+  let retirementResult;
+  if (input.retirement) {
+    await stores.csiRetirement.joinWriter();
+    const records = await session.authority.prepareOriginalCsiRelease();
+    await stores.csiRetirement.prepare(records);
+    // The generic assembly stops its activation timer and refuses the private final boundary.
+    await assert.rejects(
+      session.close({ releaseActivation: false }),
+      /original CSI retirement owns the final boundary/,
+    );
+    retirementJoined = true;
+    const intent = await fixture('/fixture:retire');
+    const retirementDescriptors = [...opened];
+    assert.ok(retirementDescriptors.length > 0);
+    retirementResult = await stores.csiRetirement.complete(intent.retirementId);
+    assert.equal(retirementResult.stage, 'DRAINED');
+    assert.equal(retirementResult.progressVersion, 4);
+    assert.equal(opened.size, 0);
+    for (const handle of retirementDescriptors)
+      await assert.rejects(handle.stat(), { code: 'EBADF' });
+    const closedImage = await fixture('/fixture:image');
+    assert.deepEqual(
+      await stores.csiRetirement.complete(intent.retirementId),
+      retirementResult,
+    );
+    assert.deepEqual(await fixture('/fixture:image'), closedImage);
+    await stores.stopLocal();
+  }
   const workerUrl = worker.ready.context.url;
   await worker.close();
   worker = undefined;
@@ -1145,9 +1240,11 @@ try {
         retained,
         invocations,
         refusalChecks: checks.length,
-        writerGeneration: (await stores.publication.owner()).writerGeneration,
+        writerGeneration: finalWriterGeneration,
+        ...(retirementResult ? { retirement: retirementResult } : {}),
         coldRecovery: input.coldRecovery === true,
         coldRefusalChecks,
+        recoveryCut: input.recoveryCut,
         originalActivation: initialActivation,
         platformFixture: `${actualPlatform.value} real inodes; explicit mount/proc-fd and placement mapping`,
         nativeCsiDeployment: false,
@@ -1164,8 +1261,11 @@ try {
 } finally {
   const cleanupErrors = [];
   for (const close of [
-    () => session?.close({ releaseActivation: false }),
-    () => stores?.close(),
+    () =>
+      retirementJoined
+        ? stores?.stopLocal()
+        : session?.close({ releaseActivation: false }),
+    () => (retirementJoined ? stores?.stopLocal() : stores?.close()),
   ]) {
     try {
       await close();
@@ -1181,10 +1281,14 @@ try {
   await worker?.close();
   Server.prototype.listen = nativeListen;
   Object.defineProperties(ManagedCsiMount.prototype, originalMount);
+  Object.defineProperty(
+    ManagedCsiRootDirectory,
+    'open',
+    originalRootDirectoryOpen,
+  );
   Object.defineProperty(process, 'platform', actualPlatform);
   Object.assign(fs, native);
   for (const handle of opened) await handle.close();
-  closedRoot = true;
   await rootHandle.close();
   await fs.rm(workspace, { recursive: true, force: true });
   assert.deepEqual(cleanupErrors, [], 'Unexpected private cleanup refusal');
