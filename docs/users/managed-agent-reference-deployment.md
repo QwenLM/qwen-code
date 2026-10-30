@@ -4,6 +4,11 @@
 
 The Managed Agent reference distribution is experimental. Its accepted initial topology is one Java control plane and its embedded Runtime Broker on one trusted Linux host, one MySQL database, and one compatible Qwen Hosted Harness. The compatibility manifest in each release is authoritative for that release.
 
+For a source-based Kubernetes installation with optional trusted-node tools and
+WebShell, see the separate
+[Helm deployment guide](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes).
+That chart does not extend this reference distribution's acceptance scope.
+
 ## Verify and extract
 
 Download the archive, its detached manifest, and `SHA256SUMS.txt` from the same GitHub prerelease. Verify them before extraction:
