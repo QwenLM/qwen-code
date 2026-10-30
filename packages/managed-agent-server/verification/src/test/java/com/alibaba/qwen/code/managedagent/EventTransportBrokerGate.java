@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.EventTransportConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
+import com.alibaba.qwen.code.managedagent.contracts.event.EventSubscriptions;
 import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
@@ -142,11 +143,9 @@ class EventTransportBrokerGate {
     @Autowired
     private ManagedAgentProperties properties;
 
-    @Autowired
     private Producer producer;
 
-    @Autowired
-    private ClientServiceProvider provider;
+    private final ClientServiceProvider provider = ClientServiceProvider.loadService();
 
     @Autowired
     private JournalEventTransport journalTransport;
@@ -159,7 +158,7 @@ class EventTransportBrokerGate {
 
     @Autowired
     @Qualifier("eventTransportOwnerConsumer")
-    private LitePushConsumer ownerConsumer;
+    private EventSubscriptions ownerConsumer;
 
     private final Map<String, List<Outcome>> outcomes =
             new ConcurrentHashMap<>();
@@ -178,7 +177,12 @@ class EventTransportBrokerGate {
     }
 
     @BeforeEach
-    void recordWakeOutcomes() {
+    void recordWakeOutcomes() throws Exception {
+        producer = provider.newProducerBuilder()
+                .setClientConfiguration(clientConfiguration())
+                .setTopics(properties.getEventTransport().getTopic())
+                .build();
+        opened.add(producer);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.activateForWake(anyString(), anyString())).thenReturn(true);
         doAnswer(invocation -> {

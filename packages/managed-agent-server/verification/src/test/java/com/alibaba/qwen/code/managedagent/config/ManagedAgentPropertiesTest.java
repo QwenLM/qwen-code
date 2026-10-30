@@ -645,16 +645,24 @@ public class ManagedAgentPropertiesTest {
                 com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore.class,
                 com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules.class)) {
             var root = java.nio.file.Path.of(marker.getProtectionDomain().getCodeSource().getLocation().toURI());
-            assertThat(java.nio.file.Files.isDirectory(root)).as("compiled module containing %s", marker).isTrue();
-            try (var paths = java.nio.file.Files.walk(root)) {
-                var names = paths.filter(path -> path.toString().endsWith(".class"))
-                        .map(root::relativize).map(java.nio.file.Path::toString)
-                        .filter(name -> !name.equals("module-info.class")).toList();
-                assertThat(names).as("classes containing %s", marker).isNotEmpty();
-                for (String name : names) {
-                    classes.add(Class.forName(name.substring(0, name.length() - ".class".length())
-                            .replace(java.io.File.separatorChar, '.'), false, marker.getClassLoader()));
+            List<String> names;
+            if (java.nio.file.Files.isDirectory(root)) {
+                try (var paths = java.nio.file.Files.walk(root)) {
+                    names = paths.map(root::relativize)
+                            .map(path -> path.toString().replace(java.io.File.separatorChar, '/'))
+                            .toList();
                 }
+            } else {
+                try (var jar = new java.util.jar.JarFile(root.toFile())) {
+                    names = jar.stream().map(java.util.jar.JarEntry::getName).toList();
+                }
+            }
+            var classNames = names.stream().filter(name -> name.endsWith(".class"))
+                    .filter(name -> !name.equals("module-info.class")).toList();
+            assertThat(classNames).as("classes containing %s", marker).isNotEmpty();
+            for (String name : classNames) {
+                classes.add(Class.forName(name.substring(0, name.length() - ".class".length())
+                        .replace('/', '.'), false, marker.getClassLoader()));
             }
         }
         return classes;
