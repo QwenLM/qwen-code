@@ -26,7 +26,7 @@
 import { NativeLspService } from '../native-lsp-service.js';
 import { EventEmitter } from 'events';
 import { pathToFileURL } from 'url';
-import * as path from 'path';
+import { WorkspaceContext } from '../../utils/workspaceContext.js';
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -117,13 +117,7 @@ function createService(workspaceRoot: string): NativeLspService {
     get: () => undefined,
     getActiveExtensions: () => [],
   };
-  const workspaceContext = {
-    getDirectories: () => [workspaceRoot],
-    isPathWithinWorkspace: () => true,
-    fileExists: async () => false,
-    readFile: async () => '{}',
-    resolvePath: (p: string) => path.resolve(workspaceRoot, p),
-  };
+  const workspaceContext = new WorkspaceContext(workspaceRoot);
   const fileDiscovery = {
     discoverFiles: async () => [],
     shouldIgnoreFile: () => false,
