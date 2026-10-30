@@ -977,6 +977,29 @@ describe('release workflow', () => {
     }
   });
 
+  it('retains standalone archives only after dry-run verification succeeds', () => {
+    const steps = releaseYaml.jobs.publish.steps;
+    const verifyIndex = steps.findIndex(
+      (step) => step.name === 'Verify Standalone Archives',
+    );
+    const uploadIndex = steps.findIndex((step) =>
+      String(step.uses ?? '').includes('actions/upload-artifact'),
+    );
+    expect(verifyIndex).toBeGreaterThanOrEqual(0);
+    expect(uploadIndex).toBeGreaterThan(verifyIndex);
+    const upload = steps[uploadIndex];
+    expect(upload.if).toBe("${{ needs.prepare.outputs.is_dry_run == 'true' }}");
+    expect(upload.with.name).toContain('needs.prepare.outputs.release_sha');
+    expect(upload.with.name).toContain('needs.prepare.outputs.release_version');
+    expect(upload.with.name).toContain('github.run_attempt');
+    expect(upload.with.path.split('\n')).toEqual([
+      'dist/standalone/qwen-code-*',
+      'dist/standalone/SHA256SUMS',
+    ]);
+    expect(upload.with['if-no-files-found']).toBe('error');
+    expect(upload.with['retention-days']).toBe(7);
+  });
+
   it('allows build artifact replacement when all jobs are rerun', () => {
     const upload = releaseYaml.jobs.quality_build.steps.find((step) =>
       String(step.uses ?? '').includes('actions/upload-artifact'),

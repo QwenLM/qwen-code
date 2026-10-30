@@ -752,6 +752,17 @@ jobs:
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts
 
+      - name: 'Retain verified dry-run standalone archives'
+        if: "${{ needs.prepare.outputs.is_dry_run == 'true' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-dry-run-standalone-${{ needs.prepare.outputs.release_version }}-${{ needs.prepare.outputs.release_sha }}-${{ github.run_attempt }}'
+          path: |-
+            dist/standalone/qwen-code-*
+            dist/standalone/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: 'error'
+
       - name: 'Auto-label internal CI PRs for release notes exclusion'
         continue-on-error: true
         if: |-
