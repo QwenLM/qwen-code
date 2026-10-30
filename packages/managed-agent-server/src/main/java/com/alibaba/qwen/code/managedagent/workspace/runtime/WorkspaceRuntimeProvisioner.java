@@ -33,7 +33,7 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey, String harnessSessionId) {
-        if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+        if (!WorkspaceExecutionProfile.admitsCapabilityDigest(scope.getCapabilityDigest())) {
             return delegate.createRequest(scope, isolationKey);
         }
         var resolved = resolver.resolve(harnessSessionId, scope.getLifecycleAuthority());

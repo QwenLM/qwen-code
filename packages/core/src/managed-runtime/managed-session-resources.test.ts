@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -624,7 +625,10 @@ describe('managed session input durability', () => {
       transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -656,7 +660,10 @@ describe('managed session input durability', () => {
       transcriptPath,
     });
     const reopened = await LocalManagedSessionAuthority.open({
-      lease: reopenLease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        reopenLease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',

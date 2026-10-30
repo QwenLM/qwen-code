@@ -73,8 +73,7 @@ public final class PublicationJournalFixture {
     public String commitDigest;
     public WorkspaceCsiReservationStore.Reservation csiReservation;
 
-    private PublicationJournalFixture(DataSource source,
-            boolean journalHeadAuthorization) {
+    private PublicationJournalFixture(DataSource source) {
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = new ManagedSessionStore(jdbc);
@@ -82,24 +81,22 @@ public final class PublicationJournalFixture {
                 new AesGcmSecretProtector("key", new byte[32]),
                 () -> "binding-1");
         executions = new JdbcToolExecutionRepository(source);
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        store = newStore(10 * ALLOCATION, 10);
     }
 
-    public static PublicationJournalFixture create(DataSource source,
-            boolean journalHeadAuthorization) {
-        return create(source, journalHeadAuthorization, null);
+    public static PublicationJournalFixture create(DataSource source) {
+        return create(source, null);
     }
 
-    public static PublicationJournalFixture create(DataSource source,
-            boolean journalHeadAuthorization, WorkspaceCsiRegistration registration) {
+    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration) {
         PublicationJournalFixture fixture =
-                new PublicationJournalFixture(source, journalHeadAuthorization);
+                new PublicationJournalFixture(source);
         fixture.populate(source, registration, false);
         return fixture;
     }
 
     public static PublicationJournalFixture createSessionIsolated(DataSource source) {
-        var fixture = new PublicationJournalFixture(source, false);
+        var fixture = new PublicationJournalFixture(source);
         fixture.populate(source, null, true);
         return fixture;
     }
@@ -207,16 +204,10 @@ public final class PublicationJournalFixture {
     }
 
     public ToolPublicationStore newStore(long bytes, long count) {
-        return newStore(bytes, count, false);
-    }
-
-    public ToolPublicationStore newStore(long bytes, long count,
-            boolean journalHeadAuthorization) {
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
                 bindings,
                 new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, bytes,
-                        bytes, count),
-                journalHeadAuthorization);
+                        bytes, count));
     }
 
     public JsonNode reserve() {

@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   HIDDEN_COMPOSER_MODEL_IDS,
+  appendUnavailableComposerModels,
   isDiscontinuedSettingsModel,
   isStandaloneModelPickerUnavailable,
 } from './composerModels';
@@ -124,5 +125,56 @@ describe('isStandaloneModelPickerUnavailable', () => {
         ],
       }),
     ).toBe(false);
+  });
+});
+
+describe('appendUnavailableComposerModels', () => {
+  it('appends injected models after available ones', () => {
+    expect(
+      appendUnavailableComposerModels(
+        [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+        [{ id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' }],
+      ),
+    ).toEqual([
+      { id: 'qwen-plus', label: 'Qwen Plus' },
+      {
+        id: 'qwen-max',
+        label: 'Qwen Max',
+        tooltip: 'Need Pro',
+        disabled: true,
+      },
+    ]);
+  });
+
+  it('keeps an available model when the host injects the same id', () => {
+    expect(
+      appendUnavailableComposerModels(
+        [{ id: 'qwen-plus', label: 'Live' }],
+        [{ id: 'qwen-plus', label: 'Catalog', tooltip: 'Locked' }],
+      ),
+    ).toEqual([{ id: 'qwen-plus', label: 'Live' }]);
+  });
+
+  it('skips empty, hidden, and duplicate injected ids', () => {
+    expect(
+      appendUnavailableComposerModels(
+        [{ id: 'qwen-plus' }],
+        [
+          { id: '  ' },
+          { id: 'coder-model(qwen-oauth)', tooltip: 'hidden' },
+          { id: 'qwen-max', tooltip: 'first' },
+          { id: 'qwen-max', tooltip: 'second' },
+        ],
+      ),
+    ).toEqual([
+      { id: 'qwen-plus' },
+      { id: 'qwen-max', tooltip: 'first', disabled: true },
+    ]);
+  });
+
+  it('leaves the list unchanged when the host omits unavailable models', () => {
+    expect(
+      appendUnavailableComposerModels([{ id: 'qwen-plus', label: 'Plus' }]),
+    ).toEqual([{ id: 'qwen-plus', label: 'Plus' }]);
   });
 });

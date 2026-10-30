@@ -40,7 +40,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                         identity(binding.getBindingId()), binding.getGeneration())
                 || exists(
                         connection,
-                        "SELECT 1 FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT' AND"
+                        "SELECT 1 FROM ma_operation WHERE operation_kind IN ('CSI_RETIREMENT', 'WORKSPACE_RETIREMENT') AND"
                             + " target_kind = 'RUNTIME_BINDING' AND target_id = ? AND"
                             + " target_revision = ? LIMIT 1",
                         identity(binding.getBindingId()),

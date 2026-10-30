@@ -182,14 +182,17 @@ export function fakeModelLaunchArgs(fakeServer: FakeOpenAIServer): string[] {
 }
 
 /**
- * Builds the `waitFor` both suites use: poll for the condition actually being
- * waited on, so a fast runner does not burn a fixed budget and a slow one is
- * not given up on early, and name it in the failure so a timeout says which
- * step never happened.
+ * Builds the shared `waitFor`: poll for the condition actually being waited
+ * on, so a fast runner does not burn a fixed budget and a slow one is not
+ * given up on early, and name it in the failure so a timeout says which step
+ * never happened. Four interactive suites use it — the two skill-hook suites,
+ * `cli/tool-hook-context` and `cli/tool-hook-updated-input` — and its budget
+ * is the 60s CI default, so each caller's `it()` cap has to cover one budget
+ * per wait plus setup slack.
  */
 export function makeWaitFor(rig: TestRig, getOutput: () => string) {
   return async (label: string, done: () => boolean): Promise<void> => {
-    const ok = await rig.poll(done, 30000, 100);
+    const ok = await rig.poll(done, rig.getDefaultTimeout(), 100);
     expect(ok, `timed out waiting for ${label}. Output:\n${getOutput()}`).toBe(
       true,
     );

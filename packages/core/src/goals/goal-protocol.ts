@@ -205,17 +205,6 @@ export type GoalEvidenceProofKind =
   | 'execution_output'
   | 'external_fact';
 
-export function isGoalEvidenceProofKind(
-  value: unknown,
-): value is GoalEvidenceProofKind {
-  return (
-    value === 'user_input' ||
-    value === 'delivered_output' ||
-    value === 'execution_output' ||
-    value === 'external_fact'
-  );
-}
-
 export interface GoalRecord {
   goalId: string;
   revision: number;

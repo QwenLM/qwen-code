@@ -47,14 +47,15 @@ class SshWorkspaceStoreTest {
     @BeforeEach
     void setup() {
         var source = source();
-        ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         store = new SshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
     }
 
     javax.sql.DataSource source() {
-        return new DriverManagerDataSource("jdbc:h2:mem:ssh-" + UUID.randomUUID()
+        var source = new DriverManagerDataSource("jdbc:h2:mem:ssh-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        ManagedSchema.initialize(source);
+        return source;
     }
 
     @Test

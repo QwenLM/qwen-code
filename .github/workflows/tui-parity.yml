@@ -4,24 +4,154 @@ on:
   pull_request:
     paths:
       - 'packages/**'
-      - 'scripts/tui-parity/**'
-      - 'scripts/build*'
+      - 'scripts/**'
       - 'integration-tests/**'
+      - 'integrations/**'
+      - 'patches/**'
       - 'esbuild.config.js'
       - '.github/workflows/tui-parity.yml'
+      - '.github/actions/**'
+      - '.github/scripts/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.json'
+      - '.npmrc'
+      - '.nvmrc'
   workflow_dispatch:
+  schedule:
+    # 03:17 Asia/Shanghai; avoid the top-of-hour hosted runner burst.
+    - cron: '17 19 * * *'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}'
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
 
 jobs:
+  changes:
+    name: 'Check TUI impact'
+    # Door for the parity/noflicker lanes below: route it like them (#13245) so
+    # a starved hosted queue cannot hold their gate — it sat 40+ minutes there
+    # while the pool stood idle. Untrusted fork PRs stay hosted: for
+    # pull_request events the script below is read from the PR's own YAML.
+    # The job runs no checkout and no PR code, so no pool-hygiene step applies.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'read'
+    outputs:
+      component: '${{ steps.changes.outputs.component }}'
+      render: '${{ steps.changes.outputs.render }}'
+      input: '${{ steps.changes.outputs.input }}'
+      recovery: '${{ steps.changes.outputs.recovery }}'
+      integration: '${{ steps.changes.outputs.integration }}'
+      full: '${{ steps.changes.outputs.full }}'
+      reason: '${{ steps.changes.outputs.reason }}'
+    steps:
+      - uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        id: 'changes'
+        with:
+          script: |-
+            const selected = { component: false, render: false, input: false, recovery: false, integration: false, full: false };
+            const reasons = new Set();
+            const all = () => Object.keys(selected).forEach((key) => { selected[key] = true; });
+            const groups = {
+              render: [
+                /^packages\/cli\/src\/ui\/.*(status.?line|footer|header|viewport|transcript|messages|markdown|theme|colors|layout|textUtils|HistoryItemDisplay|useGitBranchName|hooksCommand|contexts\/SessionContext|model\/)/i,
+                /^packages\/core\/src\/telemetry\/uiTelemetry/i,
+                /^integration-tests\/(renderer-matrix|interactive\/(tui-migration|interactive-session-viewport|statusline-parity))/i,
+              ],
+              input: [
+                /^packages\/cli\/src\/(ui\/.*(input|keypress|key-map|keyMatchers|kitty|mouse|focus|editor|clipboard|paste|text-buffer|line-edit|vim|completion|atCommandProcessor|useShellHistory)|utils\/.*(clipboard|paste|editor))/i,
+                /^packages\/core\/src\/(utils\/editor|services\/visionBridge)/i,
+                /^integration-tests\/interactive\/tui-(input-ownership|editor-parity|clipboard-source)/i,
+              ],
+              recovery: [
+                /^packages\/cli\/src\/ui\/.*(session|resume|rewind|restore|checkpoint|history|item-projection|exit-|backgroundWork|useBranchCommand|commands\/(clear|quit))/i,
+                /^packages\/core\/src\/(core\/session-recovery|services\/(session|chatRecording|fileHistory|chatCompression|visionBridge)|config\/storage|tools\/(edit|write-file)|utils\/(api-history-metadata|transcript-records|conversation-chain|jsonl-utils|sessionStorageUtils|atomicFileWrite|paths))/i,
+                /^integration-tests\/interactive\/tui-(session-recovery|checkpoint-restore)/i,
+              ],
+              integration: [
+                /^packages\/cli\/src\/(dualOutput\/|ui\/.*(shell|client-tool-run|dialogs-confirm|extension|useReactToolScheduler|keyToAnsi)|services\/(interactive-mod|mod-session)|config\/extension|commands\/extensions)/i,
+                /^packages\/core\/src\/(extension|confirmation-bus|permissions|tools\/|services\/(shellExecutionService|backgroundShellRegistry|shellContextEnv)|sandbox\/|.*runtime-shell|mods\/tool)/i,
+                /^integration-tests\/interactive\/tui-(foreground-shell|extension-acquisition|dual-output)/i,
+              ],
+            };
+            const sharedTurn = /^packages\/cli\/src\/(ui\/(opentui\/(live-turn|live-session|event-adapter)|hooks\/(use-llm-stream|useReactToolScheduler))|services\/interactive-mod)|^packages\/core\/src\/core\/(client|turn|llm-chat|coreToolScheduler)/;
+            const broad = [
+              /(^|\/)(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*\.json)$/,
+              /^(\.npmrc|\.nvmrc|esbuild\.config\.js)$/,
+              /^patches\//,
+              /^\.github\/(actions\/|scripts\/|workflows\/tui-parity\.yml$)/,
+              /^scripts\/(tui-parity\/|tests\/(e2e-workflow|tui-impact)\.test\.js$|build|prepare|copy_|generate-git|cli-entry)/,
+              /^packages\/core\/src\/config\/config\./,
+              /^packages\/cli\/(scripts\/|src\/(utils\/(tui-runtime|npm-runtime)\.|index\.|cli\.|llm\.|config\/(config|settings)\.|ui\/(App[./]|AppContainer[./]|startInteractiveUI\.|opentui\/(opentui-(runtime|host|app-shell|assets)|renderer-selection|start-opentui-ui))))/,
+              /^integration-tests\/(test-helper|interactive\/interactive-session\.|vitest|installed\/)/,
+            ];
+            try {
+              if (context.eventName !== 'pull_request') {
+                all();
+                reasons.add('Scheduled or manual full acceptance');
+              } else {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  ...context.repo,
+                  pull_number: context.payload.pull_request.number,
+                  per_page: 100,
+                });
+                // GitHub caps listFiles at 3,000; never turn missing API evidence into a green skip.
+                if (!Number.isInteger(context.payload.pull_request.changed_files) || files.length !== context.payload.pull_request.changed_files || files.length >= 3000) {
+                  throw new Error('Incomplete PR file list');
+                }
+                if (files.some((file) => typeof file.filename !== 'string' || !file.filename || (file.status === 'renamed' && typeof file.previous_filename !== 'string'))) {
+                  throw new Error('Incomplete PR file paths');
+                }
+                const paths = new Set(files.flatMap((file) => [file.filename, file.previous_filename].filter(Boolean)));
+                for (const path of paths) {
+                  if (/^(docs\/|packages\/managed-agent-server\/|packages\/vscode-ide-companion\/src\/)/.test(path)) continue;
+                  if (broad.some((pattern) => pattern.test(path))) {
+                    all();
+                    reasons.add('Shared renderer, runtime, dependency or test/build infrastructure');
+                    continue;
+                  }
+                  let mapped = false;
+                  for (const [group, patterns] of Object.entries(groups)) {
+                    if (patterns.some((pattern) => pattern.test(path)) || sharedTurn.test(path)) {
+                      selected[group] = selected.component = true;
+                      reasons.add(`${group} mechanism`);
+                      mapped = true;
+                    }
+                  }
+                  if (!mapped && /^(packages\/|integrations\/|scripts\/|integration-tests\/)/.test(path)) {
+                    selected.component = true;
+                    reasons.add('Unmapped source or test change: component checks; maintainers should consider manual full acceptance');
+                  }
+                }
+              }
+            } catch {
+              all();
+              reasons.add('Impact detection failed: conservative full acceptance');
+              core.setFailed('Cannot classify a complete PR diff; full acceptance requested');
+            }
+            if (!reasons.size) reasons.add('No TUI impact');
+            const reason = [...reasons].join('; ');
+            for (const [key, value] of Object.entries(selected)) core.setOutput(key, String(value));
+            core.setOutput('reason', reason);
+            await core.summary.addHeading('TUI acceptance selection').addTable([
+              [{ data: 'Lane', header: true }, { data: 'Selected', header: true }],
+              ...Object.entries(selected).map(([key, value]) => [key, String(value)]),
+            ]).addRaw(reason).write();
+
   parity:
     name: 'TUI parity snapshots (ink vs opentui)'
+    needs: 'changes'
+    if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.component != 'false') }}"
     # Same-repo PRs, write-access authors and dispatches run on the ECS pool
     # (#13245: both jobs sat 26+ minutes in the hosted queue); other fork PRs
     # stay hosted because these jobs build the PR's code. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # Cold setup/build plus three serial product legs can exceed 30 minutes.
+    timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -55,7 +185,7 @@ jobs:
       # silently follow 'latest'.
       - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:
-          bun-version: '1.3.14'
+          bun-version: '1.4.4'
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -79,12 +209,15 @@ jobs:
             echo "QWEN_CODE_SYSTEM_DEFAULTS_PATH=$fixture_root/defaults.json"
           } >> "$GITHUB_ENV"
       - name: 'Build cli'
-        run: 'npm run build'
+        run: 'npm run build -- --cli-only'
       - name: 'Component parity snapshots (ink vs opentui)'
+        if: "${{ needs.changes.result != 'success' || needs.changes.outputs.full != 'false' || needs.changes.outputs.component == 'true' }}"
         run: 'bash scripts/tui-parity/component-parity.sh'
       - name: 'Bundle the product for runtime and renderer comparison'
+        if: "${{ needs.changes.result != 'success' || needs.changes.outputs.full != 'false' || needs.changes.outputs.render == 'true' || needs.changes.outputs.input == 'true' || needs.changes.outputs.recovery == 'true' || needs.changes.outputs.integration == 'true' }}"
         run: 'npm run bundle'
       - name: 'Three-leg product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
+        if: "${{ needs.changes.result != 'success' || needs.changes.outputs.full != 'false' }}"
         env:
           QWEN_SANDBOX: 'false'
           QWEN_TUI_ACCEPTANCE_OUT: '${{ runner.temp }}/tui-migration-${{ github.run_id }}-${{ github.run_attempt }}'
@@ -99,7 +232,44 @@ jobs:
           for leg in node:ink bun:ink bun:opentui; do
             export QWEN_E2E_RUNTIME="${leg%%:*}"
             export QWEN_E2E_RENDERER="${leg#*:}"
-            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+          done
+          exit "$failed"
+      - name: 'Targeted product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
+        if: "${{ needs.changes.result == 'success' && needs.changes.outputs.full == 'false' && (needs.changes.outputs.render == 'true' || needs.changes.outputs.input == 'true' || needs.changes.outputs.recovery == 'true' || needs.changes.outputs.integration == 'true') }}"
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_TUI_ACCEPTANCE_OUT: '${{ runner.temp }}/tui-migration-${{ github.run_id }}-${{ github.run_attempt }}'
+          TUI_RENDER: '${{ needs.changes.outputs.render }}'
+          TUI_INPUT: '${{ needs.changes.outputs.input }}'
+          TUI_RECOVERY: '${{ needs.changes.outputs.recovery }}'
+          TUI_INTEGRATION: '${{ needs.changes.outputs.integration }}'
+        run: |-
+          set -euo pipefail
+          QWEN_HOME="$(mktemp -d "${RUNNER_TEMP}/tui-migration-home.XXXXXX")"
+          export QWEN_HOME
+          trap 'rm -rf "$QWEN_HOME"' EXIT
+          cd integration-tests
+          tests=()
+          if [ "$TUI_RENDER" = true ]; then
+            npx vitest run renderer-matrix.test.ts interactive/interactive-session-viewport.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
+            tests+=(interactive/tui-migration.test.ts interactive/statusline-parity.test.ts)
+          fi
+          if [ "$TUI_INPUT" = true ]; then
+            tests+=(interactive/tui-input-ownership.test.ts interactive/tui-editor-parity.test.ts interactive/tui-clipboard-source.test.ts)
+          fi
+          if [ "$TUI_RECOVERY" = true ]; then
+            tests+=(interactive/tui-session-recovery.test.ts)
+          fi
+          if [ "$TUI_INTEGRATION" = true ]; then
+            tests+=(interactive/tui-foreground-shell.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-dual-output.test.ts)
+          fi
+          [ "${#tests[@]}" -gt 0 ]
+          failed=0
+          for leg in node:ink bun:ink bun:opentui; do
+            export QWEN_E2E_RUNTIME="${leg%%:*}"
+            export QWEN_E2E_RENDERER="${leg#*:}"
+            npx vitest run "${tests[@]}" --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
           done
           exit "$failed"
       - name: 'Upload product acceptance evidence'
@@ -115,7 +285,9 @@ jobs:
 
   noflicker:
     name: 'OpenTUI no-flicker gate'
-    # No-flicker gate; always runs. With secrets.QWEN_API_KEY it drives a
+    needs: 'changes'
+    if: "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.full != 'false' || needs.changes.outputs.render == 'true' || needs.changes.outputs.recovery == 'true') }}"
+    # With secrets.QWEN_API_KEY it drives a
     # real model conversation; without it (fork PRs never receive secrets)
     # accept-noflicker.sh falls back to the offline scripted-stream gate.
     # Routed like `parity` above.
@@ -156,17 +328,213 @@ jobs:
       # silently follow 'latest'.
       - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:
-          bun-version: '1.3.14'
+          bun-version: '1.4.4'
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
       - name: 'Build cli'
-        run: 'npm run build'
+        run: 'npm run build -- --cli-only'
       - name: 'OpenTUI no-flicker gate (0 clears, balanced DEC2026)'
+        if: "${{ needs.changes.result != 'success' || needs.changes.outputs.full != 'false' || needs.changes.outputs.render == 'true' }}"
         env:
           # The script's default report dir is a fixed /tmp path, which
           # concurrent runs on one ECS host would share.
           OUT: '${{ runner.temp }}/opentui-noflicker-out'
         run: 'bash scripts/tui-parity/accept-noflicker.sh'
+      - name: 'Bundle the product for cold checkpoint recovery'
+        if: "${{ needs.changes.result != 'success' || needs.changes.outputs.full != 'false' || needs.changes.outputs.recovery == 'true' }}"
+        run: 'npm run bundle'
+      - name: 'Cold checkpoint recovery (Node+Ink, Bun+Ink, Bun+OpenTUI)'
+        if: "${{ needs.changes.result != 'success' || needs.changes.outputs.full != 'false' || needs.changes.outputs.recovery == 'true' }}"
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_TUI_ACCEPTANCE_OUT: '${{ runner.temp }}/tui-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}'
+        run: |-
+          set -euo pipefail
+          cd integration-tests
+          failed=0
+          for leg in node:ink bun:ink bun:opentui; do
+            export QWEN_E2E_RUNTIME="${leg%%:*}"
+            export QWEN_E2E_RENDERER="${leg#*:}"
+            npx vitest run interactive/tui-checkpoint-restore.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+          done
+          exit "$failed"
+      - name: 'Upload cold checkpoint recovery evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'tui-checkpoint-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/tui-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}/'
+          if-no-files-found: 'warn'
+
+  installed-npm:
+    name: 'Installed npm Node26 private Bun acceptance'
+    if: "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 60
+    outputs:
+      canonical-artifact-id: '${{ steps.canonical.outputs.artifact-id }}'
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '26.4.0'
+          package-manager-cache: false
+      - name: 'Capture actual npm product toolchain'
+        run: |-
+          set -euo pipefail
+          echo "QWEN_INSTALLED_NODE=$(command -v node)" >> "$GITHUB_ENV"
+          echo "QWEN_INSTALLED_NPM=$(realpath "$(command -v npm)")" >> "$GITHUB_ENV"
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: 'Install dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+      - name: 'Build and bundle checkout'
+        run: 'npm run build && npm run bundle'
+      - name: 'Nine installed npm acceptance cases'
+        env:
+          QWEN_INSTALLED_OUT: '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}'
+          QWEN_E2E_RENDERER: 'opentui'
+        run: 'npx vitest run --config integration-tests/vitest.installed.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false'
+      - name: 'Upload canonical installed npm artifact'
+        id: 'canonical'
+        if: '${{ success() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        with:
+          name: 'installed-npm-canonical-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: |-
+            ${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}/AUDITED-ARTIFACT.json
+            ${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}/published-files.json
+            ${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}/tarballs/*.tgz
+          if-no-files-found: 'error'
+          retention-days: 1
+      - name: 'Upload installed npm evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        with:
+          name: 'installed-npm-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}'
+          if-no-files-found: 'error'
+
+  installed-distribution:
+    name: 'Installed npm global and npx (${{ matrix.target }})'
+    needs: 'installed-npm'
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 120
+    permissions:
+      contents: 'read'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: 'ubuntu-24.04'
+            target: 'linux-x64'
+            platform: 'linux'
+            arch: 'x64'
+          - os: 'ubuntu-24.04-arm'
+            target: 'linux-arm64'
+            platform: 'linux'
+            arch: 'arm64'
+          - os: 'macos-15'
+            target: 'darwin-arm64'
+            platform: 'darwin'
+            arch: 'arm64'
+          - os: 'macos-15-intel'
+            target: 'darwin-x64'
+            platform: 'darwin'
+            arch: 'x64'
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+      - name: 'Prepare distribution attempt paths'
+        env:
+          DISTRIBUTION_TARGET: '${{ matrix.target }}'
+        run: |-
+          set -euo pipefail
+          attempt="${RUNNER_TEMP}/qwen-distribution-${DISTRIBUTION_TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$attempt"
+          printf '%s\n' "$DISTRIBUTION_TARGET" > "$attempt/target.txt"
+          {
+            echo "QWEN_DISTRIBUTION_ARTIFACT_DIR=${RUNNER_TEMP}/qwen-distribution-artifact"
+            echo "QWEN_DISTRIBUTION_ARTIFACT=${RUNNER_TEMP}/qwen-distribution-bound.json"
+            echo "QWEN_DISTRIBUTION_ROOT_OUT=$attempt"
+          } >> "$GITHUB_ENV"
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: 'Capture actual Node22 npm toolchain'
+        run: |-
+          set -euo pipefail
+          test "$(node --version)" = 'v22.23.2'
+          echo "QWEN_DISTRIBUTION_NODE22=$(command -v node)" >> "$GITHUB_ENV"
+          echo "QWEN_DISTRIBUTION_NPM22=$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$(command -v npm)")" >> "$GITHUB_ENV"
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '26.4.0'
+          package-manager-cache: false
+      - name: 'Capture actual Node26 npm toolchain'
+        run: |-
+          set -euo pipefail
+          test "$(node --version)" = 'v26.4.0'
+          echo "QWEN_DISTRIBUTION_NODE26=$(command -v node)" >> "$GITHUB_ENV"
+          echo "QWEN_DISTRIBUTION_NPM26=$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$(command -v npm)")" >> "$GITHUB_ENV"
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: 'Assert actual distribution host'
+        env:
+          EXPECTED_PLATFORM: '${{ matrix.platform }}'
+          EXPECTED_ARCH: '${{ matrix.arch }}'
+        run: |-
+          set -euo pipefail
+          mkdir -p "$QWEN_DISTRIBUTION_ROOT_OUT"
+          node -e 'const assert=require("node:assert/strict"); assert.equal(process.platform,process.env.EXPECTED_PLATFORM); assert.equal(process.arch,process.env.EXPECTED_ARCH); console.log(JSON.stringify({platform:process.platform,arch:process.arch,node:process.version}))' | tee "$QWEN_DISTRIBUTION_ROOT_OUT/host.txt"
+          if [ "$EXPECTED_PLATFORM" = 'linux' ]; then
+            getconf GNU_LIBC_VERSION | tee -a "$QWEN_DISTRIBUTION_ROOT_OUT/host.txt"
+          fi
+      - name: 'Install dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+      - name: 'Build and bundle checkout'
+        run: 'npm run build && npm run bundle'
+      - name: 'Download canonical installed npm artifact'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c'
+        with:
+          artifact-ids: '${{ needs.installed-npm.outputs.canonical-artifact-id }}'
+          path: '${{ env.QWEN_DISTRIBUTION_ARTIFACT_DIR }}'
+      - name: 'Bind canonical artifact to this checkout'
+        run: 'node --import tsx integration-tests/installed/bind-distribution-artifact.ts "$QWEN_DISTRIBUTION_ARTIFACT_DIR" "$QWEN_DISTRIBUTION_ARTIFACT"'
+      - name: 'Twelve Node22 global and npx acceptance cases'
+        env:
+          QWEN_DISTRIBUTION_NODE: '${{ env.QWEN_DISTRIBUTION_NODE22 }}'
+          QWEN_DISTRIBUTION_NPM: '${{ env.QWEN_DISTRIBUTION_NPM22 }}'
+          QWEN_DISTRIBUTION_NODE_VERSION: '22.23.2'
+          QWEN_DISTRIBUTION_OUT: '${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/node22'
+        run: 'npx vitest run --config integration-tests/vitest.distribution.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false'
+      - name: 'Twelve Node26 global and npx acceptance cases'
+        env:
+          QWEN_DISTRIBUTION_NODE: '${{ env.QWEN_DISTRIBUTION_NODE26 }}'
+          QWEN_DISTRIBUTION_NPM: '${{ env.QWEN_DISTRIBUTION_NPM26 }}'
+          QWEN_DISTRIBUTION_NODE_VERSION: '26.4.0'
+          QWEN_DISTRIBUTION_OUT: '${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/node26'
+        run: 'npx vitest run --config integration-tests/vitest.distribution.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false'
+      - name: 'Upload distribution attempt evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        with:
+          name: 'installed-distribution-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: |-
+            ${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}
+            ${{ env.QWEN_DISTRIBUTION_ARTIFACT }}
+            !${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/**/home/.npm/**
+            !${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/**/verified-tar/**
+            !${{ env.QWEN_DISTRIBUTION_ROOT_OUT }}/**/global-ignore-scripts/prefix/**
+          if-no-files-found: 'error'

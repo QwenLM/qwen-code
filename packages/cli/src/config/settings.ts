@@ -37,6 +37,7 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
+import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
@@ -1605,6 +1606,9 @@ function readSettingsLayers(
   // the settings to avoid a cycle
   if (!opts.skipLoadEnvironment) {
     loadEnvironment(tempMergedSettings, workspaceDir);
+    // `verifyPr` is a workspace-restricted root, so the merged value already
+    // excludes a cloned repository's choice of publishing target.
+    applyVerifyPrCoordinateEnv(tempMergedSettings.verifyPr);
   }
 
   // Create LoadedSettings first
