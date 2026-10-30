@@ -57,7 +57,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ignored -> CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable()));
     }
 
-    WorkspaceRuntimeTransport(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport delegate,
+    public WorkspaceRuntimeTransport(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport delegate,
             WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition) {

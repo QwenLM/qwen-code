@@ -10,6 +10,8 @@ import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistratio
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import java.util.concurrent.CompletableFuture;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRecoveryCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
@@ -228,7 +230,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.localProvisioner = baseProvisioner;
         java.util.function.Function<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord, CompletionStage<Void>> verifyExternal =
                 baseProvisioner instanceof ExternalWorkspaceProvisioner external ? external::verifyAcquisition
-                        : ignored -> CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable());
+                        : ignored -> CompletableFuture.failedFuture(
+                                com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository, verifyExternal);
@@ -342,7 +345,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     @Override
     public boolean supportsWorkspaceClose(String profile) {
-        return com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
                 ? ExternalWorkspaceProvisioner.KIND.equals(brokerSettings.getProvisioner())
                         && externalRegistrations != null && service.supportsDrainedStopKind(ExternalWorkspaceProvisioner.KIND)
                 : supportsWorkspaceClose();
