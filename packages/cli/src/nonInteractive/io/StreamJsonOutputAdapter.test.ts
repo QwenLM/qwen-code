@@ -1112,6 +1112,54 @@ describe('StreamJsonOutputAdapter', () => {
       );
     });
 
+    it('should stop reporting the refusal once the next turn answers', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      const refused = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(refused.is_error).toBe(true);
+
+      // The latch belongs to the turn it was set in; the result that ends that
+      // turn clears it, so the next prompt's genuine answer is not reported as
+      // a refusal.
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Second answer',
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.subtype).toBe('success');
+      expect(parsed.result).toBe('Second answer');
+    });
+
     it('should use provided summary over extracted text', () => {
       stdoutWriteSpy.mockClear();
       adapter.emitResult({
