@@ -220,9 +220,13 @@ into a worktree watch.
   the dirty gate ignores ignored files on purpose, and the merge must not
   destroy them. The same protection covers submodule alignment: before a
   checked-out submodule is reset to the commit the PR head records, its
-  ignored files are intersected with the target commit's tracked paths; a
-  collision leaves the submodule untouched and answers `synced: false`
-  naming `submodule: path`.
+  ignored files are matched against the target commit's tracked paths —
+  the exact path and file/directory transitions in either direction (an
+  ignored directory the target tracks as a blob, or an ignored file the
+  target tracks under as a directory). A collision leaves the submodule
+  untouched and answers `synced: false` naming `submodule: path`. A path
+  listing that cannot be read (a failed or over-buffer enumeration) is a
+  refusal too — never an assumption that there is nothing to lose.
 - The PR head is fetched into the watch's private ref
   (`refs/qwen-autofix/pr-<n>/head`, the same ref prepare uses) and read
   from there — never from the shared `FETCH_HEAD`, which a concurrent

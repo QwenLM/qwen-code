@@ -43,6 +43,8 @@ const mocks = vi.hoisted(() => ({
   // Runs right after a real networkGit call: a concurrent fetch or branch
   // switch in the user's checkout, for the in-place race regressions.
   afterFetch: null as (() => void) | null,
+  // Makes the ignored-file listing throw, for the fail-closed regression.
+  failListings: false,
 }));
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
@@ -66,6 +68,18 @@ vi.mock('./worktree.js', async (importOriginal) => {
       const out = actual.networkGit(args);
       mocks.afterFetch?.();
       return out;
+    },
+  };
+});
+vi.mock('../review/lib/git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../review/lib/git.js')>();
+  return {
+    ...actual,
+    gitRaw: (...args: string[]) => {
+      if (mocks.failListings && args.includes('--ignored')) {
+        throw new Error('simulated listing failure (ENOBUFS)');
+      }
+      return actual.gitRaw(...args);
     },
   };
 });
@@ -195,6 +209,7 @@ describe('runSync (real git, bare remote)', () => {
 
   afterEach(() => {
     mocks.afterFetch = null;
+    mocks.failListings = false;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
@@ -1185,6 +1200,88 @@ describe('runSync (real git, bare remote)', () => {
       expect(outcome).toMatchObject({ synced: false, moved: true });
       expect(outcome.reason).toMatch(/vendor\/sub: secret\.env/);
       // The user's bytes and the submodule tip both survive.
+      expect(readFileSync(join(inSub, 'secret.env'), 'utf8')).toBe(
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    /** Bumps the PR head's gitlink to a submodule commit tracking `files`. */
+    const bumpSubmoduleTo = (files: Record<string, string>) => {
+      const sub = join(base, 'sub-ip');
+      for (const [name, content] of Object.entries(files)) {
+        const p = join(sub, name);
+        mkdirSync(dirname(p), { recursive: true });
+        writeFileSync(p, content);
+        run(sub, 'add', name);
+      }
+      run(sub, 'commit', '-q', '-m', 'bump sub files');
+      const s3 = run(sub, 'rev-parse', 'HEAD');
+      const author = join(base, 'author-ip');
+      run(author, 'update-index', '--cacheinfo', `160000,${s3},vendor/sub`);
+      run(author, 'commit', '-q', '-m', 'bump gitlink');
+      run(author, 'push', '-q', 'origin', 'HEAD:feat');
+      run(
+        remote,
+        'update-ref',
+        'refs/pull/7/head',
+        run(author, 'rev-parse', 'HEAD'),
+      );
+    };
+
+    /** Ignores `pattern` inside the checked-out submodule. */
+    const ignoreInSubmodule = (inSub: string, pattern: string) => {
+      const subGitDir = run(inSub, 'rev-parse', '--absolute-git-dir');
+      mkdirSync(join(subGitDir, 'info'), { recursive: true });
+      writeFileSync(join(subGitDir, 'info', 'exclude'), `${pattern}\n`);
+    };
+
+    it('refuses when the target tracks a blob where an ignored directory sits', () => {
+      const { s1, inSub } = withSubmodule();
+      mkdirSync(join(inSub, 'local-dir'), { recursive: true });
+      writeFileSync(
+        join(inSub, 'local-dir', 'secret.env'),
+        'DIR_LOCAL_WORK=do-not-delete',
+      );
+      ignoreInSubmodule(inSub, 'local-dir/');
+      bumpSubmoduleTo({ 'local-dir': 'REMOTE_BLOB=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: local-dir/);
+      expect(readFileSync(join(inSub, 'local-dir', 'secret.env'), 'utf8')).toBe(
+        'DIR_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    it('refuses when the target tracks a directory where an ignored file sits', () => {
+      const { s1, inSub } = withSubmodule();
+      writeFileSync(join(inSub, 'local-file'), 'FILE_LOCAL_WORK=do-not-delete');
+      ignoreInSubmodule(inSub, 'local-file');
+      bumpSubmoduleTo({ 'local-file/remote.txt': 'REMOTE=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: local-file\/remote\.txt/);
+      expect(readFileSync(join(inSub, 'local-file'), 'utf8')).toBe(
+        'FILE_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    it('refuses the reset when the ignored-file listing cannot be read', () => {
+      const { s1, inSub } = withSubmodule();
+      writeFileSync(
+        join(inSub, 'secret.env'),
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      ignoreInSubmodule(inSub, 'secret.env');
+      bumpSubmoduleTo({ 'secret.env': 'REMOTE_BYTES=1' });
+      // A failed enumeration (e.g. a listing past the command buffer) must
+      // refuse the reset, not read as "no ignored files".
+      mocks.failListings = true;
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/unreadable/);
       expect(readFileSync(join(inSub, 'secret.env'), 'utf8')).toBe(
         'SUBMODULE_LOCAL_WORK=do-not-delete',
       );

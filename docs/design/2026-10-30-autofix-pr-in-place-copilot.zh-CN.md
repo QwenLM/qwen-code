@@ -183,8 +183,11 @@ worktree watch。
   形式持有的路径时，git 拒绝，回答 `synced: false` 并点名冲突路径——
   脏门禁刻意忽略 ignored 文件，merge 就绝不能销毁它们。同样的保护覆盖
   子模块对齐：已检出的子模块被 reset 到 PR head 记录的提交之前，先把它
-  的 ignored 文件与目标提交跟踪的路径求交；有冲突就原样保留该子模块，
-  回答 `synced: false` 并以 `子模块: 路径` 点名。
+  的 ignored 文件与目标提交跟踪的路径匹配——精确路径，以及双向的文件/
+  目录转换（目标把 ignored 目录当 blob 跟踪，或把 ignored 文件当目录在
+  其下跟踪）。有冲突就原样保留该子模块，回答 `synced: false` 并以
+  `子模块: 路径` 点名。路径列表读不出来（枚举失败或超出命令缓冲）同样
+  是拒绝——绝不假设没有可丢失的东西。
 - PR head fetch 进 watch 的私有 ref（`refs/qwen-autofix/pr-<n>/head`，与
   prepare 同一个 ref）并从那里读——绝不读共享的 `FETCH_HEAD`，用户检出
   里的并发 fetch 会在 fetch 与读之间覆写它。

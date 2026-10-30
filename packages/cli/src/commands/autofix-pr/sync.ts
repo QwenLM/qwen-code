@@ -24,7 +24,7 @@ import { realpathSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { git, gitOpt } from '../review/lib/git.js';
+import { git, gitOpt, gitRaw } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
 import {
   assertWatching,
@@ -482,11 +482,16 @@ function alignLevel(
     if (alignment.keepWork && holdsWork(dir, sha)) continue;
     if (alignment.collisions) {
       // The dirty gate ignores ignored files on purpose; a reset would
-      // overwrite one the target commit starts tracking. Leave the
-      // submodule as it is and report the collision for the user.
+      // overwrite one the target commit tracks, at the same path or across
+      // a file/directory transition. An unreadable listing is a refusal
+      // too — never an assumption that there is nothing to lose.
       const collided = ignoredCollisions(dir, sha);
+      const rel = relative(alignment.root, dir);
+      if (collided === null) {
+        alignment.collisions.push(`${rel}: (path listing unreadable)`);
+        continue;
+      }
       if (collided.length > 0) {
-        const rel = relative(alignment.root, dir);
         alignment.collisions.push(...collided.map((p) => `${rel}: ${p}`));
         continue;
       }
@@ -539,41 +544,86 @@ function isOwnSubmodule(
   }
 }
 
-/** The refusal naming the submodule paths whose reset would overwrite an
- * ignored file of the user's. */
+/** The refusal naming the submodules whose reset would overwrite an
+ * ignored file of the user's, or whose path listings could not be read. */
 function submoduleCollisionReason(collisions: string[]): string {
-  return `the PR head's submodule commit(s) start tracking ignored file(s) in your checkout (${collisions.join('; ')}); move aside or unignore them, then sync again — an in-place watch never overwrites your files`;
+  return `in-place sync refused to reset submodule(s): the PR head's tracked paths collide with ignored files in your checkout, or a path listing could not be read (${collisions.join('; ')}); resolve them, then sync again — an in-place watch never overwrites your files`;
 }
 
 /**
- * Ignored files of a submodule that the target commit starts tracking: a
- * reset would overwrite them, and the dirty gate cannot see them. Both
- * listings are NUL-delimited, so a C-quoted path cannot dodge the match.
+ * Ignored files of a submodule that the target commit's tracked paths would
+ * overwrite: the exact path, or a file/directory transition in either
+ * direction (an ignored directory whose path the target tracks as a blob,
+ * or an ignored file the target tracks under as a directory). Both listings
+ * are NUL-delimited, so a C-quoted path cannot dodge the match. Returns
+ * null when either listing cannot be read — the caller must then refuse the
+ * reset, not assume there is nothing to lose.
  */
-function ignoredCollisions(dir: string, sha: string): string[] {
-  const ignoredRaw = gitOpt(
-    '-C',
-    dir,
-    'ls-files',
-    '--others',
-    '--ignored',
-    '--exclude-standard',
-    '-z',
-  );
-  if (!ignoredRaw) return [];
-  const ignored = new Set(ignoredRaw.split('\0').filter((p) => p !== ''));
-  if (ignored.size === 0) return [];
-  const trackedRaw = gitOpt(
-    '-C',
-    dir,
-    'ls-tree',
-    '-r',
-    '--name-only',
-    '-z',
-    sha,
-  );
-  if (trackedRaw === null) return [];
-  return trackedRaw.split('\0').filter((p) => p !== '' && ignored.has(p));
+function ignoredCollisions(dir: string, sha: string): string[] | null {
+  const decode = (buf: Buffer): string | null => {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    } catch {
+      return null;
+    }
+  };
+  let ignoredRaw: string;
+  let trackedRaw: string;
+  try {
+    // gitRaw, not gitOpt: a large ignored dependency tree runs past the
+    // 1 MiB default buffer, and a failed read must not read as "no ignored
+    // files". A failure throws and refuses the reset below.
+    const ignoredDecoded = decode(
+      gitRaw(
+        '-C',
+        dir,
+        'ls-files',
+        '--others',
+        '--ignored',
+        '--exclude-standard',
+        '-z',
+      ),
+    );
+    const trackedDecoded = decode(
+      gitRaw('-C', dir, 'ls-tree', '-r', '--name-only', '-z', sha),
+    );
+    if (ignoredDecoded === null || trackedDecoded === null) return null;
+    ignoredRaw = ignoredDecoded;
+    trackedRaw = trackedDecoded;
+  } catch {
+    return null;
+  }
+  const ignoredSet = new Set<string>();
+  const ignoredAncestors = new Set<string>();
+  for (const raw of ignoredRaw.split('\0')) {
+    if (raw === '') continue;
+    // An entirely ignored directory is listed with a trailing slash.
+    const p = raw.endsWith('/') ? raw.slice(0, -1) : raw;
+    ignoredSet.add(p);
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      ignoredAncestors.add(parts.slice(0, i).join('/'));
+    }
+  }
+  if (ignoredSet.size === 0) return [];
+  const collisions: string[] = [];
+  for (const t of trackedRaw.split('\0')) {
+    if (t === '') continue;
+    // The target tracks an ignored path itself, or a path under it.
+    if (ignoredSet.has(t) || ignoredAncestors.has(t)) {
+      collisions.push(t);
+      continue;
+    }
+    // The target tracks a directory where an ignored file sits.
+    const parts = t.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      if (ignoredSet.has(parts.slice(0, i).join('/'))) {
+        collisions.push(t);
+        break;
+      }
+    }
+  }
+  return collisions;
 }
 
 /**
