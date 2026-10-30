@@ -12,6 +12,7 @@ import {
   qualifySkillName,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
+import { EXTENSION_HEADER_PREFIX } from '@qwen-code/qwen-code-core/utils/attached-content.js';
 
 export const EXTENSION_REF_PREFIX = 'ext:';
 export const EXTENSION_CONTEXT_BUDGET = 200_000;
@@ -66,7 +67,7 @@ export function buildExtensionContextText(extension: Extension): string {
   const lines: string[] = [];
 
   lines.push(
-    `--- Extension: ${displayName} (untrusted third-party content) ---`,
+    `${EXTENSION_HEADER_PREFIX}${displayName} (untrusted third-party content) ---`,
   );
   if (extension.config.description) {
     const desc = sanitizeDisplayText(extension.config.description);

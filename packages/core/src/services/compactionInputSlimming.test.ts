@@ -10,11 +10,36 @@ import { ToolNames } from '../tools/tool-names.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 import {
   ATTACHMENT_PROCESSING_FAILURE_NOTICE,
+  EXTENSION_HEADER_PREFIX,
   markTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
+  MCP_RESOURCE_NOTE_HEADER_PREFIX,
+  MCP_SERVER_HEADER_PREFIX,
   REFERENCED_FILES_HEADER,
   REFERENCED_SESSION_HEADER_PREFIX,
 } from '../utils/attached-content.js';
+
+/**
+ * Blocks qwen-code writes into a user turn beside the request, as their
+ * writers open them, with the name an attached-content note gives each.
+ */
+const HARNESS_BLOCKS: Array<[string, string, string]> = [
+  [
+    'an MCP resource read that returned nothing',
+    `\n${MCP_RESOURCE_NOTE_HEADER_PREFIX}docs:readme: (no readable content) ---\n`,
+    'MCP resource docs:readme: (no readable content)',
+  ],
+  [
+    'an @-mentioned MCP server',
+    `${MCP_SERVER_HEADER_PREFIX}docs ---\nThe user explicitly mentioned this MCP server.`,
+    'MCP Server: docs',
+  ],
+  [
+    'an @-mentioned extension',
+    `${EXTENSION_HEADER_PREFIX}docs (untrusted third-party content) ---\nRead the docs first.`,
+    'Extension: docs (untrusted third-party content)',
+  ],
+];
 import {
   condenseToUserMessages,
   countUnmarkedUserTurns,
@@ -922,6 +947,20 @@ describe('compactionInputSlimming', () => {
         }
       });
 
+      it.each(HARNESS_BLOCKS)(
+        'caps the block written for %s on a turn with no mark',
+        (_label, block) => {
+          const prompt = { text: 'explain what this does' };
+
+          const parts = slim([prompt, { text: block + 'b'.repeat(20_000) }]);
+
+          expect(parts[0]).toBe(prompt);
+          expect(parts[1]!.text!.length).toBeLessThanOrEqual(
+            4_000 + SLIM_TEXT_TRUNCATION_MARKER.length,
+          );
+        },
+      );
+
       describe('a turn whose prompt part is marked', () => {
         const prompt = markTypedPrompt({ text: 'explain what this does' });
         const fileBlock = [
@@ -1781,6 +1820,27 @@ describe('compactionInputSlimming', () => {
       const [quote] = quotesIn(blockText(condensed[0]!));
       expect(quote).toBe('explain what this does');
     });
+
+    it.each(HARNESS_BLOCKS)(
+      'names the block written for %s on a turn with no mark instead of quoting it',
+      (_label, block, name) => {
+        const history: Content[] = [
+          {
+            role: 'user',
+            parts: [{ text: 'please summarize @docs' }, { text: block }],
+          },
+          ...toolRound(1, 20_000),
+          { role: 'model', parts: [{ text: 'done' }] },
+        ];
+
+        const condensed = condenseToUserMessages(history, 12_000)!;
+
+        const [quote] = quotesIn(blockText(condensed[0]!));
+        expect(quote).toBe(
+          `please summarize @docs\n[Attached, not quoted: ${name}]`,
+        );
+      },
+    );
 
     it('counts the omitted assistant and tool messages in the note', () => {
       const history: Content[] = [

@@ -7,7 +7,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
-import { MCP_RESOURCE_HEADER_PREFIX } from '../utils/attached-content.js';
+import {
+  MCP_RESOURCE_HEADER_PREFIX,
+  MCP_RESOURCE_NOTE_HEADER_PREFIX,
+} from '../utils/attached-content.js';
 
 /**
  * Cap injected resource text so a misbehaving/hostile MCP server can't blow the
@@ -142,7 +145,7 @@ export function emptyMcpResourceText(
   formatted: FormattedMcpResource,
   label: string,
 ): string {
-  return `\n--- MCP resource ${label}: ${summarizeMcpResource(formatted)} ---\n`;
+  return `\n${MCP_RESOURCE_NOTE_HEADER_PREFIX}${label}: ${summarizeMcpResource(formatted)} ---\n`;
 }
 
 /**

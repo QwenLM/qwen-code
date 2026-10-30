@@ -10,6 +10,7 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   MAX_MCP_RESOURCE_BLOB_CHARS,
   MAX_MCP_RESOURCE_TEXT_CHARS,
+  emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
 } from './mcp-resource-content.js';
@@ -47,6 +48,15 @@ describe('formatMcpResourceContents', () => {
     );
 
     expect(opensAttachedContent(textOf(out.parts.slice(0, 1)))).toBe(true);
+  });
+
+  it('opens the note for an empty read with a header compaction recognizes as attached', () => {
+    const formatted = formatMcpResourceContents({ contents: [] }, 'srv:x://a');
+
+    expect(formatted.parts).toHaveLength(0);
+    expect(
+      opensAttachedContent(emptyMcpResourceText(formatted, 'srv:x://a')),
+    ).toBe(true);
   });
 
   it('caps text at MAX_MCP_RESOURCE_TEXT_CHARS and flags truncation', () => {

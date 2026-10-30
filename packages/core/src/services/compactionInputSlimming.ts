@@ -21,8 +21,11 @@ import {
 } from '../utils/xml.js';
 import {
   ATTACHMENT_PROCESSING_FAILURE_NOTICE,
+  EXTENSION_HEADER_PREFIX,
   isTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
+  MCP_RESOURCE_NOTE_HEADER_PREFIX,
+  MCP_SERVER_HEADER_PREFIX,
   opensAttachedContent,
   REFERENCED_SESSION_HEADER_PREFIX,
 } from '../utils/attached-content.js';
@@ -937,6 +940,14 @@ function capTypedText(part: Part, stats: SlimStats): Part {
 const ATTACHED_NAMES_MAX = 8;
 const ATTACHED_NAME_MAX_CHARS = 120;
 
+/** Headers whose first line, without its dashes, names the block. */
+const SELF_NAMING_HEADER_PREFIXES = [
+  REFERENCED_SESSION_HEADER_PREFIX,
+  MCP_RESOURCE_NOTE_HEADER_PREFIX,
+  MCP_SERVER_HEADER_PREFIX,
+  EXTENSION_HEADER_PREFIX,
+];
+
 /** One line naming the attached content in `parts`, or '' when none. */
 function attachedContentNote(parts: Part[]): string {
   if (parts.length === 0) return '';
@@ -951,7 +962,7 @@ function attachedContentNote(parts: Part[]): string {
           .replace(/\s*\[[^\]]*\]\s*---$/, ''),
       ];
     }
-    if (line.startsWith(REFERENCED_SESSION_HEADER_PREFIX)) {
+    if (SELF_NAMING_HEADER_PREFIXES.some((prefix) => line.startsWith(prefix))) {
       return [line.split('\n', 1)[0]!.replace(/^-+\s*|\s*-+$/g, '')];
     }
     return [];
