@@ -1121,6 +1121,8 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
     skillToolDefinitionTokens: 0,
     loadedSkillBodiesTokens: 0,
     memoryFilesTokens: 50,
+    breakdown: { instructionFiles: 30, memoryFiles: 20 },
+    instructionFiles: [{ path: 'QWEN.md', tokens: 30 }],
     categories: [],
     builtinTools: [],
     mcpTools: [],
@@ -15547,8 +15549,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       usage: {
         modelName: 'm',
         showDetails: true,
+        breakdown: { instructionFiles: 30, memoryFiles: 20 },
+        instructionFiles: [{ path: 'QWEN.md', tokens: 30 }],
       },
       formattedText: expect.stringContaining('## Context Usage'),
+    });
+    const { collectContextData } = await import(
+      '../ui/commands/contextCommand.js'
+    );
+    vi.mocked(collectContextData).mockRejectedValueOnce(
+      new Error('Context not initialized'),
+    );
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContextUsage, {
+        sessionId,
+      }),
+    ).resolves.toMatchObject({
+      usage: {
+        breakdown: { instructionFiles: 0, memoryFiles: 0 },
+        instructionFiles: [],
+        memoryFiles: [],
+        isEstimated: true,
+      },
     });
     expect(lsp).toEqual({
       v: 1,
