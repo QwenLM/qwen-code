@@ -454,9 +454,28 @@ export function ContextUsageMessage({
               ) : undefined}
             </CategoryRow>
           )}
+          {breakdown.instructionFiles !== undefined && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.instructionFiles')}
+              tokens={breakdown.instructionFiles}
+            >
+              {hasDetails && (usage.instructionFiles?.length ?? 0) > 0 ? (
+                <DetailSection
+                  items={usage.instructionFiles!}
+                  getName={(item) => ('path' in item ? item.path : item.name)}
+                  tokenLabel={t('contextUsage.tokens')}
+                />
+              ) : undefined}
+            </CategoryRow>
+          )}
           <CategoryRow
             {...categoryProps}
-            label={t('contextUsage.memoryFiles')}
+            label={t(
+              breakdown.instructionFiles === undefined
+                ? 'contextUsage.memoryFiles'
+                : 'contextUsage.autoMemory',
+            )}
             tokens={breakdown.memoryFiles}
           >
             {hasDetails && usage.memoryFiles.length > 0 ? (

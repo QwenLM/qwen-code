@@ -213,6 +213,7 @@ function expectCoherentBreakdown(item: {
     (breakdown.systemPrompt ?? 0) +
     (breakdown.builtinTools ?? 0) +
     (breakdown.mcpTools ?? 0) +
+    (breakdown.instructionFiles ?? 0) +
     (breakdown.memoryFiles ?? 0) +
     (breakdown.skills ?? 0) +
     (breakdown.startupContext ?? 0) +
@@ -420,7 +421,54 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Current tier warn');
   });
 
+  it.each([false, true])(
+    'preserves the combined memory category in legacy OpenTUI snapshots (details: %s)',
+    (showDetails) => {
+      const item = {
+        modelName: 'legacy-model',
+        totalTokens: 200,
+        contextWindowSize: 1000,
+        breakdown: {
+          memoryFiles: 200,
+          freeSpace: 800,
+          autocompactBuffer: 0,
+        },
+        memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+        showDetails,
+      };
+      expectCoherentBreakdown(item);
+      const text = projectContextUsage(item);
+      expect(text).toContain('█ Memory files 200 tokens (20.0%)');
+      expect(text).not.toContain('Instruction files');
+      expect(text).not.toContain('Auto memory');
+      expect(text.includes('QWEN.md')).toBe(showDetails);
+    },
+  );
+
   it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const item = {
+      modelName: 'm',
+      totalTokens: 30,
+      contextWindowSize: 100,
+      breakdown: {
+        instructionFiles: 20,
+        memoryFiles: 10,
+        freeSpace: 70,
+        autocompactBuffer: 0,
+      },
+      showDetails: true,
+      instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
+      memoryFiles: [{ path: 'auto memory', tokens: 10 }],
+    };
+    expectCoherentBreakdown(item);
+    const split = projectContextUsage(item);
+    expect(split).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(split).toContain('█ Auto memory 10 tokens (10.0%)');
+    const summary = projectContextUsage({ ...item, showDetails: false });
+    expect(summary).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(summary).toContain('█ Auto memory 10 tokens (10.0%)');
+    expect(split).toContain('QWEN.md');
+    expect(split).not.toContain('Memory files');
     const text = projectContextUsage({
       modelName: 'm',
       totalTokens: 5000,
