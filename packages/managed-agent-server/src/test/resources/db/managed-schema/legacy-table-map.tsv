@@ -1,6 +1,6 @@
 # Exact inventory at origin/main 18f80f56666a347a2b67b2ef98099cc58356b253. Documentation only; no upgrade or SQL routing.
 managed_agent_session	ma_session,ma_event_stream
-managed_agent_turn	ma_turn
+managed_agent_turn	ma_turn,ma_user_message_queue,ma_user_message,ma_user_message_command
 managed_agent_command	ma_request_receipt
 managed_agent_operation	ma_operation
 managed_agent_action	ma_session_record,ma_operation
@@ -10,7 +10,7 @@ managed_workspace_create_command	ma_request_receipt,ma_session
 managed_agent_event	ma_public_event
 managed_agent_item	ma_message
 managed_agent_item_part	ma_message
-managed_agent_snapshot	ma_snapshot
+managed_agent_snapshot	ma_message,ma_event_stream
 managed_agent_consumer_progress	ma_event_stream
 qwen_managed_session_journal_head	ma_session_head
 qwen_managed_session_journal_tx	ma_session_journal_tx

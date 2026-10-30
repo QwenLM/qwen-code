@@ -29,6 +29,41 @@ class SignatureAuthFilterTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
+    void authenticatesExtensionArchivesFromADiskSpoolAndSignsTheirManifestQuery() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setMaxSignedBodyBytes(1);
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        SignatureAuthFilter filter = filter(new BrokerSecurity(properties, server, new WebMvcProperties()));
+        byte[] archive = "a binary archive larger than the JSON body limit".getBytes(StandardCharsets.UTF_8);
+        String path = "/v1/agents/workspaces/workspace/extensions";
+        String query = "packageDigest=" + sha256Hex(archive) + "&manifest=eyJzY2hlbWFWZXJzaW9uIjoxfQ";
+        String timestamp = now();
+        String signature = sign("POST", path, query, "tenant-a", "actor-a", timestamp, archive, "publish");
+        for (boolean tamper : new boolean[] {false, true}) {
+            MockHttpServletRequest request = request("POST", path);
+            request.setContentType("application/octet-stream");
+            request.setContent(archive);
+            request.setQueryString(tamper ? query + "changed" : query);
+            request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+            request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+            request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signature);
+            request.addHeader("Idempotency-Key", "publish");
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            java.util.concurrent.atomic.AtomicBoolean accepted = new java.util.concurrent.atomic.AtomicBoolean();
+            filter.doFilter(request, response, (wrapped, result) -> {
+                assertThat(wrapped.getInputStream().readAllBytes()).isEqualTo(archive);
+                assertThat(((HttpServletRequest) wrapped).getUserPrincipal()).isInstanceOf(AuthenticatedTenantActor.class);
+                accepted.set(true);
+            });
+            assertThat(accepted.get()).isEqualTo(!tamper);
+            assertThat(response.getStatus()).isEqualTo(tamper ? 401 : 200);
+        }
+    }
+
+    @Test
     void staysOutOfOpenModeAndRunsBeforeTheHeaderStandIn() throws Exception {
         SignatureAuthFilter filter = filter(open());
         MockHttpServletRequest request = request("GET",

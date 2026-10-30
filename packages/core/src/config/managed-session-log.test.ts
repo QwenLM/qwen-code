@@ -231,10 +231,11 @@ describe('Managed Session log recording', () => {
         MANAGED_SESSION_COMMIT_SUBTYPE,
       ]).toContain(record['subtype']);
     }
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
+    const scan = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
     expect(scan.uncommitted).toBe(0);
     // The session is the activation's worker, with a five-minute horizon.
     expect(scan.activation?.workerId).toBe(SESSION_ID);
@@ -290,10 +291,11 @@ describe('Managed Session log recording', () => {
     const sealed = await lockRecord();
     expect(sealed).toMatchObject({ state: 'sealed', schema_version: 3 });
     // The log records that the session stopped advancing before the seal.
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
+    const scan = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
     expect(scan.activation?.phase).toBe('released');
     expect(scan.uncommitted).toBe(0);
     const bytesAtClose = (
@@ -643,11 +645,18 @@ describe('Managed Session log recording', () => {
       false,
     );
     await recorder.flush();
-    const raw = await readFile(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      'utf8',
-    );
-    expect(raw.split('"domain":"session_source"')).toHaveLength(2);
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
+    expect(
+      journal.events.filter(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          event.payload['domain'] === 'session_source',
+      ),
+    ).toHaveLength(1);
     await restored.closeSessionWriter();
   });
 
@@ -801,10 +810,11 @@ describe('Managed Session log recording', () => {
       });
       // The failed anchor does not skip the stop: the log records that the
       // session stopped advancing before the seal.
-      const scan = await LocalJsonlManagedSessionJournalStore.read(
-        sessionService().getSessionTranscriptPath(SESSION_ID),
-        localManagedSessionKey(projectDir, SESSION_ID),
-      );
+      const scan = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+        runtimeBaseDir: runtimeDir,
+        sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+      });
       expect(scan.activation?.phase).toBe('released');
       const restored = await start(restoringConfig());
       expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
@@ -1016,6 +1026,14 @@ describe('Managed Session log recording', () => {
       expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
       expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
     ]);
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording.turnDaemonPromptIds).toEqual([
+      'daemon-prompt-1',
+      undefined,
+    ]);
   });
 
   it('skips a malformed file-history record instead of failing the managed restore', async () => {
@@ -1135,7 +1153,7 @@ describe('Managed Session log recording', () => {
         { replay: { kind: 'none' } },
       );
       expect(projection).toBeDefined();
-      expect(projection?.runtime.apiHistory).toEqual([
+      expect(projection?.runtime.apiHistory).toMatchObject([
         { role: 'user', parts: [{ text: 'before the damage' }] },
         { role: 'user', parts: [{ text: 'after the damage' }] },
       ]);
@@ -1404,7 +1422,7 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
-  it('restores a session whose title body is missing', async () => {
+  it('refuses snapshot conversion when the title dependency is missing', async () => {
     const first = await start(managedConfig());
     await first
       .getChatRecordingService()!
@@ -1425,12 +1443,11 @@ describe('Managed Session log recording', () => {
         replay: { kind: 'none' },
       }),
     ).resolves.toBeDefined();
-    const restored = await start(restoringConfig());
-    expect(
-      restored.getChatRecordingService()!.getCurrentCustomTitle(),
-    ).toBeUndefined();
-    expect(await activeChatTexts(restored)).toEqual(['first prompt']);
-    await restored.closeSessionWriter();
+    await expect(start(restoringConfig())).rejects.toThrow(/not present/);
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      format_version: 2,
+    });
   });
 
   it('gives back the seal it took over when the log does not match it', async () => {
@@ -1584,13 +1601,14 @@ describe('Managed Session log recording', () => {
     }
     expect(zeroed).toBeGreaterThan(0);
 
-    // The restore repair leaves the unreadable checkpoint to the gate: the
-    // session opens blocked rather than failing to open at all.
-    const restored = await start(restoringConfig());
-    const block = restored.getManagedSessionBlock();
-    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
-    expect(block?.message).toContain('cannot be read');
-    await restored.closeSessionWriter();
+    // Conversion refuses an incomplete resource closure before admitting work.
+    await expect(start(restoringConfig())).rejects.toThrow(
+      /on disk where|digest|not present/,
+    );
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      format_version: 2,
+    });
   });
 
   it('restores a log whose Runtime calls settled, without blocking', async () => {

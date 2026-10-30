@@ -8,12 +8,15 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -23,6 +26,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -197,6 +201,16 @@ class HostedWorkspaceToolTurnIT {
         runDriver(cases, "provider-control");
     }
 
+    @Test
+    @Timeout(300)
+    @EnabledIfSystemProperty(named = "qwen.provider.media.bundle-ready", matches = "true")
+    void providerMediaReachesModelAndSurvivesReplyLossAndBrokerRestartOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("M4 requires real MySQL").startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("mysql.user")).as("M4 requires -Dmysql.user").isNotBlank();
+        runDriver(List.of("png", "jpeg", "webp", "gif", "native-pdf", "pdf-text", "pdf-render",
+                "image-disabled", "image-missing", "pdf-too-large", "lost-start", "lost-execute"), "provider-media");
+    }
+
     private static void registerUnicodePublication(GenericApplicationContext context) {
         var objects = new ConcurrentHashMap<String, byte[]>();
         context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
@@ -219,12 +233,12 @@ class HostedWorkspaceToolTurnIT {
             public void validateConfiguration() {}
         });
         context.registerBean("unicodeGrants", ToolPublicationStore.class, () -> new ToolPublicationStore(
-                context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
+                context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
                 context.getBean(ManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
                 context.getBean(RuntimeBindingRepository.class),
                 new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4)));
         context.registerBean("unicodeData", ToolPublicationDataStore.class, () -> new ToolPublicationDataStore(
-                context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
+                context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
                 context.getBean(ToolPublicationStore.class), context.getBean(ManagedSessionStore.class),
                 context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
                 new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
@@ -233,7 +247,7 @@ class HostedWorkspaceToolTurnIT {
             properties.getToolPublication().setEntryConcurrency(4);
             return new ToolPublicationController(context.getBean(ToolPublicationStore.class),
                     context.getBean(ToolPublicationDataStore.class),
-                    new ToolPublicationAdmissionStore(context.getBean(JdbcTemplate.class),
+                    new ToolPublicationAdmissionStore(context.getBean("managedJdbcTemplate", JdbcTemplate.class),
                             context.getBean(PlatformTransactionManager.class), context.getBean(ManagedSessionStore.class),
                             context.getBean(ToolPublicationDataStore.class)), properties);
         });
@@ -249,6 +263,7 @@ class HostedWorkspaceToolTurnIT {
         boolean sseGaps = driverName.equals("sse-gap");
         boolean shellOutput = driverName.equals("shell-output");
         boolean providerControl = driverName.equals("provider-control");
+        boolean providerMedia = driverName.equals("provider-media");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
@@ -329,17 +344,21 @@ class HostedWorkspaceToolTurnIT {
                     "fg6eAuthentication", HostedGateTestSupport.authentication(tenant, "fg6e-fixture")));
         }
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
-            JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
+            JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
             if (unicode) {
                 spring.getBean(ManagedAgentProperties.class).getToolPublication()
                         .setServiceBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
             }
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-                System.out.println((shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
+                System.out.println((providerMedia ? "M4_DATABASE " : shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 try (var connection = jdbc.getDataSource().getConnection()) {
-                    assertThat(connection.getMetaData().getDatabaseProductName())
-                            .containsAnyOf("MySQL", "MariaDB");
+                    String product = connection.getMetaData().getDatabaseProductName();
+                    if (providerMedia) {
+                        assertThat(product).isEqualToIgnoringCase("MySQL");
+                    } else {
+                        assertThat(product).containsAnyOf("MySQL", "MariaDB");
+                    }
                 }
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
@@ -410,13 +429,19 @@ class HostedWorkspaceToolTurnIT {
                     ? new HostedShellOutputProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             HostedProviderControlProbe providerProbe = providerControl
                     ? new HostedProviderControlProbe(jdbc, tenant, sessions, broker, gateServer) : null;
+            HostedProviderMediaProbe mediaProbe = providerMedia
+                    ? new HostedProviderMediaProbe(jdbc, tenant, sessions, broker, gateServer,
+                            () -> new EmbeddedRuntimeBroker(spring.getBean(AgentStateStore.class),
+                                    spring.getBean(ManagedAgentProperties.class), spring.getBean(RuntimeBindingRepository.class),
+                                    spring.getBean(RuntimeSessionRepository.class), spring.getBean(ToolExecutionRepository.class),
+                                    spring.getBean(WorkspaceExecutionStore.class))) : null;
             HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
                     "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
             HostedOperatorRecoveryProbe operatorProbe = operatorRecovery
                     ? new HostedOperatorRecoveryProbe(spring, sessions, temporary.resolve("runtime"), gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
-            try (shellProbe; providerProbe; coldLoadProbe; operatorProbe) {
+            try (shellProbe; providerProbe; mediaProbe; coldLoadProbe; operatorProbe) {
                 if (storeFaults || shellOutput) {
                     for (Map<String, Object> session : sessions) {
                         if (shellOutput ? session.get("fault").equals("receipt-failure")
@@ -445,11 +470,12 @@ class HostedWorkspaceToolTurnIT {
                         "integration-tests/helpers/hosted-" + driverName + "-driver.ts", config.toString())
                         .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
                 try {
-                    assertThat(driver.waitFor(faults || latency ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
+                    assertThat(driver.waitFor(providerMedia ? 240 : faults || latency ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
                     assertThat(Files.readString(log)).contains(unicode ? "HOSTED_SHELL_UNICODE_OK: " + String.join(",", cases)
                             : operatorRecovery ? "HOSTED_OPERATOR_RECOVERY_OK" : latency ? "HOSTED_LATENCY_OK"
+                            : providerMedia ? "HOSTED_PROVIDER_MEDIA_OK"
                             : providerControl ? "HOSTED_PROVIDER_FAULTS_OK"
                             : shellOutput ? "HOSTED_SHELL_OUTPUT_FAULTS_OK"
                             : sseGaps ? "HOSTED_SSE_GAP_OK"
@@ -466,7 +492,9 @@ class HostedWorkspaceToolTurnIT {
                         if (operatorRecovery) {
                             continue;
                         }
-                        if (unicode) {
+                        if (providerMedia) {
+                            mediaProbe.assertReport(sessions.get(index), reports.get(index));
+                        } else if (unicode) {
                             assertThat(workspace.resolve("child/invalid.txt")).doesNotExist();
                             assertThat(workspace.resolve("child/sibling.txt")).doesNotExist();
                             assertThat(Files.readString(workspace.resolve("child/unicode-ok.txt")))

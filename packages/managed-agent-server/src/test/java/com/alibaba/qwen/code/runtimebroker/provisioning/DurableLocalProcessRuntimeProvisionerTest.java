@@ -169,6 +169,69 @@ class DurableLocalProcessRuntimeProvisionerTest {
         }
     }
 
+    @org.junit.jupiter.api.condition.EnabledOnOs(OS.LINUX)
+    @Test
+    void registeredZombieIsRetiredBeforeWaitingForReady() throws Exception {
+        var request = request(false);
+        var store = store();
+        Path replacement = directory.resolve("replacement-worker");
+        Process parent = new ProcessBuilder("/bin/sh", "-c",
+                "/bin/sleep 0.1 & exec /bin/sleep 60").start();
+        try (var provider = new LocalProcessRuntimeProvisioner(
+                List.of("/bin/sh", "-c", "touch \"$1\"", "replacement", replacement.toString()),
+                directory, TRANSPORT, null, store)) {
+            ProcessHandle zombie = null;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (zombie == null && System.nanoTime() < deadline) {
+                zombie = parent.children().filter(process -> {
+                    try {
+                        return Files.readString(Path.of("/proc", Long.toString(process.pid()), "stat"))
+                                .contains(") Z ");
+                    } catch (java.io.IOException absent) {
+                        return false;
+                    }
+                }).findFirst().orElse(null);
+                Thread.sleep(10);
+            }
+            assertNotNull(zombie, "the child must remain unreaped");
+            assertTrue(zombie.isAlive(), "the JDK still considers a zombie alive");
+            long pid = zombie.pid();
+            String started = LocalRuntimeStore.startIdentity(zombie);
+            var handle = await(provider.ensureResource(request, SEED, null));
+            store.locked(request, SEED, handle, false, (resource, original) -> {
+                resource.createReady();
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.REGISTERED,
+                        pid, started, null));
+                return null;
+            });
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> provider.provision(request, SEED).toCompletableFuture().get(5, TimeUnit.SECONDS));
+            var conflict = org.junit.jupiter.api.Assertions.assertInstanceOf(
+                    RuntimeBrokerException.class, failure.getCause());
+            assertEquals(409, conflict.getStatusCode());
+            assertFalse(conflict.isRetryable());
+            var retired = registration(store, request, handle);
+            assertEquals(LocalRuntimeStore.State.RETIRED, retired.state());
+            assertEquals(handle, retired.handle());
+            assertEquals(pid, retired.pid());
+            assertEquals(started, retired.started());
+            assertBlocked(provider.provision(request, SEED));
+            var observation = await(provider.reconcile(request, SEED, handle, null));
+            assertEquals(RuntimeObservation.Outcome.CONFLICT, observation.getOutcome());
+            assertNull(observation.getStopEvidence());
+            var lease = new RuntimeLease(SEED.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    SEED.getToken(), SEED.getLeaseId(), SEED.getEpoch());
+            var lost = await(provider.reconcile(request, SEED, handle, lease));
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND, lost.getOutcome());
+            assertNotNull(lost.getLossEvidence());
+            assertNull(lost.getStopEvidence());
+            assertFalse(Files.exists(replacement), "the original placement must never launch a replacement");
+        } finally {
+            parent.destroyForcibly();
+            assertTrue(parent.waitFor(5, TimeUnit.SECONDS));
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"PROVISIONING", "RECOVERY_BLOCKED"})
     void brokerAdoptsARegisteredStartupWithoutASavedLease(String state) throws Exception {
@@ -513,8 +576,6 @@ class DurableLocalProcessRuntimeProvisionerTest {
         assertThrows(IllegalArgumentException.class, () -> new LocalRuntimeStore.HostIdentity("unknown", HOST.bootId(), HOST.pidNamespace(), HOST.timeNamespace()));
         if (!"Linux".equals(System.getProperty("os.name"))) {
             assertThrows(IllegalStateException.class, LocalRuntimeStore.HostIdentity::linux);
-        } else {
-            assertNotNull(LocalRuntimeStore.HostIdentity.linux());
         }
     }
 

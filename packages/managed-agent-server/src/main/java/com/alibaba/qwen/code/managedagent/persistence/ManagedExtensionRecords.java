@@ -35,8 +35,8 @@ public final class ManagedExtensionRecords {
             "memory_job", "monitor_run", "goal_state", "todo_state",
             "plan_mode", "team_state", "team_task", "team_message",
             "team_plan", "session_message", "session_command",
-            "session_metadata",
-            "file_history", "session_source");
+            "session_metadata", "file_history", "session_source",
+            "hosted_harness_release");
     /** The event kinds of managed-session/1, as the authority writes them. */
     public static final List<String> EVENT_KINDS = List.of("input.accepted",
             "wake.requested", "activation.changed", "model.attempt",
@@ -212,15 +212,19 @@ public final class ManagedExtensionRecords {
             "scheduleId", "ownerScopeId", "goal", "cron", "timezone",
             "definitionRevision", "definitionDigest", "promptRef",
             "sessionMode", "targetSessionId", "overlap", "catchUp",
-            "catchUpLimit", "enabled", "run");
+            "catchUpLimit", "enabled", "gate", "run");
+    /** The longest gate command a definition may carry, in UTF-8 bytes. */
+    public static final int SCHEDULE_GATE_MAX_BYTES = 2048;
     private static final List<String> SCHEDULE_FIXED = List.of("kind",
             "scheduleId", "ownerScopeId");
     private static final Set<String> AUTOMATION_RUN_KEYS = Set.of("kind",
             "automationRunId", "scheduleId", "definitionRevision",
-            "occurrenceKey", "sessionMode", "targetSessionId", "run");
+            "occurrenceKey", "sessionMode", "targetSessionId",
+            "gateOutputRef", "run");
     private static final List<String> AUTOMATION_RUN_FIXED = List.of("kind",
             "automationRunId", "scheduleId", "definitionRevision",
-            "occurrenceKey", "sessionMode", "targetSessionId");
+            "occurrenceKey", "sessionMode", "targetSessionId",
+            "gateOutputRef");
 
     private ManagedExtensionRecords() {
     }
@@ -1399,6 +1403,12 @@ public final class ManagedExtensionRecords {
                 "schedule.overlap");
         require(schedule.get("enabled").isBoolean(),
                 "schedule.enabled must be boolean");
+        // The gate: bounded text under its own cap, or null for a definition
+        // that fires every slot (docs/design/2026-10-22-managed-automation-gate.md).
+        JsonNode gate = schedule.get("gate");
+        if (!gate.isNull()) {
+            boundedText(gate, "schedule.gate", SCHEDULE_GATE_MAX_BYTES);
+        }
     }
 
     /**
@@ -1507,6 +1517,12 @@ public final class ManagedExtensionRecords {
         count(automation.get("definitionRevision"), 1, MAX_COUNT,
                 "automationRun.definitionRevision");
         occurrenceKey(automation.get("occurrenceKey"));
+        // The probe output that admitted the run, read by its dispatch; null
+        // for a run of a definition without a gate.
+        JsonNode gateOutputRef = automation.get("gateOutputRef");
+        if (!gateOutputRef.isNull()) {
+            durableRef(gateOutputRef, "automationRun.gateOutputRef");
+        }
     }
 
     /** Whether {@code automation} may open an AutomationRun: its run opens. */
@@ -1631,6 +1647,11 @@ public final class ManagedExtensionRecords {
      * byte on its own, so it is counted explicitly.
      */
     static String boundedText(JsonNode node, String label) {
+        return boundedText(node, label, MAX_TEXT_BYTES);
+    }
+
+    /** {@link #boundedText(JsonNode, String)} under a caller's byte cap. */
+    static String boundedText(JsonNode node, String label, int maxBytes) {
         require(node != null && node.isTextual() && !node.textValue()
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
@@ -1654,8 +1675,8 @@ public final class ManagedExtensionRecords {
         // The byte budget is checked before the control rule, the order
         // boundedString applies, so an input breaking both reports one clause.
         require(value.getBytes(StandardCharsets.UTF_8).length
-                + 2L * loneSurrogates <= MAX_TEXT_BYTES,
-                label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
+                + 2L * loneSurrogates <= maxBytes,
+                label + " exceeds " + maxBytes + " UTF-8 bytes");
         require(!control, label + " must not contain control characters");
         return value;
     }

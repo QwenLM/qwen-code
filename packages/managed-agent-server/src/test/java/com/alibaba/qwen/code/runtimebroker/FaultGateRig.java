@@ -92,6 +92,7 @@ final class FaultGateRig implements AutoCloseable {
     private final Server database;
     private final DataSource dataSource;
     private final List<AutoCloseable> resources = new ArrayList<>();
+    private final List<FaultProxy> proxies = new ArrayList<>();
     private final List<BrokerProcess> brokers = new ArrayList<>();
     private final Set<ProcessHandle> orphans = new HashSet<>();
 
@@ -165,6 +166,7 @@ final class FaultGateRig implements AutoCloseable {
     FaultProxy proxy() throws IOException {
         FaultProxy proxy = new FaultProxy();
         resources.add(proxy);
+        proxies.add(proxy);
         return proxy;
     }
 
@@ -334,7 +336,7 @@ final class FaultGateRig implements AutoCloseable {
                             : last.getState() + " " + last.getExecutionStatus()
                                     + ", dispatch " + last.getDispatchOwner()
                                     + "/" + last.getDispatchGeneration())
-                    + logs(), timeout);
+                    + diagnostics() + logs(), timeout);
         }
     }
 
@@ -425,6 +427,28 @@ final class FaultGateRig implements AutoCloseable {
             }
             Thread.sleep(50);
         } while (System.nanoTime() < deadline);
+    }
+
+    /**
+     * What the Broker logs leave out of a failed wait: the requests each
+     * proxy saw, the runs {@link #recordRun} recorded, and each Broker's
+     * live workers. An execution the Broker gave up on reads UNKNOWN
+     * whether its execute request timed out or its worker was gone before
+     * dispatch, and neither path logs; these tell the two apart.
+     */
+    String diagnostics() {
+        StringBuilder text = new StringBuilder("\n--- rig ---");
+        for (FaultProxy proxy : proxies) {
+            text.append("\nproxy ").append(proxy.port()).append(" requests: ")
+                    .append(proxy.counts());
+        }
+        text.append("\nrecorded runs: ").append(runs());
+        for (BrokerProcess broker : brokers) {
+            text.append("\nbroker ").append(broker.pid())
+                    .append(" live workers: ").append(broker.workers().stream()
+                            .map(ProcessHandle::pid).toList());
+        }
+        return text.toString();
     }
 
     String logs() {

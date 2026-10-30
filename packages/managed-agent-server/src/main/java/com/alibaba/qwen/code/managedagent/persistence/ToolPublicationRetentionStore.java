@@ -46,6 +46,15 @@ public final class ToolPublicationRetentionStore {
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
     }
 
+    /** The instant the last live read lease expires, or 0 without one. */
+    static long earliestReadLeaseExpiry(JdbcTemplate jdbc, String tenant, String session) {
+        Long expiry = jdbc.queryForObject(
+                "SELECT MIN(expires_at) FROM ma_read_lease WHERE tenant_key = ? AND session_key = ?"
+                        + " AND expires_at > ?",
+                Long.class, hash(tenant), hash(session), now(jdbc));
+        return expiry == null ? 0 : expiry;
+    }
+
     static void lockTenant(JdbcTemplate jdbc, String tenant) {
         // A zero statement timeout is unlimited, the historical shape.
         lockTenant(jdbc, tenant, 0);

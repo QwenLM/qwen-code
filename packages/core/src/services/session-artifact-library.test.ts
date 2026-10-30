@@ -3,7 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,7 +31,10 @@ let artifactId: string;
 let service: SessionService;
 const stamp = '2026-10-20T00:00:00.000Z';
 
-async function seed(archived = false) {
+async function seed(
+  archived = false,
+  artifactPaths: readonly string[] = ['report.md'],
+) {
   const storage = new Storage(cwd, runtime);
   const dir = path.join(
     storage.getProjectDir(),
@@ -60,16 +63,20 @@ async function seed(archived = false) {
         sessionId: id,
         sequence: 1,
         recordedAt: stamp,
-        changes: [
-          {
+        changes: artifactPaths.map((workspacePath) => {
+          const currentArtifactId = stableSessionArtifactId(
+            id,
+            `workspace:${workspacePath}`,
+          );
+          return {
             action: 'created',
-            artifactId,
+            artifactId: currentArtifactId,
             artifact: {
-              id: artifactId,
+              id: currentArtifactId,
               title: 'Report',
               kind: 'file',
               storage: 'workspace',
-              workspacePath: 'report.md',
+              workspacePath,
               source: 'tool',
               status: 'available',
               retention: 'restorable',
@@ -77,8 +84,8 @@ async function seed(archived = false) {
               createdAt: stamp,
               updatedAt: stamp,
             },
-          },
-        ],
+          };
+        }),
       },
     },
     {
@@ -109,6 +116,109 @@ afterEach(async () => {
 });
 
 describe('persisted artifact library', () => {
+  it.each([false, true])(
+    'removes a group once and preserves other artifacts across reload (%s)',
+    async (archived) => {
+      await seed(archived, ['report.md', 'second.md', 'keep.md']);
+      const secondId = stableSessionArtifactId(id, 'workspace:second.md');
+      const keptId = stableSessionArtifactId(id, 'workspace:keep.md');
+      await fs.appendFile(
+        file,
+        JSON.stringify({
+          sessionId: id,
+          cwd,
+          uuid: 'trailing-sources',
+          parentUuid: 'assistant-1',
+          timestamp: stamp,
+          version: '0.25.3',
+          type: 'system',
+          subtype: 'session_sources_snapshot',
+          systemPayload: { version: 1, revision: 1, sources: [] },
+        }) + '\n',
+      );
+      const before = await fs.readFile(file, 'utf8');
+      const options = {
+        processKind: 'daemon' as const,
+        reclaimPolicy: 'never' as const,
+      };
+      const lease = archived
+        ? await service.acquireSessionMaintenanceLease(id, options)
+        : await service.acquireSessionWriterLease(id, options);
+      const assertStorageUnchanged = vi.fn(() =>
+        lease.assertOwnedAndUnchanged(),
+      );
+      const assertCanMutate = vi.fn();
+      try {
+        await expect(
+          service.removeSessionArtifactsForLibrary(
+            id,
+            [artifactId, secondId, artifactId, 'absent'],
+            { assertStorageUnchanged, assertCanMutate },
+          ),
+        ).resolves.toEqual([artifactId, secondId]);
+      } finally {
+        await lease.release();
+      }
+      expect(assertStorageUnchanged).toHaveBeenCalledOnce();
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      const after = await fs.readFile(file, 'utf8');
+      expect(after.startsWith(before)).toBe(true);
+      const appended = after.slice(before.length).trim().split('\n');
+      expect(appended).toHaveLength(1);
+      expect(JSON.parse(appended[0])).toMatchObject({
+        parentUuid: 'assistant-1',
+        subtype: 'session_artifact_event',
+        systemPayload: {
+          sequence: 2,
+          changes: [
+            { action: 'removed', artifactId, reason: 'explicit' },
+            { action: 'removed', artifactId: secondId, reason: 'explicit' },
+          ],
+        },
+      });
+      const fresh = new SessionService(cwd, { runtimeBaseDir: runtime });
+      const snapshot = await fresh.readSessionArtifactSnapshot(id);
+      expect(snapshot?.artifacts.map((artifact) => artifact.id)).toEqual([
+        keptId,
+      ]);
+      expect(snapshot?.tombstonedIds).toEqual([artifactId, secondId]);
+      expect(snapshot?.markerArtifacts?.map((artifact) => artifact.id)).toEqual(
+        [artifactId, secondId],
+      );
+      const loaded = archived
+        ? await fresh.loadArchivedSession(id, { maxBytes: 1024 * 1024 })
+        : await fresh.loadSession(id);
+      expect(
+        loaded?.artifactSnapshot?.artifacts.map((artifact) => artifact.id),
+      ).toEqual([keptId]);
+      expect(await fresh.getSessionLocation(id)).toBe(
+        archived ? 'archived' : 'active',
+      );
+      await expect(
+        fresh.removeSessionArtifactsForLibrary(
+          id,
+          [artifactId, secondId, 'absent'],
+          { assertStorageUnchanged, assertCanMutate },
+        ),
+      ).resolves.toEqual([]);
+      expect(assertStorageUnchanged).toHaveBeenCalledOnce();
+      expect(await fs.readFile(file, 'utf8')).toBe(after);
+    },
+  );
+
+  it('rejects groups exceeding the persisted event limit before writing', async () => {
+    await seed();
+    const before = await fs.readFile(file, 'utf8');
+    await expect(
+      service.removeSessionArtifactsForLibrary(
+        id,
+        Array.from({ length: 801 }, (_, index) => `artifact-${index}`),
+        { assertStorageUnchanged: async () => {}, assertCanMutate: () => {} },
+      ),
+    ).rejects.toThrow('at most 800 unique ids');
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+  });
+
   it.each([false, true])(
     'reads and unregisters cold artifacts without changing archive state (%s)',
     async (archived) => {
@@ -722,4 +832,81 @@ describe('persisted artifact library', () => {
       ),
     ).toEqual([artifactId]);
   });
+
+  it.each([false, true])(
+    'retains a shared preview until its last registration is removed (%s)',
+    async (removeTogether) => {
+      await seed();
+      const capture = await saveArtifactSnapshot(
+        '<html>Shared capture</html>',
+        'Shared capture',
+        'https://example.com',
+        id,
+        runtime,
+      );
+      const firstId = stableSessionArtifactId(id, `url:${capture.url}`);
+      const secondId = stableSessionArtifactId(
+        id,
+        `managed:${capture.managedId}`,
+      );
+      const artifacts = [firstId, secondId].map((id) => ({
+        ...capture,
+        id,
+        toolName: 'artifact',
+        source: 'tool',
+        status: 'available',
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: stamp,
+        updatedAt: stamp,
+      }));
+      await fs.appendFile(
+        file,
+        JSON.stringify({
+          sessionId: id,
+          cwd,
+          uuid: 'shared-capture',
+          parentUuid: 'assistant-1',
+          timestamp: stamp,
+          version: '0.25.3',
+          type: 'system',
+          subtype: 'session_artifact_event',
+          systemPayload: {
+            v: 2,
+            sessionId: id,
+            sequence: 2,
+            recordedAt: stamp,
+            changes: artifacts.map((artifact) => ({
+              action: 'created',
+              artifactId: artifact.id,
+              artifact,
+            })),
+          },
+        }) + '\n',
+      );
+      const captured = fileURLToPath(capture.url!);
+      const guards = {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      };
+      const requested = removeTogether ? [firstId, secondId] : [firstId];
+      await expect(
+        service.removeSessionArtifactsForLibrary(id, requested, guards),
+      ).resolves.toEqual(requested);
+      if (!removeTogether) {
+        expect(await fs.readFile(captured, 'utf8')).toBe(
+          '<html>Shared capture</html>',
+        );
+        await expect(
+          service.removeSessionArtifactsForLibrary(id, [secondId], guards),
+        ).resolves.toEqual([secondId]);
+      }
+      await expect(fs.stat(captured)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        (await service.readSessionArtifactSnapshot(id))?.artifacts.map(
+          (artifact) => artifact.id,
+        ),
+      ).toEqual([artifactId]);
+    },
+  );
 });

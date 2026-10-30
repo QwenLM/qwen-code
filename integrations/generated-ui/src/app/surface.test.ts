@@ -5,7 +5,7 @@
  */
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { ViewSurface } from './surface.js';
+import { VIEW_BASE_STYLE, ViewSurface } from './surface.js';
 
 function harness(html: string) {
   const frame = document.createElement('iframe');
@@ -17,6 +17,148 @@ function harness(html: string) {
   surface.attach(content, html, 'body { color: black }');
   return { surface, frame, content, onEvent, onError };
 }
+
+describe('view height', () => {
+  it('grows and shrinks with its content within the bounds', () => {
+    const h = harness('<p id="out">Ready</p>');
+    // jsdom lays out nothing; give the frame the width a browser would.
+    Object.defineProperty(h.frame, 'clientWidth', { value: 600 });
+    const body = h.content.body;
+    body.style.margin = '12px';
+    const sized = (height: number) => {
+      body.getBoundingClientRect = () => ({ height }) as DOMRect;
+      h.surface.fit();
+      return h.frame.style.height;
+    };
+    expect(sized(300)).toBe('326px');
+    expect(sized(40)).toBe('80px');
+    expect(sized(5000)).toBe('3600px');
+    body.getBoundingClientRect = () => ({ height: 200 }) as DOMRect;
+    h.surface.apply([{ kind: 'text', id: 'out', value: 'Updated' }]);
+    expect(h.frame.style.height).toBe('226px');
+  });
+});
+
+describe('view height with viewport-sized content', () => {
+  it('does not grow the frame on its own resize', () => {
+    const h = harness('<p id="out">Ready</p>');
+    let width = 600;
+    Object.defineProperty(h.frame, 'clientWidth', { get: () => width });
+    const body = h.content.body;
+    body.style.margin = '12px';
+    // Like body{min-height:100vh}: the body is as tall as the frame.
+    let measured = 0;
+    body.getBoundingClientRect = () => {
+      measured++;
+      return { height: parseFloat(h.frame.style.height) || 0 } as DOMRect;
+    };
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('106px');
+    // Writing the height resizes the frame; that resize is not measured.
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    expect(h.frame.style.height).toBe('106px');
+    expect(measured).toBe(1);
+    // A width change reflows the content, so it is measured again.
+    body.getBoundingClientRect = () => ({ height: 300 }) as DOMRect;
+    width = 400;
+    h.content.defaultView!.dispatchEvent(new Event('resize'));
+    expect(h.frame.style.height).toBe('326px');
+  });
+
+  it('contains child margins in the measured body', () => {
+    // A first child's margin would otherwise collapse through the body and
+    // escape its measured height.
+    expect(VIEW_BASE_STYLE).toContain('body{margin:12px;display:flow-root;');
+  });
+});
+
+describe('view height before layout', () => {
+  it('does not measure a hidden or zero-width frame', () => {
+    const h = harness('<p id="out">Ready</p>');
+    h.content.body.getBoundingClientRect = () => ({ height: 5000 }) as DOMRect;
+    h.frame.style.height = '';
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('');
+    Object.defineProperty(h.frame, 'clientWidth', { value: 600 });
+    h.frame.hidden = true;
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('');
+    h.frame.hidden = false;
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('3600px');
+  });
+});
+
+describe('host theme in the view document', () => {
+  it('pins the color scheme and copies standard style variables', () => {
+    const h = harness('<p id="out">Ready</p>');
+    const root = h.content.documentElement;
+    expect(root.style.colorScheme).toBe('light dark');
+    h.surface.setHostStyle({
+      theme: 'dark',
+      variables: {
+        '--color-text-primary': 'oklch(98.5% 0 0)',
+        '--color-border-primary': 'oklch(100% 0 0/.1)',
+        '--font-sans': '-apple-system, "Segoe UI", system-ui',
+        '--border-radius-md': '6px',
+      },
+    });
+    expect(root.style.colorScheme).toBe('dark');
+    expect(root.style.getPropertyValue('--color-text-primary')).toBe(
+      'oklch(98.5% 0 0)',
+    );
+    expect(root.style.getPropertyValue('--font-sans')).toBe(
+      '-apple-system, "Segoe UI", system-ui',
+    );
+    h.surface.setHostStyle({
+      theme: 'light',
+      variables: { '--color-text-primary': 'rgb(10, 10, 10)' },
+    });
+    expect(root.style.colorScheme).toBe('light');
+    expect(root.style.getPropertyValue('--color-text-primary')).toBe(
+      'rgb(10, 10, 10)',
+    );
+    expect(root.style.getPropertyValue('--color-border-primary')).toBe('');
+  });
+
+  it('ignores non-standard names and values that could escape a declaration', () => {
+    const h = harness('<p id="out">Ready</p>');
+    h.surface.setHostStyle({
+      variables: {
+        '--color-text-primary': 'red; background: url(/secret)',
+        '--color-text-secondary': '}body{display:none',
+        '--gu-text': 'red',
+        color: 'red',
+        '--color-text-danger': 'rgb(231, 0, 11)',
+      },
+    });
+    const style = h.content.documentElement.style;
+    expect(style.getPropertyValue('--color-text-primary')).toBe('');
+    expect(style.getPropertyValue('--color-text-secondary')).toBe('');
+    expect(style.getPropertyValue('--gu-text')).toBe('');
+    expect(style.color).toBe('');
+    expect(style.getPropertyValue('--color-text-danger')).toBe(
+      'rgb(231, 0, 11)',
+    );
+  });
+
+  it('applies a theme received before the view mounts', () => {
+    const frame = document.createElement('iframe');
+    document.body.replaceChildren(frame);
+    const surface = new ViewSurface(frame, vi.fn(), vi.fn());
+    surface.setHostStyle({
+      theme: 'dark',
+      variables: { '--color-text-primary': 'rgb(250, 250, 250)' },
+    });
+    surface.attach(frame.contentDocument!, '<p id="out">Ready</p>', '');
+    const root = frame.contentDocument!.documentElement;
+    expect(root.style.colorScheme).toBe('dark');
+    expect(root.style.getPropertyValue('--color-text-primary')).toBe(
+      'rgb(250, 250, 250)',
+    );
+  });
+});
 
 describe('generated markup display', () => {
   it('preserves valid common IDs without exposing named DOM properties to the renderer', () => {

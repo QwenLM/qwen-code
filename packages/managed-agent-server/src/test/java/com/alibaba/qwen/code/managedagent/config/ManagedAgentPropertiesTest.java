@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
 import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HostedCleanupRetryCoordinator;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
 import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
@@ -96,6 +97,43 @@ class ManagedAgentPropertiesTest {
                 });
     }
 
+    private static final String PROVIDER_ID_KEY =
+            "qwen.managed-agent.runtime-broker.external-provider-id";
+    private static final String REQUEST_TIMEOUT_KEY =
+            "qwen.managed-agent.runtime-broker.external-request-timeout";
+    private static final String STARTUP_TIMEOUT_KEY =
+            "qwen.managed-agent.runtime-broker.external-startup-timeout";
+
+    @Test
+    void applicationYmlBindsTheExternalRuntimeDefaults() throws java.io.IOException {
+        var values = applicationYmlValues();
+        // The named contract itself: renaming or typoing a variable shows up
+        // here, and dropping the '2m' unit flips the startup bind to PT2S
+        // instead of PT2M while every duration floor keeps passing.
+        assertThat(values).containsEntry(PROVIDER_ID_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID:external}");
+        assertThat(values).containsEntry(REQUEST_TIMEOUT_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT:30s}");
+        assertThat(values).containsEntry(STARTUP_TIMEOUT_KEY,
+                "${QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT:2m}");
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        PROVIDER_ID_KEY + "=" + values.get(PROVIDER_ID_KEY),
+                        REQUEST_TIMEOUT_KEY + "=" + values.get(REQUEST_TIMEOUT_KEY),
+                        STARTUP_TIMEOUT_KEY + "=" + values.get(STARTUP_TIMEOUT_KEY))
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var broker = started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker();
+                    assertThat(broker.getExternalProviderId()).isEqualTo("external");
+                    assertThat(broker.getExternalRequestTimeout())
+                            .isEqualTo(java.time.Duration.ofSeconds(30));
+                    assertThat(broker.getExternalStartupTimeout())
+                            .isEqualTo(java.time.Duration.ofMinutes(2));
+                });
+    }
+
     private static java.util.Map<String, Object> applicationYmlValues() throws java.io.IOException {
         var loaded = new org.springframework.boot.env.YamlPropertySourceLoader().load(
                 "application.yml",
@@ -168,10 +206,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 34 is the current field
+        // exceptions would go unchecked. 36 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(34);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(36);
     }
 
     @Test
@@ -432,8 +470,8 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void theThreeScanDelaySchedulesShareOneFallback() throws java.io.IOException {
-        // The Dispatch comment claims the three sites read the identical
+    void theFourScanDelaySchedulesShareOneFallback() throws java.io.IOException {
+        // The Dispatch comment claims the four sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
         // true when one fallback is retuned without the others. The unit
         // is half of the claim: @Scheduled reads a bare number as
@@ -450,7 +488,8 @@ class ManagedAgentPropertiesTest {
         assertThat(applicationYmlValues()).containsEntry(
                 "qwen.managed-agent.dispatch.scan-delay", "1s");
         for (Class<?> coordinator : List.of(ActionResponseCoordinator.class,
-                HarnessCoordinator.class, SessionLifecycleCoordinator.class)) {
+                HarnessCoordinator.class, SessionLifecycleCoordinator.class,
+                HostedCleanupRetryCoordinator.class)) {
             assertThat(schedulesOn(coordinator, "dispatch.scan-delay"))
                     .as(coordinator.getSimpleName())
                     .hasSize(1)
@@ -508,6 +547,7 @@ class ManagedAgentPropertiesTest {
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
                 "runtime-broker.retention.scan-delay",
+                "session-worktree.scan-delay",
                 "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
@@ -1126,6 +1166,8 @@ class ManagedAgentPropertiesTest {
                     + ".max-slots-per-tick")).isTrue();
             assertThat(source.containsProperty("qwen.managed-agent.automation"
                     + ".concurrency")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".scanner-threads")).isTrue();
         });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -1157,6 +1199,7 @@ class ManagedAgentPropertiesTest {
                             .isEqualTo(java.time.Duration.ofHours(24));
                     assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
                     assertThat(automation.getConcurrency()).isEqualTo(4);
+                    assertThat(automation.getScannerThreads()).isEqualTo(4);
                 });
     }
 
@@ -1165,6 +1208,7 @@ class ManagedAgentPropertiesTest {
         List<Consumer<ManagedAgentProperties>> invalid = List.of(
                 p -> p.getAutomation().setMaxSlotsPerTick(0),
                 p -> p.getAutomation().setConcurrency(0),
+                p -> p.getAutomation().setScannerThreads(0),
                 p -> p.getAutomation().setScanDelay(
                         java.time.Duration.ZERO),
                 p -> p.getAutomation().setLease(java.time.Duration.ZERO),
