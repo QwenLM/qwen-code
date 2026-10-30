@@ -45,10 +45,15 @@ describe('keyToAnsi', () => {
     ['backspace', '\x7f', '\x7f', '\x1b[127;5u'],
     ['return', '\r', null, '\x1b[27;5;13~'],
   ])(
-    'pins the literal mapping for %s with and without Ctrl',
+    'pins the literal mapping for %s with and without modifiers',
     (name, expected, ctrlExpected, sequence) => {
       expect(keyToAnsi(key({ name }))).toBe(expected);
       expect(keyToAnsi(key({ name, ctrl: true, sequence }))).toBe(ctrlExpected);
+      if (name === 'return') {
+        expect(
+          keyToAnsi(key({ name, meta: true, sequence: '\x1b\r' })),
+        ).toBeNull();
+      }
     },
   );
 

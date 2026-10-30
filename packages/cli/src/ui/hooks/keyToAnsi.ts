@@ -66,7 +66,7 @@ export function keyToAnsi(key: Key): string | null {
 
   // Enter/Return
   if (key.name === 'return') {
-    return key.ctrl ? null : '\r';
+    return key.ctrl || key.meta ? null : '\r';
   }
 
   // Pass through printable characters and unmapped named-key sequences.
