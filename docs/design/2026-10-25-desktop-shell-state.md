@@ -51,6 +51,10 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 - `writeShellState` writes through to `localStorage` (the browser path and an in-session fallback) and to IPC. The IPC write is fire-and-forget: a failure leaves the session working, the mirror survives a same-origin reload, and only a launch on a fresh origin loses the value.
 - `remote-connections.ts` and `workspace-hosts.ts` call the adapter; their readers' validation is unchanged. `rememberWorkspaceHost` adds a desktop-only write-path rejection that also skips its change-event dispatch; see the workspace-host catalog rule below.
 
+### Boot navigation
+
+`start_runtime` reads both catalogs before navigating and appends one `fanout=<origin>` per saved host the daemon accepts (http/https, no credentials, root path, no query or fragment), skipping the page origin. The daemon derives `connect-src` from the request URL alone, so without those parameters a saved host would stay blocked for the whole first document of a launch; hydration necessarily runs after that document is served.
+
 ### Workspace-host catalog rule
 
 `rememberWorkspaceHost` does not persist the page's own origin **in the desktop shell**. There the origin is the ephemeral runtime origin, so persisting it would add a stale host on every launch. The browser keeps saving it: the saved entry is the offline snapshot for the local group when the page daemon cannot be reached. `useOtherOrigins` keeps the group itself in-session, but each group's project list comes from that saved entry.
@@ -81,7 +85,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 ## Verification
 
-- `cargo test` in `packages/desktop/src-tauri`: 42 `#[test]` functions, 39 of which run on Windows and 38 on macOS because the rest are platform-gated. They include a settings reload test that writes a catalog, drops the store, reloads it, and reads the value back, plus allowlist and size-cap tests.
+- `cargo test` in `packages/desktop/src-tauri`: the crate's unit tests, including a settings reload test that writes a catalog, drops the store, reloads it, and reads the value back, plus allowlist and size-cap tests. How many run depends on the platform, because some are gated on `windows`/`unix`.
 - `cargo clippy --all-targets -- -D warnings`: clean.
 - `npm run typecheck --workspace=@qwen-code/web-shell`: clean.
 - ESLint and Prettier on the touched files: clean.

@@ -51,6 +51,10 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 - `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，镜像在同源重载下存活，只有在全新 origin 上启动才会丢失该值。
 - `remote-connections.ts` 与 `workspace-hosts.ts` 调用该适配器；它们读取侧的校验保持不变。`rememberWorkspaceHost` 新增了仅限桌面外壳的写入路径拒绝，同时会跳过其变更事件派发；详见下方工作区主机目录规则。
 
+### 启动导航
+
+`start_runtime` 在导航前读取两个目录，为每个 daemon 可接受的已保存主机（仅 http/https、无账号密码、根路径、无 query 与 fragment）追加一个 `fanout=<origin>`，并跳过页面 origin。daemon 只根据请求 URL 生成 `connect-src`，因此缺少这些参数时，已保存主机在整个首次文档期间都会被拦截；而水合必然发生在该文档下发之后。
+
 ### 工作区主机目录规则
 
 `rememberWorkspaceHost` **只在桌面外壳中**不持久化页面自身的 origin。那里的 origin 是临时运行时 origin，持久化会在每次启动时追加一个过期主机。浏览器仍会保存它：当页面 daemon 不可达时，该条目是本地分组的离线快照。`useOtherOrigins` 只保证分组本身留在会话内，而每个分组的项目列表来自该已保存条目。
@@ -81,7 +85,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 ## 验证
 
-- `packages/desktop/src-tauri` 中的 `cargo test`：42 个 `#[test]` 函数，其中 Windows 上运行 39 个、macOS 上运行 38 个，其余按平台门控。其中包括一个设置重载测试：写入目录、丢弃存储、重新加载并读回该值，以及白名单和大小上限测试。
+- `packages/desktop/src-tauri` 中的 `cargo test`：该 crate 的单元测试，其中包括一个设置重载测试：写入目录、丢弃存储、重新加载并读回该值，以及白名单和大小上限测试。实际运行的用例数按平台不同，因为部分用例带有 `windows`/`unix` 门控。
 - `cargo clippy --all-targets -- -D warnings`：干净。
 - `npm run typecheck --workspace=@qwen-code/web-shell`：干净。
 - 对改动文件运行 ESLint 与 Prettier：干净。

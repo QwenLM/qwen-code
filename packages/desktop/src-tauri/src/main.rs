@@ -8,7 +8,7 @@ use desktop_state::{
     default_window_size, is_shell_state_key_allowed, restore_window, zoom_after, SettingsStore,
     DEFAULT_ZOOM,
 };
-use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
+use runtime::{fanout_origin, resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -553,6 +553,57 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
     Ok(())
 }
 
+// The two catalogs whose entries name remote origins. Both must stay in
+// `SHELL_STATE_KEYS` (desktop_state.rs); `fanout_keys_stay_allowlisted` pins it.
+const REMOTE_CONNECTIONS_KEY: &str = "qwen-remote-connections";
+const WORKSPACE_HOSTS_KEY: &str = "qwen-workspace-hosts";
+
+/// Origins the very first document of a launch must be served with. The daemon
+/// derives `connect-src` from the request URL alone, while the catalogs reach
+/// the client only through hydration, so without this a saved host is blocked
+/// until the user reloads or clicks through to it.
+fn launch_fanout_origins(settings: &SettingsStore, page_origin: &str) -> Vec<String> {
+    fanout_origins_from_catalogs(
+        settings.shell_state(REMOTE_CONNECTIONS_KEY).as_deref(),
+        settings.shell_state(WORKSPACE_HOSTS_KEY).as_deref(),
+        page_origin,
+    )
+}
+
+fn fanout_origins_from_catalogs(
+    connections: Option<&str>,
+    hosts: Option<&str>,
+    page_origin: &str,
+) -> Vec<String> {
+    let mut origins = Vec::new();
+    if let Some(entries) = parse_catalog(connections) {
+        origins.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .filter_map(fanout_origin),
+        );
+    }
+    if let Some(entries) = parse_catalog(hosts) {
+        origins.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("origin")?.as_str())
+                .filter_map(fanout_origin),
+        );
+    }
+    origins.retain(|origin| origin != page_origin);
+    origins.dedup();
+    origins
+}
+
+fn parse_catalog(raw: Option<&str>) -> Option<Vec<serde_json::Value>> {
+    match serde_json::from_str::<serde_json::Value>(raw?) {
+        Ok(serde_json::Value::Array(entries)) => Some(entries),
+        _ => None,
+    }
+}
+
 fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bool) {
     stop_runtime(&app);
     let generation = {
@@ -617,6 +668,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                         return;
                     }
                 };
+                let fanout = launch_fanout_origins(&state.settings, origin.as_str());
                 *lock(&state.origin) = Some(origin);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();
@@ -628,7 +680,9 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                     );
                     return;
                 };
-                if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
+                if let Err(error) =
+                    window.navigate(runtime.authenticated_web_url_with_fanout(&fanout))
+                {
                     runtime.stop();
                     clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
@@ -970,8 +1024,10 @@ mod tests {
     };
     use super::{
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
-        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_runtime_origin,
-        is_safe_external_url, is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
+        ensure_workspace_dir, fanout_origins_from_catalogs, is_allowed_navigation,
+        is_bootstrap_url, is_runtime_origin, is_safe_external_url, is_same_origin,
+        is_shell_state_key_allowed, origin_of, updates_disabled_value, BOOTSTRAP_URL,
+        REMOTE_CONNECTIONS_KEY, WORKSPACE_HOSTS_KEY,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -1053,6 +1109,27 @@ mod tests {
             &Url::parse("https://example.com/").expect("external"),
             &origin,
         ));
+    }
+
+    #[test]
+    fn fanout_origins_cover_saved_hosts_and_skip_the_page_origin() {
+        let connections = Some(
+            r#"["https://remote.example","http://127.0.0.1:49152/","https://remote.example/ws","not a url"]"#,
+        );
+        let hosts = Some(
+            r#"[{"origin":"https://remote.example","workspaces":[]},{"origin":"http://10.0.0.2:4170","workspaces":[]}]"#,
+        );
+        assert_eq!(
+            fanout_origins_from_catalogs(connections, hosts, "http://127.0.0.1:49152"),
+            ["https://remote.example", "http://10.0.0.2:4170"]
+        );
+    }
+
+    #[test]
+    fn fanout_keys_stay_allowlisted() {
+        for key in [REMOTE_CONNECTIONS_KEY, WORKSPACE_HOSTS_KEY] {
+            assert!(is_shell_state_key_allowed(key), "{key}");
+        }
     }
 
     #[test]
