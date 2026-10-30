@@ -425,7 +425,12 @@ function cancelledOutputText(rawOutput: unknown): string {
   }
   const record = rawOutput as Record<string, unknown>;
   for (const key of ['text', 'output', 'stdout'] as const) {
-    if (typeof record[key] === 'string') return record[key];
+    const value = record[key];
+    if (typeof value !== 'string') continue;
+    // A cancelled call that recorded no output carries the redacted input dump
+    // in `text`, written there as the same string as `reason`; it is not output.
+    if (key === 'text' && value === record['reason']) continue;
+    return value;
   }
   return '';
 }

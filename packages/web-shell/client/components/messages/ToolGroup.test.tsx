@@ -3577,6 +3577,27 @@ describe('generic tool card details', () => {
     expect(text.split('"method": "ping"').length - 1).toBe(1);
   });
 
+  it('does not render the cancelled input dump as the result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'completed',
+        wasCancelled: true,
+        args: { method: 'ping' },
+        rawOutput: {
+          status: 'cancelled',
+          reason: '{"method":"ping"}',
+          text: '{"method":"ping"}',
+        },
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Cancelled');
+    expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
   it.each(['output', 'stdout'] as const)(
     'keeps cancelled %s output visible',
     (key) => {
