@@ -27,6 +27,9 @@ junit.xml
 # so formatting and `pnpm install` fight over the file. .yamllint.yml
 # already ignores it for the same reason.
 pnpm-lock.yaml
+
+# Helm templates are validated through Helm rendering.
+deploy/kubernetes/chart/templates/
 Thumbs.db
 packages/vscode-ide-companion/schemas/settings.schema.json
 packages/cli/src/services/insight/templates/insightTemplate.ts
