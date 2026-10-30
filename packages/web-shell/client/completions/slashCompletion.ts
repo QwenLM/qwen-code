@@ -561,9 +561,11 @@ function getRemainingSkillArgumentHint(
   // an earlier branch's optional placeholder.
   let best: { remaining: string[]; literals: number } | null = null;
   for (const branch of splitHintParts(argumentHint, (ch) => ch === '|')) {
-    const tokens = splitHintParts(branch.trim(), (ch) => /\s/.test(ch)).map(
-      parseSkillHintToken,
-    );
+    const tokens = splitHintParts(branch.trim(), (ch) => /\s/.test(ch))
+      .map(parseSkillHintToken)
+      // Empty groups are malformed metadata: they must not survive as
+      // renderable leftover tokens (e.g. '[] []' echoing '[]').
+      .filter((token) => token.text !== '[]' && token.text !== '<>');
     const result = matchSkillHintBranch(tokens, typed);
     if (result && (!best || result.literals > best.literals)) best = result;
   }

@@ -352,6 +352,18 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
     }
   });
 
+  it('hides the original empty-group witness instead of echoing a leftover token', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '[] []',
+      },
+    ];
+    expect(getSlashCommandArgumentHint('/demo x', commands, 'en')).toBeNull();
+  });
+
   it('consumes flags typed after a free-text placeholder', () => {
     const commands: CommandInfo[] = [
       {
