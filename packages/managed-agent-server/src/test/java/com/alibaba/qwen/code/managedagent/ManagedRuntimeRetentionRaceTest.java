@@ -219,7 +219,7 @@ class ManagedRuntimeRetentionRaceTest {
                 var registration = reference == Reference.CSI_RETIREMENT
                         ? new WorkspaceCsiRegistration("tenant-1", "storage", "cluster", "namespace", "claim", "pvc",
                                 "volume", "pv", "driver", "handle", "backend", "serial", "/workspace", 1) : null;
-                var publication = PublicationJournalFixture.create(source, false, registration);
+                var publication = PublicationJournalFixture.create(source, registration);
                 bindings = publication.bindings;
                 binding = bindings.findById("binding-1");
                 write = registration == null ? publication::reserve : () ->

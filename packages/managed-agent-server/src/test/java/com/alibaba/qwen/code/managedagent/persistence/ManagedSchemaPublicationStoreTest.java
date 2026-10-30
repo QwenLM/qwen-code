@@ -40,7 +40,7 @@ public class ManagedSchemaPublicationStoreTest {
     void asyncVerificationSealsAndAdmissionReuseTheSameImmutableResourceRow() {
         DataSource source = dataSource();
         ManagedSchema.initialize(source);
-        var fixture = PublicationJournalFixture.create(source, true);
+        var fixture = PublicationJournalFixture.create(source);
         fixture.reserve();
         var bucket = new Bucket();
         fixture.sessions.setPublicationObjects(bucket);

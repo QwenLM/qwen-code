@@ -128,20 +128,19 @@ public class OwnerSubscriptions {
     }
 
     private Set<String> held() {
-        String writer = harness.writerIdentity();
-        if (writer == null) {
-            // No Harness client: this node writes no journal.
-            return Set.of();
+        record Owner(String writer, String tenant) {
         }
-        Map<String, List<String>> byTenant = new HashMap<>();
+        Map<Owner, List<String>> groups = new HashMap<>();
         for (AttachedSession session : harness.attachedSessions()) {
-            byTenant.computeIfAbsent(session.tenantId(),
-                    ignored -> new ArrayList<>()).add(session.sessionId());
+            String writer = session.writerIdentity() == null ? harness.writerIdentity() : session.writerIdentity();
+            if (writer != null) {
+                groups.computeIfAbsent(new Owner(writer, session.tenantId()),
+                        ignored -> new ArrayList<>()).add(session.sessionId());
+            }
         }
         Set<String> held = new HashSet<>();
-        for (Map.Entry<String, List<String>> tenant : byTenant.entrySet()) {
-            held.addAll(store.heldBy(writer, tenant.getKey(),
-                    tenant.getValue()));
+        for (var group : groups.entrySet()) {
+            held.addAll(store.heldBy(group.getKey().writer(), group.getKey().tenant(), group.getValue()));
         }
         return held;
     }

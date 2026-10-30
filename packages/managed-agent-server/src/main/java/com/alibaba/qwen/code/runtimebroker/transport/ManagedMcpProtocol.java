@@ -6,12 +6,16 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /** Session ownership and bounded wire envelope for private MCP controls. */
 public final class ManagedMcpProtocol {
     static final String PATH = "/internal/managed-runtime/v3/mcp";
+    static final String DEFINITIONS_PATH = PATH + "/definitions";
     private static final Set<String> KINDS = Set.of("mcp-configure", "mcp-discover",
             "mcp-invoke", "mcp-status", "mcp-cancel", "mcp-release");
     private static final Set<String> RECOVERY_KINDS = Set.of("mcp-status", "mcp-cancel", "mcp-release");
@@ -19,6 +23,33 @@ public final class ManagedMcpProtocol {
     private static final Set<String> STATES = Set.of("running", "settled", "outcome_unknown");
 
     private ManagedMcpProtocol() {
+    }
+
+    static List<Map<String, Object>> definitions(byte[] bytes) {
+        Map<String, Object> envelope = ManagedContextProtocol.parse(bytes);
+        if (!envelope.keySet().equals(Set.of("protocolVersion", "servers"))
+                || !Integer.valueOf(1).equals(envelope.get("protocolVersion"))
+                || !(envelope.get("servers") instanceof List<?> servers)) {
+            throw new RuntimeBrokerException(502, "managed_mcp_response_invalid", "Runtime MCP definitions are invalid.", false);
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        Set<String> identities = new HashSet<>();
+        for (Object entry : servers) {
+            Long revision = entry instanceof Map<?, ?> value ? BrokerValues.exactLong(value.get("serverRevision")) : null;
+            if (!(entry instanceof Map<?, ?> pin)
+                    || !pin.keySet().equals(Set.of("serverId", "serverRevision", "definitionDigest", "transport"))
+                    || !(pin.get("serverId") instanceof String id) || !id.matches("[A-Za-z0-9._:-]{1,128}")
+                    || revision == null || revision < 1 || revision > 9_007_199_254_740_991L
+                    || !(pin.get("definitionDigest") instanceof String digest) || !digest.matches("[a-f0-9]{64}")
+                    || !(pin.get("transport") instanceof String transport)
+                    || !Set.of("stdio", "streamable-http", "sse").contains(transport)
+                    || !identities.add(id + "\0" + revision.longValue())) {
+                throw new RuntimeBrokerException(502, "managed_mcp_response_invalid", "Runtime MCP definitions are invalid.", false);
+            }
+            result.add(Map.of("serverId", id, "serverRevision", revision.longValue(),
+                    "definitionDigest", digest, "transport", transport));
+        }
+        return List.copyOf(result);
     }
 
     public static boolean isOperation(Map<String, Object> operation) {

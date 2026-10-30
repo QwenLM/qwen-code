@@ -100,9 +100,9 @@ class EventTransportConfigurationTest {
                 // Bound from the property values, as in a deployment.
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .withBean(ClientServiceProvider.class, () -> provider)
-                .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
-                .withBean(Clock.class, Clock::systemUTC)
-                .withBean(ObjectMapper.class, ObjectMapper::new)
+                .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> mock(JdbcTemplate.class))
+                .withBean("managedAgentClock", Clock.class, Clock::systemUTC)
+                .withBean("managedAgentObjectMapper", ObjectMapper.class, ObjectMapper::new)
                 .withBean(HarnessConnector.class, () -> harness)
                 .withBean(MessageMaterializer.class,
                         () -> mock(MessageMaterializer.class))

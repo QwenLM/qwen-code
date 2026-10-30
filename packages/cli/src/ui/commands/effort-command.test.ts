@@ -103,11 +103,13 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
-  it.each(['high', 'max', 'low'] as const)(
+  it.each(['low', 'high', 'max'] as const)(
     'reports the effective state for saved %s without changing settings',
     async (effort) => {
+      // deepseek-v4-pro on Token Plan offers only high/max, so a saved low
+      // falls back to the provider default.
       const spec = tokenPlanProvider.models!.find(
-        (m) => m.id === 'qwen3.8-max',
+        (m) => m.id === 'deepseek-v4-pro',
       )!;
       Object.assign(context.services.config!, {
         getModel: () => spec.id,
@@ -121,8 +123,8 @@ describe('effortCommand', () => {
       );
       expect((res as { content: string }).content).toContain(
         effort === 'low'
-          ? 'Current reasoning effort:'
-          : 'using the model/provider default',
+          ? 'using the model/provider default'
+          : 'Current reasoning effort:',
       );
       expect(setValue).not.toHaveBeenCalled();
       expect(setReasoningEffort).not.toHaveBeenCalled();

@@ -16,21 +16,27 @@ final class WorkspaceStorageKindGuard {
     }
 
     static void lockDomain(JdbcTemplate jdbc, String tenantId) {
+        lockDomain(jdbc, tenantId, 0);
+    }
+
+    // Bounded variant: caps each lock acquisition statement at timeoutSeconds
+    // so a caller cannot be frozen behind a long holder of the guard row.
+    static void lockDomain(JdbcTemplate jdbc, String tenantId, int timeoutSeconds) {
         jdbc.execute((ConnectionCallback<Void>) connection -> {
-            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenantId);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenantId, timeoutSeconds);
             return null;
         });
     }
 
     static void requireLocalAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'SSH_LOCAL')",
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'SSH_LOCAL', 'EXTERNAL')",
                 Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     static void requireExecutionAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI'",
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('CSI', 'EXTERNAL')",
                 Long.class, WorkspaceCsiRegistration.aliasKey(tenantId, storageId)) != 0) {
             throw WorkspaceExecutionStore.unavailable();
         }

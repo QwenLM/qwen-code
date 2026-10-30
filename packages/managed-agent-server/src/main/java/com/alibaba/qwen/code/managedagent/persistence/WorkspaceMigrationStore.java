@@ -357,13 +357,17 @@ public final class WorkspaceMigrationStore {
         // one proven never delivered, has settled.
         check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation r"
                 + " ON r.session_scope_key = s.session_scope_key AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED', 'UNKNOWN')") == 0,
+                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')") == 0,
                 "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage
         // moves. A conflicted one keeps only refs, which move with it.
         check(count("SELECT COUNT(*) FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
                 + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')") == 0,
+                "migration_work_unsettled");
+        check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_worktree WHERE physical_key IN"
+                        + " (SELECT physical_key FROM ma_storage WHERE alias_key = ?) AND state <> 'REMOVED'", Integer.class,
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0,
                 "migration_work_unsettled");
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));

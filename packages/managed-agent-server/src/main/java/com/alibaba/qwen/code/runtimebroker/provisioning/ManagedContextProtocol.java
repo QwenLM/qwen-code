@@ -57,6 +57,10 @@ public final class ManagedContextProtocol {
 
     public static Map<String, Object> boot(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed) {
+        return boot(request, seed, null);
+    }
+
+    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> extensions) {
         require(request != null && request.isManagedContext() && seed != null);
         RuntimeScope scope = request.getScope();
         Map<String, Object> boot = new LinkedHashMap<>();
@@ -76,12 +80,19 @@ public final class ManagedContextProtocol {
         boot.put("mountRoot", scope.getCanonicalCwd());
         boot.put("capabilityDigest", scope.getCapabilityDigest());
         boot.put("isolationClass", scope.getIsolationClass());
+        if (extensions != null) {
+            boot.put("managedExtensions", extensions);
+        }
         validateBoot(boot);
         return Map.copyOf(boot);
     }
 
     public static void validateBoot(Map<String, Object> boot) {
-        require(boot.keySet().equals(BOOT_KEYS)
+        java.util.Set<String> expectedKeys = new java.util.HashSet<>(BOOT_KEYS);
+        if (boot.containsKey("managedExtensions")) {
+            expectedKeys.add("managedExtensions");
+        }
+        require(boot.keySet().equals(expectedKeys)
                 && "boot".equals(boot.get("type"))
                 && exactNumber(boot.get("version"), 2)
                 && PROTOCOL.equals(boot.get("managedContext")));
@@ -101,6 +112,18 @@ public final class ManagedContextProtocol {
                 .matches("sha256:[0-9a-f]{64}"));
         require(Set.of("session", "workspace")
                 .contains(string(boot, "isolationClass")));
+        boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(string(boot, "capabilityDigest"));
+        require(extended == boot.containsKey("managedExtensions"));
+        if (extended) {
+            require(boot.get("managedExtensions") instanceof Map<?, ?>);
+            Map<?, ?> config = (Map<?, ?>) boot.get("managedExtensions");
+            if (com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(string(boot, "capabilityDigest"))) {
+                require(config.get("cgroupRoot") instanceof String cgroup && java.nio.file.Path.of(cgroup).isAbsolute());
+            }
+            require((config.keySet().equals(Set.of("enabled", "mode", "cacheDirectory")) || config.keySet().equals(Set.of("enabled", "mode", "cacheDirectory", "cgroupRoot"))) && Boolean.TRUE.equals(config.get("enabled"))
+                    && com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(string(boot, "capabilityDigest")).equals(config.get("mode"))
+                    && config.get("cacheDirectory") instanceof String directory && java.nio.file.Path.of(directory).isAbsolute());
+        }
     }
 
     static URI ready(Map<String, Object> ready, Map<String, Object> boot) {

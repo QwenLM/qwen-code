@@ -25,13 +25,18 @@ import { getEffectiveReasoning } from '../../reasoning-overrides.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import {
+  QWENCLOUD_MAAS_HOSTS,
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../../dashscope-source-config.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
  * Legacy input ladder for routes without an explicit reasoning capability.
- * DashScope accepts high/max as xhigh aliases; configured presets expose only
- * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * Configured presets declare the tiers the model accepts (qwen3.8 goes up to
+ * max) and bypass this ladder. Keep this fallback's clamp and warning for
  * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
@@ -40,6 +45,17 @@ const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'high',
   'xhigh',
 ] as const;
+
+/**
+ * Output caps DashScope enforces on hosted third-party models that sit below
+ * the vendor's own limit (and so below the shared tokenLimits table, which
+ * describes the vendor API). Keys are lowercase wire model ids. A request
+ * above the cap is rejected with `400 Range of max_tokens should be [1, N]`
+ * on every DashScope endpoint (Standard, Token Plan); probe 2026-10-22.
+ */
+const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
+  ['minimax-m2.5', 32_768],
+]);
 
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
@@ -174,15 +190,7 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope-us.aliyuncs.com',
 ];
 
-/**
- * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
- * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
- * endpoints are subdomains of these, so one suffix match covers all four.
- */
-export const QWENCLOUD_MAAS_HOSTS: readonly string[] = [
-  'maas.qianwenaiapi.com',
-  'maas.qwencloudapi.com',
-];
+export { QWENCLOUD_MAAS_HOSTS };
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -326,9 +334,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
     }
 
-    return customHeaders
-      ? { ...defaultHeaders, ...customHeaders }
-      : defaultHeaders;
+    return withDashScopeSourceConfig(
+      customHeaders ? { ...defaultHeaders, ...customHeaders } : defaultHeaders,
+      this.contentGeneratorConfig.baseUrl,
+      this.cliConfig.getChannel?.(),
+    );
   }
 
   override buildClient(): OpenAI {
@@ -356,7 +366,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       fetch: buildSessionAwareFetch(
         runtimeOptions?.fetch,
         this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
+        withoutDashScopeSourceConfig(this.contentGeneratorConfig.customHeaders),
       ),
     });
   }
@@ -533,6 +543,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    this.capHostedOutputTokens(merged, model);
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
     if (selectedThinkingKnob?.field === 'thinking_budget') {
@@ -618,6 +629,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Clamp max_tokens to the DashScope cap for hosted models whose endpoint
+   * limit is lower than the vendor's. Runs on the final body, so the default,
+   * samplingParams and extra_body values are all bounded: the server rejects
+   * anything above the cap, whichever layer set it.
+   */
+  private capHostedOutputTokens(
+    merged: Record<string, unknown>,
+    model: string | undefined,
+  ): void {
+    const cap = DASHSCOPE_OUTPUT_TOKEN_CAPS.get(this.resolveWireModel(model));
+    const maxTokens = merged['max_tokens'];
+    if (cap !== undefined && typeof maxTokens === 'number' && maxTokens > cap) {
+      merged['max_tokens'] = cap;
+    }
   }
 
   /**

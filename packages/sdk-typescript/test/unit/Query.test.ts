@@ -291,6 +291,116 @@ describe('Query', () => {
     }
   });
 
+  describe('session Workflow mode', () => {
+    async function initializeMode(query: Query, expected: boolean) {
+      await vi.waitFor(() =>
+        expect(transport.writtenMessages.length).toBeGreaterThan(0),
+      );
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(request.request).toMatchObject({
+        subtype: 'initialize',
+        workflowMode: expected,
+      });
+      transport.simulateMessage(
+        createControlResponse(request.request_id, true, {
+          capabilities: { can_set_workflow_mode: true },
+        }),
+      );
+      await query.initialized;
+    }
+
+    it.each([true, false])(
+      'stages explicit %s over a custom transport without sending a setter',
+      async (enabled) => {
+        const query = new Query(transport, { workflowMode: enabled });
+        await initializeMode(query, enabled);
+        expect(transport.getAllWrittenMessages()).toHaveLength(1);
+        const get = query.getWorkflowMode();
+        await vi.waitFor(() =>
+          expect(transport.writtenMessages).toHaveLength(2),
+        );
+        const request = transport.getLastWrittenMessage() as CLIControlRequest;
+        expect(request.request.subtype).toBe('get_workflow_mode');
+        let settled = false;
+        void get.then(() => {
+          settled = true;
+        });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        const state = {
+          requested: enabled,
+          available: true,
+          effective: enabled,
+        };
+        transport.simulateMessage(
+          createControlResponse(request.request_id, true, state),
+        );
+        await expect(get).resolves.toEqual(state);
+        await query.close();
+      },
+    );
+
+    it.each([true, false])(
+      'closes after rejecting an ignored initial choice (%s)',
+      async (workflowMode) => {
+        const query = new Query(transport, { workflowMode });
+        const output = query.next().catch((error: unknown) => error);
+        const input = query.streamInput(
+          (async function* () {
+            yield createUserMessage('ordinary prompt');
+          })(),
+        );
+        const result = input.catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(transport.writtenMessages).toHaveLength(1),
+        );
+        const request = transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(request.request_id, true, {}),
+        );
+        expect(await result).toEqual(
+          expect.objectContaining({
+            message: expect.stringContaining('does not support'),
+          }),
+        );
+        expect(transport.getAllWrittenMessages()).toHaveLength(1);
+        expect(await output).toEqual(await result);
+        expect(query.isClosed()).toBe(true);
+        expect(transport.closed).toBe(true);
+      },
+    );
+
+    it('sends strict Boolean setters and rejects malformed status instead of assuming off', async () => {
+      const query = new Query(transport, { workflowMode: false });
+      await initializeMode(query, false);
+      const set = query.setWorkflowMode(true);
+      const result = set.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(transport.writtenMessages).toHaveLength(2));
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(request.request).toEqual({
+        subtype: 'set_workflow_mode',
+        enabled: true,
+      });
+      transport.simulateMessage(
+        createControlResponse(request.request_id, true, {
+          requested: true,
+          available: false,
+          effective: true,
+        }),
+      );
+      expect(await result).toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining('Invalid Workflow mode response'),
+        }),
+      );
+      await expect(
+        query.setWorkflowMode('on' as unknown as boolean),
+      ).rejects.toThrow('boolean');
+      expect(transport.writtenMessages).toHaveLength(2);
+      await query.close();
+    });
+  });
+
   describe('Construction and Initialization', () => {
     it('should create Query with transport and options', async () => {
       const query = new Query(transport, {
@@ -576,8 +686,26 @@ describe('Query', () => {
       );
 
       await expect(query.initialized).rejects.toThrow();
+      expect(query.isClosed()).toBe(true);
+      expect(transport.closed).toBe(true);
+    });
 
-      await query.close();
+    it('preserves the initialization error when cleanup rejects', async () => {
+      vi.spyOn(transport, 'close').mockRejectedValueOnce(
+        new Error('cleanup failed'),
+      );
+      const query = new Query(transport, {});
+      const output = query.next().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(transport.writtenMessages).toHaveLength(1));
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(request.request_id, false),
+      );
+
+      const error = await query.initialized.catch((error: unknown) => error);
+      expect(await output).toBe(error);
+      expect(transport.close).toHaveBeenCalledOnce();
+      expect(query.isClosed()).toBe(true);
     });
   });
 

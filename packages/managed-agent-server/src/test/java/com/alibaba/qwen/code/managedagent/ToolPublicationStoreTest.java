@@ -123,7 +123,7 @@ class ToolPublicationStoreTest {
                         "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
                         "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1)
                 : null;
-        journal = PublicationJournalFixture.create(source, false, csiRegistration);
+        journal = PublicationJournalFixture.create(source, csiRegistration);
         jdbc = journal.jdbc;
         manager = journal.manager;
         sessions = journal.sessions;
@@ -252,11 +252,10 @@ class ToolPublicationStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"0.5,false", "1.0,false", "0.0,false", "-0.0,false",
-            "0.5,true", "1.0,true", "0.0,true", "-0.0,true"})
+    @ValueSource(doubles = {0.5, 1.0, 0.0, -0.0})
     void csiOriginalProducerFinishesBlockedCaptureAndCreatesItsFirstCandidateAfterSeal(
-            double score, boolean journalHeadAuthorization) {
-        var execution = authorizeCsi(journalHeadAuthorization);
+            double score) {
+        var execution = authorizeCsi();
         retireCsi();
         var objects = new java.util.HashMap<String, byte[]>();
         var data = csiData(objects);
@@ -343,10 +342,9 @@ class ToolPublicationStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"marker,false", "journal,false", "unknown,false", "grant,false",
-            "marker,true", "journal,true", "unknown,true", "grant,true"})
-    void csiTailRefusesMissingOrClosedOriginalAuthority(String damage, boolean journalHeadAuthorization) {
-        var execution = authorizeCsi(journalHeadAuthorization);
+    @ValueSource(strings = {"marker", "journal", "unknown", "grant"})
+    void csiTailRefusesMissingOrClosedOriginalAuthority(String damage) {
+        var execution = authorizeCsi();
         retireCsi();
         if ("marker".equals(damage)) {
             jdbc.update(
@@ -371,10 +369,9 @@ class ToolPublicationStoreTest {
         assertThat(csiStore.inspect(csiRegistration).phase()).isEqualTo("DRAINING");
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void csiSealRefusesNewGrantReserveRenewAndInstallation(boolean journalHeadAuthorization) {
-        var execution = authorizeCsi(journalHeadAuthorization);
+    @Test
+    void csiSealRefusesNewGrantReserveRenewAndInstallation() {
+        var execution = authorizeCsi();
         retireCsi();
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
         assertThatThrownBy(this::reserve).isInstanceOf(IllegalArgumentException.class);
@@ -400,12 +397,8 @@ class ToolPublicationStoreTest {
     }
 
     private ToolExecutionRecord authorizeCsi() {
-        return authorizeCsi(false);
-    }
-
-    private ToolExecutionRecord authorizeCsi(boolean journalHeadAuthorization) {
         initialize(publicationDataSource(), true);
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        store = newStore(10 * ALLOCATION, 10);
         reserve();
         var prepared = executions.findByExecutionCallId("execution-1");
         assertThat(store.verifyDispatch(prepared, "pub-1", PUBLICATION_TOKEN)).isEqualTo(binding);
@@ -1039,8 +1032,7 @@ class ToolPublicationStoreTest {
         int segmentLength = segmentText.length();
         if (large) {
             store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
-                    new ToolPublicationStore.Capacity(16 * 1024 * 1024, 64 * 1024 * 1024, 64 * 1024 * 1024, 10),
-                    true);
+                    new ToolPublicationStore.Capacity(16 * 1024 * 1024, 64 * 1024 * 1024, 64 * 1024 * 1024, 10));
             store.apply(request("reserve").put("captureBytes", segmentLength), WRITER_TOKEN, PUBLICATION_TOKEN);
         } else {
             reserve();
@@ -1670,7 +1662,7 @@ class ToolPublicationStoreTest {
         long allocated = captureBytes + ToolPublicationContract.PRODUCER_BYTES
                 + ToolPublicationContract.ADMISSION_BYTES;
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
-                new ToolPublicationStore.Capacity(captureBytes, allocated, allocated, 1), true);
+                new ToolPublicationStore.Capacity(captureBytes, allocated, allocated, 1));
         store.apply(request("reserve").put("captureBytes", captureBytes), WRITER_TOKEN, PUBLICATION_TOKEN);
         boolean[] slow = {false};
         int[] metadataQueries = {0};
@@ -1868,12 +1860,9 @@ class ToolPublicationStoreTest {
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null).path("state").asText()).isEqualTo("FENCED");
     }
 
-    // The release fence must hold on the shipped legacy scan and on the
-    // head fast path alike.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void sameEpochReleasePreventsReserveAndRenew(boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+    @Test
+    void sameEpochReleasePreventsReserveAndRenew() {
+        store = newStore(10 * ALLOCATION, 10);
         reserve();
         append("activation.release", event(3, "activation.changed", activation("released")) + MARKER, 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
@@ -1899,22 +1888,13 @@ class ToolPublicationStoreTest {
                         "event.sequence must be an integer from 4 to 4.");
     }
 
-    // Ambiguous evidence fails closed on both read paths: a pre-existing
-    // journal (written before the commit-side check) that carries two
-    // tool.intent lines at one sequence is fenced by either authorization
-    // path — the duplicate is never silently resolved.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void duplicateIntentLinesInAPreExistingJournalAreFenced(
-            boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+    // Corrupted committed evidence must never resolve duplicate intent positions.
+    @Test
+    void duplicateIntentLinesInAPreExistingJournalAreFenced() {
+        store = newStore(10 * ALLOCATION, 10);
         reserve();
-        // Simulate the pre-existing poison: the activation line's declared
-        // place holds a second tool.intent at the intent's sequence, planted
-        // with the stored-bytes idiom of
-        // aForeignScopedActivationInAPreExistingJournalIsNotPromoted (a
-        // commit-side-checked journal can never contain this pair, so it is
-        // planted where the commit path cannot see it).
+        // Corrupt committed bytes with a duplicate intent position. The
+        // commit validator refuses this pair, so inject it directly.
         byte[] record = jdbc.queryForObject(
                         "SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id ="
                                 + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
@@ -1941,11 +1921,6 @@ class ToolPublicationStoreTest {
                         + " X'73657373696f6e2d31' AND journal_revision = 2",
                 poisonedBytes, poisonedBytes.length,
                 ExtensionRecordJournal.sha256(poisonedBytes));
-        // A cold head forces both flag settings through the journal scan.
-        jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL, activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN,
                 PUBLICATION_TOKEN))
                 .hasMessageContaining("Intent sequence conflicts");
@@ -1976,52 +1951,6 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("event.v must be an integer from 1 to 1.");
     }
 
-    // A pre-existing journal (written before the commit-side check) whose
-    // activation line carries an envelope version the reader does not know
-    // is fenced by either evidence read path, and nothing promotes into
-    // the trusted head columns.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void unknownVersionActivationInAPreExistingJournalIsNotPromoted(
-            boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
-        reserve();
-        // Simulate the pre-existing poison: the stored activation line
-        // carries version 2.
-        byte[] record = jdbc.queryForObject(
-                        "SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id ="
-                                + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                                + " journal_revision = 2",
-                byte[].class);
-        String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
-        StringBuilder poisoned = new StringBuilder();
-        for (String line : lines) {
-            if (line.contains("activation.changed")) {
-                line = line.replace("\"v\":1", "\"v\":2");
-            }
-            poisoned.append(line).append("\n");
-        }
-        byte[] poisonedBytes = poisoned.toString()
-                .getBytes(StandardCharsets.UTF_8);
-        jdbc.update(
-                "UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest"
-                        + " = ? WHERE tenant_id = X'74656e616e742d31' AND session_id ="
-                        + " X'73657373696f6e2d31' AND journal_revision = 2",
-                poisonedBytes, poisonedBytes.length,
-                ExtensionRecordJournal.sha256(poisonedBytes));
-        // A cold head forces both flag settings through the evidence scan.
-        jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL, activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
-        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN,
-                PUBLICATION_TOKEN))
-                .hasMessageContaining("Journal event scope conflicts");
-        assertThat(jdbc.queryForObject("SELECT activation_id FROM"
-                        + " ma_session_head", String.class))
-                .isNull();
-    }
-
     // A misscoped domain.committed line is refused by the commit-side
     // envelope scope check before any domain check runs.
     @Test
@@ -2035,95 +1964,12 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("The event names another Session.");
     }
 
-    // A pre-existing journal (written before the commit-side check) with a
-    // misscoped activation line must not be promoted into the trusted head
-    // columns by either authorization path.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void aForeignScopedActivationInAPreExistingJournalIsNotPromoted(
-            boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
-        reserve();
-        // Simulate the pre-existing poison: the stored activation line
-        // names another Session.
-        byte[] record = jdbc.queryForObject(
-                        "SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id ="
-                                + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                                + " journal_revision = 2",
-                byte[].class);
-        String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
-        StringBuilder poisoned = new StringBuilder();
-        for (String line : lines) {
-            if (line.contains("activation.changed")) {
-                line = line.replace("\"sessionId\":\"session-1\"",
-                        "\"sessionId\":\"session-9\"");
-            }
-            poisoned.append(line).append("\n");
-        }
-        jdbc.update(
-                "UPDATE ma_session_journal_tx SET record_bytes = ? WHERE tenant_id ="
-                        + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                        + " journal_revision = 2",
-                poisoned.toString().getBytes(StandardCharsets.UTF_8));
-        // A cold head forces both flag settings through the journal scan.
-        jdbc.update("UPDATE ma_session_head SET"
-                + " activation_id = NULL, activation_phase = NULL,"
-                + " activation_event_epoch = NULL, activation_expires_at = NULL,"
-                + " activation_head_revision = NULL");
-        assertThatThrownBy(() -> store.verifyDispatch(
-                executions.findByExecutionCallId("execution-1"), "pub-1",
-                PUBLICATION_TOKEN))
-                .hasMessageContaining("Journal event scope conflicts");
-        assertThat(jdbc.queryForObject("SELECT activation_id FROM"
-                        + " ma_session_head", String.class))
-                .isNull();
-    }
-
-    // The discriminating position: a misscoped line ABOVE the intent is
-    // parsed by the legacy walk and refused; the warm head path never
-    // re-reads it — the accepted §9 residual, narrowed by the commit-side
-    // check to journals written before this change.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void aForeignScopedLineAboveTheIntentIsRefusedByTheLegacyScan(
-            boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
-        reserve();
-        append("tool.wait", event(3, "checkpoint.committed",
-                checkpointPayload("checkpoint-1")) + MARKER, 1,
-                List.of(), null);
-        byte[] record = jdbc.queryForObject(
-                        "SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id ="
-                                + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                                + " journal_revision = 3",
-                byte[].class);
-        String poisoned = new String(record, StandardCharsets.UTF_8)
-                .replace("\"sessionId\":\"session-1\"", "\"sessionId\":\"session-9\"");
-        // The walk's digest verification still sees a consistent row.
-        jdbc.update(
-                "UPDATE ma_session_journal_tx SET record_bytes = ?, record_digest = ? WHERE"
-                    + " tenant_id = X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                    + " journal_revision = 3",
-                poisoned.getBytes(StandardCharsets.UTF_8), digest(poisoned));
-        if (journalHeadAuthorization) {
-            // The warm head path answers from the head columns and never
-            // re-parses the intermediate revision — the §9 residual.
-            store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN);
-        } else {
-            assertThatThrownBy(() -> store.apply(request("renew"),
-                    WRITER_TOKEN, PUBLICATION_TOKEN))
-                    .hasMessageContaining("Journal event scope conflicts");
-        }
-    }
-
     // A binding naming a never-committed intent sequence is a client fault
-    // (400) on both paths — the 500 corruption fault is reserved for a
+    // (400) — the 500 corruption fault is reserved for a
     // journal damaged inside the committed span.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void aNeverCommittedIntentSequenceIsAClientFault(
-            boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+    @Test
+    void aNeverCommittedIntentSequenceIsAClientFault() {
+        store = newStore(10 * ALLOCATION, 10);
         ObjectNode candidate = request("reserve");
         ((ObjectNode) candidate.get("binding")).put("intentSequence", 99);
         assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN,
@@ -2134,7 +1980,7 @@ class ToolPublicationStoreTest {
 
     @Test
     void aJournalHoleAboveTheIntentFencesTheHeadPath() {
-        store = newStore(10 * ALLOCATION, 10, true);
+        store = newStore(10 * ALLOCATION, 10);
         reserve();
         append("tool.wait", event(3, "checkpoint.committed",
                 checkpointPayload("checkpoint-1")) + MARKER, 1,
@@ -2150,17 +1996,15 @@ class ToolPublicationStoreTest {
                 });
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void aCorruptedJournalRowAboveTheIntentFencesBothPaths(
-            boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+    @Test
+    void aCorruptedJournalRowAboveTheIntentFencesAuthorization() {
+        store = newStore(10 * ALLOCATION, 10);
         reserve();
         append("tool.wait", event(3, "checkpoint.committed",
                 checkpointPayload("checkpoint-1")) + MARKER, 1,
                 List.of(), null);
         // A damaged write zeroed a revision's byte_length between the
-        // intent's and the head: both paths must refuse the evidence with
+        // intent's and the head must refuse the evidence with
         // the journal-corruption fault (500), not a client request fault.
         jdbc.update(
                 "UPDATE ma_session_journal_tx SET byte_length = 0 WHERE tenant_id ="
@@ -2176,7 +2020,7 @@ class ToolPublicationStoreTest {
 
     @Test
     void anOverlappingJournalRangeFencesTheHeadPath() {
-        store = newStore(10 * ALLOCATION, 10, true);
+        store = newStore(10 * ALLOCATION, 10);
         reserve();
         // The intent's sequence suddenly matches two revisions.
         jdbc.update(
@@ -2192,30 +2036,10 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void disabledJournalHeadAuthorizationKeepsScanningTheJournal() {
-        store = newStore(10 * ALLOCATION, 10, false);
-        reserve();
-        // With the gate off the head columns are not trusted, even when they
-        // disagree with the journal: the legacy scan authorizes instead.
-        jdbc.update("UPDATE ma_session_head SET activation_phase = 'released'");
-        store.verifyDispatch(executions.findByExecutionCallId("execution-1"), "pub-1", PUBLICATION_TOKEN);
-        // The scan still backfills the head, repairing the disagreement.
-        assertThat(jdbc.queryForObject("SELECT activation_phase FROM ma_session_head",
-                String.class)).isEqualTo("active");
-        // A release committed to the journal still fences both grant paths.
-        append("activation.release", event(3, "activation.changed", activation("released")) + MARKER, 1,
-                List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
-        assertThatThrownBy(() -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN)).hasMessageContaining("Original activation is fenced");
-        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .hasMessageContaining("Activation is not active");
-    }
-
-    @Test
     void oneCommitKeepsTheLastActivationChange() {
         reserve();
         // Two activation changes in one transaction: the head must record
-        // the last one, as the journal scans do. The two payloads differ in
+        // the last one. The two payloads differ in
         // every column, so all four discriminate last from first.
         ObjectNode firstActive = activation("active");
         firstActive.put("expiresAt", System.currentTimeMillis() + 180_000);
@@ -2236,9 +2060,7 @@ class ToolPublicationStoreTest {
                 .isEqualTo(lastReleased.get("expiresAt").asLong());
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
-        // The two scans' intra-record ordering must agree with the head:
-        // with the columns blanked, both backward walks fence the released
-        // activation instead of reviving the record's earlier active one.
+        // Missing authoritative head columns must never revive an activation.
         jdbc.update("UPDATE ma_session_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
@@ -2272,36 +2094,27 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("Original activation is fenced");
     }
 
-    @Test
-    void oversizedActivationFieldsBlankTheHeadColumnsInsteadOfFailingTheCommit() {
+    @ParameterizedTest
+    @ValueSource(strings = {"activationId", "phase"})
+    void invalidActivationFieldsAreRejectedWithoutChangingTheHead(String field) {
         reserve();
-        assertThat(jdbc.queryForObject("SELECT activation_phase FROM ma_session_head",
-                String.class)).isEqualTo("active");
-        // A non-conforming writer can exceed the V36 column widths; the
-        // commit must still succeed and leave the columns blank, so
-        // authorization falls back to reading the journal.
-        ObjectNode oversized = JSON.createObjectNode()
-                .put("activationId", "activation-" + "a".repeat(600))
-                .put("epoch", 1).put("phase", "active")
-                .put("expiresAt", System.currentTimeMillis() + 180000);
-        append("activation.oversize", event(3, "activation.changed", oversized) + MARKER, 1, List.of(), null);
-        var head = jdbc.queryForMap("SELECT activation_id, activation_phase,"
-                + " activation_event_epoch, activation_expires_at"
+        var before = jdbc.queryForMap("SELECT activation_id, activation_phase, journal_revision"
                 + " FROM ma_session_head");
-        assertThat(head.get("activation_id")).isNull();
-        assertThat(head.get("activation_phase")).isNull();
-        assertThat(head.get("activation_event_epoch")).isNull();
-        assertThat(head.get("activation_expires_at")).isNull();
-        // A conforming activation writes the columns again.
-        append("activation.restore", event(4, "activation.changed", activation("active")) + MARKER, 1,
-                List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
-        var restored = jdbc.queryForMap("SELECT activation_id, activation_phase,"
-                + " activation_event_epoch, activation_expires_at"
-                + " FROM ma_session_head");
-        assertThat(restored.get("activation_id")).isEqualTo("activation-1");
-        assertThat(restored.get("activation_phase")).isEqualTo("active");
-        assertThat(restored.get("activation_event_epoch")).isEqualTo(1L);
-        assertThat(restored.get("activation_expires_at")).isNotNull();
+        for (JsonNode invalid : List.of(JSON.getNodeFactory().textNode(""),
+                JSON.getNodeFactory().textNode("x".repeat("activationId".equals(field) ? 513 : 33)),
+                JSON.getNodeFactory().numberNode(1), JSON.getNodeFactory().nullNode())) {
+            ObjectNode changed = activation("active");
+            changed.set(field, invalid);
+            assertThatThrownBy(() -> append("activation.invalid",
+                    event(3, "activation.changed", changed)
+                            + event(4, "activation.changed", activation("active")) + MARKER,
+                    2, List.of(), null))
+                    .hasMessageContaining("must fit the journal head");
+        }
+        assertThat(jdbc.queryForMap("SELECT activation_id, activation_phase, journal_revision"
+                + " FROM ma_session_head")).isEqualTo(before);
+        assertThat(store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN)).isNotNull();
     }
 
     @Test
@@ -2751,6 +2564,29 @@ class ToolPublicationStoreTest {
                 .isEqualTo(original.path("bindingDigest"));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void acceptsLargeCurrentCheckpointsWithFreshOrOriginalBindings(boolean freshBinding) {
+        ObjectNode next = checkpoint.deepCopy();
+        var items = (com.fasterxml.jackson.databind.node.ArrayNode) next.path("tools").path("items");
+        ObjectNode first = (ObjectNode) items.get(0);
+        for (int i = 2; i <= 400; i++) {
+            items.add(first.deepCopy().put("executionCallId", "execution-" + i)
+                    .put("functionCallId", "model-" + i));
+        }
+        JsonNode nextRef = ref("checkpoint-2", "managed-checkpoint", next);
+        assertThat(nextRef.path("byteLength").asLong()).isBetween(65_537L, 1_048_576L);
+        ObjectNode payload = checkpointPayload("checkpoint-2");
+        payload.put("previousCheckpointId", "checkpoint-1");
+        payload.set("stateRef", nextRef);
+        append("checkpoint.commit", event(3, "checkpoint.committed", payload) + MARKER, 1,
+                List.of(resource(nextRef, next)), "checkpoint-2");
+        if (freshBinding) {
+            binding.set("checkpointRef", nextRef);
+        }
+        assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
+    }
+
     @Test
     void renewsOriginalBindingWhenAnotherToolAdvancesTheWaitCheckpoint() {
         JsonNode original = reserve();
@@ -2860,12 +2696,7 @@ class ToolPublicationStoreTest {
     }
 
     private ToolPublicationStore newStore(long bytes, long count) {
-        return newStore(bytes, count, false);
-    }
-
-    private ToolPublicationStore newStore(long bytes, long count,
-            boolean journalHeadAuthorization) {
-        return journal.newStore(bytes, count, journalHeadAuthorization);
+        return journal.newStore(bytes, count);
     }
 
     private JsonNode reserve() {
@@ -2936,8 +2767,7 @@ class ToolPublicationStoreTest {
                         sessions,
                         executions,
                         bindings,
-                        new ToolPublicationStore.Capacity(total, allocation, allocation, 1),
-                        true);
+                        new ToolPublicationStore.Capacity(total, allocation, allocation, 1));
         store.apply(
                 fixture.request("reserve").put("captureBytes", total),
                 WRITER_TOKEN,
@@ -3546,44 +3376,6 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void oneBackfillPageCapturesTwoJournalTransactions() {
-        twoHistoricalReceipts();
-        publicResults.backfillOnePage();
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
-                                        + " 'TOOL_RESULT_PROJECTION'", Long.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM ma_session_head", Boolean.class)).isFalse();
-    }
-
-    @Test
-    void invalidLaterBackfillRecordPreservesEarlierCheckpoint() {
-        twoHistoricalReceipts();
-        long last = jdbc.queryForObject("SELECT MAX(journal_revision) FROM ma_session_journal_tx", Long.class);
-        jdbc.update("UPDATE ma_session_journal_tx SET record_digest=? WHERE journal_revision=?", "0".repeat(64), last);
-        assertThatThrownBy(publicResults::backfillOnePage).hasMessageContaining("Backfill journal digest changed");
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
-                                        + " 'TOOL_RESULT_PROJECTION'", Long.class)).isEqualTo(1);
-        assertThat(jdbc.queryForMap(
-                                "SELECT o3_backfill_revision, o3_backfill_error FROM"
-                                        + " ma_session_head"))
-                .containsEntry("o3_backfill_revision", last - 1).containsEntry("o3_backfill_error", "invalid_journal");
-    }
-
-    private void twoHistoricalReceipts() {
-        ordinaryNotStartedReceipt();
-        var outcome = publicResults.claim().orElseThrow().source().outcomeRef();
-        var receipt = JSON.createObjectNode().put("executionCallId", "execution-2").putNull("resultRef");
-        receipt.set("toolOutcomeRef", outcome);
-        receipt.putArray("resources");
-        append("recordToolResult", event(journal.sequence + 1, "tool.receipt", receipt) + MARKER, 1, List.of(), null);
-        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
-        jdbc.update(
-                "UPDATE ma_session_head SET o3_backfill_revision=0, o3_backfill_pending=TRUE,"
-                        + " o3_backfill_through=NULL");
-    }
-
-    @Test
     void publishesASixKiBPreviewWithoutPrematureTruncation() throws Exception {
         var fixture = largeApiFixture(6144);
         var result =
@@ -3599,17 +3391,10 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void projectsOrdinaryNotStartedReceiptAndBackfillsItAfterCrash() {
+    void projectsOrdinaryNotStartedReceipt() {
         ordinaryNotStartedReceipt();
         assertThat(jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class)).isEqualTo("OPEN");
         assertThat(jdbc.queryForObject("SELECT receipt_sequence FROM ma_output_capture", Long.class)).isNull();
-        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
-        jdbc.update(
-                "UPDATE ma_session_head SET o3_backfill_pending = TRUE,"
-                    + " o3_backfill_through = NULL");
-        for (int i = 0; i < 4; i++) {
-            publicResults.backfillOnePage();
-        }
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
                                         + " 'TOOL_RESULT_PROJECTION'", Long.class)).isEqualTo(1);
@@ -3623,7 +3408,7 @@ class ToolPublicationStoreTest {
         publicSessions.appendPublicEventIfAbsent("tenant-1", "session-1", "turn_public_1", "item.tool_call.updated",
                 Map.of("toolCallId", "model-1", "status", "in_progress"), false, "late-tool-update");
         new TransactionTemplate(manager).executeWithoutResult(status -> publicSessions.materializeNextBatch("tenant-1", "session-1", 100));
-        assertThat(publicSessions.findSnapshot("tenant-1", "session-1").orElseThrow().items()).singleElement()
+        assertThat(publicSessions.findMessagePage("tenant-1", "session-1", null, 100, false).items()).singleElement()
                 .satisfies(item -> {
                     assertThat(item.status()).isEqualTo("failed");
                     assertThat(JSON.valueToTree(item.attributes()).path("result")).isEqualTo(result);
@@ -3763,17 +3548,6 @@ class ToolPublicationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event", Long.class)).isEqualTo(1);
     }
 
-    @Test
-    void newHeadsSkipHistoricalBackfill() {
-        ordinaryNotStartedReceipt();
-        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM ma_session_head", Boolean.class)).isFalse();
-        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
-        publicResults.backfillOnePage();
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
-                                        + " 'TOOL_RESULT_PROJECTION'", Long.class)).isZero();
-    }
-
     private void ordinaryNotStartedReceipt() {
         reserve();
         var execution = executions.findByExecutionCallId("execution-1");
@@ -3829,7 +3603,7 @@ class ToolPublicationStoreTest {
                 .contains(descriptor);
         assertThat(publicResults.findResult("tenant-1", "other-session", descriptor.path("item_id").asText())).isEmpty();
         new TransactionTemplate(manager).executeWithoutResult(status -> publicSessions.materializeNextBatch("tenant-1", "session-1", 100));
-        assertThat(publicSessions.findSnapshot("tenant-1", "session-1").orElseThrow().items()).singleElement()
+        assertThat(publicSessions.findMessagePage("tenant-1", "session-1", null, 100, false).items()).singleElement()
                 .satisfies(item -> assertThat(JSON.valueToTree(item.attributes()).path("result")).isEqualTo(descriptor));
         assertThat(publicSessions.findControlEvents("tenant-1", "session-1", 1)).isEmpty();
         assertThat(jdbc.queryForObject("SELECT status FROM ma_turn", String.class)).isEqualTo("COMPLETED");
