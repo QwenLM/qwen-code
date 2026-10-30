@@ -681,4 +681,88 @@ describe('OpenTuiMcpDialog server-detail action cursor', () => {
     expect(onServerAction).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Tools for srv/)).toBeTruthy();
   });
+
+  it('follows a surviving action key after an earlier action is removed', async () => {
+    const onServerAction = vi.fn();
+    const dialog = (status: MCPServerStatus) => (
+      <OpenTuiMcpDialog
+        servers={[serverWith({ status, toolCount: 1 })]}
+        onServerAction={onServerAction}
+        availableTerminalHeight={30}
+        onClose={() => {}}
+      />
+    );
+    const { rerender } = render(dialog(MCPServerStatus.DISCONNECTED));
+    await press('return');
+    await press('down');
+    await press('down');
+    rerender(dialog(MCPServerStatus.CONNECTED));
+    await press('return');
+    expect(onServerAction).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ name: 'srv' }),
+      'toggle-disable',
+    );
+  });
+
+  it('uses the latest action for a burst of detail navigation and Enter', async () => {
+    const onServerAction = vi.fn();
+    render(
+      <OpenTuiMcpDialog
+        servers={[
+          serverWith({ status: MCPServerStatus.DISCONNECTED, toolCount: 1 }),
+        ]}
+        onServerAction={onServerAction}
+        availableTerminalHeight={30}
+        onClose={() => {}}
+      />,
+    );
+    await press('return');
+    await act(async () => {
+      for (const name of ['down', 'down', 'return']) {
+        for (const handler of [...mocks.state.keyboardHandlers]) {
+          handler(baseKeyEvent({ name, sequence: name }));
+        }
+      }
+    });
+    expect(onServerAction).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ name: 'srv' }),
+      'toggle-disable',
+    );
+  });
+
+  it('selects detail actions with both hover and click', async () => {
+    const onServerAction = vi.fn();
+    render(
+      <OpenTuiMcpDialog
+        servers={[
+          serverWith({ status: MCPServerStatus.DISCONNECTED, toolCount: 1 }),
+        ]}
+        onServerAction={onServerAction}
+        availableTerminalHeight={30}
+        onClose={() => {}}
+      />,
+    );
+    await press('return');
+    await act(async () => {
+      fireEvent.mouseOver(screen.getByText('Disable'));
+    });
+    expect(screen.getByText('Disable').parentElement?.textContent).toContain(
+      '›',
+    );
+    await press('return');
+    expect(onServerAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'srv' }),
+      'toggle-disable',
+    );
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('Reconnect'), { button: 0 });
+    });
+    expect(screen.getByText('Reconnect').parentElement?.textContent).toContain(
+      '›',
+    );
+    expect(onServerAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'srv' }),
+      'reconnect',
+    );
+  });
 });
