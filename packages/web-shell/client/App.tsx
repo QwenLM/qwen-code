@@ -150,7 +150,10 @@ import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  hasActiveBackgroundAgent,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -8795,9 +8798,21 @@ export function App({
       return changed ? next : tabs;
     });
   }, [backgroundTasks, connection.sessionId]);
+  // Host-provided footers render their own task list from composer tasks
+  // plus background agents (foreground agents are transcript-only; terminal
+  // background agents keep reaching hosts, matching the design doc).
+  const footerHostTasks = useMemo(
+    () =>
+      sessionTasks.filter(
+        (task) =>
+          isComposerTask(task) ||
+          (task.kind === 'agent' && task.isBackgrounded === true),
+      ),
+    [sessionTasks],
+  );
   const footerTasks = useMemo(
-    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
-    [backgroundTasks, renderFooter],
+    () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
+    [footerHostTasks, renderFooter],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
@@ -24940,11 +24955,22 @@ export function App({
                           ref={statusBarRef}
                           onOpenTasks={() => openTasksPanel()}
                           onReturnToInput={handleReturnToEditor}
+                          // The pill filters composer tasks itself; it also
+                          // counts background agents, which the
+                          // pre-filtered list would have dropped. The full
+                          // snapshot reaches the pill only while a
+                          // background agent is still running in the
+                          // shipped entry, where the environment panel
+                          // replaces the footer task list; the empty chat
+                          // and headerless embeds keep the pre-filtered
+                          // composer tasks, so agents never reach them.
                           tasks={
                             isChatEmptyState ||
                             !environmentTasksReplacementEnabled
                               ? backgroundTasks
-                              : []
+                              : hasActiveBackgroundAgent(sessionTasks)
+                                ? sessionTasks
+                                : []
                           }
                           hideSettings={
                             hideSettings || !workspaceContextActive

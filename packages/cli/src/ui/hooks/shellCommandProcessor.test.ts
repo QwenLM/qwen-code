@@ -52,11 +52,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, type HistoryItemWithoutId } from '../types.js';
+import type { SetStateAction } from 'react';
 
 describe('useShellCommandProcessor', () => {
   let addItemToHistoryMock: Mock;
   let setPendingHistoryItemMock: Mock;
+  let pendingHistoryItem: HistoryItemWithoutId | null;
   let onExecMock: Mock;
   let onDebugMessageMock: Mock;
   let mockConfig: Config;
@@ -74,7 +76,13 @@ describe('useShellCommandProcessor', () => {
     );
 
     addItemToHistoryMock = vi.fn();
-    setPendingHistoryItemMock = vi.fn();
+    pendingHistoryItem = null;
+    setPendingHistoryItemMock = vi.fn(
+      (item: SetStateAction<HistoryItemWithoutId | null>) => {
+        pendingHistoryItem =
+          typeof item === 'function' ? item(pendingHistoryItem) : item;
+      },
+    );
     onExecMock = vi.fn();
     onDebugMessageMock = vi.fn();
     setShellInputFocusedMock = vi.fn();
@@ -238,7 +246,7 @@ describe('useShellCommandProcessor', () => {
     });
     await act(async () => await execPromise);
 
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(null);
+    expect(pendingHistoryItem).toBeNull();
     expect(addItemToHistoryMock).toHaveBeenCalledTimes(2); // Initial + final
     expect(addItemToHistoryMock.mock.calls[1][0]).toEqual(
       expect.objectContaining({
@@ -612,7 +620,7 @@ describe('useShellCommandProcessor', () => {
 
     await act(async () => await execPromise);
 
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(null);
+    expect(pendingHistoryItem).toBeNull();
     expect(addItemToHistoryMock).toHaveBeenCalledTimes(2);
     expect(addItemToHistoryMock.mock.calls[1][0]).toEqual({
       type: 'error',
@@ -647,7 +655,7 @@ describe('useShellCommandProcessor', () => {
 
     await act(async () => await execPromise);
 
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(null);
+    expect(pendingHistoryItem).toBeNull();
     expect(addItemToHistoryMock).toHaveBeenCalledTimes(2);
     expect(addItemToHistoryMock.mock.calls[1][0]).toEqual({
       type: 'error',

@@ -1145,6 +1145,52 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('macOS lane capacity', () => {
+    const macosJob = () => yml.jobs['e2e-test-macos'];
+
+    it('runs a single macOS shard on main pushes, two everywhere else', () => {
+      // macos-latest is the org-level bottleneck measured on #15052: two
+      // shards per main push serialized in the scarce regime, so the run
+      // ended with five green legs and a verdict lost to a slot-starved
+      // second shard. One unsharded leg keeps full coverage at the same
+      // runner-minute cost while halving slot acquisitions per main push.
+      const shard = macosJob().strategy.matrix.shard;
+      const matrixFor = (eventName, refName) => {
+        if (Array.isArray(shard)) return shard;
+        const expression = String(shard)
+          .replace(/^\$\{\{\s*/, '')
+          .replace(/\s*\}\}$/, '')
+          .replace(/github\.event_name/g, JSON.stringify(eventName))
+          .replace(/github\.ref_name/g, JSON.stringify(refName));
+        // Anything this guard does not model must throw, not evaluate as
+        // undefined — the failure is the contract, not a guess.
+        if (/github\.|\?[^:]/.test(expression)) {
+          throw new Error(
+            `macOS shard matrix carries an unmodeled term: ${expression}`,
+          );
+        }
+        return new Function('fromJSON', `return (${expression});`)(
+          JSON.parse.bind(JSON),
+        );
+      };
+      expect(matrixFor('push', 'main')).toEqual(['1/1']);
+      expect(matrixFor('push', 'feat/e2e/example')).toEqual(['1/2', '2/2']);
+      expect(matrixFor('schedule', 'main')).toEqual(['1/2', '2/2']);
+      expect(matrixFor('workflow_dispatch', 'main')).toEqual(['1/2', '2/2']);
+    });
+
+    it('keeps the macOS variant on macos-latest with the same shard plumbing', () => {
+      // Unsharding changes matrix cardinality only: the runner label, the
+      // fork gate, and the vitest --shard plumbing stay exactly as pinned
+      // elsewhere, so the suite the leg runs is identical.
+      expect(macosJob()['runs-on']).toBe('macos-latest');
+      const runStep = macosJob().steps.find((step) =>
+        String(step.run ?? '').includes('--shard='),
+      );
+      expect(runStep.run).toContain('--shard="${{ matrix.shard }}"');
+    });
+  });
+
   describe('docker lock cache ownership heal', () => {
     // Run 35054004633 (#11990) failed exactly the two steps that open
     // ~/.cache/qwen-code-ci/docker-sandbox-daemon.lock — 'Run E2E tests'

@@ -32,7 +32,7 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
     }
 
     @Test
-    void tenfoldHistoryKeepsDueClaimsAndSnapshotBodyReadsBounded() {
+    void tenfoldHistoryKeepsDueClaimsAndMessageBodyReadsBounded() {
         var session =
                 jdbc.queryForMap(
                         "SELECT tenant_id, session_id FROM ma_session WHERE session_kind ="
@@ -47,14 +47,14 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                             id,
                             "turn",
                             "item.output_text.delta",
-                            Map.of("itemId", "item", "text", "snapshot"),
+                            Map.of("itemId", "item", "text", "x".repeat(70_000)),
                             false,
                             UUID.randomUUID().toString());
                     store.materializeNextBatch(tenant, id, 100);
                 });
         String resource =
                 jdbc.queryForObject(
-                        "SELECT manifest_resource_key FROM ma_snapshot WHERE tenant_id = ? AND"
+                        "SELECT body_resource_key FROM ma_message WHERE tenant_id = ? AND"
                             + " session_id = ?",
                         String.class,
                         tenant,
@@ -74,8 +74,8 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
         assertThat(scanned(due, Long.MAX_VALUE).scannedRows()).isEqualTo(claims.scannedRows());
         assertThat(scanned(body, resource).scannedRows()).isEqualTo(reads.scannedRows());
         assertThat(store.deliverableRenames(Long.MAX_VALUE)).hasSize(1);
-        assertThat(store.findSnapshotPage(tenant, id, null, 0, 10).items()).hasSize(1);
-        var recent = store.findRecentSnapshotPage(tenant, id, null, 1);
+        assertThat(tx.execute(status -> store.findMessagePage(tenant, id, null, 10, false)).items()).hasSize(1);
+        var recent = tx.execute(status -> store.findMessagePage(tenant, id, null, 1, true));
         assertThat(recent.items()).hasSize(1);
         assertThat(recent.items().getFirst().itemId()).isEqualTo("item");
         assertThat(recent.hasMore()).isFalse();

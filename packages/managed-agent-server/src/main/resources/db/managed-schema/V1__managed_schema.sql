@@ -255,11 +255,9 @@ CREATE TABLE ma_event_stream (
     covered_sequence BIGINT NOT NULL DEFAULT 0,
     wake_covered_sequence BIGINT,
     projection_version INT NOT NULL DEFAULT 1,
-    snapshot_stale_since BIGINT UNSIGNED,
-    current_snapshot_id VARBINARY(512),
     artifact_refs_resource_key CHAR(64),
     output_ranges_json LONGTEXT,
-    projection_pending BOOLEAN GENERATED ALWAYS AS (last_sequence > covered_sequence OR snapshot_stale_since IS NOT NULL),
+    projection_pending BOOLEAN GENERATED ALWAYS AS (last_sequence > covered_sequence),
     gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, stream_kind, stream_id),
     CONSTRAINT ck_ma_stream_kind CHECK ((CASE stream_kind WHEN 'SESSION' THEN 7 WHEN 'TASK' THEN 4 ELSE -1 END = CHAR_LENGTH(stream_kind))),
@@ -337,29 +335,6 @@ CREATE TABLE ma_message (
 CREATE INDEX ix_ma_message_history ON ma_message (tenant_id, session_id, first_sequence, item_id);
 
 CREATE INDEX ix_ma_message_execution ON ma_message (execution_key, item_id);
-
-CREATE TABLE ma_snapshot (
-    tenant_id VARBINARY(512) NOT NULL,
-    session_id VARBINARY(512) NOT NULL,
-    snapshot_id VARBINARY(512) NOT NULL,
-    snapshot_version BIGINT NOT NULL,
-    covered_sequence BIGINT NOT NULL,
-    projection_version INT NOT NULL,
-    manifest_resource_key CHAR(64) NOT NULL,
-    manifest_sha256 CHAR(64) NOT NULL,
-    item_count BIGINT NOT NULL,
-    state VARCHAR(16) NOT NULL,
-    gmt_create BIGINT UNSIGNED NOT NULL,
-    published_at BIGINT UNSIGNED,
-    retain_until BIGINT UNSIGNED NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, snapshot_id),
-    CONSTRAINT uq_ma_snapshot_version UNIQUE (tenant_id, session_id, snapshot_version),
-    CONSTRAINT ck_ma_snapshot_state CHECK ((CASE state WHEN 'BUILDING' THEN 8 WHEN 'PUBLISHED' THEN 9 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
-    CONSTRAINT ck_ma_snapshot_revision CHECK (snapshot_version > 0 AND covered_sequence >= 0 AND item_count >= 0),
-    CONSTRAINT fk_ma_snapshot_session FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
-) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_ma_snapshot_expiry ON ma_snapshot (state, retain_until);
 
 CREATE TABLE ma_session_record (
     session_scope_key CHAR(64) NOT NULL,
@@ -443,10 +418,6 @@ CREATE TABLE ma_resource (
     encryption_key_id VARBINARY(2048),
     publish_command_id VARBINARY(2048),
     state VARCHAR(32) NOT NULL,
-    snapshot_id VARBINARY(512),
-    snapshot_page_ordinal INT,
-    snapshot_page_first_sequence BIGINT,
-    snapshot_page_last_sequence BIGINT,
     scope_key CHAR(64),
     publication_id VARBINARY(512),
     slot_key VARBINARY(1024),
@@ -461,8 +432,6 @@ CREATE TABLE ma_resource (
     PRIMARY KEY (resource_key),
     CONSTRAINT uq_ma_resource_id UNIQUE (session_scope_key, resource_id),
     CONSTRAINT uq_ma_capture_slot UNIQUE (scope_key, publication_id, slot_key),
-    CONSTRAINT uq_ma_snapshot_page UNIQUE (session_scope_key, snapshot_id, snapshot_page_ordinal),
-    CONSTRAINT ck_ma_resource_snapshot_page CHECK ((kind <> X'6d616e616765642d736e617073686f742d70616765' AND snapshot_id IS NULL AND snapshot_page_ordinal IS NULL AND snapshot_page_first_sequence IS NULL AND snapshot_page_last_sequence IS NULL) OR (snapshot_id IS NOT NULL AND snapshot_page_ordinal IS NOT NULL AND snapshot_page_ordinal >= 0 AND snapshot_page_first_sequence IS NOT NULL AND snapshot_page_first_sequence >= 0 AND snapshot_page_last_sequence IS NOT NULL AND snapshot_page_last_sequence >= snapshot_page_first_sequence AND kind = X'6d616e616765642d736e617073686f742d70616765' AND schema_version = 1 AND storage_kind = 'MYSQL_INLINE')),
     CONSTRAINT ck_ma_resource_length CHECK (byte_length >= 0),
     CONSTRAINT ck_ma_resource_capture CHECK ((publication_id IS NULL AND scope_key IS NULL AND slot_key IS NULL AND capture_state IS NULL) OR (publication_id IS NOT NULL AND scope_key IS NOT NULL AND slot_key IS NOT NULL AND capture_state IS NOT NULL))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
@@ -474,8 +443,6 @@ CREATE INDEX ix_ma_resource_projection_gc ON ma_resource (retention_until, resou
 CREATE INDEX ix_ma_resource_capture ON ma_resource (scope_key, publication_id, capture_state);
 
 CREATE INDEX ix_ma_resource_delete_intent ON ma_resource (session_scope_key, state, deletion_operation_key, resource_key);
-
-CREATE INDEX ix_ma_snapshot_page_lookup ON ma_resource (session_scope_key, snapshot_id, snapshot_page_last_sequence, snapshot_page_ordinal);
 
 CREATE TABLE ma_resource_ref (
     session_scope_key CHAR(64) NOT NULL,
@@ -490,7 +457,7 @@ CREATE TABLE ma_resource_ref (
     resource_id VARBINARY(2048),
     gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (session_scope_key, owner_kind, owner_key, owner_revision, resource_key),
-    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'SNAPSHOT' THEN 8 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 ELSE -1 END = CHAR_LENGTH(owner_kind))),
+    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 ELSE -1 END = CHAR_LENGTH(owner_kind))),
     CONSTRAINT fk_ma_ref_resource FOREIGN KEY (resource_key) REFERENCES ma_resource (resource_key),
     runtime_binding_key CHAR(64),
     CONSTRAINT ck_ma_ref_binding CHECK ((owner_kind = 'HOSTED_CLEANUP' AND runtime_binding_key IS NOT NULL AND owner_revision > 0) OR (owner_kind <> 'HOSTED_CLEANUP' AND runtime_binding_key IS NULL))
@@ -1214,8 +1181,6 @@ CREATE INDEX ix_ma_occurrence_list ON ma_schedule_occurrence (tenant_id, schedul
 
 CREATE INDEX ix_ma_occurrence_outcome ON ma_schedule_occurrence (tenant_id, schedule_id, outcome);
 
-ALTER TABLE ma_snapshot ADD CONSTRAINT fk_ma_snapshot_manifest_resource_key FOREIGN KEY (manifest_resource_key) REFERENCES ma_resource (resource_key);
-
 ALTER TABLE ma_message ADD CONSTRAINT fk_ma_message_body_resource_key FOREIGN KEY (body_resource_key) REFERENCES ma_resource (resource_key);
 
 ALTER TABLE ma_output_capture ADD CONSTRAINT fk_ma_output_capture_manifest_resource_key FOREIGN KEY (manifest_resource_key) REFERENCES ma_resource (resource_key);
@@ -1247,10 +1212,6 @@ CREATE INDEX ix_ma_operation_scope_id ON ma_operation (scope_key, operation_kind
 CREATE INDEX ix_ma_operation_session_state ON ma_operation (session_scope_key, operation_kind, state);
 
 CREATE INDEX ix_ma_resource_scope_page ON ma_resource (session_scope_key, resource_key);
-
-CREATE INDEX ix_ma_snapshot_session_expiry ON ma_snapshot (tenant_id, session_id, retain_until, snapshot_id);
-
-ALTER TABLE ma_event_stream ADD CONSTRAINT fk_ma_stream_snapshot FOREIGN KEY (tenant_id, session_id, current_snapshot_id) REFERENCES ma_snapshot (tenant_id, session_id, snapshot_id);
 
 ALTER TABLE ma_event_stream ADD CONSTRAINT fk_ma_stream_artifact_refs FOREIGN KEY (artifact_refs_resource_key) REFERENCES ma_resource (resource_key);
 

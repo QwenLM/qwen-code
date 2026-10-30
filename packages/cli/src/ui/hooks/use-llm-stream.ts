@@ -654,8 +654,11 @@ export const useLlmStream = (
   const abortControllerRef = useRef<AbortController | null>(null);
   // Submission preprocessing may await logging while a continuation replaces
   // the foreground slot. Preserve the exact owner for a later Shell launch.
-  const submissionAbortControllersBySignalRef = useRef(
-    new WeakMap<AbortSignal, AbortController>(),
+  const submissionOwnersBySignalRef = useRef(
+    new WeakMap<
+      AbortSignal,
+      { controller: AbortController; generation: number }
+    >(),
   );
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
   const activeInteractionOwnerRef = useRef<
@@ -943,7 +946,14 @@ export const useLlmStream = (
   const [isResponding, setIsResponding] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
-  const activeShellSignalsRef = useRef(new Set<AbortSignal>());
+  const activeShellSignalsRef = useRef(new Map<AbortSignal, number>());
+  const hasCurrentShellActivity = useCallback(
+    () =>
+      [...activeShellSignalsRef.current.values()].includes(
+        submissionLeaseGenerationRef.current,
+      ),
+    [],
+  );
   const shellOwnsPendingItem = useCallback(
     (item: HistoryItemWithoutId | null) =>
       activeShellSignalsRef.current.size > 0 &&
@@ -958,8 +968,7 @@ export const useLlmStream = (
     if (
       (submissionActivitiesByGenerationRef.current.get(currentGeneration) ??
         0) === 0 &&
-      activeModelStreamsRef.current === 0 &&
-      activeShellSignalsRef.current.size === 0
+      activeModelStreamsRef.current === 0
     ) {
       setIsResponding(false);
       setSubmissionInFlight(false);
@@ -1410,9 +1419,9 @@ export const useLlmStream = (
 
   const onExec = useCallback(
     async (done: Promise<void>, signal: AbortSignal) => {
-      activeShellSignalsRef.current.add(signal);
-      const shellAbortController =
-        submissionAbortControllersBySignalRef.current.get(signal);
+      const { controller: shellAbortController, generation: shellGeneration } =
+        submissionOwnersBySignalRef.current.get(signal)!;
+      activeShellSignalsRef.current.set(signal, shellGeneration);
       // A tool continuation can replace the foreground controller while this
       // command is still running. Keep the shell independently cancellable.
       if (shellAbortController) {
@@ -1421,16 +1430,14 @@ export const useLlmStream = (
           shellAbortController,
         );
       }
-      const releaseShellActivity = retainSubmissionActivity(
-        submissionLeaseGenerationRef.current,
-      );
+      const releaseShellActivity = retainSubmissionActivity(shellGeneration);
       setIsResponding(true);
       setSubmissionInFlight(true);
       try {
         await done;
       } finally {
         activeShellSignalsRef.current.delete(signal);
-        submissionAbortControllersBySignalRef.current.delete(signal);
+        submissionOwnersBySignalRef.current.delete(signal);
         if (shellAbortController) {
           auxiliaryAbortRefsRef.current.delete(shellAbortController);
           detachedToolContinuationAbortControllersRef.current.delete(
@@ -1591,7 +1598,7 @@ export const useLlmStream = (
       shellOwnsPendingItem(pendingItemAtCancel);
     turnCancelledRef.current = true;
     submissionLeaseGenerationRef.current += 1;
-    setSubmissionInFlight(activeShellSignalsRef.current.size > 0);
+    setSubmissionInFlight(false);
     const foregroundAbortController = abortControllerRef.current;
     // A completed foreground stream can leave only a detached Shell behind.
     // Classify the controllers this cancellation actually aborts: a live
@@ -1718,7 +1725,7 @@ export const useLlmStream = (
           wasGoalTurn: activeGoalTurnRef.current !== null,
         });
     } finally {
-      setIsResponding(activeShellSignalsRef.current.size > 0);
+      setIsResponding(false);
       setShellInputFocused(false);
     }
     return true;
@@ -4019,7 +4026,7 @@ export const useLlmStream = (
         ) {
           return;
         }
-        if (activeShellSignalsRef.current.size === 0) {
+        if (!hasCurrentShellActivity()) {
           setSubmissionInFlight(false);
         }
       };
@@ -4187,10 +4194,10 @@ export const useLlmStream = (
 
       const abortController = new AbortController();
       const abortSignal = abortController.signal;
-      submissionAbortControllersBySignalRef.current.set(
-        abortSignal,
-        abortController,
-      );
+      submissionOwnersBySignalRef.current.set(abortSignal, {
+        controller: abortController,
+        generation: submissionGeneration,
+      });
       const inheritedToolContinuationOwner = metadata?.toolContinuationOwner;
       const isDetachedToolContinuation =
         inheritedToolContinuationOwner?.survivesGenerationChange === true;
@@ -4918,7 +4925,7 @@ export const useLlmStream = (
         // Model/tool controller retention has its own owners. This lookup is
         // needed after submission only while its Shell is still executing.
         if (!activeShellSignalsRef.current.has(abortSignal)) {
-          submissionAbortControllersBySignalRef.current.delete(abortSignal);
+          submissionOwnersBySignalRef.current.delete(abortSignal);
         }
         releaseSubmissionActivity();
         if (detachedAbortController && !keepToolContinuationAbortController) {
@@ -4971,6 +4978,7 @@ export const useLlmStream = (
       releaseUndeliveredGoalTurn,
       retainSubmissionActivity,
       setSubmissionInFlight,
+      hasCurrentShellActivity,
       shellOwnsPendingItem,
       finishModTurn,
     ],
