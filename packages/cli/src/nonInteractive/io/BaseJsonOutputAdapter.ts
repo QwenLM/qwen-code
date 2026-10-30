@@ -168,15 +168,28 @@ export abstract class BaseJsonOutputAdapter {
    * (`SessionTokenLimitExceeded`, `UserPromptSubmitBlocked`). Such a stream
    * carries no content, so without this the terminal `result` would fall back
    * to `lastAssistantMessage` and replay the previous turn's answer as a
-   * success (#15704).
+   * success (#15704). `buildResultMessage` consumes it, so one turn cannot
+   * leak its refusal into the next — a shared adapter serves many prompts in
+   * stream-json input mode.
+   *
+   * `producedText` is sampled when the latch is set, not read at result time.
+   * Refusals fire at the head of a send, so text already streamed belongs to
+   * this turn and is the answer an error envelope would drop; text that
+   * arrives after the latch belongs to a later turn (a drain item) and must
+   * not turn the refused prompt back into a success. `startAssistantMessage`
+   * is a per-round boundary and does not reset either field.
    */
-  protected preSendRefusalMessage: string | null = null;
+  protected preSendRefusal: {
+    message: string;
+    producedText: boolean;
+  } | null = null;
 
   /**
-   * Set once the current turn streams assistant text. A refusal can fire
-   * mid-turn (the hook runs on `ToolResult` sends, the token gate reads the
-   * previous request's count), and converting such a turn to the error
-   * envelope would drop the text it already produced.
+   * Set once the turn streams assistant text. A refusal can fire mid-turn
+   * (the hook runs on `ToolResult` sends, the token gate reads the previous
+   * request's count), and converting such a turn to the error envelope would
+   * drop the text it already produced. Scoped to the turn: reset when the
+   * result ends it, in `buildResultMessage`.
    */
   protected turnProducedText = false;
 
@@ -625,9 +638,6 @@ export abstract class BaseJsonOutputAdapter {
    * This is a shared implementation used by both streaming and non-streaming adapters.
    */
   startAssistantMessage(): void {
-    // The refusal latch and text flag describe the turn being started.
-    this.preSendRefusalMessage = null;
-    this.turnProducedText = false;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -747,18 +757,29 @@ export abstract class BaseJsonOutputAdapter {
       case LlmEventType.SessionTokenLimitExceeded:
         // The client refused the send, so no content follows and the terminal
         // `result` must report the refusal rather than the previous answer.
-        this.preSendRefusalMessage ??= event.value.message;
+        this.latchPreSendRefusal(event.value.message);
         break;
       case LlmEventType.UserPromptSubmitBlocked:
         // The reason is model-generated for prompt/HTTP-backed hooks and is
         // written as one stderr line in text mode, so keep ESC/OSC bytes out
         // of it and flatten TAB/CR/LF instead of letting them start a second
         // line the reader would take for genuine output.
-        this.preSendRefusalMessage ??= `Blocked by a UserPromptSubmit hook: ${sanitizeTerminalLine(event.value.reason)}`;
+        this.latchPreSendRefusal(
+          `Blocked by a UserPromptSubmit hook: ${sanitizeTerminalLine(event.value.reason)}`,
+        );
         break;
       default:
         break;
     }
+  }
+
+  /**
+   * Latches the refusal for this turn, sampling whether the turn had already
+   * streamed text. The first refusal wins: later ones describe the same
+   * refused turn.
+   */
+  protected latchPreSendRefusal(message: string): void {
+    this.preSendRefusal ??= { message, producedText: this.turnProducedText };
   }
 
   // ========== Subagent APIs ==========
@@ -1299,18 +1320,20 @@ export abstract class BaseJsonOutputAdapter {
     // the refused turn is not reported as an answer (#15704). A turn that
     // already streamed text keeps its success envelope, and an error the
     // caller classified keeps its subtype but reports the real refusal.
-    const refusal = this.preSendRefusalMessage;
-    this.preSendRefusalMessage = null;
+    const refusal = this.preSendRefusal;
+    this.preSendRefusal = null;
+    // The result ends the turn; the next prompt starts a fresh text tally.
+    this.turnProducedText = false;
     let resultOptions = options;
     if (refusal !== null) {
       if (options.isError) {
-        resultOptions = { ...options, errorMessage: refusal };
-      } else if (!this.turnProducedText) {
+        resultOptions = { ...options, errorMessage: refusal.message };
+      } else if (!refusal.producedText) {
         resultOptions = {
           ...options,
           isError: true,
           subtype: 'error_during_execution',
-          errorMessage: options.errorMessage ?? refusal,
+          errorMessage: options.errorMessage ?? refusal.message,
         };
       }
     }

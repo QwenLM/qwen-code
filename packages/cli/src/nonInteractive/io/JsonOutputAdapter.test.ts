@@ -423,6 +423,14 @@ describe('JsonOutputAdapter', () => {
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+      // A shared adapter served the previous prompt, which ended with its own
+      // result — its answer must not be replayed for this refusal.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.SessionTokenLimitExceeded,
@@ -451,6 +459,14 @@ describe('JsonOutputAdapter', () => {
     });
 
     it('should emit a blocked prompt as an error result', () => {
+      // Previous prompt's turn, ended by its own result — see the text-mode
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
@@ -467,7 +483,8 @@ describe('JsonOutputAdapter', () => {
       });
 
       const output = stdoutWriteSpy.mock.calls[0][0] as string;
-      const resultMessage = JSON.parse(output).find(
+      // The array also holds the previous turn's success result.
+      const resultMessage = JSON.parse(output).findLast(
         (msg: unknown) =>
           typeof msg === 'object' &&
           msg !== null &&

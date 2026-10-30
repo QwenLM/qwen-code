@@ -822,6 +822,15 @@ describe('StreamJsonOutputAdapter', () => {
         limit: 100,
         message: 'Session token limit exceeded: 120 tokens > 100 limit.',
       };
+      // A shared adapter (stream-json input mode) served the previous prompt,
+      // which ended with its own result. Its answer stays in
+      // `lastAssistantMessage` and must not be replayed for this refusal.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.SessionTokenLimitExceeded,
@@ -847,6 +856,14 @@ describe('StreamJsonOutputAdapter', () => {
     });
 
     it('should report a blocked prompt as an error instead of replaying the previous answer', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
@@ -874,6 +891,14 @@ describe('StreamJsonOutputAdapter', () => {
     });
 
     it('should strip terminal control sequences from a blocked-hook reason', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
@@ -929,6 +954,38 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.result).toBe('First answer');
     });
 
+    it('should keep the text a turn produced before a refusal in a later round', () => {
+      // The CLI starts a new assistant message at the head of every model
+      // round, so a refusal that latches on round 2's send has to leave the
+      // text round 1 already streamed as the turn's answer.
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'First answer',
+      });
+      adapter.finalizeAssistantMessage();
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.result).toBe('First answer');
+    });
+
     it('should report the refusal over a caller error it did not cause', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
@@ -956,7 +1013,8 @@ describe('StreamJsonOutputAdapter', () => {
       );
     });
 
-    it('should report a success once the next turn starts', () => {
+    it('should keep the refusal when the next round starts before the result', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.SessionTokenLimitExceeded,
@@ -966,7 +1024,8 @@ describe('StreamJsonOutputAdapter', () => {
           message: 'Session token limit exceeded: 120 tokens > 100 limit.',
         },
       });
-      // No result is emitted for the refused turn.
+      // The CLI starts the next round even after a refused turn; that
+      // round boundary must not clear the latch.
       adapter.startAssistantMessage();
       adapter.finalizeAssistantMessage();
       stdoutWriteSpy.mockClear();
@@ -980,11 +1039,13 @@ describe('StreamJsonOutputAdapter', () => {
       const output = stdoutWriteSpy.mock.calls[0][0] as string;
       const parsed = JSON.parse(output);
 
-      expect(parsed.is_error).toBe(false);
-      expect(parsed.result).toBe('Response text');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed).not.toHaveProperty('result');
     });
 
-    it('should keep the second turn text after a refused turn', () => {
+    it('should not resurrect a refused prompt from a later turn text', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.SessionTokenLimitExceeded,
@@ -994,6 +1055,9 @@ describe('StreamJsonOutputAdapter', () => {
           message: 'Session token limit exceeded: 120 tokens > 100 limit.',
         },
       });
+      // A drain turn (queued cron / background item) starts after the refused
+      // turn and streams its own answer; the refused prompt must still be
+      // reported as the refusal.
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.Content,
@@ -1011,11 +1075,19 @@ describe('StreamJsonOutputAdapter', () => {
       const output = stdoutWriteSpy.mock.calls[0][0] as string;
       const parsed = JSON.parse(output);
 
-      expect(parsed.is_error).toBe(false);
-      expect(parsed.result).toBe('Second answer');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed).not.toHaveProperty('result');
     });
 
     it('should keep the refusal latch across a retry of the refused turn', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
       adapter.startAssistantMessage();
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
