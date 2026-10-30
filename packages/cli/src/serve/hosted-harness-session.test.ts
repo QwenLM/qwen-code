@@ -1456,6 +1456,66 @@ describe('Hosted Harness no-tool session', () => {
     });
   });
 
+  // Runs before the abort case below: the hold latch (crashBeforeCommitFired)
+  // is module scope and never reset, so this case must execute while it is
+  // still unset. Otherwise the spent latch, not the session-id comparison,
+  // would suppress the hold and this case could not fail for its property.
+  it('does not fire the finished-before-commit hold for a non-matching session', async () => {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'no hold' }];
+    const promptId = randomUUID();
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId, payloadDigest: digest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
+    const events = (
+      await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      })
+    ).events;
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === promptId,
+        )
+        .map((event) => event.payload['outcome']),
+    ).toEqual(['completed']);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'assistant',
+      ),
+    ).toBe(true);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 60_000);
+
   // R1-2: the finished-before-commit hold must observe the Turn's abort signal.
   // Without the release/addEventListener wiring a leaked flag would park the
   // Session uncancellably; these cases drive a real turn into the hold and prove
@@ -1539,62 +1599,6 @@ describe('Hosted Harness no-tool session', () => {
         new Promise((resolve) => setTimeout(resolve, 5_000)),
       ]);
     }
-  }, 60_000);
-
-  it('does not fire the finished-before-commit hold for a non-matching session', async () => {
-    const key = {
-      tenantId: 'tenant',
-      workspaceId: 'workspace',
-      sessionId: SESSION_ID,
-    };
-    const server = await app(true);
-    const created = await headers(supertest(server).post('/session')).send({
-      sessionId: SESSION_ID,
-      sessionScope: 'thread',
-      managedSessionStore: store(),
-    });
-    expect(created.status).toBe(200);
-    const clientId = created.body.clientId as string;
-    const prompt = [{ type: 'text', text: 'no hold' }];
-    const promptId = randomUUID();
-    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
-    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .set('X-Qwen-Client-Id', clientId)
-      .send({ prompt, promptId, payloadDigest: digest })
-      .expect(202);
-    await vi.waitFor(
-      async () => {
-        const status = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: SETTLE_TIMEOUT_MS },
-    );
-    const events = (
-      await LocalJsonlManagedSessionJournalStore.read({
-        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
-        runtimeBaseDir: state.root,
-        sessionKey: key,
-      })
-    ).events;
-    expect(
-      events
-        .filter(
-          (event) =>
-            event.kind === 'turn.settled' &&
-            event.payload['turnId'] === promptId,
-        )
-        .map((event) => event.payload['outcome']),
-    ).toEqual(['completed']);
-    expect(
-      events.some(
-        (event) =>
-          event.kind === 'message.committed' &&
-          event.payload['role'] === 'assistant',
-      ),
-    ).toBe(true);
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }, 60_000);
 
   it('refuses legacy teardown during compression even without a client id', async () => {

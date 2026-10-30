@@ -501,6 +501,13 @@ describe('managed-agent-server e2e runner', () => {
     expect(b3aWindow).toContain(
       'SELECT prompt_id FROM qwen_managed_agent.ma_turn',
     );
+    // R4-2: the window helper only runs through its arming ternary. Pin the
+    // condition itself, so narrowing the guard (e.g. to 'after-result') reds
+    // here instead of silently deleting the arm's only durable-window check
+    // while the helper name still appears in the barrier->crash slice.
+    expect(source).toMatch(
+      /approvalFault === 'finished-before-commit'\s*\?\s*finishedBeforeCommitWindow\(/,
+    );
     expect(source).toContain(
       'Finished-before-commit crash landed before the model Finished marker committed',
     );
