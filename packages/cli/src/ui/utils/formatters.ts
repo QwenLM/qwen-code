@@ -60,7 +60,10 @@ export const formatTokenCount = (count: number): string => {
   if (count < 10000) {
     return `${(count / 1000).toFixed(1)}k`;
   }
-  return `${Math.floor(count / 1000)}k`;
+  if (count < 1_000_000) {
+    return `${Math.floor(count / 1000)}k`;
+  }
+  return `${(count / 1_000_000).toFixed(1)}m`;
 };
 
 /** Context-window usage from the used fraction: `4.5`, or `>100` past the limit. */
