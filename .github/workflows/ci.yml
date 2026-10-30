@@ -1879,13 +1879,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { group: 'cli', shard: '1/3' }
-          - { group: 'cli', shard: '2/3' }
-          - { group: 'cli', shard: '3/3' }
-          - { group: 'core', shard: '1/2' }
-          - { group: 'core', shard: '2/2' }
-          - { group: 'rest', shard: '' }
-          - { group: 'scripts', shard: '' }
+          - group: 'cli'
+            shard: '1/3'
+          - group: 'cli'
+            shard: '2/3'
+          - group: 'cli'
+            shard: '3/3'
+          - group: 'core'
+            shard: '1/2'
+          - group: 'core'
+            shard: '2/2'
+          - group: 'rest'
+            shard: ''
+          - group: 'scripts'
+            shard: ''
     runs-on: 'macos-latest'
     timeout-minutes: 60
     permissions:

@@ -32,6 +32,34 @@ describe('macOS CI groups', () => {
     ]);
   });
 
+  it('shards both heavy groups by workspace path and keeps their heap cap', () => {
+    for (const [group, shard] of [
+      ['cli', '2/3'],
+      ['core', '1/2'],
+    ]) {
+      const spawn = vi.fn().mockReturnValue({ status: 0 });
+      expect(runMacOsGroup(group, shard, spawn)).toBe(0);
+      // Without the bare '--', npm consumes --shard itself and every leg
+      // re-runs the whole workspace suite — the overrun this split removes.
+      expect(spawn.mock.calls[0][1]).toEqual([
+        'run',
+        'test:ci',
+        `--workspace=packages/${group}`,
+        '--',
+        `--shard=${shard}`,
+      ]);
+      expect(spawn.mock.calls[0][2].env.NODE_OPTIONS).toBe(
+        '--max-old-space-size=3072',
+      );
+    }
+  });
+
+  it('leaves the scripts group on the ambient environment', () => {
+    const spawn = vi.fn().mockReturnValue({ status: 0 });
+    expect(runMacOsGroup('scripts', '', spawn)).toBe(0);
+    expect(spawn.mock.calls[0][2].env).toBe(process.env);
+  });
+
   it('runs helper tests after standalone failure and preserves either failure', () => {
     for (const [standalone, scripts] of [
       [3, 0],

@@ -83,6 +83,18 @@ describe('complete macOS test groups', () => {
       ).toThrow();
     }
   });
+
+  it('keeps the aggregate gate on exactly the events the shards run on', () => {
+    // The aggregate only reads `needs.test_macos_shards.result`, so a gate
+    // that drifts from the shards' makes the preserved check name report
+    // `skipped` while the seven legs run and fail.
+    for (const event of ['merge_group', 'schedule', 'workflow_dispatch']) {
+      expect(gateRunsOn(condOf('test_macos'), event)).toBe(
+        gateRunsOn(condOf('test_macos_shards'), event),
+      );
+    }
+    expect(gateRunsOn(condOf('test_macos'), 'pull_request')).toBe(false);
+  });
 });
 
 // The extended ceilings below, except the test lane's, are scoped to the
