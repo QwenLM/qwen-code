@@ -5964,13 +5964,18 @@ async function runQwenServeImpl(
             },
             { requireFresh: true },
           );
+        // Partial observations retain known identities even when the service
+        // marks the catalog unavailable. They cannot prove a name absent or
+        // an alias uniquely owned.
+        skills = status?.skills;
         if (status?.initialized) {
-          skills = status.skills;
           // An untrusted workspace's catalog omits Extension Skills, so an
           // unresolved name there is not evidence that the name is invalid.
-          catalogAvailable = isWorkspaceTrustedForPersistence(workspace);
           catalogEnumerated =
-            catalogAvailable && !status.snapshot && !status.errors?.length;
+            isWorkspaceTrustedForPersistence(workspace) &&
+            !status.snapshot &&
+            !status.errors?.length;
+          catalogAvailable = catalogEnumerated;
         }
       } catch {
         // Preserve the legacy name heuristic when the catalog is unavailable.

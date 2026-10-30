@@ -532,6 +532,48 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     return directory;
   }
 
+  it.skipIf(process.platform === 'win32')(
+    'reports partial discovery errors while preserving readable skills',
+    async () => {
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-partial-skills-'),
+      );
+      try {
+        const directory = path.join(workspace, '.qwen', 'skills', 'readable');
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'SKILL.md'),
+          '---\nname: readable\ndescription: readable\n---\nInstructions',
+        );
+        // A symlink loop reliably makes discovery fail even when permission
+        // bits are not enforced. The sibling remains genuinely readable.
+        const unreadable = path.join(
+          workspace,
+          '.qwen',
+          'skills',
+          'unreadable',
+        );
+        await fsp.symlink(unreadable, unreadable, 'dir');
+        const provider = createWorkspaceSkillsStatusProvider();
+        const status = await provider(workspace);
+        expect(status.initialized).toBe(true);
+        expect(status.skills.map((skill) => skill.name)).toContain('readable');
+        expect(status.skills.map((skill) => skill.name)).not.toContain(
+          'unreadable',
+        );
+        // Exercise the actual manager's discovery signal, not a mocked flag.
+        await expect(provider.snapshot(workspace)).rejects.toThrow(
+          'completely discovered',
+        );
+        expect(status.errors).toEqual([
+          expect.objectContaining({ kind: 'skills', status: 'error' }),
+        ]);
+      } finally {
+        await fsp.rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('lists active and inactive extension Skills without a runtime Config', async () => {
     const active = await writeExtension('active', ['active-skill']);
     await writeExtension('inactive', ['inactive-skill']);

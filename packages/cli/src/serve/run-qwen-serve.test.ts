@@ -2190,6 +2190,135 @@ describe('workspace skill settings persistence', () => {
     ).toEqual({ disabled: [] });
   });
 
+  it.each(['disabled', 'defaultDisabled'] as const)(
+    'preserves known identity and the user %s restriction after partial discovery',
+    async (list) => {
+      writeSkillSettings([]);
+      fs.writeFileSync(
+        path.join(qwenHome, 'settings.json'),
+        JSON.stringify({ skills: { [list]: ['pdf'] } }),
+      );
+      const partial = {
+        v: 1 as const,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:pdf', 'extension', 'rust')],
+        errors: [
+          {
+            kind: 'skills' as const,
+            status: 'error' as const,
+            error: 'incomplete discovery',
+          },
+        ],
+      };
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: vi.fn().mockResolvedValue(partial),
+          workspaceSkillsStatusProvider: vi.fn().mockResolvedValue(partial),
+        }),
+      );
+      const { persistUserSkillActivation, workspaceRegistry } =
+        await captureSkillPersistence([]);
+      const status =
+        await workspaceRegistry!.primary.workspaceService.getWorkspaceSkillsStatus(
+          { route: 'TEST', workspaceCwd: workspace },
+          { requireFresh: true },
+        );
+      expect(status).toMatchObject({
+        initialized: false,
+        skills: partial.skills,
+        errors: partial.errors,
+      });
+      const before = fs.readFileSync(
+        path.join(qwenHome, 'settings.json'),
+        'utf8',
+      );
+      await expect(
+        persistUserSkillActivation!(workspace, ['rust:pdf'], true, 'hard'),
+      ).resolves.toEqual({
+        outcomes: [
+          {
+            skillName: 'rust:pdf',
+            changed: false,
+            block: {
+              reason: list === 'disabled' ? 'hard' : 'default',
+              list,
+              entry: 'pdf',
+              scope: 'User',
+            },
+          },
+        ],
+        settingsChanges: [],
+      });
+      expect(
+        fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+      ).toBe(before);
+    },
+  );
+
+  it.each(['partial', 'retained'] as const)(
+    'keeps missing names retryable with a %s catalog and writes no mixed batch entries',
+    async (mode) => {
+      writeSkillSettings([], ['rust:pdf']);
+      const warm = {
+        v: 1 as const,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:pdf', 'extension', 'rust')],
+      };
+      const partial = {
+        ...warm,
+        errors: [
+          {
+            kind: 'skills' as const,
+            status: 'error' as const,
+            error: 'incomplete discovery',
+          },
+        ],
+      };
+      const query =
+        mode === 'retained'
+          ? vi.fn().mockResolvedValueOnce(warm).mockResolvedValue(partial)
+          : vi.fn().mockResolvedValue(partial);
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi.fn().mockResolvedValue(partial),
+          isChannelLive: () => false,
+        }),
+      );
+      const { persistUserSkillActivation, workspaceRegistry } =
+        await captureSkillPersistence([]);
+      if (mode === 'retained') {
+        await workspaceRegistry!.primary.workspaceService.getWorkspaceSkillsStatus(
+          { route: 'TEST', workspaceCwd: workspace },
+        );
+      }
+      const before = fs.readFileSync(
+        path.join(qwenHome, 'settings.json'),
+        'utf8',
+      );
+      for (const names of [['missing'], ['rust:pdf', 'missing']]) {
+        await expect(
+          persistUserSkillActivation!(workspace, names, true, 'hard'),
+        ).rejects.toMatchObject({ name: 'SkillCatalogUnavailableError' });
+        expect(
+          fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+        ).toBe(before);
+      }
+    },
+  );
+
   it('reports a retryable failure for an unresolved name on an untrusted workspace', async () => {
     writeSkillSettings([], []);
     const { persistUserSkillActivation } = await captureSkillPersistence(

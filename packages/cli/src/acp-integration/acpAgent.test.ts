@@ -10770,6 +10770,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
         getCachedSkills,
       }),
       getExtensions: vi.fn().mockReturnValue([
@@ -10901,6 +10902,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isSkillEnabled: vi.fn().mockReturnValue(false),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: vi.fn().mockResolvedValue(undefined),
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
         getCachedSkills: vi.fn().mockReturnValue([
           {
             name: 'session-skill',
@@ -11570,6 +11572,75 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([false, true])(
+    'preserves known skills and reports partial discovery in live ACP status (errors: %s)',
+    async (hasDiscoveryErrors) => {
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue('/work/status'),
+        getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+        isSafeMode: vi.fn().mockReturnValue(false),
+        getBareMode: vi.fn().mockReturnValue(false),
+        getExtensionManager: vi.fn().mockReturnValue({
+          refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+        }),
+        getSkillManager: vi.fn().mockReturnValue({
+          hasDiscoveryErrors: vi.fn().mockReturnValue(hasDiscoveryErrors),
+          getCachedSkills: vi.fn().mockReturnValue([
+            {
+              name: 'rust:pdf',
+              authoredName: 'pdf',
+              description: 'Known extension skill',
+              level: 'extension',
+              extensionName: 'rust',
+              filePath: '/ext/rust/skills/pdf/SKILL.md',
+            },
+          ]),
+        }),
+        getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+        isSkillEnabled: vi.fn().mockReturnValue(true),
+        getExtensions: vi.fn().mockReturnValue([]),
+      } as unknown as Config;
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      try {
+        const status = await agent.extMethod(
+          SERVE_STATUS_EXT_METHODS.workspaceSkills,
+          {},
+        );
+        expect(status).toMatchObject({
+          v: 1,
+          workspaceCwd: '/work/status',
+          initialized: true,
+          skills: [{ name: 'rust:pdf', extensionName: 'rust' }],
+        });
+        if (hasDiscoveryErrors) {
+          expect(status).toMatchObject({
+            errors: [
+              { kind: 'skills', status: 'error', error: expect.any(String) },
+            ],
+          });
+        } else {
+          expect(status).not.toHaveProperty('errors');
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('reports an uninitialized snapshot when catalog enumeration throws', async () => {
     // A partial build failure must not look like a valid empty catalog: the
     // daemon latches `initialized: true` and then prefers it over its own
@@ -11639,6 +11710,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
         getCachedSkills: vi.fn().mockReturnValue([]),
       }),
     } as unknown as Config;
@@ -11688,6 +11760,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
         getCachedSkills: vi.fn().mockReturnValue([]),
       }),
     } as unknown as Config;
@@ -37454,6 +37527,7 @@ describe('sessionLanguage multi-session propagation', () => {
         getExtensions: () => [],
         getSkillManager: () => ({
           refreshCache,
+          hasDiscoveryErrors: () => false,
           getCachedSkills: () => [
             {
               name: skillName,

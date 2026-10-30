@@ -361,11 +361,22 @@ async function buildWorkspaceSkillsStatus(
         );
       }
     }
+    const errors: ServeWorkspaceSkillsStatus['errors'] =
+      skillManager.hasDiscoveryErrors()
+        ? [
+            {
+              kind: 'skills',
+              status: 'error',
+              error: 'The enabled Skills could not be completely discovered.',
+            },
+          ]
+        : undefined;
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
       initialized: true,
       skills: statuses.sort((a, b) => a.name.localeCompare(b.name)),
+      ...(errors ? { errors } : {}),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
