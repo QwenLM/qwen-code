@@ -19113,6 +19113,9 @@ export class Session implements SessionContext {
             ? []
             : await this.#resolvePrompt(attachmentBlocks, abortSignal, {
                 deferBridgeConversions: true,
+                // The expansion is the request; the pointers only stand
+                // for the attachments beside it.
+                markPrompt: false,
               });
         return this.#applyBridgeConversionsIfNeeded(
           [...attachmentParts, ...expandedPrompt],
@@ -19298,6 +19301,12 @@ export class Session implements SessionContext {
       promptLast?: boolean;
       onFullTurnModel?: (model: string) => boolean;
       deferBridgeConversions?: boolean;
+      /**
+       * Mark the assembled prompt as the request, for compaction. False when
+       * the request is built elsewhere, as a command's expansion is.
+       * Defaults to true.
+       */
+      markPrompt?: boolean;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -19589,13 +19598,14 @@ export class Session implements SessionContext {
     // trims as before.
     const promptText =
       pathSpecsToRead.length > 0 ? initialQueryText : initialQueryText.trim();
-    // Without a text block (a command's attachments alone) the prompt holds
-    // only the `@uri` pointers this function wrote, not a request.
-    const promptPart: Part = message.some(
-      (block) => block.type === 'text' && block.text.trim() !== '',
-    )
-      ? markTypedPrompt({ text: promptText })
-      : { text: promptText };
+    // A prompt with no text holds only the `@uri` pointers this function
+    // wrote, which stand for the attachments in compaction's quote. Left
+    // unmarked, the turn would be read by position, and the attachments'
+    // content, sent first, quoted as the user's words.
+    const promptPart: Part =
+      options.markPrompt === false
+        ? { text: promptText }
+        : markTypedPrompt({ text: promptText });
     // promptLast → instruction trails the reference content (prominence fix).
     // Default → original order (instruction first), byte-identical to the
     // pre-change behaviour the mid-turn drain path depends on.

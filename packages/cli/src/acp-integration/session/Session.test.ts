@@ -22301,6 +22301,32 @@ describe('Session', () => {
         ]);
       });
 
+      it('marks the pointer of a prompt that holds only an attachment, not its content', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///notes.txt',
+                mimeType: 'text/plain',
+                text: 'note body',
+              },
+            },
+          ],
+        });
+
+        // Unmarked, the turn would be read by position, and the attachment's
+        // content, sent first, would be quoted as the user's words.
+        const typed = firstSentMessage().filter(core.isTypedPrompt);
+        expect(textParts(typed)).toEqual(['@attachment:///notes.txt']);
+        expect(textParts(firstSentMessage()).join('')).toContain('note body');
+      });
+
       it("marks a command's expansion, not the pointer to its attachment (R3-1)", async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -27242,9 +27268,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: @attachment:///inline-only.txt',
-            },
+            }),
             {
               text: 'File: attachment:///inline-only.txt\ninline only contents',
             },
@@ -27298,9 +27324,9 @@ describe('Session', () => {
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
           [
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: ',
-            },
+            }),
             { text: 'Attachment absolutePath: /tmp/image-2.png' },
           ],
           '',
@@ -28527,15 +28553,15 @@ describe('Session', () => {
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining([
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: @file:///notes.txt',
-            },
+            }),
             {
               text: 'File: file:///notes.txt\nnote contents',
             },
-            {
+            core.markTypedPrompt({
               text: '\n[User message received during tool execution]: @file:///image.png',
-            },
+            }),
             {
               inlineData: {
                 mimeType: 'image/png',
