@@ -124,9 +124,6 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
-// Bounds the collect fallback that retains messages a bridge REJECTED from its
-// mid-turn queue (mirrors the bridge's own bounds, shared from
-// ChannelAgentBridge). Plain collect-mode buffering is unbounded and unchanged.
 const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
 const CHANNEL_MEMORY_PAGE_SIZE = 20;
 const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
@@ -7333,14 +7330,17 @@ export abstract class ChannelBase {
             // `inject` hands the text to the bridge's mid-turn queue so the
             // agent reads it inside the RUNNING turn, at its next drain
             // boundary. The queue carries plain text only and the RUNNING
-            // turn's route decides where the answer goes, so a message that
-            // cannot be represented that way (media, a recognized slash
-            // command, a chat/thread its turn does not own, an unauthorized
-            // member's text, a collect replay) is NOT injected. A bridge
-            // without the capability, or one rejecting injections, also falls
-            // back. Every fallback below lands in `collectBuffers` and is
-            // replayed as its own turn once this one ends, so nothing parked
-            // here is reported as delivered.
+            // turn's route decides where the answer goes, so a message whose
+            // route/content it cannot carry (a recognized slash command, a
+            // chat/thread its turn does not own, an unauthorized member's
+            // text, a collect replay) parks in `collectBuffers` exactly as
+            // `collect` would instead of being injected. A bridge without the
+            // capability, or one rejecting injections, also falls back. Media
+            // is refused visibly, but only when the message would otherwise
+            // have been injected: a dropped image would make the injected text
+            // contentless. Every fallback below lands in `collectBuffers` and
+            // is replayed as its own turn once this one ends, so nothing
+            // parked here is reported as delivered.
             let injectFallback = false;
             let injectRejectReason: string | undefined;
             if (mode === 'inject' && !envelope.collectReplay) {
@@ -7349,19 +7349,6 @@ export abstract class ChannelBase {
                 // per session so a configured `inject` is not silently `collect`
                 // with no operator-visible reason.
                 this.logInjectUnsupported(sessionId);
-              } else if (images.length > 0) {
-                // A dropped image would make the injected text contentless
-                // (or advertise a picture the model cannot see). The house
-                // convention for a text-only mid-turn path is a visible
-                // refusal, as /btw does.
-                process.stderr.write(
-                  `[${this.name}] inject: refusing message with image(s) from ${envelope.senderId} for session ${sessionId} (mid-turn injection is text-only)\n`,
-                );
-                await this.notifyInjectRefused(
-                  envelope,
-                  'Mid-turn injection supports text-only messages. Send this again after the current task finishes, or use a different dispatch mode.',
-                );
-                return;
               } else if (envelope.attachments?.length) {
                 // The attachment lines (a `saved to:` path) are plain text, so
                 // buffer the message: the adapter keeps the file for the
@@ -7395,6 +7382,22 @@ export abstract class ChannelBase {
                   `[${this.name}] inject: NOT delivered mid-turn (an earlier message of this turn is parked); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
                 );
               } else {
+                if (images.length > 0) {
+                  // A dropped image would make the injected text contentless
+                  // (or advertise a picture the model cannot see). The house
+                  // convention for a text-only mid-turn path is a visible
+                  // refusal, as /btw does. Reached only here, so a message that
+                  // is ineligible for injection for any other reason parks in
+                  // the collect buffer like text instead of being refused.
+                  process.stderr.write(
+                    `[${this.name}] inject: refusing message with image(s) from ${envelope.senderId} for session ${sessionId} (mid-turn injection is text-only)\n`,
+                  );
+                  await this.notifyInjectRefused(
+                    envelope,
+                    'Mid-turn injection supports text-only messages. Send this again after the current task finishes, or use a different dispatch mode.',
+                  );
+                  return;
+                }
                 // The injected text must carry the same group-history backfill
                 // a queued turn would get, or the agent answers a reference
                 // ("the third one") it cannot resolve. Drained only once the
@@ -7431,7 +7434,10 @@ export abstract class ChannelBase {
             }
             if (injectFallback) {
               // Bounded fallback: retained only until this turn ends, then
-              // replayed in arrival order. The bounds mirror the bridge's.
+              // replayed in arrival order. It bounds only messages a bridge
+              // REJECTED from its mid-turn queue (bounds shared from
+              // ChannelAgentBridge); plain collect-mode buffering is unbounded
+              // and unchanged.
               const fallbackEntries = (
                 this.collectBuffers.get(sessionId) ?? []
               ).filter((entry) => entry.injectFallback);
