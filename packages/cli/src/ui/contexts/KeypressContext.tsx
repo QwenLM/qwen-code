@@ -130,7 +130,14 @@ export interface Key {
   clipboardImageUnavailable?: boolean;
 }
 
-export type KeypressHandler = (key: Key) => void;
+/**
+ * Return-value contract: only a literal `false` means anything — an
+ * exclusive handler declining a key so the dispatch continues into ordinary
+ * handlers (see {@link ExclusiveKeypressOptions}). Every other return value
+ * is ignored, and `unknown` keeps both sync and async handlers assignable
+ * (matching the old void-return assignability).
+ */
+export type KeypressHandler = (key: Key) => unknown;
 export type MouseHandler = (event: SgrMouseEvent) => void;
 
 export interface PasteProgress {
@@ -138,8 +145,27 @@ export interface PasteProgress {
   receivedBytes: number;
 }
 
+export interface ExclusiveKeypressOptions {
+  /**
+   * While any exclusive handler is subscribed, ordinary (non-exclusive)
+   * handlers do not receive keys. Reserved for modal surfaces that own the
+   * keyboard while mounted (the right-click context menu overlay), so the
+   * composer, dialogs, and tab bars cannot act on the same keystroke.
+   *
+   * An exclusive handler may return `false` to decline the key it was just
+   * handed: the dispatch then continues into the ordinary handlers for that
+   * same keystroke. This is the dismissal contract — the modal releases the
+   * keyboard and the dismissing key keeps flowing, instead of being dropped
+   * into the bare readline layer.
+   */
+  exclusive?: boolean;
+}
+
 interface KeypressContextValue {
-  subscribe: (handler: KeypressHandler) => void;
+  subscribe: (
+    handler: KeypressHandler,
+    options?: ExclusiveKeypressOptions,
+  ) => void;
   unsubscribe: (handler: KeypressHandler) => void;
   subscribeMouse: (handler: MouseHandler) => void;
   unsubscribeMouse: (handler: MouseHandler) => void;
@@ -179,6 +205,11 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
+  // Exclusive handlers are tracked separately so broadcast() can gate the
+  // ordinary set with a cheap `size > 0` check instead of tagging every
+  // entry. A Set keyed by the same handler function keeps subscribe /
+  // unsubscribe symmetric.
+  const exclusiveSubscribers = useRef<Set<KeypressHandler>>(new Set()).current;
   const mouseSubscribers = useRef<Set<MouseHandler>>(new Set()).current;
   const [pasteProgress, setPasteProgress] = useState<PasteProgress>({
     active: false,
@@ -186,17 +217,22 @@ export function KeypressProvider({
   });
 
   const subscribe = useCallback(
-    (handler: KeypressHandler) => {
+    (handler: KeypressHandler, options?: ExclusiveKeypressOptions) => {
+      if (options?.exclusive) {
+        exclusiveSubscribers.add(handler);
+        return;
+      }
       subscribers.add(handler);
     },
-    [subscribers],
+    [subscribers, exclusiveSubscribers],
   );
 
   const unsubscribe = useCallback(
     (handler: KeypressHandler) => {
       subscribers.delete(handler);
+      exclusiveSubscribers.delete(handler);
     },
-    [subscribers],
+    [subscribers, exclusiveSubscribers],
   );
 
   const subscribeMouse = useCallback(
@@ -771,6 +807,22 @@ export function KeypressProvider({
       // FOCUS_IN/OUT) early-return before reaching broadcast, so terminal
       // protocol noise does not count as user activity.
       noteInteraction();
+      // While an exclusive handler is subscribed (an open context menu's
+      // overlay), it owns the keyboard: ordinary handlers are skipped for
+      // this key. The overlay returns false for a key it does not handle —
+      // the dismissal case — and the same key then flows to ordinary
+      // handlers below, so a dismissing keystroke is never lost.
+      if (exclusiveSubscribers.size > 0) {
+        let declined = false;
+        for (const handler of exclusiveSubscribers) {
+          if (handler(key) === false) {
+            declined = true;
+          }
+        }
+        if (!declined) {
+          return;
+        }
+      }
       for (const handler of subscribers) {
         handler(key);
       }
@@ -1641,6 +1693,7 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    exclusiveSubscribers,
     mouseSubscribers,
     initialCapturedInput,
   ]);
