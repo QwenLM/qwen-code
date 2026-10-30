@@ -323,6 +323,16 @@ describe('StandaloneRecents', () => {
   it('loads only the requested archived group', async () => {
     const { renderSession } = await render({ archiveState: 'archived' });
 
+    const group = container.querySelector(
+      '[data-testid="standalone-archived-group"]',
+    )!;
+    expect(group.classList).toContain('mb-3');
+    const header = group.querySelector('button[aria-expanded]')!;
+    expect(header.parentElement?.className).toContain('headerRow');
+    expect(header.querySelector('svg')?.classList).toContain(
+      'lucide-circle-dashed',
+    );
+    expect(header.querySelector('span + svg')).toBeNull();
     expect(container.textContent).toContain('Archived chat');
     expect(container.textContent).not.toContain('Active chat');
     expect(renderSession).toHaveBeenCalledWith(
