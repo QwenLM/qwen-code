@@ -3,8 +3,10 @@
  * Analyze failed CI logs and render failure details.
  *
  * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
- * tests populate the failure summary, while the workflow aggregates issues
- * by workflow identity rather than by test or commit signatures.
+ * tests populate the failure summary, and the workflow routes on them — a run
+ * that names failing tests files or reuses a per-signature issue (matched by
+ * the `title` and `searchMarkers` emitted here), while a run without any test
+ * identity shares the workflow's aggregate issue.
  *
  * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
  * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`

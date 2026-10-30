@@ -218,6 +218,7 @@ export default {
   'toolDisplayName.CronCreate': 'toolDisplayName.CronCreate',
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
+  'toolDisplayName.AutofixPr': 'toolDisplayName.AutofixPr',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',

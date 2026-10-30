@@ -980,6 +980,56 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
   });
+
+  it('tui-parity changes gate is routed like the lanes it guards', () => {
+    // The changes job is the door to parity/noflicker: a 40-minute hosted
+    // queue wait behind it starves two pool-routed lanes. Route it like them;
+    // it runs no checkout, so the workspace-restore pin does not apply.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'tui-parity.yml'), 'utf8'),
+    );
+    const job = doc.jobs.changes;
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    assert.deepEqual(route('workflow_dispatch', false, ''), ECS_LABELS);
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(
+        route('pull_request', false, assoc),
+        HOSTED_LABELS,
+        assoc,
+      );
+    }
+    for (const eventName of ['pull_request', 'workflow_dispatch']) {
+      assert.deepEqual(
+        route(eventName, true, 'OWNER', true),
+        HOSTED_LABELS,
+        eventName,
+      );
+    }
+    // Byte-identity with the lanes it guards is this change's own acceptance
+    // criterion: the gate is their door, so drift here is what re-starves
+    // them behind a hosted queue.
+    for (const lane of ['parity', 'noflicker']) {
+      assert.equal(
+        runsOn,
+        String(doc.jobs[lane]['runs-on']),
+        `the gate must be routed by the same expression as ${lane}`,
+      );
+    }
+    // Any added step would run on the reused pool workspace with no hygiene
+    // step before it, so the whole step list is pinned, not just checkouts.
+    assert.deepEqual(
+      job.steps.map((s) => s.uses),
+      ['actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'],
+      'changes gate must stay checkout-free and shell-free; adding a step re-adds the pool-hygiene requirement',
+    );
+  });
 });
 
 describe('control-plane jobs moved off the hosted queue', () => {
@@ -1063,5 +1113,110 @@ describe('control-plane jobs moved off the hosted queue', () => {
         }
       });
     }
+  }
+});
+
+describe('credential-free release fanout routing (#15465)', () => {
+  const reference = parse(
+    readFileSync(join(workflowsDir, 'repo-hygiene.yml'), 'utf8'),
+  ).jobs.dedup['runs-on'];
+  it('keeps the Desktop reusable caller limited to schedule and dispatch', () => {
+    const caller = parse(
+      readFileSync(join(workflowsDir, 'desktop-packaging-check.yml'), 'utf8'),
+    );
+    assert.deepEqual(Object.keys(caller.on).sort(), [
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    assert.equal(
+      caller.jobs.package.uses,
+      './.github/workflows/desktop-release.yml',
+    );
+  });
+  for (const [file, jobId, events] of [
+    ['desktop-release.yml', 'prepare', ['release', 'workflow_dispatch']],
+    ['live-host-release.yml', 'prepare', ['workflow_dispatch']],
+    [
+      'dsw-swe-verified-release.yml',
+      'release_gate',
+      ['release', 'workflow_dispatch'],
+    ],
+    [
+      'release-managed-runtime.yml',
+      'prepare',
+      ['release', 'workflow_dispatch'],
+    ],
+  ]) {
+    const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
+    const job = doc.jobs[jobId];
+    const expression = job['runs-on'];
+    it(`${file}: routes release preparation to ECS with hosted fallbacks`, () => {
+      assert.equal(
+        expression,
+        file === 'live-host-release.yml'
+          ? reference.replace(
+              "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+              "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event_name != 'pull_request'",
+            )
+          : reference,
+      );
+      for (const eventName of events) {
+        assert.ok(Object.hasOwn(doc.on, eventName));
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: false }),
+          JSON.parse(ECS),
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: true }),
+          JSON.parse(HOSTED),
+        );
+        assert.deepEqual(
+          evalRunsOn(
+            expression.replace(
+              "github.repository == 'QwenLM/qwen-code'",
+              'false',
+            ),
+            { eventName, ecsDisabled: false },
+          ),
+          JSON.parse(HOSTED),
+        );
+      }
+    });
+    it(`${file}: keeps release secrets and PR execution outside this migration`, () => {
+      assert.doesNotMatch(JSON.stringify([doc.env, job]), /secrets(?:\.|\[)/);
+      assert.equal(job.environment, undefined);
+      assert.equal((job.permissions ?? doc.permissions).contents, 'read');
+      assert.doesNotMatch(
+        expression,
+        /ECS_RELEASE_HOST_RUNNER_ENABLED|ecs-qwen-release-host/,
+      );
+      if (file === 'live-host-release.yml') {
+        assert.ok(Object.hasOwn(doc.on, 'pull_request'));
+        assert.deepEqual(
+          evalRunsOn(expression, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo: true,
+            assoc: 'OWNER',
+          }),
+          JSON.parse(HOSTED),
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo: false,
+            assoc: 'NONE',
+          }),
+          JSON.parse(HOSTED),
+        );
+      } else {
+        assert.ok(
+          !Object.keys(doc.on).some((event) =>
+            event.startsWith('pull_request'),
+          ),
+        );
+      }
+    });
   }
 });

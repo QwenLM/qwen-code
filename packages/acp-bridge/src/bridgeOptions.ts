@@ -709,6 +709,8 @@ export interface BridgeOptions {
   onChannelDelivery?: ChannelDeliveryHandler;
   /** Resolves ancestor workflow trust from the owning daemon runtime. */
   onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler;
+  /** Live owner authorization, read immediately before forwarding a prompt. */
+  isWorkflowModeWriteAllowed?: (sessionId: string) => boolean;
 }
 
 /**

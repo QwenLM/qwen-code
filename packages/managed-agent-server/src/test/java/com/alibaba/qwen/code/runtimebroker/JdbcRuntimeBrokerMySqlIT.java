@@ -30,6 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcRuntimeBrokerMySqlIT {
     @Test
+    void residentMountPathsDoNotBlockIndependentStorageAfterRetirement() throws Exception {
+        inIsolatedSchema("resident_placement_", ResidentWorkspacePlacementTest::verify);
+    }
+
+    @Test
     void physicalAliasesReleaseOnlyTheirMatchingHolder() throws Exception {
         inIsolatedSchema("broker_physical_", JdbcPhysicalStorageReleaseTest::verify);
     }
@@ -61,6 +66,8 @@ class JdbcRuntimeBrokerMySqlIT {
                     PreparedStatement timeZone = connection.prepareStatement(
                             "SET time_zone = '" + offset + "'")) {
                 timeZone.execute();
+                JdbcRepositorySupportTest.assertDatabaseClock(
+                        JdbcRepositorySupport.databaseNowPrecise(connection));
                 JdbcRepositorySupportTest.assertStorageSafeClock(
                         JdbcRepositorySupport.databaseNow(connection));
             }

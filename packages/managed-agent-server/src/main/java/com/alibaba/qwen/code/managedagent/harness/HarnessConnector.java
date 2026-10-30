@@ -38,9 +38,15 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLiveApprovalSelection() { return false; }
 
+    default boolean supportsAutoApproval() { return false; }
+
+    default boolean supportsPermissionRules() { return false; }
+
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
 
     default boolean supportsModelSelection() { return false; }
+
+    default boolean supportsUserMessageQueue() { return false; }
 
     default boolean supportsContextCompression() { return false; }
 
@@ -82,6 +88,16 @@ public interface HarnessConnector extends AutoCloseable {
 
     default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
         throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default boolean supportsSessionExtensions() { return false; }
+
+    default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
+    default Map<String, Object> continueExtensionOperation(String tenantId, String sessionId, String operationId, boolean recoverPrevious) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
     }
 
     default boolean isWorkspaceFilesAvailable() {

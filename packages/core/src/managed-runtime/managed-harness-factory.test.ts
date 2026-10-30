@@ -35,6 +35,7 @@ import {
   type ManagedSessionCommand,
 } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   managedRuntimeDispatchGate,
   resetManagedRuntimeDispatchGatesForTest,
@@ -85,7 +86,11 @@ async function createWorkspace(): Promise<Workspace> {
   return { runtimeBaseDir, projectRoot, transcriptPath };
 }
 
-function open(workspace: Workspace): Promise<ManagedSession> {
+async function open(workspace: Workspace): Promise<ManagedSession> {
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: workspace.runtimeBaseDir,
+    sessionKey,
+  });
   return openManagedSession({
     runtimeBaseDir: workspace.runtimeBaseDir,
     sessionId,
@@ -96,8 +101,14 @@ function open(workspace: Workspace): Promise<ManagedSession> {
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
     create: {
-      definitionRef: ref('managed-definition'),
-      rootSnapshotRef: ref('managed-root'),
+      definitionRef: await resources.publish(
+        'managed-definition',
+        Buffer.from('{}'),
+      ),
+      rootSnapshotRef: await resources.publish(
+        'managed-root',
+        Buffer.from('{}'),
+      ),
       createdBy: 'daemon',
     },
   });

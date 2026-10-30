@@ -537,7 +537,7 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
-        assertThat(modelRequests).hasSize(shellLifecycleV2 ? 4 : 8);
+        assertThat(modelRequests).hasSize(4);
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
@@ -792,230 +792,54 @@ class HostedPublicWorkspaceIT {
         }
     }
 
-    // W2: a controlled cwd change settles through the production server and
-    // the deployment's real Workspace probe, on both API surfaces.
     @Test
     @Timeout(480)
-    void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
+    void legacyWorkspaceCwdOperationsSettleAndPivotLaterTurns() throws Exception {
         List<Path> roots = boot();
         Files.createDirectory(roots.get(0).resolve("child2"));
         register("workspace-0", "storage-0");
-        register("workspace-1", "storage-1");
         Map<String, Object> creation = Map.of("agent_id", "qwen-code",
-                "input", List.of(Map.of("type", "input_text", "text",
-                        "G0_FILES")), "workspace",
-                Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+                "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
         String session = request("POST", "/v1/agents/sessions", creation,
-                "w2-create", "actor", 202).path("id").asText();
-        // The Session first runs a real tool Turn in the original
-        // directory, so the later Turn has something to escape from.
+                "legacy-cwd-create", "actor", 202).path("id").asText();
         awaitTurn(session, null, "child", roots.get(0));
-
-        Map<String, Object> change = Map.of("cwd_relative", "child2//",
-                "expected_context_revision", 1);
-        // A just-completed Turn can retain the Runtime context for a moment;
-        // re-drive the same idempotency key until admission answers 202.
-        JsonNode operation = await().atMost(Duration.ofSeconds(35))
-                .until(() -> {
-                    HttpResponse<String> answer = rawRequest("POST",
-                            "/v1/agents/sessions/" + session + "/cwd", change,
-                            "w2-cwd-1", "actor");
-                    JsonNode body = json.readTree(answer.body());
-                    if (answer.statusCode() == 409
-                            && "session_context_busy".equals(body.path("error")
-                                    .path("code").asText())) {
-                        return null;
-                    }
-                    assertThat(answer.statusCode())
-                            .as("POST /cwd: %s", answer.body())
-                            .isEqualTo(202);
-                    return body;
-                }, Objects::nonNull);
-        assertThat(operation.path("type").asText()).isEqualTo("cwd_change");
-        assertThat(operation.path("target_cwd_relative").asText())
-                .isEqualTo("child2");
-        assertThat(operation.path("expected_context_revision").asLong())
-                .isEqualTo(1);
-        assertThat(operation.path("status").asText())
-                .isIn("pending", "installing");
-        assertThat(operation.path("replayed").asBoolean()).isFalse();
-        String operationId = operation.path("id").asText();
-
-        // The same key replays even spelled differently once normalized.
-        JsonNode replay = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child2/./",
-                        "expected_context_revision", 1),
-                "w2-cwd-1", "actor", 202);
-        assertThat(replay.path("id").asText()).isEqualTo(operationId);
-        assertThat(replay.path("replayed").asBoolean()).isTrue();
-
+        // A durable Turn result can precede the Runtime's confirmed release.
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() ->
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?"
+                        + " AND session_state <> 'RELEASED'", Integer.class, tenant, session)).isZero());
+        var store = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore.class);
+        String operation = LegacyCwdOperations.seed(jdbc, store, tenant, session, "actor", "actor-digest",
+                "legacy-cwd", "digest", "child2", 1).operation().operationId();
         await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
-                    + "/operations/" + operationId, null, null, "actor", 200);
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                    null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
-            assertThat(polled.path("result_context_revision").asLong())
-                    .isEqualTo(2);
-            assertThat(polled.path("replayed").asBoolean()).isFalse();
+            assertThat(polled.path("result_context_revision").asLong()).isEqualTo(2);
         });
-        JsonNode read = request("GET", "/v1/agents/sessions/" + session,
+        JsonNode web = request("POST", "/api/agent/web-shell/v1/operations/query",
+                Map.of("sessionId", session, "operationId", operation), null, "actor", 200);
+        assertThat(web.path("status").asText()).isEqualTo("completed");
+        assertThat(web.path("resultContextRevision").asLong()).isEqualTo(2);
+        JsonNode events = request("GET", "/v1/agents/sessions/" + session + "/events",
                 null, null, "actor", 200);
-        assertThat(read.at("/workspace/cwd_relative").asText())
-                .isEqualTo("child2");
-        assertThat(read.at("/workspace/context_revision").asLong())
-                .isEqualTo(2);
-        assertThat(read.at("/workspace/state").asText()).isEqualTo("ready");
-        JsonNode events = request("GET", "/v1/agents/sessions/" + session
-                + "/events", null, null, "actor", 200);
-        JsonNode changed = null;
+        long changed = 0;
         for (JsonNode event : events.path("data")) {
-            if ("session.context.changed"
-                    .equals(event.path("type").asText())) {
-                changed = event;
+            if ("session.context.changed".equals(event.path("type").asText())) {
+                changed++;
             }
         }
-        assertThat(changed).as("session.context.changed in %s", events)
-                .isNotNull();
-        assertThat(changed.path("data").path("cwdRelative").asText())
-                .isEqualTo("child2");
-        assertThat(changed.path("data").path("contextRevision").asLong())
-                .isEqualTo(2);
-        assertThat(changed.path("data").path("workspaceId").asText())
-                .isEqualTo("workspace-0");
-
-        Map<String, Object> webChange = Map.of("sessionId", session,
-                "idempotencyKey", "w2-cwd-web-1", "cwdRelative", ".",
-                "expectedContextRevision", 2);
-        JsonNode webOperation = request("POST",
-                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
-                null, "actor", 202);
-        assertThat(webOperation.path("type").asText())
-                .isEqualTo("cwd_change");
-        String webOperationId = webOperation.path("operationId").asText();
-        JsonNode webReplay = request("POST",
-                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
-                null, "actor", 202);
-        assertThat(webReplay.path("operationId").asText())
-                .isEqualTo(webOperationId);
-        assertThat(webReplay.path("replayed").asBoolean()).isTrue();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("POST",
-                    "/api/agent/web-shell/v1/operations/query",
-                    Map.of("sessionId", session,
-                            "operationId", webOperationId),
-                    null, "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("completed");
-            assertThat(polled.path("resultContextRevision").asLong())
-                    .isEqualTo(3);
-        });
-
-        assertRefusal(request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "..", "expected_context_revision",
-                        3), "w2-bad-lexical", "actor", 400), "invalid_cwd");
-        assertRefusal(request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child",
-                        "expected_context_revision", 1),
-                "w2-stale-revision", "actor", 409), "context_revision_conflict");
-        String legacy = request("POST", "/v1/agents/sessions",
-                Map.of("agent_id", "qwen-code"), "w2-legacy", null, 202)
-                .path("id").asText();
-        assertRefusal(request("POST",
-                "/v1/agents/sessions/" + legacy + "/cwd",
-                Map.of("cwd_relative", ".", "expected_context_revision",
-                        1), "w2-legacy-cwd", "actor", 400),
-                "unsupported_feature");
-        request("POST", "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child",
-                        "expected_context_revision", 3),
-                "w2-stranger", "stranger", 404);
-
-        // A missing target fails the operation, never the Session.
-        JsonNode missing = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "missing",
-                        "expected_context_revision", 3),
-                "w2-missing-dir", "actor", 202);
-        String missingOperation = missing.path("id").asText();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
-                    + "/operations/" + missingOperation, null, null,
-                    "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("failed");
-            assertThat(polled.path("failure_code").asText())
-                    .isEqualTo("workspace_unavailable");
-            assertThat(polled.path("result_context_revision")
-                    .isMissingNode()).isTrue();
-        });
-        read = request("GET", "/v1/agents/sessions/" + session, null, null,
-                "actor", 200);
-        assertThat(read.at("/workspace/cwd_relative").asText())
-                .isEqualTo(".");
-        assertThat(read.at("/workspace/context_revision").asLong())
-                .isEqualTo(3);
-
-        // The WebShell twin's failed projection must carry failureCode too —
-        // the contract condition requires it, and generated clients read it.
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("POST",
-                    "/api/agent/web-shell/v1/operations/query",
-                    Map.of("sessionId", session,
-                            "operationId", missingOperation),
-                    null, "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("failed");
-            assertThat(polled.path("failureCode").asText())
-                    .isEqualTo("workspace_unavailable");
-        });
-
-        // The Session is not wedged: the next admitted change completes.
-        String recovered = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd",
-                Map.of("cwd_relative", "child2",
-                        "expected_context_revision", 3),
-                "w2-recovered", "actor", 202).path("id").asText();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
-                    + "/operations/" + recovered, null, null, "actor", 200);
-            assertThat(polled.path("status").asText()).isEqualTo("completed");
-            assertThat(polled.path("result_context_revision").asLong())
-                    .isEqualTo(4);
-        });
-
-        events = request("GET", "/v1/agents/sessions/" + session + "/events",
-                null, null, "actor", 200);
-        long changedEvents = 0;
-        for (JsonNode event : events.path("data")) {
-            if ("session.context.changed"
-                    .equals(event.path("type").asText())) {
-                changedEvents++;
-            }
-        }
-        // Each completed change emitted once; the refused one emitted none.
-        assertThat(changedEvents).isEqualTo(3);
-
-        // #13112 landed the missing half of the pivot: a bound later Turn
-        // installs the committed binding on its fresh Runtime Session, so
-        // the turn's file writes land only in the changed directory — a
-        // stale-runtime reuse would land them back in the original one.
-        // The sentinel makes the direction discriminating: identical bytes
-        // flowed through both Turns of the fixture model otherwise.
-        Files.writeString(roots.get(0).resolve("child")
-                .resolve("proof.txt"), "sentinel");
-        String laterTurn = request("POST",
-                "/v1/agents/sessions/" + session + "/events",
+        assertThat(changed).isEqualTo(1);
+        Files.writeString(roots.get(0).resolve("child/proof.txt"), "sentinel");
+        String laterTurn = request("POST", "/v1/agents/sessions/" + session + "/events",
                 Map.of("type", "agent.session.input.message", "input",
-                        List.of(Map.of("type", "input_text", "text",
-                                "G0_FILES"))),
-                "w2-later-turn", "actor", 202).path("turn_id").asText();
+                        List.of(Map.of("type", "input_text", "text", "G0_FILES"))),
+                "legacy-cwd-later-turn", "actor", 202).path("turn_id").asText();
         awaitTurn(session, laterTurn, "child2", roots.get(0));
-        assertThat(Files.readString(roots.get(0).resolve("child2")
-                .resolve("proof.txt"))).isEqualTo("after");
+        assertThat(Files.readString(roots.get(0).resolve("child2/proof.txt"))).isEqualTo("after");
+        assertThat(Files.readString(roots.get(0).resolve("child/proof.txt"))).isEqualTo("sentinel");
         assertThat(roots.get(0).resolve("proof.txt")).doesNotExist();
-        // The sentinel survives: a reused pre-change installation would
-        // have overwritten it with the fixture's "before"->"after".
-        assertThat(Files.readString(roots.get(0).resolve("child")
-                .resolve("proof.txt"))).isEqualTo("sentinel");
     }
 
     private static void assertRefusal(JsonNode refusal, String code) {
@@ -1074,7 +898,18 @@ class HostedPublicWorkspaceIT {
         residentPublicHandoff(true);
     }
 
+    @Test
+    @EnabledOnOs(OS.MAC)
+    @Timeout(180)
+    void residentUnsupportedToolRefusalAllowsCloseAndAnotherFileSession() throws Exception {
+        residentPublicHandoff(false, true);
+    }
+
     private void residentPublicHandoff(boolean reconstruct) throws Exception {
+        residentPublicHandoff(reconstruct, false);
+    }
+
+    private void residentPublicHandoff(boolean reconstruct, boolean unsupportedTool) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
         resident = true;
         residentRestart = reconstruct;
@@ -1156,6 +991,21 @@ class HostedPublicWorkspaceIT {
             assertThat(fixture.workerAlive()).isTrue();
             assertThat(fixture.starts).hasValue(1);
             saveResidentOwnership("after-application-reconstruction");
+        }
+        if (unsupportedTool) {
+            String refused = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
+                    "input", List.of(Map.of("type", "input_text", "text", "G0_RESIDENT_UNSUPPORTED")),
+                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                    "resident-unsupported", "actor", 202).path("id").asText();
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
+                        String.class, refused)).isEqualTo("COMPLETED");
+            });
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                    Long.class, refused)).isZero();
+            assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
+            closeResidentSession(refused, "resident-unsupported-close");
         }
         String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
         saveResidentOwnership("after-second-turn");
@@ -1692,7 +1542,7 @@ class HostedPublicWorkspaceIT {
                     }
                 })
                 .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         if (!publicChildRestarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
@@ -1867,9 +1717,20 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor", "glob");
-            } else {
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob"));
+                if (shellLifecycleV2) {
+                    expectedTools.add("monitor");
+                }
+                assertThat(tools).containsExactlyInAnyOrderElementsOf(expectedTools);
+                body.path("tools").forEach(tool -> {
+                    if ("run_shell_command".equals(tool.at("/function/name").asText())) {
+                        assertThat(tool.at("/function/parameters/properties").has("is_background")).isEqualTo(shellLifecycleV2);
+                    }
+                });
+            } else if (resident) {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            } else {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch");
             }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
@@ -1895,22 +1756,19 @@ class HostedPublicWorkspaceIT {
             int step = results.size();
             boolean definitionTurn = prompt.get().contains("G0_DEFINITION_APPROVAL_");
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
-            boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) {
                 assertThat(results.get(2).toString()).contains("after");
             }
             boolean residentSecond = resident && prompt.get().contains("G0_RESIDENT_SECOND");
+            boolean residentUnsupported = resident && prompt.get().contains("G0_RESIDENT_UNSUPPORTED");
+            if (residentUnsupported && step >= 1) {
+                assertThat(results.getFirst().toString()).contains("Resident Workspace supports only");
+            }
             if (residentSecond && step >= 1) {
                 assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
             }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 1) {
-                assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            }
-            if (runShell && shellFault == null && !foregroundOnly && step >= 2) {
-                assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            }
-            if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
-                assertThat(results.get(foregroundOnly ? 0 : 2).toString()).contains("G0_SHELL_STDOUT");
+            if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)) {
+                assertThat(results.getFirst().toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
@@ -1918,16 +1776,14 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean publicParent = publicChildren && tools.contains("agent");
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
-                    : step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
+                    : step < (residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (toolCall) {
-                String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
                                 : List.of("write_file", "edit", "read_file")).get(step);
-                Map<String, Object> args = runShell ? switch (foregroundOnly ? 2 : step) {
-                    case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
-                    case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
-                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
-                } : switch (step) {
+                Map<String, Object> args = runShell
+                        ? Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof")
+                        : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", resident ? "after-first-" + tenant : "after");
                     default -> Map.of("file_path", "proof.txt");
@@ -1936,6 +1792,10 @@ class HostedPublicWorkspaceIT {
                     args = step == 1
                             ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
                             : Map.of("file_path", "proof.txt");
+                }
+                if (residentUnsupported) {
+                    name = "web_fetch";
+                    args = Map.of("url", "https://resident.invalid/never-requested", "prompt", "Unsupported resident tool");
                 }
                 if (definitionTurn) {
                     String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];

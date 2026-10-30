@@ -39,6 +39,7 @@ const MANAGED_SURFACE_FILE = resolve(
 const ROUTE_METHODS: ReadonlySet<string> = new Set([
   'GET',
   'POST',
+  'PUT',
   'PATCH',
   'DELETE',
 ]);

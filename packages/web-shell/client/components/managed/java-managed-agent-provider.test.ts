@@ -512,7 +512,7 @@ describe('createJavaManagedAgentProvider', () => {
     {
       approvalMode: 'yolo',
       approvalRevision: 0,
-      availableApprovalModes: ['yolo', 'auto'],
+      availableApprovalModes: ['yolo', 'unknown'],
       supported: true,
     },
   ])('refuses invalid approval options (%j)', async (selection) => {
@@ -524,6 +524,51 @@ describe('createJavaManagedAgentProvider', () => {
     await expect(
       provider.approvalChange!.queryOptions('s', { clientId: 'client' }),
     ).rejects.toThrow('Invalid Session approval options');
+  });
+
+  it('round-trips Auto and Session rules through the existing approval contract', async () => {
+    const permissionRules = {
+      allow: ['Read'],
+      ask: ['Bash(git push*)'],
+      deny: ['Bash(rm *)'],
+    };
+    const selection = {
+      approvalMode: 'auto',
+      approvalRevision: 2,
+      availableApprovalModes: ['auto', 'default'],
+      supported: true,
+      permissionRulesSupported: true,
+      permissionRules,
+    };
+    const receipt = {
+      sessionId: 's',
+      approvalMode: 'auto',
+      approvalRevision: 3,
+      replayed: false,
+      permissionRules,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(selection))
+      .mockResolvedValueOnce(jsonResponse(receipt));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.approvalChange!.queryOptions('s', { clientId: 'c' }),
+    ).toEqual(selection);
+    expect(
+      await provider.approvalChange!.submit(
+        's',
+        { approvalMode: 'auto', expectedRevision: 2, permissionRules },
+        { clientId: 'c', requestId: 'request', idempotencyKey: 'key' },
+      ),
+    ).toEqual(receipt);
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toMatchObject({
+      permissionRules,
+    });
   });
 
   it('uses only server model choices and preserves the frozen change key and revision', async () => {
@@ -818,99 +863,6 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     ).rejects.toThrow('identity mismatch');
   });
-  it('uses the exact cwd request and key and queries its accepted operation', async () => {
-    const operation = {
-      operationId: 'op-cwd',
-      sessionId: 's1',
-      type: 'cwd_change',
-      status: 'pending',
-      expectedContextRevision: 7,
-      targetCwdRelative: ' 空格 dir ',
-      replayed: false,
-    };
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockImplementation(async () => jsonResponse(operation));
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      productScope: 'tenant:actor',
-      fetch: fetchImpl,
-    });
-    expect(
-      await provider.cwdChange!.submit(
-        's1',
-        { cwdRelative: ' 空格 dir ', expectedContextRevision: 7 },
-        { clientId: 'client', idempotencyKey: 'original-key' },
-      ),
-    ).toEqual(operation);
-    expect(String(fetchImpl.mock.calls[0][0])).toContain(
-      '/sessions/cwd/change',
-    );
-    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
-      expect.objectContaining({
-        sessionId: 's1',
-        cwdRelative: ' 空格 dir ',
-        expectedContextRevision: 7,
-        idempotencyKey: 'original-key',
-      }),
-    );
-    expect(
-      await provider.cwdChange!.query('s1', 'op-cwd', { clientId: 'client' }),
-    ).toEqual(operation);
-    expect(String(fetchImpl.mock.calls[1][0])).toContain('/operations/query');
-  });
-
-  it('requires explicit identity scope for cwd recovery and maps its capability independently', async () => {
-    const options = {
-      baseUrl: 'https://product.example',
-      fetch: vi.fn<typeof fetch>().mockResolvedValue(
-        jsonResponse({
-          sessionId: 's1',
-          status: 'active',
-          createdAt: 1,
-          updatedAt: 1,
-          workspace: {
-            workspaceId: 'ws',
-            cwdRelative: '.',
-            contextRevision: 3,
-            state: 'ready',
-          },
-          capabilities: { cwdChange: true, workspaceTurns: false },
-        }),
-      ),
-    };
-    expect(createJavaManagedAgentProvider(options).cwdChange).toBeUndefined();
-    expect(
-      createJavaManagedAgentProvider({ ...options, productScope: '  ' })
-        .cwdChange,
-    ).toBeUndefined();
-    const provider = createJavaManagedAgentProvider({
-      ...options,
-      productScope: 'tenant:actor',
-    });
-    expect(
-      (await provider.getSession('s1', { clientId: 'client' })).capabilities
-        .cwdChange,
-    ).toBe(true);
-  });
-
-  it('rejects an unrelated operation returned by the query endpoint', async () => {
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      productScope: 'tenant:actor',
-      fetch: vi.fn<typeof fetch>().mockResolvedValue(
-        jsonResponse({
-          sessionId: 'other',
-          operationId: 'op',
-          type: 'action_response',
-          status: 'completed',
-        }),
-      ),
-    });
-    await expect(
-      provider.cwdChange!.query('s1', 'op', { clientId: 'client' }),
-    ).rejects.toThrow();
-  });
   it('keeps an empty bound session idle and disables execution', async () => {
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -1091,7 +1043,7 @@ describe('createJavaManagedAgentProvider', () => {
     ).toThrow('productScope');
   });
 
-  it('sends a catalog model with the built-in Agent on both creation paths', async () => {
+  it('preserves model, worktree and extension pins on both creation paths', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementation(async () =>
@@ -1109,6 +1061,14 @@ describe('createJavaManagedAgentProvider', () => {
       workspaceId: 'ws',
       cwdRelative: '.',
       approvalMode: 'yolo' as const,
+      worktree: { baseRef: 'main' },
+      extensionPins: [
+        {
+          extensionId: 'ext_00000000-0000-0000-0000-000000000001',
+          packageRevision: 1,
+          packageDigest: 'a'.repeat(64),
+        },
+      ],
     };
     const command = { clientId: 'client', idempotencyKey: 'frozen-key' };
     await provider.workspaceBinding!.createEmpty(request, command);
@@ -1122,6 +1082,8 @@ describe('createJavaManagedAgentProvider', () => {
           agentId: 'qwen-code',
           modelId: 'model-b',
           approvalMode: 'yolo',
+          worktree: request.worktree,
+          extensionPins: request.extensionPins,
           idempotencyKey: 'frozen-key',
         }),
       );
@@ -1221,7 +1183,9 @@ describe('createJavaManagedAgentProvider', () => {
         ),
       });
       const summary = await provider.getSession('s', { clientId: 'client' });
-      if (['default', 'auto-edit', 'yolo'].includes(String(approvalMode)))
+      if (
+        ['default', 'auto-edit', 'auto', 'yolo'].includes(String(approvalMode))
+      )
         expect(summary.approvalMode).toBe(approvalMode);
       else expect(summary).not.toHaveProperty('approvalMode');
     },
@@ -1439,6 +1403,7 @@ describe('createJavaManagedAgentProvider', () => {
         events: [],
         items: [],
         lastSequence: 7,
+        coveredSequence: 5,
         hasMore: true,
         olderCursor: 'older-1',
       }),
@@ -1455,7 +1420,9 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.olderCursor).toBe('older-1');
-    expect(transcript.lastEventId).toBe(7);
+    expect(transcript.lastEventId).toBe(5);
+    expect(transcript.history).toBe('items');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
       'https://product.example/api/agent/web-shell/v1/transcript/query',
@@ -1468,6 +1435,37 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     );
   });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])(
+    'rejects %s message coverage instead of resuming at the head',
+    async (_label, coverage) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          events: [],
+          items: [],
+          lastSequence: 400,
+          coveredSequence: coverage,
+          hasMore: false,
+        }),
+      );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider.getTranscript('session-1', {
+          clientId: 'client-1',
+          limit: 100,
+        }),
+      ).rejects.toThrow('Invalid message transcript coverage.');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi
@@ -1806,6 +1804,7 @@ describe('createJavaManagedAgentProvider', () => {
         olderCursor: 'older-1',
         hasMore: true,
         lastSequence: 4,
+        coveredSequence: 4,
       }),
     );
     const provider = createJavaManagedAgentProvider({

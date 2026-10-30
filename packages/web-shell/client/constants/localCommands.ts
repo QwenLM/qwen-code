@@ -24,7 +24,7 @@ export function getLocalCommands(
     {
       name: 'language',
       description: t('local.language'),
-      argumentHint: 'ui [en|zh-CN] | output <language>',
+      argumentHint: 'ui [en|zh-CN|ru] | output <language>',
       subcommands: ['ui', 'output'],
     },
     {
@@ -182,6 +182,7 @@ const BUILTIN_COMMAND_DESCRIPTION_KEYS: Record<string, string> = {
  */
 const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   // Bundled with Qwen Code (packages/core/src/skills/bundled).
+  'autofix-pr': 'skilldesc.autofixPr',
   batch: 'skilldesc.batch',
   dataviz: 'skilldesc.dataviz',
   'extension-creator': 'skilldesc.extensionCreator',

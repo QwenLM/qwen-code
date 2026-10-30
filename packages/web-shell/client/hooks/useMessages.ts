@@ -1,3 +1,8 @@
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonHttpError,
@@ -373,6 +378,8 @@ export function useMessagesFromBlocks(
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const [resolutionSnapshot, setResolutionSnapshot] = useState<{
     sessionId: string;
     resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
@@ -542,6 +549,13 @@ export function useMessagesFromBlocks(
     }
     const sessionId = connection.sessionId;
     if (
+      !available ||
+      (availability && availability.getSnapshot() !== 'available')
+    ) {
+      reconciliationRequestRef.current = undefined;
+      return;
+    }
+    if (
       !sessionId ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
@@ -652,6 +666,15 @@ export function useMessagesFromBlocks(
     request
       .then(({ resolutions, errors, notFounds, succeeded }) => {
         if (!active) return;
+        if (
+          (availability && availability.getSnapshot() !== 'available') ||
+          errors.some((entry) => isDaemonUnavailableError(entry.error))
+        ) {
+          if (reconciliationRequestRef.current?.request === request) {
+            reconciliationRequestRef.current = undefined;
+          }
+          return;
+        }
         round.processed = true;
         // Grace-miss accounting lives in the active handler, not the per-call
         // closure: a superseded round's late 404 must not consume grace that
@@ -783,6 +806,8 @@ export function useMessagesFromBlocks(
       clearTimeout(retryTimer);
     };
   }, [
+    availability,
+    available,
     backgroundAgentNotificationKey,
     connection.catchingUp,
     connection.loadingTranscript,

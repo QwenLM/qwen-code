@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.90.0",
-    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes."
+    "version": "1.98.0",
+    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
     {
@@ -204,7 +204,7 @@
         "tags": ["Public Sessions"],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the server-selected profile, and a Session pinned to a stored definition may include initial input when its single tools entry selected a profile from the deployment's definition tool-profile allowlist. Otherwise Workspace creation must have empty input. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports idle ACTIVE Sessions through their admitted Workspace lifecycle protocol, including v2 Shell/MCP, or reliably CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn — 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness. A stored AgentDefinition may be selected by agent_id: an explicit agent_revision pins that revision, an omitted one resolves the latest revision at admission and pins it for the Session's life, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported with error.field naming the refused field. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof. ",
+        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the server-selected profile, and a Session pinned to a stored definition may include initial input when its single tools entry selected a profile from the deployment's definition tool-profile allowlist. Otherwise Workspace creation must have empty input. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports idle ACTIVE Sessions through their admitted Workspace lifecycle protocol, including v2 Shell/MCP, or reliably CLOSED/ARCHIVED Sessions; directory-change submission is retired; previously admitted durable cwd_change operations remain queryable and continue settling. This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn — 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness. A stored AgentDefinition may be selected by agent_id: an explicit agent_revision pins that revision, an omitted one resolves the latest revision at admission and pins it for the Session's life, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported with error.field naming the refused field. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof. ",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -506,7 +506,7 @@
         "tags": ["Public Sessions"],
         "operationId": "getSessionEvents",
         "x-qwen-implementation-status": "implemented",
-        "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor strictly below replay_floor_sequence gets 409 cursor_expired as JSON; SSE sends one agent.session.resync_required frame and closes. Projection rebuilds preserve the floor and current immutable Snapshot until a replacement is published, and do not make expired positions readable again.",
+        "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor strictly below replay_floor_sequence gets 409 cursor_expired as JSON; SSE sends one agent.session.resync_required frame and closes. Projection rebuilds preserve the floor and invalidate message-page cursors. Reload current Items after the projection catches up; expired event positions do not become readable again.",
         "parameters": [
           {
             "$ref": "#/components/parameters/AfterSequence"
@@ -684,7 +684,7 @@
               ],
               "default": 0
             },
-            "description": "Initial sequence filter, or opaque next_cursor from the preceding Item page."
+            "description": "Exclusive first_sequence boundary on the first page, or an opaque message cursor. Explicit cursor takes precedence."
           },
           {
             "name": "cursor",
@@ -694,7 +694,7 @@
               "type": "string",
               "maxLength": 4096
             },
-            "description": "Opaque next_cursor from the preceding Item page; when supplied, it takes precedence over after."
+            "description": "Opaque current-message continuation cursor bound to scope, direction, membership range and projection generation. Old snapshot cursors are rejected."
           },
           {
             "$ref": "#/components/parameters/ListLimit"
@@ -702,7 +702,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Materialized items and snapshot watermark.",
+            "description": "Current message Items and the initial sequence membership upper bound.",
             "content": {
               "application/json": {
                 "schema": {
@@ -712,7 +712,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -724,10 +724,16 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "413": {
+            "$ref": "#/components/responses/MessagePageTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Items are read from one immutable Snapshot. Pass next_cursor as after or cursor to continue the same snapshot, even while new messages or revisions are committed. Positions are scoped to tenant and Session and expire after 30 minutes with 409 cursor_expired. A numeric after on the first page retains its sequence-filter meaning. snapshot_through_sequence remains fixed across that pagination."
+        "description": "Requires current Session read authorization on every page. Read bounded current message-table pages in chronological order. The first request fixes a sequence membership upper bound; later pages retain that range but read current bodies and statuses. Numeric after excludes every Item with first_sequence at or below that value. Explicit cursor takes precedence; nonnumeric after is an existing cursor alias. Continuation uses the complete (first_sequence,item_id) position. Cursors bind tenant, Session, direction and projection generation, and are rejected after a projection rebuild. Old signed snapshot cursors are invalid. snapshot_through_sequence retains its wire name and denotes the initial membership bound, not immutable content. A lagging initial projection returns retryable message_projection_pending; canonical history and writer ownership are unchanged."
       }
     },
     "/v1/agents/sessions/{sessionId}/artifacts": {
@@ -1232,7 +1238,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1244,10 +1250,16 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
+        "description": "Requires current Session read authorization. Read the most recent limit current message Items and selected bounded Turn control events; olderCursor pages toward older Items. Bodies and statuses remain live. The response coveredSequence and lastSequence both identify actual message projection coverage for SSE continuation, never an unmaterialized event tail. No persisted conversation snapshot or whole-history replay is read. Projection rebuild invalidates cursors. If projection coverage is below the replay floor, return retryable message_projection_pending."
       }
     },
     "/api/agent/web-shell/v1/events/stream": {
@@ -1255,7 +1267,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellStreamEvents",
         "x-qwen-implementation-status": "implemented",
-        "description": "POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and the current immutable Snapshot. On the resync frame, reload the transcript and resume after its lastSequence.",
+        "description": "POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and invalidate message-page cursors. On the resync frame, reload the transcript and resume after its lastSequence.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1558,64 +1570,6 @@
         }
       }
     },
-    "/v1/agents/sessions/{sessionId}/cwd": {
-      "parameters": [
-        {
-          "$ref": "#/components/parameters/SessionId"
-        }
-      ],
-      "post": {
-        "tags": ["Public Sessions"],
-        "operationId": "changeSessionCwd",
-        "x-qwen-implementation-status": "implemented",
-        "description": "W2, implemented: same-workspace only. Requires the workspace files deployment opt-in and an idle, bound Session; replay precedes revision and busy checks. Errors in pipeline order: 400 invalid_request for a missing field, a missing Idempotency-Key or malformed body; 401 actor_required without a trusted actor, answered before the Idempotency-Key is checked and before any Session lookup; 400 invalid_idempotency_key for a malformed Idempotency-Key; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expected_context_revision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content — a matching operation under the caller's own actor_digest replays first; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; 409 session_state_conflict when the Session is no longer ACTIVE; 409 workspace_unavailable when the Registry facts moved — the binding must still match the ACTIVE registry row and the actor recorded by the Workspace create command must keep OPERATOR or above, at admission as well as at settlement, where it re-checks the recorded actor's grants and the V56-persisted initiator's role the same way, so demoting either actor fails the operation with workspace_unavailable; 409 context_revision_conflict on a revision mismatch; 409 session_context_busy while an input, Turn or operation is active or queued. Poll the operation or await session.context.changed; do not treat 202 as activation. A failed operation reports failure_code and never retries; the Session keeps its prior directory and revision.",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ChangeCwdRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "description": "Durable cwd operation; acceptance does not mean the new cwd is active.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PublicCwdOperation"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
-          }
-        }
-      }
-    },
     "/v1/agents/sessions/{sessionId}/operations/{operationId}": {
       "parameters": [
         {
@@ -1701,54 +1655,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
-          }
-        }
-      }
-    },
-    "/api/agent/web-shell/v1/sessions/cwd/change": {
-      "post": {
-        "tags": ["WebShell"],
-        "operationId": "webShellChangeCwd",
-        "x-qwen-implementation-status": "implemented",
-        "description": "W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content, and a completed change under the same key always replays instead, before the role refusal; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts (the recorded create-command actor's grant included, and the settlement re-checks the V56-persisted initiator the same way, so demoting either actor fails the operation, exactly like the public surface), 409 context_revision_conflict and 409 session_context_busy. Poll the operation or await session.context.changed; do not treat 202 as activation.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WebShellChangeCwdRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "description": "Durable cwd operation; acceptance does not mean the new cwd is active.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WebShellCwdOperation"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -4068,7 +3974,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionApproval",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable.",
+        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5342,7 +5248,7 @@
         },
         "responses": {
           "200": {
-            "description": "Immutable public item snapshot page.",
+            "description": "Chronological page of current message Items within the initial sequence membership range; content remains live.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5352,7 +5258,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -5364,14 +5270,2261 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
-        "summary": "Read one immutable public Session snapshot page for reading exports"
+        "description": "Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned. A projection-generation change returns 409 message_projection_changed; discard the cursor and restart this read.",
+        "summary": "Read one current Session message page for exports"
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/user-messages": {
+      "get": {
+        "operationId": "queryUserMessages",
+        "tags": ["Public Resources"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-qwen-implementation-status": "partial"
+      },
+      "post": {
+        "operationId": "commandUserMessages",
+        "tags": ["Public Resources"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserMessageCommand"
+              }
+            }
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      }
+    },
+    "/api/agent/web-shell/v1/user-messages/query": {
+      "post": {
+        "operationId": "webShellQueryUserMessages",
+        "tags": ["WebShell"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellUserMessageQuery"
+              }
+            }
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      }
+    },
+    "/api/agent/web-shell/v1/user-messages/command": {
+      "post": {
+        "operationId": "webShellCommandUserMessages",
+        "tags": ["WebShell"],
+        "summary": "Query or mutate the durable Session user message queue",
+        "responses": {
+          "200": {
+            "description": "Authoritative queue snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMessageSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellUserMessageCommand"
+              }
+            }
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions": {
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listWorkspaceExtensionPackages",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageCatalog"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "createWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an ACTIVE Workspace, an authenticated operator and the deployment extension allowlist. The Idempotency-Key binds an actor-scoped durable operation. Publication retains immutable tar.gz bytes under a server-assigned stable extension identity; it does not activate a Session. The manifest query is base64url JSON and is covered by the existing request signature. Archive contents and Runtime compatibility are validated by the target compiler before activation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "packageDigest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          {
+            "name": "manifest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Base64url-encoded ManagedExtensionPackageManifest JSON. Canonical schemaVersion/compilerVersion are 1."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageDigest}": {
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "extensionId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "packageDigest",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      ],
+      "put": {
+        "tags": ["Public Resources"],
+        "operationId": "publishWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an ACTIVE Workspace, an authenticated operator and the deployment extension allowlist. The Idempotency-Key binds an actor-scoped durable operation. Publication retains immutable tar.gz bytes under a server-assigned stable extension identity; it does not activate a Session. The manifest query is base64url JSON and is covered by the existing request signature. Archive contents and Runtime compatibility are validated by the target compiler before activation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "manifest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Base64url-encoded ManagedExtensionPackageManifest JSON. Canonical schemaVersion/compilerVersion are 1."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}": {
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "extensionId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "packageRevision",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        {
+          "name": "packageDigest",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}/archive": {
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "extensionId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "packageRevision",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        {
+          "name": "packageDigest",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "readWorkspaceExtensionArchive",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "The exact immutable archive named by the pin. Private no-store binary stream, bounded to 100 MiB.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/settings": {
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "extensionId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getWorkspaceExtensionPackageSettings",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "setWorkspaceExtensionPackageSettings",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires the same Workspace operator and deployment permission as publication. Writes a complete encrypted settings revision with optimistic concurrency; old pinned revisions remain available. No values are returned.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionPackageSettingsCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/operations/{operationId}": {
+      "parameters": [
+        {
+          "name": "workspaceId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "operationId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getWorkspaceExtensionPackageOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation. The querying actor must own the original publication or settings operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWorkspaceExtensionPackages",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageCatalog"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionWorkspaceQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/packages/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionPackageQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/settings/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWorkspaceExtensionPackageSettings",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/settings/submit": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "submitWorkspaceExtensionPackageSettings",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires the same Workspace operator and deployment permission as publication. Writes a complete encrypted settings revision with optimistic concurrency; old pinned revisions remain available. No values are returned.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionSettingsSubmit"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/operations/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWorkspaceExtensionPackageOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authenticated actor with a read grant on the persisted Workspace. Reads durable metadata only; never creates a Runtime, loads a Harness Session, or retries an original operation. The querying actor must own the original publication or settings operation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionOperationQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/publish": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "publishWebShellWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an ACTIVE Workspace, an authenticated operator and the deployment extension allowlist. The Idempotency-Key binds an actor-scoped durable operation. Publication retains immutable tar.gz bytes under a server-assigned stable extension identity; it does not activate a Session. The manifest query is base64url JSON and is covered by the existing request signature. Archive contents and Runtime compatibility are validated by the target compiler before activation.",
+        "responses": {
+          "200": {
+            "description": "Persisted Workspace extension resource. Contains no settings values or executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "packageDigest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          {
+            "name": "manifest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Base64url-encoded ManagedExtensionPackageManifest JSON. Canonical schemaVersion/compilerVersion are 1."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getSessionExtensionConfiguration",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "applySessionExtensionConfiguration",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionApplySelection"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ]
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        },
+        {
+          "name": "operationId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getSessionExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/continue": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        },
+        {
+          "name": "operationId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "continueSessionExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/recover-previous": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        },
+        {
+          "name": "operationId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "recoverPreviousSessionExtensions",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellSessionExtensionsQuery",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionSessionQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/submit": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellSessionExtensionsSubmit",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionSessionSubmit"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/continue": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellSessionExtensionsContinue",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionSessionOperation"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/recover-previous": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellSessionExtensionsRecoverPrevious",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires a Workspace reader for status and OPERATOR for changes. Status reads durable configuration and never loads a Harness or retries an operation. Apply requires an idle Session and the original Runtime with the package execution contract; a committed unknown outcome fences new execution until the original operation is reconciled. Explicit recovery compiles previous content into a new revision.",
+        "responses": {
+          "200": {
+            "description": "Persisted or reconciled Session configuration; contains no settings values or private executable recipes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionSessionOperation"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/files/upload": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellWorkspaceFilesUpload",
+        "x-qwen-implementation-status": "implemented",
+        "summary": "Upload one binary file to a persisted Workspace",
+        "description": "Requires a trusted actor with OPERATOR or OWNER access, enabled Workspace files, verified LOCAL or SSH_LOCAL storage and an updated CLI. Uploads are limited to 8 MiB, require an existing parent directory and never overwrite an occupied path. A durable physical storage hold excludes tool execution and retirement until the original upload has a definite terminal result. Repeating the same upload ID reconciles its original command without replaying mutation; changed requests conflict. CSI is unsupported and never falls back to a primary Workspace. An uncertain result returns 503 workspace_upload_pending and must be queried by the original upload ID.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "cwdRelative",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "expectedScopeRevision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "uploadId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 36,
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Exactly one locator: Session ID, or Workspace ID plus cwdRelative."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Workspace upload result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellWorkspaceFileUploadResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "413": {
+            "description": "The upload exceeds the 8 MiB binary limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Uploads require unencoded application/octet-stream bytes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/files/uploads/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellWorkspaceFilesUploadQuery",
+        "x-qwen-implementation-status": "implemented",
+        "summary": "Reconcile the original Workspace upload",
+        "description": "Only the admitting actor with a current Workspace operator grant can query the upload. Status checks use the frozen original storage target and never execute an upload or select a replacement Runtime. Reconciliation remains available through storage fencing; pending commands retain their durable hold. The server also reconciles pending uploads after client cancellation or restart.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellWorkspaceFileUploadQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Workspace upload result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellWorkspaceFileUploadStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/options": {
+      "post": {
+        "operationId": "webShellSessionWorktreeOptions",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Options a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeOptionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktreeOptions"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/query": {
+      "post": {
+        "operationId": "webShellSessionWorktreeQuery",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Query a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktreePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/inspect": {
+      "post": {
+        "operationId": "webShellSessionWorktreeInspect",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Inspect a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeInspectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktreeInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspaces/worktrees/cleanup": {
+      "post": {
+        "operationId": "webShellSessionWorktreeCleanup",
+        "tags": ["WebShell"],
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "summary": "Cleanup a main Session worktree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionWorktreeCleanupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSessionWorktree"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees/options": {
+      "get": {
+        "operationId": "sessionWorktreeOptions",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "."
+            }
+          },
+          {
+            "name": "base_ref",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktreeOptions"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Options a main Session worktree"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees": {
+      "get": {
+        "operationId": "sessionWorktreeQuery",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktreePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Query a main Session worktree"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}": {
+      "get": {
+        "operationId": "sessionWorktreeInspect",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "worktreeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktreeInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Inspect a main Session worktree"
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}/cleanup": {
+      "post": {
+        "operationId": "sessionWorktreeCleanup",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "session_worktree",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "worktreeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Session worktree result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorktree"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Cleanup a main Session worktree"
+      }
+    },
+    "/api/agent/web-shell/v1/transcript/items/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRecentTranscriptItems",
+        "x-qwen-implementation-status": "implemented",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bounded recent current message Item page. Items are chronological within each page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellExportPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidMessagePage"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/MessagePageTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
+          }
+        },
+        "description": "Requires current Session read authorization on every page. Read at most limit recent current message Items in chronological order; nextCursor continues toward older Items in the initial sequence membership range. snapshotThroughSequence names that fixed membership upper bound, while bodies and statuses remain live. Cursors bind scope, backward direction and projection generation. Rebuild invalidates the cursor. No snapshot copies are generated and no live tail is scanned; transcript reads provide actual projection coverage for SSE handoff. Projection coverage below the replay floor returns retryable message_projection_pending.",
+        "summary": "Read recent current Session Items and page toward older Items"
       }
     }
   },
@@ -5617,6 +7770,46 @@
             }
           }
         }
+      },
+      "MessageProjectionChanged": {
+        "description": "409 message_projection_changed: the message projection generation changed. Discard the message cursor and restart this read; this is not replay-floor cursor expiration.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessagePageTooLarge": {
+        "description": "413 message_page_too_large: selected message bodies or Turn control events exceed the response byte budget. Reducing limit can help a multi-Item page, but a single oversized Item cannot be returned even with limit=1. Signed POST requests may also return payload_too_large when their request body exceeds the configured signed-body limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "InvalidMessagePage": {
+        "description": "400 invalid_message_cursor for malformed, wrong-scope, wrong-direction or out-of-range message cursors; invalid_limit outside 1..100; invalid_event_cursor for a negative numeric after.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessageProjectionPending": {
+        "description": "503 message_projection_pending: projection coverage is below the replay floor, or the initial forward read is behind committed events. Retry after message projection catches up.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -5841,6 +8034,27 @@
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
             "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
+          },
+          "extensionPins": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            },
+            "description": "Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime."
+          },
+          "worktree": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "base_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [],
+            "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
           }
         }
       },
@@ -6039,13 +8253,14 @@
             "format": "int64",
             "minimum": 0,
             "default": 0,
-            "description": "Events at or below this sequence may be pruned. A replay cursor strictly below this durable floor has expired, including after projection rebuild or removal of every retained event. The current immutable Snapshot remains available until replacement."
+            "description": "Events at or below this sequence may be pruned. A replay cursor strictly below this durable floor has expired, including after projection rebuild or removal of every retained event. Reload current Items to resynchronize; projection coverage below the floor returns retryable message_projection_pending."
           },
           "snapshot_through_sequence": {
             "type": "integer",
             "format": "int64",
             "minimum": 0,
-            "default": 0
+            "default": 0,
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "capabilities": {
             "$ref": "#/components/schemas/SessionCapabilities"
@@ -6075,6 +8290,16 @@
           },
           "recovery": {
             "$ref": "#/components/schemas/SessionRecovery"
+          },
+          "worktree": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionWorktree"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -6094,7 +8319,8 @@
             "type": "boolean"
           },
           "snapshots": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Retained capability name for reading the current message projection. It does not promise persisted fixed-version conversation snapshots."
           },
           "artifacts": {
             "type": "boolean"
@@ -6227,7 +8453,7 @@
       },
       "PublicEvent": {
         "type": "object",
-        "description": "A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no item_id or content_part_id, and that later deltas may name other Parts. Reload the Items until the snapshot_through_sequence they return reaches the sequence of the stream.reconciled event, then resume after that snapshot_through_sequence, not after the stream.reconciled event; the Snapshot is rebuilt meanwhile.",
+        "description": "A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no item_id or content_part_id, and that later deltas may name other Parts. Start a fresh Items query and retry message_projection_pending until the returned snapshot_through_sequence reaches the stream.reconciled sequence. Resume after that returned sequence, which bounds the initial live-message membership range; content is not frozen.",
         "required": [
           "schema_version",
           "projection_version",
@@ -6317,7 +8543,8 @@
           "snapshot_through_sequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "action": {
             "const": "reload_snapshot"
@@ -6675,12 +8902,13 @@
           },
           "next_cursor": {
             "type": ["string", "null"],
-            "description": "Opaque position in the same immutable Snapshot; pass it as after or cursor. Scoped to tenant and Session, with a fixed 30-minute expiry."
+            "description": "Opaque current-message continuation position; pass it as after or cursor. Bound to tenant, Session, forward direction, initial membership range and projection generation. Rebuild invalidates the cursor; no fixed snapshot retention or expiry is promised."
           },
           "snapshot_through_sequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Fixed first-request sequence membership upper bound. Bodies and statuses are read live on every page; this does not identify a retained content version."
           }
         }
       },
@@ -6755,12 +8983,12 @@
           },
           "cursor": {
             "type": ["string", "null"],
-            "maxLength": 512
+            "maxLength": 4096
           },
           "limit": {
             "type": ["integer", "null"],
             "minimum": 1,
-            "maximum": 1000,
+            "maximum": 100,
             "default": 100
           }
         }
@@ -6843,6 +9071,27 @@
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
             "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
+          },
+          "extensionPins": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            },
+            "description": "Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime."
+          },
+          "worktree": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "baseRef": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [],
+            "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
           }
         }
       },
@@ -7077,11 +9326,12 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0,
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "planned",
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"],
+            "enum": ["default", "auto", "auto-edit", "yolo"],
             "description": "Current effective approval policy; initialApprovalMode retains the immutable creation policy."
           },
           "modelContext": {
@@ -7128,6 +9378,16 @@
           },
           "recovery": {
             "$ref": "#/components/schemas/SessionRecovery"
+          },
+          "worktree": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WebShellSessionWorktree"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -7144,7 +9404,8 @@
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "True when Workspace files are enabled, the bound Session is active and undeleted, the caller holds OPERATOR or above on the Workspace and the exact ACTIVE Registry generation/storage and create-command-actor OPERATOR/OWNER grant still hold, matching cwd admission. This does not promise an idle Session and is independent of workspaceTurns execution-profile gates. Missing means false. Existing operations remain queryable under read authorization even when this capability is false."
+            "description": "Retired: Session directory-change submission has been removed; always false.",
+            "deprecated": true
           },
           "actions": {
             "type": "boolean",
@@ -7200,7 +9461,7 @@
           },
           "approvalModeChange": {
             "type": "boolean",
-            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
+            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
           },
           "inputAttachments": {
             "type": "boolean",
@@ -7267,7 +9528,8 @@
           "coveredSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Actual message projection coverage of this read; resume SSE after this sequence."
           },
           "olderCursor": {
             "type": ["string", "null"]
@@ -7278,7 +9540,8 @@
           "lastSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Actual message projection coverage for SSE handoff, equal to coveredSequence; unmaterialized tail events are delivered by SSE."
           }
         }
       },
@@ -7464,7 +9727,8 @@
           "snapshotThroughSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "action": {
             "const": "reload_snapshot"
@@ -7671,22 +9935,6 @@
           }
         },
         "x-qwen-implementation-status": "partial"
-      },
-      "ChangeCwdRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["cwd_relative", "expected_context_revision"],
-        "properties": {
-          "cwd_relative": {
-            "$ref": "#/components/schemas/WorkspaceRelativePath"
-          },
-          "expected_context_revision": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 1
-          }
-        },
-        "x-qwen-implementation-status": "implemented"
       },
       "CwdOperationStatus": {
         "type": "string",
@@ -7943,40 +10191,6 @@
           }
         },
         "x-qwen-implementation-status": "partial"
-      },
-      "WebShellChangeCwdRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "sessionId",
-          "idempotencyKey",
-          "cwdRelative",
-          "expectedContextRevision"
-        ],
-        "properties": {
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "idempotencyKey": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "cwdRelative": {
-            "$ref": "#/components/schemas/WorkspaceRelativePath"
-          },
-          "expectedContextRevision": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 1
-          },
-          "requestId": {
-            "type": ["string", "null"],
-            "maxLength": 128
-          }
-        },
-        "x-qwen-implementation-status": "implemented"
       },
       "WebShellOperationRequest": {
         "type": "object",
@@ -12112,7 +14326,7 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "approvalRevision": {
             "type": "integer",
@@ -12124,7 +14338,7 @@
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["default", "auto-edit", "yolo"]
+              "enum": ["default", "auto", "auto-edit", "yolo"]
             }
           },
           "supported": {
@@ -12137,6 +14351,14 @@
           "planModeSupported": {
             "type": "boolean",
             "description": "Optional deployment capability; missing means false."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Persisted rules, including when execution capability is unavailable. Omitted when empty."
+          },
+          "permissionRulesSupported": {
+            "type": "boolean",
+            "description": "Owner-authorized Session rule editing is available only with Harness permission-rules/1 support. Missing means false. Rule changes require an idle Session."
           }
         }
       },
@@ -12171,11 +14393,15 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "planMode": {
             "type": "boolean",
             "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Omission preserves the persisted rules. Supplying three empty arrays clears them. Rule edits require an idle Session, and share the approval revision and idempotency receipt with mode changes."
           }
         }
       },
@@ -12193,7 +14419,7 @@
           },
           "approvalMode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "approvalRevision": {
             "type": "integer",
@@ -12207,6 +14433,10 @@
           "planMode": {
             "type": "boolean",
             "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Committed rules; omitted when empty. Replayed requests return their original policy receipt."
           }
         }
       },
@@ -12216,7 +14446,7 @@
         "properties": {
           "mode": {
             "type": "string",
-            "enum": ["default", "auto-edit", "yolo"]
+            "enum": ["default", "auto", "auto-edit", "yolo"]
           },
           "revision": {
             "type": "integer",
@@ -12227,6 +14457,10 @@
           "planMode": {
             "type": "boolean",
             "description": "Immutable Plan overlay for this approval selection."
+          },
+          "permissionRules": {
+            "$ref": "#/components/schemas/ManagedPermissionRules",
+            "description": "Immutable rules snapshot for this Turn; omitted when empty."
           }
         }
       },
@@ -12581,7 +14815,7 @@
       "WebShellWorkspaceFileQueryRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspaceId", "cwdRelative", "directory"],
+        "required": ["directory"],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -12605,18 +14839,38 @@
           "expectedScopeRevision": {
             "type": "string",
             "maxLength": 64
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": ["sessionId"],
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["workspaceId"]
+                },
+                {
+                  "required": ["cwdRelative"]
+                }
+              ]
+            }
+          },
+          {
+            "required": ["workspaceId", "cwdRelative"],
+            "not": {
+              "required": ["sessionId"]
+            }
+          }
+        ]
       },
       "WebShellWorkspaceFileReadRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "workspaceId",
-          "cwdRelative",
-          "path",
-          "expectedScopeRevision"
-        ],
+        "required": ["path", "expectedScopeRevision"],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -12637,8 +14891,33 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": ["sessionId"],
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["workspaceId"]
+                },
+                {
+                  "required": ["cwdRelative"]
+                }
+              ]
+            }
+          },
+          {
+            "required": ["workspaceId", "cwdRelative"],
+            "not": {
+              "required": ["sessionId"]
+            }
+          }
+        ]
       },
       "WebShellWorkspaceFileEntry": {
         "type": "object",
@@ -12677,6 +14956,12 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "maxUploadBytes": {
+            "type": "integer",
+            "minimum": 8388608,
+            "maximum": 8388608,
+            "description": "Present only when the selected CLI supports durable Workspace uploads."
           }
         }
       },
@@ -13474,7 +15759,8 @@
           "snapshotThroughSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Fixed first-request sequence membership upper bound. Bodies and statuses are read live on every page; this does not identify a retained content version."
           }
         }
       },
@@ -13590,6 +15876,985 @@
           }
         },
         "description": "Durable Turn input or cancellation admission. The operation identifies the saved command and remains stable across idempotent retries."
+      },
+      "ManagedPermissionRules": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["allow", "ask", "deny"],
+        "properties": {
+          "allow": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "ask": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "deny": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        },
+        "description": "Session-scoped portable permission-rules/1. Each rule must be trimmed, nonempty, free of control characters, and at most 512 UTF-8 bytes. At most 32 unique strings per list, 64 across all lists and 8192 UTF-8 bytes of compact JSON. Tool names and aliases match whole tools; MCP names may end with a wildcard. Bash/Shell/run_shell_command/monitor command globs and WebFetch/web_fetch(domain:host) are supported; file-path specifiers and arbitrary tool predicates are rejected. Deny takes precedence over ask, then allow, in every mode. Rules do not provide filesystem or process isolation."
+      },
+      "UserMessage": {
+        "type": "object",
+        "required": ["id", "sequence", "revision", "state", "input"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "type": "string",
+            "enum": ["queued", "claimed", "recovery_blocked"]
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "resource": {
+                  "type": "object",
+                  "required": ["uri", "text", "mimeType"],
+                  "properties": {
+                    "uri": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "turnId": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "UserMessageSnapshot": {
+        "type": "object",
+        "required": ["paused", "messages"],
+        "properties": {
+          "paused": {
+            "type": "boolean"
+          },
+          "messages": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/UserMessage"
+            }
+          }
+        }
+      },
+      "UserMessageCommand": {
+        "type": "object",
+        "description": "submit queues input; edit only changes queued input. withdraw removes queued input or explicitly discards recovery_blocked input without replaying it. Unknown delivery may already have reached the original Turn: discarding does not undo it, preserves late durable receipts and keeps the queue paused until resume. In-flight claimed input remains immutable. Commands replay the actor-scoped recorded result before checking new-work availability.",
+        "required": ["action"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["submit", "edit", "withdraw", "resume"]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InputBlock"
+            }
+          }
+        }
+      },
+      "WebShellUserMessageQuery": {
+        "type": "object",
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellUserMessageCommand": {
+        "type": "object",
+        "required": ["sessionId", "idempotencyKey", "command"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "command": {
+            "$ref": "#/components/schemas/UserMessageCommand"
+          }
+        }
+      },
+      "ManagedExtensionPackagePin": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "extensionId": {
+            "type": "string",
+            "pattern": "^ext_[a-f0-9-]{36}$"
+          },
+          "packageRevision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "packageDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "settingsRevision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["extensionId", "packageRevision", "packageDigest"]
+      },
+      "ManagedExtensionPackageManifest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "enum": [1]
+          },
+          "compilerVersion": {
+            "type": "integer",
+            "enum": [1]
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "components": {
+            "type": "array",
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "skills",
+                "commands",
+                "agents",
+                "context",
+                "mcp",
+                "hooks",
+                "settings"
+              ]
+            }
+          },
+          "sourceType": {
+            "type": "string",
+            "enum": [
+              "git",
+              "github-release",
+              "npm",
+              "directory",
+              "archive",
+              "archive-url",
+              "link",
+              "snapshot"
+            ]
+          },
+          "sourceRevision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Exact source commit, resolved npm version, or imported content revision. Supplied together with sourceType."
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "compilerVersion",
+          "name",
+          "version",
+          "target",
+          "components"
+        ]
+      },
+      "ManagedExtensionPackage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageManifest"
+          },
+          "byteLength": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 104857600
+          }
+        },
+        "required": ["pin", "manifest", "byteLength"]
+      },
+      "ManagedExtensionPackageCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "extensions": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackage"
+            }
+          }
+        },
+        "required": ["supported", "extensions"]
+      },
+      "ManagedExtensionPackageSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "settingsRevision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "configuredKeys": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["settingsRevision", "configuredKeys"]
+      },
+      "ManagedExtensionPackageSettingsCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expectedRevision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740990
+          },
+          "values": {
+            "type": "object",
+            "maxProperties": 128,
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Complete settings revision, bounded to 8 KiB UTF-8 JSON. Values are encrypted at rest and never returned by metadata or operation queries."
+          }
+        },
+        "required": ["expectedRevision", "values"]
+      },
+      "ManagedExtensionPackageOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "extensionId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["publish", "settings"]
+          },
+          "state": {
+            "type": "string",
+            "enum": ["pending", "settled"]
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "packageDigest": {
+            "type": ["string", "null"],
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "operationId",
+          "extensionId",
+          "kind",
+          "state",
+          "revision",
+          "packageDigest"
+        ]
+      },
+      "WebShellExtensionWorkspaceQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspaceId"],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellExtensionQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspaceId", "extensionId"],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "extensionId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellExtensionOperationQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspaceId", "operationId"],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellExtensionPackageQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspaceId", "pin"],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          }
+        }
+      },
+      "WebShellExtensionSettingsSubmit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspaceId",
+          "extensionId",
+          "idempotencyKey",
+          "expectedRevision",
+          "values"
+        ],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "extensionId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "values": {
+            "type": "object",
+            "maxProperties": 128,
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Complete settings revision, bounded to 8 KiB UTF-8 JSON. Values are encrypted at rest and never returned by metadata or operation queries."
+          }
+        }
+      },
+      "ManagedExtensionApplySelection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedConfigRevision", "extensions"],
+        "properties": {
+          "expectedConfigRevision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "extensions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            }
+          }
+        }
+      },
+      "ManagedExtensionApplyOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "state", "mode", "revision"],
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "prepared",
+              "committed",
+              "active",
+              "recovery_required",
+              "failed"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["apply", "recoverPrevious"]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,127}$"
+              }
+            }
+          }
+        }
+      },
+      "ManagedExtensionManagementSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sessionId",
+          "supported",
+          "revision",
+          "extensions",
+          "requestedExtensions"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "supported": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "extensions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            }
+          },
+          "requestedExtensions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            }
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ManagedExtensionApplyOperation"
+          }
+        }
+      },
+      "WebShellExtensionSessionQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "WebShellExtensionSessionOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "operationId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "WebShellExtensionSessionSubmit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "idempotencyKey", "command"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "command": {
+            "$ref": "#/components/schemas/ManagedExtensionApplySelection"
+          }
+        }
+      },
+      "WebShellWorkspaceFileUploadResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scopeRevision",
+          "uploadId",
+          "path",
+          "sizeBytes",
+          "sha256"
+        ],
+        "properties": {
+          "scopeRevision": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "uploadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8388608
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      },
+      "WebShellWorkspaceFileUploadStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scopeRevision",
+          "uploadId",
+          "path",
+          "sizeBytes",
+          "sha256",
+          "state"
+        ],
+        "properties": {
+          "scopeRevision": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "uploadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8388608
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["completed", "failed", "pending"]
+          },
+          "code": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellWorkspaceFileUploadQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uploadId"],
+        "properties": {
+          "uploadId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SessionWorktree": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "base_commit": {
+            "type": "string"
+          },
+          "cwd_relative": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "ready",
+              "failed",
+              "blocked",
+              "removing",
+              "removed"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error_code": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "workspace_id",
+          "branch",
+          "base_commit",
+          "cwd_relative",
+          "operation_id",
+          "state",
+          "revision"
+        ]
+      },
+      "WebShellSessionWorktree": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "baseCommit": {
+            "type": "string"
+          },
+          "cwdRelative": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "ready",
+              "failed",
+              "blocked",
+              "removing",
+              "removed"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "errorCode": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "id",
+          "sessionId",
+          "workspaceId",
+          "branch",
+          "baseCommit",
+          "cwdRelative",
+          "operationId",
+          "state",
+          "revision"
+        ]
+      },
+      "WebShellSessionWorktreeOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": ["string", "null"]
+          },
+          "baseCommit": {
+            "type": ["string", "null"]
+          },
+          "currentBranch": {
+            "type": ["string", "null"],
+            "description": "Source checkout branch independent of base ref; HEAD when detached, null when unavailable."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["supported", "branches"]
+      },
+      "SessionWorktreeOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": ["string", "null"]
+          },
+          "base_commit": {
+            "type": ["string", "null"]
+          },
+          "current_branch": {
+            "type": ["string", "null"],
+            "description": "Source checkout branch independent of base ref; HEAD when detached, null when unavailable."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["supported", "branches"]
+      },
+      "WebShellSessionWorktreePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebShellSessionWorktree"
+            }
+          }
+        },
+        "required": ["data"]
+      },
+      "WebShellSessionWorktreeInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "worktree": {
+            "$ref": "#/components/schemas/WebShellSessionWorktree"
+          },
+          "canCleanup": {
+            "type": "boolean"
+          },
+          "cleanupBlocker": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": ["worktree", "canCleanup"]
+      },
+      "SessionWorktreePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionWorktree"
+            }
+          }
+        },
+        "required": ["data"]
+      },
+      "SessionWorktreeInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "worktree": {
+            "$ref": "#/components/schemas/SessionWorktree"
+          },
+          "can_cleanup": {
+            "type": "boolean"
+          },
+          "cleanup_blocker": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": ["worktree", "can_cleanup"]
+      },
+      "WebShellSessionWorktreeOptionsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "cwdRelative": {
+            "type": "string"
+          },
+          "baseRef": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId", "cwdRelative"]
+      },
+      "WebShellSessionWorktreeQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId"]
+      },
+      "WebShellSessionWorktreeInspectRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "worktreeId": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId", "worktreeId"]
+      },
+      "WebShellSessionWorktreeCleanupRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "worktreeId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          }
+        },
+        "required": ["workspaceId", "worktreeId", "idempotencyKey"]
       }
     }
   }

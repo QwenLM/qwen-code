@@ -17,7 +17,10 @@ import {
   resolvePath,
   runSideQuery,
 } from '@qwen-code/qwen-code-core';
-import { appendAutoMemoryContext } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import {
+  appendAutoMemoryContext,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
 
@@ -175,10 +178,12 @@ export const summaryCommand: SlashCommand = {
       history: ReturnType<typeof getChatHistory>,
     ): Promise<string> => {
       // Build the conversation context for summary generation
-      const conversationContext = history.map((message) => ({
-        role: message.role,
-        parts: message.parts,
-      }));
+      const conversationContext = withoutAutoMemorySnapshots(history).map(
+        (message) => ({
+          role: message.role,
+          parts: message.parts,
+        }),
+      );
 
       // Carry over the main session's system instruction. Without this the
       // model sees only chat history + the summary prompt, losing the coding-

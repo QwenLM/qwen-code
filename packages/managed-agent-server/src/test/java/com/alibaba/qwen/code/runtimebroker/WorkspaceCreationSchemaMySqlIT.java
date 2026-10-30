@@ -79,6 +79,9 @@ class WorkspaceCreationSchemaMySqlIT {
                     + "payload_digest,status,approval_mode,approval_revision,gmt_create,gmt_modified)"
                     + " VALUES ('tenant','session','turn','prompt','[]','digest',"
                     + "'COMPLETED','auto-edit',2,1,1)");
+            String rules = "{\"allow\":[\"Read\"],\"ask\":[],\"deny\":[]}";
+            jdbc.update("UPDATE ma_session SET selected_approval_mode='auto', permission_rules_json=?", rules);
+            jdbc.update("UPDATE ma_turn SET approval_mode='auto', permission_rules_json=?", rules);
             var session = jdbc.queryForMap("SELECT * FROM ma_session");
             var turn = jdbc.queryForMap("SELECT * FROM ma_turn");
             var history = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");

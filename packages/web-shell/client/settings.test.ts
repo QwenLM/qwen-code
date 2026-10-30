@@ -176,6 +176,7 @@ describe('settings presentation aliases', () => {
       'builtin:live-setup',
       'builtin:local-control',
       'builtin:connections',
+      'builtin:archived-sessions',
       'builtin:model-management',
     ]) {
       expect(WEB_SHELL_SETTING_ITEM_IDS).toContain(id);
@@ -281,6 +282,7 @@ describe('settings presentation aliases', () => {
       'setting:workflow-size': 'tools.workflowSizeGuideline',
       'setting:workflow-name-only': 'tools.workflowNameOnly',
       'setting:permission-strategy': 'policy.permissionStrategy',
+      'setting:max-sessions': 'serve.maxSessions',
       'setting:model-proposed-goals': 'goals.modelProposed',
       'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
       'setting:session-workflow': 'experimental.sessionWorkflow',
@@ -292,6 +294,7 @@ describe('settings presentation aliases', () => {
       'setting:omni-media-delivery': 'omni.enabled',
       'setting:artifacts': 'experimental.artifact',
       'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+      'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
       'setting:voice-model': 'voiceModel',
       'setting:image-model': 'imageModel',
     } satisfies Record<string, string>;

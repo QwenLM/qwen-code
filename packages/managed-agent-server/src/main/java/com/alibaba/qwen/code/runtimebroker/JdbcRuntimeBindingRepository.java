@@ -2137,6 +2137,37 @@ public final class JdbcRuntimeBindingRepository
         return selectById(connection, BrokerValues.requireId(bindingId, "bindingId"), true, 10);
     }
 
+    public RuntimeBindingRecord releaseResidentForRetirement(Connection connection,
+            RuntimeBindingRecord expected) throws SQLException {
+        RuntimeBindingRecord current = lockActiveForRetirement(connection, expected);
+        if (!ResidentWorkspaceProfile.selects(current.getRequest().getScope())
+                || current.getState() != RuntimeBindingRecord.State.DRAINING || !current.isDrainRequested()
+                || current.getOperationOwner() != null || current.getOperationLeaseUntil() != null
+                || current.getVersion() != expected.getVersion() || !current.sameOperation(expected)
+                || !current.hasSameLease(expected.getLease())
+                || !Objects.equals(current.getResourceHandle(), expected.getResourceHandle())
+                || current.getAttestationGeneration() != expected.getAttestationGeneration()) {
+            throw new IllegalStateException("Original resident retirement is unavailable");
+        }
+        WorkspaceCsiRuntimeIdentity.verify(current);
+        RuntimeBindingRecord released = current.withState(RuntimeBindingRecord.State.RELEASED,
+                current.getLease(), JdbcRepositorySupport.databaseNow(connection))
+                .withOperation(null, null, current.getOperationGeneration() + 1)
+                .withVersion(current.getVersion() + 1);
+        updateBinding(connection, released);
+        try (var statement = connection.prepareStatement("UPDATE ma_runtime_slot SET active_binding_id = NULL"
+                + " WHERE request_key = ? AND active_binding_id = ? AND last_generation = ?")) {
+            statement.setQueryTimeout(10);
+            statement.setString(1, JdbcRepositorySupport.requestKey(current.getRequest()));
+            JdbcRepositorySupport.setStringParameter(statement, 2, current.getBindingId());
+            statement.setLong(3, current.getGeneration());
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException("Original resident slot is unavailable");
+            }
+        }
+        return released;
+    }
+
     public RuntimeBindingRecord findByIdInReadOnlySnapshot(Connection connection,
             String bindingId) throws SQLException {
         if (connection == null || connection.getAutoCommit() || !connection.isReadOnly()
@@ -2228,14 +2259,19 @@ public final class JdbcRuntimeBindingRepository
                         + "AND (provision_request_id IS NULL OR provision_seed_ciphertext IS NULL OR credential_key_id IS NULL))))) "
                         + "AND (storage_id IS NULL "
                         + "OR CAST(storage_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
-                        + "OR CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "OR (CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "AND NOT (? AND CAST(provisioner_kind AS BINARY(2048)) = CAST('kubernetes-workspace' AS BINARY(2048)) "
+                        + "AND CAST(capability_digest AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "AND CAST(isolation_class AS BINARY(2048)) = CAST('workspace' AS BINARY(2048)))) "
                         + "OR CAST(workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048))) LIMIT 1")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 3, LocalProcessRuntimeProvisioner.KIND);
             JdbcRepositorySupport.setIdentity(statement, 4, request.getStorageId());
             JdbcRepositorySupport.setIdentity(statement, 5, scope.getCanonicalCwd());
-            JdbcRepositorySupport.setIdentity(statement, 6, scope.getWorkspaceId());
+            statement.setBoolean(6, ResidentWorkspaceProfile.selects(request));
+            JdbcRepositorySupport.setIdentity(statement, 7, ResidentWorkspaceProfile.CAPABILITY_DIGEST);
+            JdbcRepositorySupport.setIdentity(statement, 8, scope.getWorkspaceId());
             try (ResultSet result = statement.executeQuery()) {
                 if (result.next()) {
                     throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",

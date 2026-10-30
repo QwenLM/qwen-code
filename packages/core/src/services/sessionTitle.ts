@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -132,7 +133,9 @@ export async function tryGenerateSessionTitle(
     const llmClient = config.getLlmClient();
     if (!llmClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = llmClient.getHistoryShallow();
+    const fullHistory = withoutAutoMemorySnapshots(
+      llmClient.getHistoryShallow(),
+    );
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const hasDisplayProjection = userDisplayTexts.some(

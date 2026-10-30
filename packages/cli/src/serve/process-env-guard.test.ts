@@ -38,6 +38,17 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/memory-import.ts',
+    {
+      reason:
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+      accesses: {
+        'computed:key': 1,
+        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-contract.ts',
     {
       reason:
@@ -57,11 +68,27 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-harness-session.ts',
+    {
+      reason:
+        'The packaged load-reply-lost E2E arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement Harness only; the session bridge reads it once at construction to lose exactly the first load attach reply for that Session as fault injection. It is a process-scoped test switch, never set in production.',
+      accesses: { 'key:QWEN_E2E_DROP_LOAD_REPLY': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
         'The private offline migration worker pins deployment-owned QWEN_HOME and its retained file-history volume before validating recovery evidence.',
       accesses: { 'key:QWEN_HOME': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/workspace-git-clone.ts',
+    {
+      reason:
+        'Git clone spawning strips repository-locating and host-configuration variables from a copy of the process environment and resolves the Windows taskkill path from the process-scoped OS root.',
+      accesses: { whole: 1, 'key:SystemRoot': 1 },
     },
   ],
   [
@@ -202,8 +229,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-context-worker.ts',
     {
       reason:
-        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests and the delegated cgroup root for process isolation from the process environment; definitions are then scoped by tenant and workspace.',
+        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests and the delegated cgroup root for process isolation from the process environment; definitions are then scoped by tenant and workspace. Extension preflight and Shell children copy only the target Runtime environment allowlist through managedExtensionEnvironment, with settings from the selected extension.',
       accesses: {
+        whole: 2,
         'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
         'key:QWEN_MANAGED_HOOK_CONFIG': 1,
         'key:QWEN_MANAGED_MCP_CONFIG': 1,
@@ -238,8 +266,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-hook-runtime.ts',
     {
       reason:
-        'Hook commands use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup, and the deployment-owned cgroup root for process-tree isolation; HOME and USERPROFILE come from the verified Session directory.',
+        'Hook commands use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup, and the deployment-owned cgroup root for process-tree isolation; HOME and USERPROFILE come from the verified Session directory. Extension Hooks pass the target Runtime environment through managedExtensionEnvironment to copy only its allowlist.',
       accesses: {
+        whole: 1,
         'key:PATH': 1,
         'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
         'key:SystemRoot': 2,
@@ -270,8 +299,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-mcp-runtime.ts',
     {
       reason:
-        'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
-      accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+        'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition. Extension MCP children pass the target Runtime environment through managedExtensionEnvironment to copy only its allowlist and the selected extension settings.',
+      accesses: { 'key:PATH': 1, 'key:SystemRoot': 2, whole: 1 },
     },
   ],
   [
@@ -389,7 +418,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest, Broker URL/token and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
@@ -403,8 +432,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:NODE_EXTRA_CA_CERTS': 1,
         'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
-        'key:QWEN_HOSTED_HARNESS_BROKER_URL': 1,
-        'key:QWEN_HOSTED_HARNESS_BROKER_TOKEN': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
