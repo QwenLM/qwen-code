@@ -31,7 +31,7 @@ When it starts, it asks once to confirm where it will push and that it will repl
 A watch is a [scheduled task](./scheduled-tasks.md) whose gate runs `qwen autofix-pr snapshot <n> --gate` at every fire, outside the model. The probe prints only what changed since its last run, so a quiet PR costs no model turn. When something changed, a round runs:
 
 1. A merged or closed PR ends the watch. Someone else's push is adopted first.
-2. The failed checks, the new comments from trusted authors and a merge conflict go to one fix agent, working in the PR worktree — in the background when the fixes run without asking. For a failed check it reads the job log; a failure outside the PR (network, runner) is re-run once instead of fixed.
+2. The failed checks, the new comments from trusted authors and a merge conflict go to one fix agent, working in the PR worktree — in the background when the fixes run without asking. For a failed check it reads the job log; a failure outside the PR (network, runner) is re-run once instead of fixed. When checks fail while the branch is behind its base, the base is merged in first: the failure may be one the base already fixed.
 3. The agent verifies its change with the repository's own checks and commits only when they pass.
 4. The commits are pushed as a fast-forward of the PR head, never forced. If someone pushed meanwhile, their work is merged first.
 5. Each review thread it handled gets a reply — `Fixed in <sha>: …`, `Not changed: …` or `Needs a human decision: …` — and each push gets one summary comment.
