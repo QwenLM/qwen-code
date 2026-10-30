@@ -932,17 +932,18 @@ describe('no-AK integration CI wiring', () => {
       smokeWorkflow.indexOf("uses: './.github/actions/verify-checkout-head'"),
     ).toBeGreaterThan(smokeCheckoutIndex);
     expect(smokeWorkflow).toContain("expected_sha: '${{ github.sha }}'");
-    // The smoke is self-hosted-only, so it must take the same Node path as
+    // The full smoke is self-hosted-only, so it must take the same Node path as
     // the gate's self-hosted side: the pre-installed Node, never a nodejs.org
     // download the ECS egress proxy cannot reach.
     expect(smokeWorkflow).toContain(
       "uses: './.github/actions/self-hosted-node'",
     );
-    expect(smokeWorkflow).not.toContain('actions/setup-node');
+    const smokeJob = getWorkflowJob(smokeWorkflow, 'validate');
+    expect(smokeJob).not.toContain('actions/setup-node');
     // The gate's run steps inherit ci.yml's workflow-level bash default, so
     // the smoke must execute these commands under the same shell; a
     // powershell pin there would validate a shell the gate never runs.
-    const smokeJob = getWorkflowJob(smokeWorkflow, 'validate');
+
     for (const stepName of [
       'Configure persistent npm cache (self-hosted)',
       'Configure npm for rate limiting',
@@ -951,6 +952,27 @@ describe('no-AK integration CI wiring', () => {
     ]) {
       expect(getWorkflowStep(smokeJob, stepName)).toContain("shell: 'bash'");
     }
+    expect(smokeJob).toContain('!inputs.preview_launch_diagnostic');
+    const diagnostic = getWorkflowJob(
+      smokeWorkflow,
+      'preview-launch-diagnostic',
+    );
+    expect(diagnostic).toContain('inputs.preview_launch_diagnostic');
+    expect(diagnostic).toContain("runs-on: 'windows-2022'");
+    expect(diagnostic).toContain('--frozen-lockfile --ignore-scripts');
+    expect(diagnostic).toContain('test "$actual_head" = "$GITHUB_SHA"');
+    expect(diagnostic).toContain('QWEN_DIAG_HEAD=%s');
+    expect(diagnostic).toContain('tee -a');
+    expect(diagnostic).toContain(
+      'vitest.mjs run scripts/tests/opentui-preview-install.test.js',
+    );
+    expect(diagnostic).toContain(
+      '--retry=0 --bail=1 --maxWorkers=1 --minWorkers=1',
+    );
+    expect(diagnostic).not.toContain('--testNamePattern');
+    expect(diagnostic).not.toContain('npm run test:ci');
+    expect(diagnostic).not.toContain('npm run build');
+    expect(diagnostic).toContain("if: '${{ always() }}'");
     // Both workflows declare the persistent npm cache step; the gate's
     // self-hosted path exports NPM_CONFIG_CACHE for every later npm command.
     expect(
