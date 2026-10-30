@@ -91,6 +91,7 @@ function start(
   opts: {
     enabled?: boolean;
     sessionExists?: (id: string) => Promise<boolean | null>;
+    parentEligible?: (id: string) => Promise<boolean | null>;
     observe?: (
       root: string,
       o: { sessionId: string },
@@ -115,6 +116,7 @@ function start(
     intervalMs: 600_000,
     observeIntervalMs: opts.observeIntervalMs ?? 600_000,
     sessionExists: opts.sessionExists ?? alive,
+    ...(opts.parentEligible ? { parentEligible: opts.parentEligible } : {}),
     ...(opts.observe ? { observe: opts.observe } : {}),
     isEnabled: () => opts.enabled ?? true,
     onNotice: (message) => notices.push(message),
@@ -159,7 +161,7 @@ describe('reviewVerifyDecision', () => {
     const decision = reviewVerifyDecision(event, facts);
     expect(decision).toMatchObject({
       action: 'spawn',
-      prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      prompt: `/verify-pr 15846 --publish --repo qwenlm/qwen-code --expect-head ${target.headSha}`,
       callerSessionId: 'sess-1',
     });
   });
@@ -210,7 +212,7 @@ describe('startReviewVerifyAutomation', () => {
     await start().tick();
     expect(launch).toHaveBeenCalledTimes(1);
     expect(launch).toHaveBeenCalledWith({
-      prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      prompt: `/verify-pr 15846 --publish --repo qwenlm/qwen-code --expect-head ${target.headSha}`,
       completion: 'sent',
       callerSessionId: 'sess-1',
       name: 'verify PR #15846',
@@ -326,7 +328,7 @@ describe('startReviewVerifyAutomation', () => {
     await start().tick();
     expect(launch).toHaveBeenCalledTimes(1);
     expect(launch).toHaveBeenCalledWith({
-      prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      prompt: `/verify-pr 15846 --publish --repo qwenlm/qwen-code --expect-head ${target.headSha}`,
       completion: 'sent',
       callerSessionId: 'sess-1',
       name: 'verify PR #15846',
@@ -492,7 +494,7 @@ describe('startReviewVerifyAutomation — observing watched PRs (E2)', () => {
     });
     expect(notices.join('\n')).toContain('observed a clean approval');
     expect(launch).toHaveBeenCalledWith({
-      prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      prompt: `/verify-pr 15846 --publish --repo qwenlm/qwen-code --expect-head ${target.headSha}`,
       completion: 'sent',
       callerSessionId: 'sess-1',
       name: 'verify PR #15846',
@@ -537,4 +539,38 @@ describe('startReviewVerifyAutomation — observing watched PRs (E2)', () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(observe.mock.calls.length).toBe(callsAtStop);
   }, 10000);
+});
+
+describe('startReviewVerifyAutomation — parent eligibility (T3)', () => {
+  it('does not burn the head when the owner cannot be a parent', async () => {
+    installSkill();
+    const path = emit();
+    await start({ parentEligible: async () => false }).tick();
+    expect(launch).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(false);
+    // The decisive assertion: no dedupe key, so a later handoff for this head
+    // from a usable session is NOT suppressed.
+    expect(readSpawnedKeys(root).size).toBe(0);
+    expect(notices.join('\n')).toContain('parent-ineligible');
+  });
+
+  it('a later eligible handoff for the same head still spawns', async () => {
+    installSkill();
+    emit();
+    await start({ parentEligible: async () => false }).tick();
+    expect(readSpawnedKeys(root).size).toBe(0);
+    automation?.stop();
+    emit();
+    await start({ parentEligible: async () => true }).tick();
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the event pending when eligibility cannot be read', async () => {
+    installSkill();
+    const path = emit();
+    await start({ parentEligible: async () => null }).tick();
+    expect(launch).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(true);
+    expect(readSpawnedKeys(root).size).toBe(0);
+  });
 });

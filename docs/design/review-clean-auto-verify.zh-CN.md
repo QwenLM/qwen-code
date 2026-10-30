@@ -300,6 +300,32 @@ watch 的 PR 每个周期多一次调用。
 观测 cursor 丢失只会多读一次，绝不会多验证一次——而已被别处验证的 head 会被它
 采纳，使轮询不再把它当候选。
 
+### 7. 评审带来的四处加固
+
+第一版实现被评审找出四个缺陷，均在此修复：
+
+- **验证轮绑定它被要求验证的那个 head。** prompt 现在带 `--expect-head <sha>`，
+  而 `verify-pr-prepare` 在 live head 不是该 commit 时拒绝（exit 5）——在它 fetch、
+  建目录或执行任何东西之前。只在派生前检查会留下「派生到 prepare 之间」这段窗口，
+  而那正是排队中的交接变陈旧的地方：那一轮会去验证 PR 已经推进到的 commit，并把
+  这份报告当作另一个 commit 的评审证据发布。skill 把 exit 5 当作本轮终止，绝不是
+  「去掉旗标重试」的理由。
+- **干净批准需要当前 head 的证据。** push 时 dismiss 陈旧批准是仓库的可选策略，
+  因此 `reviewDecision` 可能对一个没人评审过的 head 仍读作 `APPROVED`。判定现在
+  要求存在 `commit.oid` 等于该 head 的批准，并在 reviews 连接读不出、或其中没有
+  这样的批准时 fail closed（`no-current-head-approval`、`reviews-unreadable`）。
+  归因与闸门是同一个事实，不是两个。
+- **父会话可用性在 write-ahead 记录之前判定。** 环境里有会话 id 并不证明它在本
+  runtime 上是可用的父会话：headless 或 standalone 评审导出的 id 是本 bridge 从未
+  见过的，而子会话过不了 launcher 的 depth 闸。两者都会在派生任何东西之前被拒，
+  所以先记录 head 等于把一次从未开始的验证标记为完成，并压掉它之后所有交接。
+  daemon 提供一个施加 launcher 自身那两条拒绝的探针；不可用的归属者丢弃事件但
+  **不记录键**，读不出答案则把事件留待处理。
+- **身份先规范化再建键。** GitHub 仓库身份大小写不敏感，缩写 commit id 是同一个
+  commit 的另一种拼写；任一差异都会为一个 head 产生两个键、两个会话、两份公开
+  报告。规范化发生在每个生产者都经过的那一个咽喉点，入口与读取端都只接受完整的
+  40 或 64 位 id，decision 再规范化一次，使 prompt 与键不可能不一致。
+
 ## 设计决定
 
 - **入口是一份契约，不是一个管线钩子。** 第一版只从 `save-artifact` 产出，等于

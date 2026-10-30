@@ -273,7 +273,19 @@ describe('observeWatches', () => {
     await observeWatches(root, { sessionExists: alive, fetch: fetchClean });
     const next = await observeWatches(root, {
       sessionExists: alive,
-      fetch: async () => approved({ headRefOid: otherHead }),
+      fetch: async () =>
+        approved({
+          headRefOid: otherHead,
+          reviews: {
+            nodes: [
+              {
+                state: 'APPROVED',
+                author: { login: 'reviewer-1' },
+                commit: { oid: otherHead },
+              },
+            ],
+          },
+        }),
     });
     expect(next[0]).toMatchObject({ action: 'emitted', headSha: otherHead });
     expect(readPendingReviewEvents(root).events).toHaveLength(2);
@@ -455,5 +467,49 @@ describe('observeWatches — the watch belongs to a session', () => {
     // Removing one leaves the other.
     expect(removeWatch(root, watchKey(watch))).toBe(true);
     expect(readWatches(root)[0]?.sessionId).toBe('other-session');
+  });
+});
+
+describe('judgeCleanApproval — current-head approval evidence', () => {
+  it('refuses a stale approval the repository never dismissed', () => {
+    // The optional-policy trap: reviewDecision still reads APPROVED after a
+    // push, but the only approval is of the PREVIOUS head.
+    expect(
+      judgeCleanApproval(
+        approved({
+          reviews: {
+            nodes: [
+              {
+                state: 'APPROVED',
+                author: { login: 'reviewer-1' },
+                commit: { oid: otherHead },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual({ clean: false, reason: 'no-current-head-approval' });
+  });
+
+  it('refuses when the reviews connection cannot be read at all', () => {
+    expect(judgeCleanApproval(approved({ reviews: undefined }))).toEqual({
+      clean: false,
+      reason: 'reviews-unreadable',
+    });
+  });
+
+  it('refuses an empty reviews list even though the aggregate says APPROVED', () => {
+    expect(judgeCleanApproval(approved({ reviews: { nodes: [] } }))).toEqual({
+      clean: false,
+      reason: 'no-current-head-approval',
+    });
+  });
+
+  it('accepts when an approval of this head is present', () => {
+    expect(judgeCleanApproval(approved())).toMatchObject({
+      clean: true,
+      headSha: head,
+      approvers: ['reviewer-1'],
+    });
   });
 });

@@ -359,10 +359,11 @@ The daemon re-reads each watched PR every five minutes and hands off a head when
 **all** of these hold:
 
 - the PR is open and not a draft;
-- GitHub's `reviewDecision` is `APPROVED` — the current aggregate, not an old
-  review's text. Pushing a new commit dismisses an earlier approval even though
-  that review still reads "Approving", and a dismissed approval hands off
-  nothing;
+- GitHub's `reviewDecision` is `APPROVED` **and** an approval exists whose commit
+  is the current head. The aggregate alone is not enough: dismissing a stale
+  approval on push is an optional repository setting, so on a repository without
+  it an approval of an older commit survives a push and the aggregate still reads
+  `APPROVED`. No approval of the current head means no handoff;
 - no review thread is both unresolved and non-outdated. Any such thread counts
   as a blocker; the observer does not try to guess which are "only questions";
 - the thread list was read in full. A truncated read hands off nothing, because
@@ -373,6 +374,11 @@ A watch belongs to the session that registers it (`--session-id`, defaulting to
 deleting the session ends the watch. An idle session keeps its watches — only
 deletion ends them. Two sessions may watch the same PR; each owns its own watch,
 and the shared per-head dedupe still means one verification per head.
+
+The round is bound to the commit that was reviewed: its prompt carries
+`--expect-head <sha>`, and the verification preflight refuses a PR that has
+advanced past it — before fetching or running anything. A moved head ends the
+round with nothing published; re-review the new head to verify it.
 
 This works no matter who reviewed — another agent, the CI bot, or a person — and
 needs nothing from them. Each head is handed off once, and a head already

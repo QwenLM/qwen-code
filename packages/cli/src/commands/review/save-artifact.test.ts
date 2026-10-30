@@ -1171,7 +1171,7 @@ describe('saveReviewArtifact — the clean-round verify handoff', () => {
       target: {
         platform: 'github',
         host: 'github.com',
-        ownerRepo: 'QwenLM/qwen-code',
+        ownerRepo: 'qwenlm/qwen-code',
         number: 123,
         headSha,
       },

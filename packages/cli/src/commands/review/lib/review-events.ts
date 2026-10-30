@@ -90,16 +90,38 @@ export function pendingEventsDir(repositoryRoot: string): string {
 }
 
 /**
+ * Canonical identities, applied at the one choke point every producer passes
+ * through, so two producers spelling one commit or one repository differently
+ * cannot produce two keys — and therefore two sessions and two public reports
+ * for one head. GitHub repository identity is case-insensitive; hosts are too.
+ * An abbreviated commit id never reaches here: the entrances refuse one.
+ */
+export function canonicalReviewTarget(
+  target: ReviewEventTarget,
+): ReviewEventTarget {
+  return {
+    ...target,
+    host: target.host.toLowerCase(),
+    ownerRepo:
+      target.platform === 'github'
+        ? target.ownerRepo.toLowerCase()
+        : target.ownerRepo,
+    headSha: target.headSha.toLowerCase(),
+  };
+}
+
+/**
  * One verification per reviewed head, not per round: two clean rounds at the
  * same sha are the same evidence request. Round is deliberately absent.
  */
 export function reviewEventDedupeKey(target: ReviewEventTarget): string {
+  const canonical = canonicalReviewTarget(target);
   return [
-    target.platform,
-    target.host,
-    target.ownerRepo,
-    String(target.number),
-    target.headSha,
+    canonical.platform,
+    canonical.host,
+    canonical.ownerRepo,
+    String(canonical.number),
+    canonical.headSha,
   ].join(':');
 }
 
@@ -126,8 +148,10 @@ export function cleanRoundHeadSha(input: {
 }): string | null {
   if (input.event !== 'APPROVE' && input.event !== 'COMMENT') return null;
   if (input.critical !== 0) return null;
-  const sha = input.anchorSha?.trim();
-  return sha ? sha : null;
+  const sha = input.anchorSha?.trim().toLowerCase();
+  // A full id only: an abbreviated anchor is another spelling of one commit,
+  // and keying it separately would verify and publish that head twice.
+  return sha && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha) ? sha : null;
 }
 
 export interface EmitReviewCleanEventInput {
@@ -158,7 +182,8 @@ export interface EmittedReviewCleanEvent {
 export function emitReviewCleanEvent(
   input: EmitReviewCleanEventInput,
 ): EmittedReviewCleanEvent {
-  const key = reviewEventDedupeKey(input.target);
+  const canonical = canonicalReviewTarget(input.target);
+  const key = reviewEventDedupeKey(canonical);
   const eventId = reviewEventId(key);
   const event: ReviewCleanEventV1 = {
     schemaVersion: REVIEW_EVENT_SCHEMA_VERSION,
@@ -166,7 +191,7 @@ export function emitReviewCleanEvent(
     createdAt: (input.now?.() ?? new Date()).toISOString(),
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.reviewedBy ? { reviewedBy: input.reviewedBy } : {}),
-    target: input.target,
+    target: canonical,
     round: input.round,
     verdict: input.verdict,
     ...(input.artifactPath ? { artifactPath: input.artifactPath } : {}),
@@ -235,8 +260,10 @@ export function readPendingReviewEvents(repositoryRoot: string): {
  */
 const EVENT_OWNER_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const EVENT_HOST_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
-/** Same shape `lib/ledger.ts` accepts for an anchor (abbreviated or full). */
-const EVENT_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/;
+/** A FULL commit id. An abbreviation is a different spelling of one commit and
+ *  would key a second verification for it, so the entrances refuse one and the
+ *  reader refuses a record carrying one. */
+const EVENT_HEAD_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 function validateEvent(value: unknown): ReviewCleanEventV1 | null {
   if (typeof value !== 'object' || value === null) return null;

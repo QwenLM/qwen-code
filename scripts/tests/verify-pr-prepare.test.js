@@ -466,3 +466,70 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stderr).toContain('--repo <owner>/<repo> is required');
   });
 });
+
+describe('--expect-head (the automated handoff carries the reviewed commit)', () => {
+  it('parses both spellings and normalizes case', () => {
+    expect(
+      parseArgs(['42', '--repo', REPO, '--expect-head', OID('a')]),
+    ).toMatchObject({ expectHead: OID('a') });
+    expect(
+      parseArgs([
+        '42',
+        '--repo',
+        REPO,
+        `--expect-head=${OID('a').toUpperCase()}`,
+      ]),
+    ).toMatchObject({ expectHead: OID('a') });
+  });
+
+  it('refuses an abbreviated or malformed commit id as a usage error', () => {
+    expect(
+      parseArgs(['42', '--repo', REPO, '--expect-head', 'abc1234']).error,
+    ).toContain('full 40- or 64-character');
+    expect(
+      parseArgs(['42', '--repo', REPO, '--expect-head', 'zz'.repeat(20)]).error,
+    ).toContain('full 40- or 64-character');
+    expect(parseArgs(['42', '--repo', REPO, '--expect-head']).error).toContain(
+      '--expect-head needs <sha>',
+    );
+  });
+
+  it('resolves when the live head is the expected commit', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(dir, snapshotFor({ base, head }));
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--expect-head', head],
+      env,
+    );
+    expect(result.status).toBe(0);
+  });
+
+  it('refuses a moved head BEFORE creating anything or running PR code', () => {
+    const { dir, base, head } = makeRepo();
+    // The review read an earlier commit; the PR has since advanced.
+    const reviewed = base;
+    const live = head;
+    const env = installFakeGh(dir, snapshotFor({ base, head: live }));
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--expect-head', reviewed],
+      env,
+    );
+    expect(result.status).toBe(5);
+    expect(result.stderr).toContain('the PR head moved');
+    expect(result.stderr).toContain(reviewed);
+    expect(result.stderr).toContain(live);
+    // The gate is ahead of the fetch probes and the artifact directories: a
+    // refused round leaves no trace for a later round to mistake for progress.
+    expect(existsSync(join(dir, 'tmp', artifactDirName(42)))).toBe(false);
+    expect(existsSync(join(dir, 'tmp', 'verify-context'))).toBe(false);
+  });
+
+  it('without the flag the live head is still what gets resolved', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(dir, snapshotFor({ base, head }));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(0);
+  });
+});

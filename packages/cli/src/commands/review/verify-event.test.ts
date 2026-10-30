@@ -73,7 +73,7 @@ describe('runVerifyEvent', () => {
       target: {
         platform: 'github',
         host: 'github.com',
-        ownerRepo: 'QwenLM/qwen-code',
+        ownerRepo: 'qwenlm/qwen-code',
         number: 15846,
         headSha: head,
       },

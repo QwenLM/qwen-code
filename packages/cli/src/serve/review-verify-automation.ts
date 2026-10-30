@@ -48,6 +48,7 @@ import type {
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import {
+  canonicalReviewTarget,
   pendingEventsDir,
   readPendingReviewEvents,
   readSpawnedKeys,
@@ -127,12 +128,12 @@ export function reviewVerifyDecision(
     ownerSessionId: string;
   },
 ): ReviewVerifyDecision {
-  const key = reviewEventDedupeKey(event.target);
+  // Canonical here too, so the prompt and the dedupe key cannot disagree about
+  // the spelling of one repository even if a caller hands over a raw target.
+  const target = canonicalReviewTarget(event.target);
+  const key = reviewEventDedupeKey(target);
   if (!facts.enabled) return { action: 'decline', reason: 'disabled', key };
-  if (
-    event.target.platform !== 'github' ||
-    event.target.host !== 'github.com'
-  ) {
+  if (target.platform !== 'github' || target.host !== 'github.com') {
     return { action: 'decline', reason: 'unsupported-platform', key };
   }
   if (!facts.skillAvailable) {
@@ -143,9 +144,13 @@ export function reviewVerifyDecision(
   }
   return {
     action: 'spawn',
-    prompt: `/verify-pr ${event.target.number} --publish --repo ${event.target.ownerRepo}`,
+    // The reviewed head rides into the round: `verify-pr-prepare --expect-head`
+    // refuses a PR that has advanced since, before it fetches or runs anything.
+    // A prompt without it would verify whatever the PR is at now and publish
+    // that report against a review of a different commit.
+    prompt: `/verify-pr ${target.number} --publish --repo ${target.ownerRepo} --expect-head ${target.headSha}`,
     callerSessionId: facts.ownerSessionId,
-    name: `verify PR #${event.target.number}`,
+    name: `verify PR #${target.number}`,
     key,
   };
 }
@@ -168,6 +173,15 @@ export interface ReviewVerifyAutomationOptions {
   /** Session existence probe, injectable for tests. Three states — alive,
    *  gone, unknown — and an unknown owner is neither served nor cleaned up. */
   sessionExists?: SessionLiveness;
+  /** Whether this runtime can actually use the owner as a sub-session parent.
+   *  Existence is not eligibility: a headless or standalone review exports a
+   *  session id that this runtime's bridge has never heard of, and a session
+   *  that is itself a sub-session fails the launcher's depth gate. Both are
+   *  refused BEFORE anything is spawned, so the check has to happen before the
+   *  write-ahead record too — otherwise the head is marked verified by a round
+   *  that never started, and every later handoff for it is suppressed.
+   *  `null` means the answer could not be read: leave the event pending. */
+  parentEligible?: (sessionId: string) => Promise<boolean | null>;
   /** Re-read each pass that has work, so flipping the setting needs no
    *  restart. Defaults to the operator-scoped `review.autoVerify`. */
   isEnabled?: () => boolean;
@@ -196,6 +210,9 @@ export function startReviewVerifyAutomation(
   const notice = opts.onNotice ?? writeStderrLineSafe;
   const observe = opts.observe ?? observeWatches;
   const liveness = opts.sessionExists ?? sessionLivenessFor(boundWorkspace);
+  // The daemon always supplies the real probe; the permissive default keeps the
+  // launcher as the only authority for a caller that does not.
+  const parentEligible = opts.parentEligible ?? (async () => true);
   const skillPath = path.join(boundWorkspace, VERIFY_SKILL_RELATIVE_PATH);
   // An unreadable pending file is reported once, not every pass: it is inert
   // and this module does not delete a file it cannot parse.
@@ -224,6 +241,22 @@ export function startReviewVerifyAutomation(
       if (decision.action === 'decline') {
         removePendingEvent(eventPath);
         notice(`review-verify: not spawning for ${label} (${decision.reason})`);
+        continue;
+      }
+      // Eligibility BEFORE the write-ahead record. An ineligible parent can
+      // never spawn, so recording the head here would suppress a verification
+      // that never started — including a later handoff for the same head from
+      // a session that could carry it.
+      const eligible = await parentEligible(owner);
+      if (eligible === null) {
+        log.debug('review-verify: parent eligibility unknown', owner);
+        continue;
+      }
+      if (eligible === false) {
+        removePendingEvent(eventPath);
+        notice(
+          `review-verify: not spawning for ${label} (parent-ineligible: ${owner} is not a usable parent on this runtime)`,
+        );
         continue;
       }
       try {

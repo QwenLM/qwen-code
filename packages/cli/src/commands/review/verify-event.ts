@@ -34,8 +34,10 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 
-/** The head shape the event reader accepts, normalized to lowercase. */
-const HEAD_SHA_RE = /^[0-9a-f]{7,64}$/;
+/** A FULL commit id. An abbreviation is another spelling of the same commit,
+ *  and two producers using different spellings would key two verifications —
+ *  and publish two reports — for one head. */
+const HEAD_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export interface VerifyEventArgs {
   pr: number;
@@ -108,7 +110,7 @@ export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
   const head = args.head.trim().toLowerCase();
   if (!HEAD_SHA_RE.test(head)) {
     throw new TypeError(
-      `--head must be a 7-64 character hex commit sha, got ${JSON.stringify(args.head)}`,
+      `--head must be a FULL 40-character (or 64-character) hex commit id — an abbreviation would key a second verification of the same commit, got ${JSON.stringify(args.head)}`,
     );
   }
   const event = args.event ?? 'APPROVE';
@@ -176,7 +178,7 @@ export const verifyEventCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe:
-          'The commit sha the review actually read — one verification per head, so a later round at the same sha does not spawn a second one',
+          'The FULL commit id the review actually read (40 hex characters, or 64) — one verification per head, so a later round at the same commit does not spawn a second one',
       })
       .option('host', {
         type: 'string',

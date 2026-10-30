@@ -4020,6 +4020,18 @@ export function createServeApp(
           ? startReviewVerifyAutomation({
               boundWorkspace: runtime.workspaceCwd,
               launch: runtime.subSessionLauncher.launch,
+              // The same two refusals the launcher itself makes before it
+              // spawns: a caller this runtime's bridge does not know, and a
+              // caller that is already a sub-session. Checked here so an
+              // ineligible owner never reaches the write-ahead dedupe record.
+              parentEligible: async (sessionId) => {
+                try {
+                  const summary = runtime.bridge.getSessionSummary(sessionId);
+                  return summary.parentSessionId === undefined;
+                } catch {
+                  return false;
+                }
+              },
             })
           : undefined;
       } catch (err) {

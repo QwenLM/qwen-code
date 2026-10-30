@@ -26,12 +26,19 @@
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+ *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> --expect-head <sha>
  *   node scripts/verify-pr-prepare.mjs --require-isolation
  *
  * Options:
  *   --repo <owner>/<repo>  required for the coordinate path: never inferred
  *                          from `origin`, because a fork's `origin` resolves the
  *                          same PR number to an unrelated PR
+ *   --expect-head <sha>    the full commit id the round was asked to verify.
+ *                          Refuses (exit 5) when the PR's live head is not that
+ *                          commit, BEFORE anything is fetched, created or run.
+ *                          An automated handoff carries the head its review
+ *                          read; without this the round would silently verify
+ *                          whatever the PR has advanced to since
  *   --require-isolation    check the process this runs in and exit 4 when no
  *                          boundary is detected; run it inside the boundary
  *
@@ -40,6 +47,7 @@
  *   2  usage error
  *   3  metadata, OID, or filesystem failure
  *   4  --require-isolation found no boundary — do not run PR code here
+ *   5  the live head is not --expect-head — do not verify a different commit
  */
 
 import { spawnSync } from 'node:child_process';
@@ -49,6 +57,7 @@ import { join } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
+const EXPECT_HEAD = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
 const FIELDS = [
   'number',
@@ -61,7 +70,7 @@ const FIELDS = [
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--expect-head <sha>]
        node scripts/verify-pr-prepare.mjs --require-isolation
 
 Resolves the coordinates a local /verify-pr round needs and writes the
@@ -231,6 +240,7 @@ export function parseArgs(argv) {
   const options = {
     pr: null,
     repo: null,
+    expectHead: null,
     requireIsolation: false,
     help: false,
   };
@@ -245,6 +255,13 @@ export function parseArgs(argv) {
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
     } else if (arg.startsWith('--repo=')) {
       options.repo = arg.slice('--repo='.length);
+    } else if (arg === '--expect-head') {
+      options.expectHead = argv[(index += 1)] ?? null;
+      if (!options.expectHead) {
+        return { error: '--expect-head needs <sha>' };
+      }
+    } else if (arg.startsWith('--expect-head=')) {
+      options.expectHead = arg.slice('--expect-head='.length);
     } else if (/^\d+$/.test(arg) && options.pr === null) {
       options.pr = Number(arg);
     } else {
@@ -257,6 +274,14 @@ export function parseArgs(argv) {
   }
   if (!parseRepo(options.repo)) {
     return { error: '--repo <owner>/<repo> is required' };
+  }
+  if (options.expectHead !== null) {
+    options.expectHead = options.expectHead.toLowerCase();
+    if (!EXPECT_HEAD.test(options.expectHead)) {
+      return {
+        error: '--expect-head must be a full 40- or 64-character hex commit id',
+      };
+    }
   }
   return options;
 }
@@ -322,6 +347,17 @@ function main(argv) {
     return fail(
       3,
       'gh returned a snapshot without a numeric PR and two 40-character OIDs',
+    );
+  }
+
+  // The head gate runs before any fetch, directory creation or execution: a
+  // round asked to verify one commit must not quietly verify another. Checking
+  // only before the spawn would still leave the window between the spawn and
+  // this preparation, which is exactly where an automated handoff can go stale.
+  if (options.expectHead && context.head !== options.expectHead) {
+    return fail(
+      5,
+      `the PR head moved: this round was asked to verify ${options.expectHead} but ${slug}#${context.pr} is now at ${context.head} — re-review the new head before verifying it`,
     );
   }
 

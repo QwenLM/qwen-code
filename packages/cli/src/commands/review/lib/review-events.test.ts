@@ -116,7 +116,7 @@ describe('the dedupe key', () => {
   it('is one verification per head, not per round', () => {
     const key = reviewEventDedupeKey(target);
     expect(key).toBe(
-      `github:github.com:QwenLM/qwen-code:15846:${'a'.repeat(40)}`,
+      `github:github.com:qwenlm/qwen-code:15846:${'a'.repeat(40)}`,
     );
     expect(reviewEventId(key)).toMatch(/^[0-9a-f]{16}$/);
   });
@@ -151,7 +151,8 @@ describe('emitReviewCleanEvent', () => {
       eventId: result.eventId,
       sessionId: 'sess-1',
       round: 1,
-      target,
+      // Stored canonical: GitHub repository identity is case-insensitive.
+      target: { ...target, ownerRepo: 'qwenlm/qwen-code' },
       verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
       artifactPath: '.qwen/reviews/report.json',
     });
@@ -316,5 +317,75 @@ describe('removePendingEvent', () => {
     removePendingEvent(result.path);
     expect(existsSync(result.path)).toBe(false);
     expect(() => removePendingEvent(result.path)).not.toThrow();
+  });
+});
+
+describe('canonical identities (one head, one verification)', () => {
+  const sha = 'a'.repeat(40);
+
+  it('collapses repository casing across producers into one pending file', () => {
+    emit({
+      target: { ...target, ownerRepo: 'QwenLM/qwen-code', headSha: sha },
+    });
+    emit({
+      target: { ...target, ownerRepo: 'qwenlm/qwen-code', headSha: sha },
+    });
+    const { events } = readPendingReviewEvents(root);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event.target.ownerRepo).toBe('qwenlm/qwen-code');
+  });
+
+  it('collapses host casing too', () => {
+    emit({ target: { ...target, host: 'GitHub.com', headSha: sha } });
+    emit({ target: { ...target, host: 'github.com', headSha: sha } });
+    expect(readPendingReviewEvents(root).events).toHaveLength(1);
+  });
+
+  it('keeps a case-sensitive platform’s repository spelling', () => {
+    emit({
+      target: {
+        ...target,
+        platform: 'aone',
+        host: 'code.alibaba-inc.com',
+        ownerRepo: 'Group/Project',
+        headSha: sha,
+      },
+    });
+    expect(
+      readPendingReviewEvents(root).events[0]?.event.target.ownerRepo,
+    ).toBe('Group/Project');
+  });
+
+  it('refuses an abbreviated anchor in the internal predicate', () => {
+    expect(
+      cleanRoundHeadSha({
+        event: 'APPROVE',
+        critical: 0,
+        anchorSha: 'abc1234',
+      }),
+    ).toBeNull();
+    expect(
+      cleanRoundHeadSha({ event: 'APPROVE', critical: 0, anchorSha: sha }),
+    ).toBe(sha);
+  });
+
+  it('refuses a record carrying an abbreviated head', () => {
+    const dir = pendingEventsDir(root);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'short.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        eventId: 'short',
+        createdAt: '2026-10-30T00:00:00.000Z',
+        sessionId: 's',
+        target: { ...target, headSha: 'abc1234' },
+        round: 1,
+        verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+      }),
+    );
+    const { events, unreadable } = readPendingReviewEvents(root);
+    expect(events).toEqual([]);
+    expect(unreadable).toHaveLength(1);
   });
 });

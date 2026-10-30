@@ -165,6 +165,7 @@ export const APPROVAL_QUERY = `query($owner: String!, $name: String!, $number: I
         nodes { isResolved isOutdated }
       }
       reviews(last: 20) {
+        pageInfo { hasPreviousPage }
         nodes { state author { login } commit { oid } }
       }
     }
@@ -181,6 +182,7 @@ export interface ApprovalFacts {
     nodes?: Array<{ isResolved?: unknown; isOutdated?: unknown }>;
   };
   reviews?: {
+    pageInfo?: { hasPreviousPage?: unknown };
     nodes?: Array<{
       state?: unknown;
       author?: { login?: unknown } | null;
@@ -213,7 +215,7 @@ export function judgeCleanApproval(
   if (pr.state !== 'OPEN') return { clean: false, reason: 'not-open' };
   if (pr.isDraft === true) return { clean: false, reason: 'draft' };
   const headSha = typeof pr.headRefOid === 'string' ? pr.headRefOid : '';
-  if (!/^[0-9a-f]{7,64}$/.test(headSha)) {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(headSha)) {
     return { clean: false, reason: 'no-head' };
   }
   if (pr.reviewDecision !== 'APPROVED') {
@@ -230,12 +232,17 @@ export function judgeCleanApproval(
     (t) => t?.isResolved === false && t?.isOutdated === false,
   );
   if (open) return { clean: false, reason: 'open-blocker' };
-  // Attribution: the approvals that still stand at THIS head. An approval of an
-  // earlier commit is not one of them, which is the same trap reviewDecision
-  // exists to avoid.
+  // `reviewDecision` alone does NOT prove this head was approved: dismissing a
+  // stale approval on push is an OPTIONAL repository policy, so on a repo
+  // without it an approval of A survives a push of B and the aggregate still
+  // reads APPROVED. The evidence is an approval whose commit IS this head.
+  const reviewNodes = pr.reviews?.nodes;
+  if (!Array.isArray(reviewNodes)) {
+    return { clean: false, reason: 'reviews-unreadable' };
+  }
   const approvers = [
     ...new Set(
-      (pr.reviews?.nodes ?? [])
+      reviewNodes
         .filter(
           (r) =>
             r?.state === 'APPROVED' &&
@@ -246,6 +253,13 @@ export function judgeCleanApproval(
         .map((r) => r.author?.login as string),
     ),
   ];
+  if (approvers.length === 0) {
+    // No approval of THIS head in what we read. A cut reviews connection may
+    // hold the evidence on a page we did not fetch; either way we cannot
+    // assert this head was reviewed, so fail closed rather than emit an event
+    // claiming it was.
+    return { clean: false, reason: 'no-current-head-approval' };
+  }
   return { clean: true, headSha, approvers };
 }
 

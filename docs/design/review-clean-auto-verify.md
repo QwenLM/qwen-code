@@ -350,6 +350,41 @@ head verified through any producer. A lost observation cursor therefore costs a
 re-read, never a duplicate verification — and a head already verified elsewhere
 is adopted into it so the poll stops treating it as a candidate.
 
+### 7. Hardening from review
+
+Four defects found in review of the first implementation, all fixed here:
+
+- **The round is bound to the head it was asked to verify.** The prompt now
+  carries `--expect-head <sha>`, and `verify-pr-prepare` refuses (exit 5) a live
+  head that is not that commit — before it fetches, creates a directory, or runs
+  anything. A check only before the spawn would leave the window between the
+  spawn and the preparation, which is exactly where a queued handoff goes stale:
+  the round would verify whatever the PR advanced to and publish that report as
+  evidence for a review of a different commit. The skill treats exit 5 as the end
+  of the round, never as a reason to retry without the flag.
+- **A clean approval needs evidence at the CURRENT head.** Dismissing a stale
+  approval on push is an optional repository policy, so `reviewDecision` can read
+  `APPROVED` for a head nobody reviewed. The judgement now requires an approval
+  whose `commit.oid` equals the head, and fails closed when the reviews
+  connection cannot be read or holds no such approval
+  (`no-current-head-approval`, `reviews-unreadable`). Attribution and gate are
+  the same fact, not two.
+- **Parent eligibility is resolved before the write-ahead record.** A session id
+  in the environment does not prove a usable parent on this runtime: a headless
+  or standalone review exports one the bridge has never heard of, and a
+  sub-session fails the launcher's depth gate. Both are refused before anything
+  is spawned, so recording the head first would mark a verification complete
+  that never started and suppress every later handoff for it. The daemon supplies
+  a probe applying the launcher's own two refusals; an ineligible owner drops the
+  event WITHOUT recording the key, and an unreadable answer leaves it pending.
+- **Identities are canonical before they are keyed.** GitHub repository identity
+  is case-insensitive and an abbreviated commit id is another spelling of one
+  commit; either difference produced two keys, two sessions and two public
+  reports for one head. Canonicalization happens at the one choke point every
+  producer passes through, the entrances and the reader refuse anything but a
+  full 40- or 64-character id, and the decision canonicalizes again so the prompt
+  and the key cannot disagree.
+
 ## Design decisions
 
 - **The entrance is a contract, not a pipeline hook.** The first cut emitted only
