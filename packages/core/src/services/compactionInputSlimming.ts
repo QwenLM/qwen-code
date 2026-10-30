@@ -8,6 +8,10 @@ import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  isWrappedSystemReminderPart,
+  SYSTEM_REMINDER_CLOSE,
+} from '../core/environmentContext.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -476,6 +480,15 @@ function transformPart(
     nextPart.text.length > maxTextChars
   ) {
     stats.textPartsTruncated++;
+    // Cut like other text, a reminder would lose its closing tag and read as
+    // open over the text after it, so its body is cut and the tag closed
+    // again.
+    if (isWrappedSystemReminderPart(nextPart)) {
+      return {
+        ...nextPart,
+        text: truncateReminderForSlimming(nextPart.text, maxTextChars),
+      };
+    }
     // Spread rather than rebuilding a bare `{ text }` so sibling properties
     // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
     // pipeline keys reasoning parts off those flags (#10380).
@@ -485,6 +498,14 @@ function transformPart(
     };
   }
   return nextPart;
+}
+
+function truncateReminderForSlimming(
+  value: string,
+  maxTextChars: number,
+): string {
+  const body = value.trimEnd().slice(0, -SYSTEM_REMINDER_CLOSE.length);
+  return `${truncateTextForSlimming(body, maxTextChars)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {

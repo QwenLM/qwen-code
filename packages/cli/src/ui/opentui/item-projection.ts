@@ -874,6 +874,8 @@ export function projectCompression(compression: {
         : 'Chat history compression did not reduce size. This may indicate issues with the compression prompt.';
     case CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR:
       return 'Could not compress chat history due to a token counting error.';
+    case CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE:
+      return 'Could not compress chat history because it is too large for the context window.';
     case CompressionStatus.NOOP:
       return 'Nothing to compress.';
     default:
