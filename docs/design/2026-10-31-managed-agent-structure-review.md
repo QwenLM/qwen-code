@@ -47,11 +47,12 @@ not even touch `java.net.http` or `ProcessBuilder`.
 | `runtime-broker` | Runtime execution, binding, leases, recovery       | ~6.4K            |
 | `verification`   | All tests; never installed or published            | ~245K            |
 
-Other measured facts: 187 HTTP mappings across 30 controller/filter classes;
-38 tables in the 1,272-line V1 schema baseline; a 2,006-line module README;
-200+ English design documents under `docs/design/` (nearly all paired with
-Chinese versions); a test-to-production ratio of about 1.8:1; exactly one
-SpotBugs exclusion; zero `TODO`/`FIXME` markers in production code.
+Other measured facts: 187 HTTP mappings, all on the API package's 23
+controllers (30 classes including filters and resolvers); 38 tables in the
+1,272-line V1 schema baseline; a 2,006-line module README; 200+ English
+design documents under `docs/design/` (nearly all paired with Chinese
+versions); a test-to-production ratio of about 1.8:1; exactly one SpotBugs
+exclusion; zero `TODO`/`FIXME` markers in production code.
 
 ### What works well and must be preserved
 

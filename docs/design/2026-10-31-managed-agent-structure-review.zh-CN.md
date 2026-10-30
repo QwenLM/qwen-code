@@ -40,10 +40,11 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 | `runtime-broker` | Runtime 执行、绑定、租约、恢复        | ~6.4K        |
 | `verification`   | 全部测试；从不 install 或发布         | ~245K        |
 
-其他实测数字：30 个 controller/filter 类中共 187 个 HTTP 映射；1,272 行 V1
-schema baseline 含 38 张表；模块 README 2,006 行；`docs/design/` 下 200+ 篇
-英文设计文档（几乎全部配有中文版）；测试/生产代码比约 1.8:1；SpotBugs 豁免
-恰好 1 条；生产代码中 `TODO`/`FIXME` 为零。
+其他实测数字：187 个 HTTP 映射全部落在 API 包的 23 个 controller 上
+（含 filter 与 resolver 共 30 个类）；1,272 行 V1 schema baseline 含 38 张
+表；模块 README 2,006 行；`docs/design/` 下 200+ 篇英文设计文档（几乎全部
+配有中文版）；测试/生产代码比约 1.8:1；SpotBugs 豁免恰好 1 条；生产代码中
+`TODO`/`FIXME` 为零。
 
 ### 做得好且必须保留的部分
 
