@@ -1308,25 +1308,43 @@ describe('runSync (real git, bare remote)', () => {
       expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
     });
 
-    it('does not fold case on a case-sensitive submodule', () => {
-      const { inSub } = withSubmodule();
-      // Default core.ignorecase on a case-sensitive filesystem: the two
-      // names are different files, and the alignment must still proceed.
-      writeFileSync(
-        join(inSub, 'CaseSecret.env'),
-        'CASE_COLLISION_USER_BYTES=keep',
-      );
-      ignoreInSubmodule(inSub, 'CaseSecret.env');
-      bumpSubmoduleTo({ 'casesecret.env': 'REMOTE_BYTES=1' });
-      const outcome = runSync(7);
-      expect(outcome).toMatchObject({ synced: true, moved: true });
-      expect(readFileSync(join(inSub, 'CaseSecret.env'), 'utf8')).toBe(
-        'CASE_COLLISION_USER_BYTES=keep',
-      );
-      expect(readFileSync(join(inSub, 'casesecret.env'), 'utf8')).toBe(
-        'REMOTE_BYTES=1',
-      );
-    });
+    // The coexistence case needs differently cased names to be distinct
+    // files. Probe the tmpdir the fixtures live on: on a case-insensitive
+    // filesystem git sets core.ignorecase itself, the guard rightly
+    // refuses, and only the refusal case above applies.
+    const caseSensitiveTmp = (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-case-probe-'));
+      try {
+        writeFileSync(join(dir, 'CaseProbe'), 'upper');
+        writeFileSync(join(dir, 'caseprobe'), 'lower');
+        return readdirSync(dir).length === 2;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+
+    it.skipIf(!caseSensitiveTmp)(
+      'does not fold case on a case-sensitive submodule',
+      () => {
+        const { inSub } = withSubmodule();
+        // Default core.ignorecase on a case-sensitive filesystem: the two
+        // names are different files, and the alignment must still proceed.
+        writeFileSync(
+          join(inSub, 'CaseSecret.env'),
+          'CASE_COLLISION_USER_BYTES=keep',
+        );
+        ignoreInSubmodule(inSub, 'CaseSecret.env');
+        bumpSubmoduleTo({ 'casesecret.env': 'REMOTE_BYTES=1' });
+        const outcome = runSync(7);
+        expect(outcome).toMatchObject({ synced: true, moved: true });
+        expect(readFileSync(join(inSub, 'CaseSecret.env'), 'utf8')).toBe(
+          'CASE_COLLISION_USER_BYTES=keep',
+        );
+        expect(readFileSync(join(inSub, 'casesecret.env'), 'utf8')).toBe(
+          'REMOTE_BYTES=1',
+        );
+      },
+    );
 
     it('reads the PR head from the private ref when a concurrent fetch rewrites FETCH_HEAD', () => {
       // A descendant of the PR head on another remote branch: an
