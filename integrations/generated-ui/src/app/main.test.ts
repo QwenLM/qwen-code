@@ -14,7 +14,27 @@ const presentation = vi.hoisted(() => ({
   onStatus: undefined as ((state: ViewState) => void) | undefined,
   onDocument: undefined as ((document: GeneratedDocument) => void) | undefined,
   capture: vi.fn<() => CaptureResult>(),
+  onEvent: undefined as
+    | ((event: {
+        id: string;
+        type: 'input' | 'change' | 'click';
+        value: string;
+        checked: boolean;
+      }) => void)
+    | undefined,
 }));
+vi.mock('./surface.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./surface.js')>();
+  return {
+    ...actual,
+    ViewSurface: class extends actual.ViewSurface {
+      constructor(...args: ConstructorParameters<typeof actual.ViewSurface>) {
+        super(...args);
+        presentation.onEvent = args[1];
+      }
+    },
+  };
+});
 vi.mock('./controller.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./controller.js')>();
   return {
@@ -41,6 +61,7 @@ const bridge = vi.hoisted(() => ({
   getHostVersion: vi.fn(),
   getHostCapabilities: vi.fn(),
   sendMessage: vi.fn(),
+  updateModelContext: vi.fn(),
   onteardown: undefined as (() => Promise<object>) | undefined,
 }));
 vi.mock('@modelcontextprotocol/ext-apps', () => ({
@@ -89,6 +110,7 @@ beforeEach(async () => {
   bridge.getHostVersion.mockReturnValue({ name: 'qwen-code-web-shell' });
   bridge.getHostCapabilities.mockReturnValue({ message: { text: {} } });
   bridge.sendMessage.mockResolvedValue({});
+  bridge.updateModelContext.mockResolvedValue({});
   presentation.capture.mockReturnValue({ ok: false, reason: 'not-ready' });
   vi.stubGlobal('Worker', undefined);
   document.body.innerHTML = readFileSync('src/app/index.html', 'utf8');
@@ -136,6 +158,65 @@ async function reconnect(context: Record<string, unknown>) {
   await vi.waitFor(() => expect(bridge.connect).toHaveBeenCalled());
   await Promise.resolve();
 }
+
+const interact = () =>
+  presentation.onEvent!({
+    id: 'workers',
+    type: 'input',
+    value: '8',
+    checked: false,
+  });
+
+describe('keep chatting with the applied values', () => {
+  async function withContextHost() {
+    await bridge.onteardown!();
+    vi.resetModules();
+    bridge.getHostCapabilities.mockReturnValue({
+      message: { text: {} },
+      updateModelContext: { text: {} },
+    });
+    await import('./main.js');
+    await vi.waitFor(() => expect(bridge.connect).toHaveBeenCalled());
+    await Promise.resolve();
+  }
+
+  it('offers the applied values as model context after the user changes them', async () => {
+    await withContextHost();
+    ready();
+    expect(text('continuation-help')).toContain('keep chatting');
+    interact();
+    present({});
+    await vi.waitFor(
+      () => expect(bridge.updateModelContext).toHaveBeenCalledTimes(1),
+      { timeout: 3000 },
+    );
+    const [request] = bridge.updateModelContext.mock.calls[0];
+    expect(request.content[0].type).toBe('text');
+    expect(request.content[0].text).toContain('attached to their message');
+    expect(request.content[0].text).toContain('"value": "8"');
+    // The capture it made publishes again; unchanged values are not resent.
+    present({});
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(bridge.updateModelContext).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer context before the user interacts', async () => {
+    await withContextHost();
+    ready();
+    present({});
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(bridge.updateModelContext).not.toHaveBeenCalled();
+  });
+
+  it('does not offer context to hosts without model context support', async () => {
+    ready();
+    interact();
+    present({});
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(bridge.updateModelContext).not.toHaveBeenCalled();
+    expect(text('continuation-help')).not.toContain('keep chatting');
+  });
+});
 
 describe('card frame', () => {
   it('uses the host locale for its own text', async () => {
@@ -259,6 +340,25 @@ describe('review outcomes reported by the host', () => {
     expect(text('continue-analysis')).toBe(
       'Review again after checking the session',
     );
+  });
+
+  it('shows why the host did not send the values', async () => {
+    bridge.sendMessage.mockResolvedValue({
+      isError: true,
+      _meta: {
+        'qwen-code/message-review': 'failed',
+        'qwen-code/message-error':
+          'The session is busy. Wait for it to finish, then send the message again.',
+      },
+    });
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toBe(
+        'Not sent. The session is busy. Wait for it to finish, then send the message again.',
+      ),
+    );
+    expect(continuation().disabled).toBe(false);
   });
 
   it('keeps the unconfirmed warning for outcomes after dispatch', async () => {

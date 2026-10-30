@@ -76,7 +76,7 @@ export interface GitWorkspaceCloneControls {
 }
 
 interface AddWorkspaceDialogProps {
-  /** Overrides the default "Add Workspace" heading. */
+  /** Overrides the default "Add workspace" heading. */
   title?: string;
   /** Overrides the default submit label; the in-flight label is unchanged. */
   submitLabel?: string;

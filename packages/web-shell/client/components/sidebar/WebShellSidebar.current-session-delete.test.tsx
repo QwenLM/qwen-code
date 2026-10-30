@@ -502,9 +502,9 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     });
     await flushSidebar();
     const newTask = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="New task"]',
+      'button[aria-label="New session"]',
     )!;
-    expect(newTask.textContent).toBe('New task');
+    expect(newTask.textContent).toBe('New session');
     expect(
       [...container.querySelectorAll('button')].some(
         (item) =>
@@ -517,7 +517,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
       managedWorkspaces: <div>Managed workspace</div>,
     });
     await flushSidebar();
-    expect(newTask.textContent).toBe('New task');
+    expect(newTask.textContent).toBe('New session');
   });
   it('keeps Local history beside Managed workspace content without selecting the hidden Local conversation', async () => {
     active.sessions = [

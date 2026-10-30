@@ -22,7 +22,7 @@ public enum ManagedSchemaProjection {
     EVENT_STREAM(
             "tenant_id, session_id, stream_kind, stream_id, last_sequence, "
                     + "replay_floor_sequence, covered_sequence, wake_covered_sequence, projection_version, "
-                    + "snapshot_stale_since, current_snapshot_id, artifact_refs_resource_key, "
+                    + "artifact_refs_resource_key, "
                     + "output_ranges_json, projection_pending, gmt_modified"),
     MESSAGE(
             "tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, "
@@ -74,8 +74,7 @@ public enum ManagedSchemaProjection {
     RESOURCE(
             "resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, "
                     + "kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, object_key, "
-                    + "object_version_id, encryption_key_id, publish_command_id, state, snapshot_id, "
-                    + "snapshot_page_ordinal, snapshot_page_first_sequence, snapshot_page_last_sequence, "
+                    + "object_version_id, encryption_key_id, publish_command_id, state, "
                     + "scope_key, publication_id, slot_key, capture_state, capture_object_key, "
                     + "operation_id, quarantine_reason, deletion_operation_key, gmt_create, "
                     + "last_verified_at, retention_until"),
@@ -151,10 +150,6 @@ public enum ManagedSchemaProjection {
                     + "started_at, settled_at, first_sequence, hook_once_key_hash, hook_occurrence_hash, "
                     + "hook_ordinal, hook_definition_hash, record_kind, state, action_id, action_version, "
                     + "decision_receipt_id, decision_digest, prompt_id, turn_id, options_json"),
-    SNAPSHOT(
-            "tenant_id, session_id, snapshot_id, snapshot_version, covered_sequence, "
-                    + "projection_version, manifest_resource_key, manifest_sha256, item_count, state, "
-                    + "gmt_create, published_at, retain_until"),
     STORAGE(
             "alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key, "
                     + "registration_state, storage_kind, registration_revision, registration_json, "

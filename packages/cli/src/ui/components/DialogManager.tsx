@@ -193,8 +193,11 @@ export const DialogManager = ({
     );
   }
   if (uiState.providerUpdateRequest) {
+    // Keyed per prompt so a queued prompt opens on its default choice
+    // instead of the row highlighted in the previous one.
     return (
       <ProviderUpdatePrompt
+        key={uiState.providerUpdateRequest.id}
         entries={uiState.providerUpdateRequest.entries}
         onConfirm={uiState.providerUpdateRequest.onConfirm}
       />

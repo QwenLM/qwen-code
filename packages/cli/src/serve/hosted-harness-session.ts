@@ -4173,6 +4173,13 @@ export function registerHostedHarnessSessionRoutes(
   const unresolvedOpenings = new Set<string>();
   let initialReconciliations = 0;
   const epoch = contract.bootId.replaceAll('-', '_');
+  // E2E fault injection only (QWEN_E2E_DROP_LOAD_REPLY=<sessionId>, set by the
+  // packaged load-reply-lost arm on the replacement Harness): lose exactly the
+  // first load attach reply for that Session, after its driver has started, so
+  // the control plane must redrive the same load into the now-active driver.
+  // The flag is never set in production.
+  const dropLoadReplySession = process.env['QWEN_E2E_DROP_LOAD_REPLY'];
+  let loadReplyDropped = false;
   const released = new Map<
     string,
     { clientId: string; receipt: HostedHarnessReleaseReceipt }
@@ -4397,6 +4404,14 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     recovery?: HostedRuntimeRecoveryReport,
   ): void => {
+    if (dropLoadReplySession === sessionId && !loadReplyDropped) {
+      loadReplyDropped = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E dropping first load reply for Session ${sessionId}`,
+      );
+      res.destroy();
+      return;
+    }
     res.status(200).json({
       sessionId,
       clientId: session.clientId,

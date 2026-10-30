@@ -439,7 +439,7 @@ public final class ApiModels {
     public record WebShellSessionSkills(List<WebShellSkill> skills) { }
 
     public record WebShellTranscriptRequest(@NotBlank String sessionId,
-            String cursor, Integer limit) {
+            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit) {
     }
 
     public record WebShellStreamRequest(@NotBlank String sessionId,

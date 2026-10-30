@@ -74,7 +74,7 @@ focused 使用真实 bridge/adapter 和独占 JSONL，仅控制 core/scheduler �
 
 MOD 投影用例先在真实 bridge、模型 continuation 和录制消费者处核对最终 parts，再检查 JSON。非空 display 与空 display 两个变体都要求逻辑结果仅出现一次，且位于 tool use 与下一条 assistant 之间；两者均不改变共享序列化合同。保留原先只检查 JSON 而预期错误的失败记录，将其归为测试断言证据，不称为生产修复。
 
-验收要求支持路径匹配真实 Ink 的事件类别/顺序/ID，queue/replay/retry 不重复，旧流不污染后继，正常关闭 session_start/session_end 各一次，正常退出后没有捕获的产品活体。只解析完整 flush 的行，拒绝坏 JSON/ANSI。普通场景 `/quit` 期望 0；active raw CtrlC 基线明确记录 Ink 0 和当前 OpenTUI 130，不接受任意非零码，也不改变产品语义。
+验收要求支持路径匹配真实 Ink 的事件类别/顺序/ID，queue/replay/retry 不重复，旧流不污染后继，正常关闭 session_start/session_end 各一次，正常退出后没有捕获的产品活体。只解析完整 flush 的行，拒绝坏 JSON/ANSI。普通 `/quit` 和确认的 active raw CtrlC 键盘退出，在三个 profile 均须完成共享清理后以 0 退出。保留历史 Ink 0/OpenTUI 130 基线，作为本次修正的差异；真实 OS signal 终止保留原信号码。任意非零码和 harness 清理均不等于优雅退出。
 
 准备夹具独立版本化并锁 hash。原 R3 v2 结果与 manifest 不变。基线收集、实现验证、独立审查是不同证据阶段。后续 commit 不可声称旧 R3 tarball 包含变更后的源码。
 
