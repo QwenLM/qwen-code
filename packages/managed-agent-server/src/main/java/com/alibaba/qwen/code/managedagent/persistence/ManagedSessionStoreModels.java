@@ -278,6 +278,13 @@ public final class ManagedSessionStoreModels {
             long nextRevision, boolean hasMore) {
     }
 
+    public record RecentTransactionPage(List<StoredTransaction> transactions,
+            long throughRevision, Long nextBeforeRevision, boolean hasMore) {
+    }
+
+    public record CommandTransaction(long throughRevision, StoredTransaction transaction) {
+    }
+
     public record StoredResource(String resourceId, String kind,
             int schemaVersion, long byteLength, String digest,
             byte[] bytes) {
