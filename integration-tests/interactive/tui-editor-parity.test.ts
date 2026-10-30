@@ -13,6 +13,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  lstatSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -89,6 +91,8 @@ type Context = {
   server: FakeOpenAIServer;
   editorLog: string;
   workspace: string;
+  home: string;
+  evidence: string;
   ownedTemp: string;
   sentinel: string;
   release: () => void;
@@ -282,6 +286,8 @@ async function scenario(
       server,
       editorLog,
       workspace,
+      home,
+      evidence,
       ownedTemp: realpathSync(temp),
       sentinel,
       release,
@@ -1125,4 +1131,210 @@ it(
       },
     ),
   90_000,
+);
+
+it(
+  'manually-creates-project-subagent-without-model',
+  () =>
+    scenario(
+      'manually-creates-project-subagent-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        home,
+        evidence,
+        frame,
+        press,
+        type,
+        restart,
+      }) => {
+        const name = 'owned-manual-proof';
+        const prompt =
+          'You are an owned test subagent. Reply only OWNED_AGENT_REPLY.';
+        const description = 'Owned manual subagent proof.';
+        const projectRoot = join(workspace, '.qwen', 'agents');
+        const userRoot = join(home, 'agents');
+        const file = join(projectRoot, name + '.md');
+        const expected = `---\nname: ${name}\ndescription: ${description}\ncolor: Blue\n---\n\n${prompt}\n`;
+        const tree = (root: string): Record<string, unknown> => {
+          const rows: Record<string, unknown> = {};
+          const visit = (path: string, relative: string) => {
+            const stat = lstatSync(path);
+            expect(stat.isSymbolicLink()).toBe(false);
+            rows[relative] = stat.isDirectory()
+              ? { type: 'dir', mode: stat.mode & 0o777 }
+              : {
+                  type: 'file',
+                  mode: stat.mode & 0o777,
+                  raw: readFileSync(path, 'utf8'),
+                };
+            if (stat.isDirectory())
+              for (const child of readdirSync(path).sort())
+                visit(
+                  join(path, child),
+                  relative === '.' ? child : relative + '/' + child,
+                );
+          };
+          if (existsSync(root)) visit(root, '.');
+          return rows;
+        };
+        const before = { project: tree(projectRoot), user: tree(userRoot) };
+        const screen = async (label: string, texts: string[]) =>
+          until(async () => {
+            const viewport = await frame(label);
+            return texts.every((text) => viewport.includes(text));
+          }, label);
+        await type('/agents create');
+        await press('\r');
+        await screen('create-location-cancel', [
+          'Choose Location',
+          'Project Level',
+          'User Level',
+        ]);
+        await press('\x1b');
+        await screen('create-cancelled', ['Type your message']);
+        const afterCancel = {
+          project: tree(projectRoot),
+          user: tree(userRoot),
+        };
+        writeFileSync(
+          join(evidence, 'agent-cancel-states.json'),
+          JSON.stringify({ before, afterCancel }, null, 2),
+        );
+        expect(afterCancel).toEqual(before);
+        await type('/agents create');
+        await press('\r');
+        await screen('create-location', ['Choose Location', 'Project Level']);
+        await press('\r');
+        await screen('create-method', [
+          'Choose Generation Method',
+          'Manual Creation',
+        ]);
+        await press('\x1b[B');
+        await press('\r');
+        await screen('create-name', ['Enter Subagent Name']);
+        await type(name);
+        await press('\r');
+        await screen('create-prompt', ['Enter System Prompt']);
+        await type(prompt);
+        await press('\r');
+        await screen('create-description', ['Enter Description']);
+        await type(description);
+        await press('\r');
+        await screen('create-tools', ['Select Tools', 'All Tools']);
+        await press('\r');
+        await screen('create-color', ['Choose Background Color', 'Blue']);
+        await press('\x1b[B');
+        await press('\r');
+        await screen('create-confirm', [
+          'Confirm and Save',
+          name,
+          description,
+          prompt,
+          'Tools:',
+        ]);
+        if (renderer === 'opentui') {
+          await screen('create-ready-to-save', [
+            'Press Enter to save, Esc to go back',
+          ]);
+        }
+        expect(existsSync(file)).toBe(false);
+        expect(tree(userRoot)).toEqual(before.user);
+        expect(server.requests).toHaveLength(0);
+        await press('\r');
+        await until(() => existsSync(file), 'project agent committed');
+        expect(readFileSync(file, 'utf8')).toBe(expected);
+        expect(readdirSync(projectRoot)).toEqual([name + '.md']);
+        expect(tree(userRoot)).toEqual(before.user);
+        writeFileSync(join(evidence, 'created-agent.md'), readFileSync(file));
+        const afterSave = { project: tree(projectRoot), user: tree(userRoot) };
+        writeFileSync(
+          join(evidence, 'agent-store-states.json'),
+          JSON.stringify(
+            {
+              before,
+              after: afterSave,
+            },
+            null,
+            2,
+          ),
+        );
+        const inspectCreatedAgent = async (phase: 'hot' | 'cold') => {
+          await screen(`${phase}-created-agent-list`, [name]);
+          await press('\r');
+          await screen(`${phase}-created-agent-actions`, [
+            'Choose Action',
+            'View Agent',
+          ]);
+          await press('\r');
+          await screen(`${phase}-created-agent-detail`, [
+            name,
+            'Description:',
+            description,
+            'System Prompt:',
+            prompt,
+          ]);
+          await press('\x1b');
+          await screen(`${phase}-created-agent-actions-back`, [
+            'Choose Action',
+            'View Agent',
+          ]);
+          await press('\x1b');
+          await screen(`${phase}-created-agent-list-back`, [
+            name,
+            'Enter to select',
+          ]);
+          const afterRead = {
+            project: tree(projectRoot),
+            user: tree(userRoot),
+          };
+          writeFileSync(
+            join(evidence, `agent-${phase}-read-only-states.json`),
+            JSON.stringify({ before: afterSave, after: afterRead }, null, 2),
+          );
+          expect(afterRead).toEqual(afterSave);
+        };
+        await screen('create-saved-composer', ['Type your message']);
+        await type('/agents manage');
+        await press('\r');
+        await inspectCreatedAgent('hot');
+        expect(readFileSync(file, 'utf8')).toBe(expected);
+        expect(tree(userRoot)).toEqual(before.user);
+        await press('\x1b');
+        await screen('hot-composer', ['Type your message']);
+        await type('/quit');
+        await press('\r');
+        await until(
+          () => session.exitResult() !== undefined,
+          'first natural quit',
+        );
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        const cold = await restart();
+        await type('/agents manage');
+        await press('\r');
+        await inspectCreatedAgent('cold');
+        expect(tree(userRoot)).toEqual(before.user);
+        expect(readdirSync(projectRoot)).toEqual([name + '.md']);
+        writeFileSync(
+          join(evidence, 'agent-cold-store-states.json'),
+          JSON.stringify(
+            { project: tree(projectRoot), user: tree(userRoot) },
+            null,
+            2,
+          ),
+        );
+        expect(readFileSync(file, 'utf8')).toBe(expected);
+        await press('\x1b');
+        await screen('cold-composer', ['Type your message']);
+        await type('/quit');
+        await press('\r');
+        await until(() => cold.exitResult() !== undefined, 'cold natural quit');
+        expect(cold.exitResult()?.exitCode).toBe(0);
+        expect(cold.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  120_000,
 );

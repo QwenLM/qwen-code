@@ -1,0 +1,41 @@
+# OpenTUI agent manager read-only details
+
+[English](2026-10-30-opentui-agent-manager-details.md) | [简体中文](2026-10-30-opentui-agent-manager-details.zh-CN.md)
+
+## Status and problem
+
+The revised global Ink baseline actually passed with hot/cold details and unchanged complete agent-store maps. The unchanged OpenTUI manager then failed at `hot-created-agent-actions`: after Enter its actual frame still showed the passive Subagents name/description list. That original failure is retained. The native read-only implementation is now verified locally with the manual wizard as uncommitted feature changes on the current dependency foundation. After the PascalCase file-name correction, six whole CLI test files passed 111 tests, and normal build, typecheck, lint and bundle all passed. Node+Ink, Bun+Ink and strict Bun+OpenTUI each passed the four selected public cases: two Permissions cases, Source acquisition, and manual creation with hot/cold manager details. Across the three profiles this is 12 executions of four unique cases, with 18 observed natural session exits and zero model requests. This is pre-commit local candidate evidence, not merged-main or installation acceptance.
+
+The public `/agents manage` command opens `subagent_list`. Ink lets the user select an agent, choose View Agent, read its configuration, and return through the action and list screens. Before this change OpenTUI reduced the manager result to name/description bullets and only handled Escape. The earlier manual-creation E2E deliberately checked details on Ink and only list descriptions on OpenTUI; its success did not establish detail parity. The revised case now requires details on both renderers.
+
+## Proposed behavior
+
+Preserve the full public `SubagentConfig` returned by `config.getSubagentManager().listSubagents({ force: true })`. Keep the manager's project/user/builtin/extension precedence rather than implement another lookup or load by a displayed name. Show a selectable agent list, a read-only action screen with View Agent and Back, and a scrollable detail screen. Do not advertise unimplemented Edit or Delete actions.
+
+Details show the same existing values as Ink: File Path, Tools, optional Model and Color, Description, and System Prompt. Use existing translation keys, terminal-safe rendering, and shared native selection/scroll primitives. Display labels must explicitly consume item labels; selection values remain identities. A missing tools field displays `*`, matching Ink. Preserve actual empty-array behavior rather than invent serializer semantics.
+
+Enter selects only within the active screen. Escape returns details → actions → list → composer, retaining the selected agent. Each screen owns its keys; stale callbacks must not act after a transition or unmount. Loading and error states must not manufacture an empty successful list. This is read-only: no save, editor launch, update, delete, model request, or reload mutation.
+
+## Owners and consumers
+
+| Owner              | Actual consumer and responsibility                                                                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI command        | `ui/commands/agentsCommand.ts` returns `subagent_list`; no new command/options.                                                                                                               |
+| Dialog mount       | `ui/opentui/opentui-dialog-mount.tsx` supplies the selected runtime's existing Config and close callback.                                                                                     |
+| Manager panel      | `ui/opentui/dialogs-misc.tsx` currently owns the list. Its export now forwards to `SubagentListDialog.tsx`, which owns the full selected object, navigation, loading, and keyboard lifecycle. |
+| Public manager     | `packages/core/src/subagents/subagent-manager.ts` owns disk refresh, safe-mode filtering, and level/name precedence; unchanged. Its returned full object supplies viewer data.                |
+| Native primitives  | Existing DialogFrame/DialogSelect/scrollbox own layout and selection mechanics; callers provide stable items and explicit safe display labels. No shared-hook redesign.                       |
+| Reference UI       | Ink `components/subagents/manage/AgentsManagerDialog.tsx`, `ActionSelectionStep.tsx`, and `AgentViewerStep.tsx` define the existing read-only path.                                           |
+| Acceptance harness | Existing interactive scenario owns temporary workspace/HOME/runtime, session restart, snapshots, and zero-model observation. Root alone runs producers.                                       |
+
+## Files and boundaries
+
+The production change is CLI-only: one extracted manager component and its existing re-export. Collocated behavior tests use the real shared selection component, and the focused E2E delta preserves the original public setup. The panel reserves a footer row in the region budget; the existing short-terminal layout tests now account for that row. Mount/config wiring already exists. No Core changes, edit/delete/generation work, manager-wide refactor, default switch, or Ink removal.
+
+## Validation and acceptance
+
+Reuse the public manual-creation setup, including cancel-before-write and exact Markdown, then require the existing Ink detail/navigation observations on both renderers. Capture full project/user agent maps immediately after creation and require equality after every hot/cold manager traversal. Capture zero model requests and natural quit results. New unit tests cover real native display labels, selection/back-stack, state-owner transitions, empty/error states, and unmount during async listing. Those checks now passed on the local candidate, including actual hot/cold name, description and system-prompt observations, action/list return navigation, and complete post-create agent-store equality. The component tests additionally cover real shared choice labels, optional detail fields, loading/error states, page and runtime ownership, unmount, and basic scroll dispatch. They do not establish a native long-scroll or optional-field E2E. Manual-field Ctrl+C is unit-tested, not exercised by this native manual case. All earlier failures remain scoped to their original runs.
+
+## Open questions
+
+The global baseline source identity remains unknown. Native E2E currently asserts the owned agent's name, description and system prompt and the read-only navigation/store contract; it does not assert every optional field or long scrolling. The bundle entry digest identifies that entry only. A separate finite identity snapshot covers 1,378 generated files, not the whole dependency graph or every transitive runtime input. Guided creation, edit/delete, other platforms, installed artifacts and final merged-main acceptance remain outside this proof.
