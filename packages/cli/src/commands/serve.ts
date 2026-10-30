@@ -81,6 +81,25 @@ export function validateManagedLocalFlags(args: readonly string[]): void {
   }
 }
 
+export function validateManagedWebFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed-web-config',
+    '--hostname',
+    '--port',
+    '--allow-origin',
+    '--token',
+    '--require-auth',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed-web-config. Only hostname, port, allow-origin and browser authentication options are supported.`,
+    );
+  }
+}
+
 /**
  * Turn Local Control on through the daemon and print the pairing QR.
  *
@@ -252,6 +271,7 @@ interface ServeArgs {
   profile: 'default' | 'hosted-harness';
   managed: boolean;
   'managed-data-dir'?: string;
+  'managed-web-config'?: string;
   'hosted-harness-capability-digest'?: string;
   token?: string;
   'max-sessions'?: number;
@@ -366,6 +386,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requiresArg: true,
         description:
           'Private persistent data directory for --managed; defaults to <Qwen home>/managed-local.',
+      })
+      .option('managed-web-config', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires an independent browser token of at least 32 bytes via QWEN_SERVER_TOKEN or --token.',
       })
       .option('token', {
         type: 'string',
@@ -875,6 +901,40 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
+    if (argv['managed-web-config'] !== undefined) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedWebFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.managed ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined
+        ) {
+          throw new Error(
+            '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
+          );
+        }
+        const { runManagedWebServe } = await import(
+          '../serve/managed-web-serve.js'
+        );
+        const handle = await runManagedWebServe({
+          configFile: argv['managed-web-config'],
+          hostname: argv.hostname,
+          port: argv.port,
+          token: argv.token,
+          allowOrigins: argv['allow-origin'],
+        });
+        writeStdoutLine(`Managed WebShell: ${handle.url}`);
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
     if (argv.managed) {
       try {
         const serveIndex = process.argv.indexOf('serve');

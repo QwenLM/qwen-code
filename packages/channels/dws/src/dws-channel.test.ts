@@ -557,6 +557,13 @@ class PolicyDwsChannel extends DwsChannel {
     return this.cursor.pendingImDeliveries ?? [];
   }
 
+  removePendingQuoteChoices(): void {
+    for (const delivery of this.cursor.pendingImDeliveries ?? []) {
+      delete delivery.quoteReply;
+    }
+    this.saveCursor();
+  }
+
   imResponseKindCount(): number {
     return (
       this as unknown as {
@@ -699,6 +706,237 @@ async function readyPolicyChannel(
 }
 
 describe('DwsChannel', () => {
+  it.each(['quotePrivateReply', 'quoteGroupReply'])(
+    'rejects non-boolean %s settings',
+    (field) => {
+      for (const value of ['false', 0, null]) {
+        expect(
+          () =>
+            new DwsChannel(
+              'invalid-quotes',
+              makeConfig({ [field]: value }),
+              makeBridge(),
+            ),
+        ).toThrow(`${field} must be a boolean`);
+      }
+    },
+  );
+
+  it.each([
+    {},
+    { quotePrivateReply: false, quoteGroupReply: false },
+    { quotePrivateReply: true, quoteGroupReply: false },
+    { quotePrivateReply: false, quoteGroupReply: true },
+    { quotePrivateReply: true, quoteGroupReply: true },
+  ])('chooses private and group quoting independently: %j', async (options) => {
+    const client = new FakeDwsClient();
+    await readyPolicyChannel(client, makeConfig(options));
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'private-origin', 'hello', {
+        conversationId: 'private-chat',
+      }),
+    );
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'group-origin', '@Bot hello', {
+        conversationId: 'group-chat',
+      }),
+    );
+
+    const expectedSends = [];
+    const expectedReplies = [];
+    if (options.quotePrivateReply) {
+      expectedReplies.push([
+        'private-chat',
+        'private-origin',
+        'open-alice',
+        'response',
+        expect.any(String),
+      ]);
+    } else {
+      expectedSends.push([
+        { kind: 'direct', openDingTalkId: 'open-alice' },
+        'response',
+        expect.any(String),
+      ]);
+    }
+    if (options.quoteGroupReply) {
+      expectedReplies.push([
+        'group-chat',
+        'group-origin',
+        'open-alice',
+        'response',
+        expect.any(String),
+      ]);
+    } else {
+      expectedSends.push([
+        { kind: 'group', conversationId: 'group-chat' },
+        'response',
+        expect.any(String),
+      ]);
+    }
+    expect(client.sendImMessage.mock.calls).toEqual(expectedSends);
+    expect(client.replyToImMessage.mock.calls).toEqual(expectedReplies);
+  });
+
+  it.each(['responseMessageId', 'responseSenderId'] as const)(
+    'sends ordinarily when %s is missing even with quoting enabled',
+    async (missingField) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(
+        client,
+        makeConfig({ quotePrivateReply: true, quoteGroupReply: true }),
+      );
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'origin', 'hello'),
+      );
+      channel.responseMessageId = 'origin';
+      channel.responseSenderId = 'open-alice';
+      channel[missingField] = undefined;
+
+      await channel.respond('cid-1', 'fallback');
+
+      expect(client.sendImMessage).toHaveBeenCalledWith(
+        { kind: 'group', conversationId: 'cid-1' },
+        'fallback',
+        expect.any(String),
+      );
+      expect(client.replyToImMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps quoteReply=%s across restart and config changes',
+    async (quoteReply) => {
+      vi.useFakeTimers();
+      try {
+        const name = 'frozen-quote-delivery-dws';
+        const client = new FakeDwsClient();
+        client.sendImMessage.mockRejectedValue(
+          new DwsCommandError('rate limited', 'unknown'),
+        );
+        client.replyToImMessage.mockRejectedValue(
+          new DwsCommandError('rate limited', 'unknown'),
+        );
+        const first = await readyPolicyChannel(
+          client,
+          makeConfig({
+            quotePrivateReply: quoteReply,
+            quoteGroupReply: quoteReply,
+          }),
+          name,
+        );
+        await client.emit(
+          1,
+          message(
+            'user_im_message_receive_o2o_all',
+            'private-frozen',
+            'hello',
+            { conversationId: 'private-chat' },
+          ),
+        );
+        await client.emit(
+          0,
+          message('user_im_message_receive_at', 'group-frozen', '@Bot hello', {
+            conversationId: 'group-chat',
+          }),
+        );
+        expect(first.channel.pendingImDeliveries()).toEqual([
+          expect.objectContaining({
+            isGroup: false,
+            quoteReply,
+            directTarget: { kind: 'direct', openDingTalkId: 'open-alice' },
+          }),
+          expect.objectContaining({ isGroup: true, quoteReply }),
+        ]);
+        const originalCalls = quoteReply
+          ? client.replyToImMessage.mock.calls
+          : client.sendImMessage.mock.calls;
+        expect(originalCalls).toHaveLength(2);
+        first.channel.disconnect();
+
+        vi.advanceTimersByTime(5_000);
+        const restartedClient = new FakeDwsClient();
+        const restarted = await readyPolicyChannel(
+          restartedClient,
+          makeConfig({
+            quotePrivateReply: !quoteReply,
+            quoteGroupReply: !quoteReply,
+          }),
+          name,
+        );
+        await restarted.channel.poll();
+        expect(restartedClient.replyToImMessage.mock.calls).toEqual(
+          quoteReply ? originalCalls : [],
+        );
+        expect(restartedClient.sendImMessage.mock.calls).toEqual(
+          quoteReply ? [] : originalCalls,
+        );
+        expect(restarted.bridge.prompt).not.toHaveBeenCalled();
+        expect(restarted.channel.pendingImDeliveries()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('retains legacy queued private sends and group replies under the new defaults', async () => {
+    vi.useFakeTimers();
+    try {
+      const name = 'legacy-quote-delivery-dws';
+      const client = new FakeDwsClient();
+      client.sendImMessage.mockRejectedValue(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      client.replyToImMessage.mockRejectedValue(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const first = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+        name,
+      );
+      await client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'private-legacy', 'hello', {
+          conversationId: 'private-chat',
+        }),
+      );
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'group-legacy', '@Bot hello', {
+          conversationId: 'group-chat',
+        }),
+      );
+      first.channel.removePendingQuoteChoices();
+      first.channel.disconnect();
+
+      vi.advanceTimersByTime(5_000);
+      const restartedClient = new FakeDwsClient();
+      const restarted = await readyPolicyChannel(
+        restartedClient,
+        makeConfig(),
+        name,
+      );
+      await restarted.channel.poll();
+      expect(restartedClient.sendImMessage.mock.calls).toEqual(
+        client.sendImMessage.mock.calls,
+      );
+      expect(restartedClient.replyToImMessage.mock.calls).toEqual(
+        client.replyToImMessage.mock.calls,
+      );
+      expect(restartedClient.sendImMessage).toHaveBeenCalledOnce();
+      expect(restartedClient.replyToImMessage).toHaveBeenCalledOnce();
+      expect(restarted.bridge.prompt).not.toHaveBeenCalled();
+      expect(restarted.channel.pendingImDeliveries()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('routes prefixed IM messages after mention normalization and filters unmatched messages', async () => {
     const client = new FakeDwsClient();
     const { bridge, channel } = await readyPolicyChannel(
@@ -8495,7 +8733,10 @@ describe('DwsChannel', () => {
 
   it('uses the originating message for a final group reply', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(client);
+    const channel = await readyChannel(
+      client,
+      makeConfig({ quoteGroupReply: true }),
+    );
     await client.emit(
       0,
       message('user_im_message_receive_at', 'message-1', '@Qwen hello', {
@@ -8528,7 +8769,10 @@ describe('DwsChannel', () => {
       client.replyToImMessage
         .mockRejectedValueOnce(new DwsCommandError('rate limited', 'unknown'))
         .mockResolvedValue(undefined);
-      const { channel, bridge } = await readyPolicyChannel(client);
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
 
       await expect(
         client.emit(
@@ -8577,7 +8821,11 @@ describe('DwsChannel', () => {
       firstClient.replyToImMessage.mockRejectedValueOnce(
         new DwsCommandError('rate limited', 'unknown'),
       );
-      const first = await readyPolicyChannel(firstClient, makeConfig(), name);
+      const first = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ quoteGroupReply: true }),
+        name,
+      );
 
       await firstClient.emit(
         0,
@@ -8591,7 +8839,7 @@ describe('DwsChannel', () => {
       const restartedClient = new FakeDwsClient();
       const restarted = await readyPolicyChannel(
         restartedClient,
-        makeConfig(),
+        makeConfig({ quoteGroupReply: true }),
         name,
       );
       await restarted.channel.poll();
@@ -8604,7 +8852,11 @@ describe('DwsChannel', () => {
       restarted.channel.disconnect();
 
       const finalClient = new FakeDwsClient();
-      const final = await readyPolicyChannel(finalClient, makeConfig(), name);
+      const final = await readyPolicyChannel(
+        finalClient,
+        makeConfig({ quoteGroupReply: true }),
+        name,
+      );
       await final.channel.poll();
       expect(final.bridge.prompt).not.toHaveBeenCalled();
       expect(finalClient.replyToImMessage).not.toHaveBeenCalled();
@@ -8689,7 +8941,10 @@ describe('DwsChannel', () => {
 
   it('keeps delivering when the pre-send cursor checkpoint fails', async () => {
     const client = new FakeDwsClient();
-    const { channel, bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ quoteGroupReply: true }),
+    );
     channel.failNextImDeliverySave = true;
 
     await client.emit(
@@ -8715,7 +8970,11 @@ describe('DwsChannel', () => {
           releaseDelivery = resolve;
         }),
     );
-    await readyPolicyChannel(client, makeConfig(), name);
+    await readyPolicyChannel(
+      client,
+      makeConfig({ quoteGroupReply: true }),
+      name,
+    );
 
     await client.emit(
       0,
@@ -8723,7 +8982,7 @@ describe('DwsChannel', () => {
     );
     const reloaded = await readyPolicyChannel(
       new FakeDwsClient(),
-      makeConfig(),
+      makeConfig({ quoteGroupReply: true }),
       name,
     );
 
@@ -8746,6 +9005,7 @@ describe('DwsChannel', () => {
       const first = await readyPolicyChannel(
         firstClient,
         makeConfig({
+          quoteGroupReply: true,
           groups: {
             '*': { senders: 'allowlist', allowedUsers: ['open-alice'] },
           },
@@ -8764,6 +9024,7 @@ describe('DwsChannel', () => {
       const restarted = await readyPolicyChannel(
         restartedClient,
         makeConfig({
+          quoteGroupReply: true,
           groups: { '*': { senders: 'allowlist', allowedUsers: [] } },
         }),
         name,
@@ -8786,6 +9047,7 @@ describe('DwsChannel', () => {
       const final = await readyPolicyChannel(
         new FakeDwsClient(),
         makeConfig({
+          quoteGroupReply: true,
           groups: { '*': { senders: 'allowlist', allowedUsers: [] } },
         }),
         name,
@@ -8800,6 +9062,7 @@ describe('DwsChannel', () => {
   it('keeps private permissions independent of approved paired groups', async () => {
     const name = 'paired-group-delivery-dws';
     const config = makeConfig({
+      quoteGroupReply: true,
       groupPolicy: 'pairing',
       senderPolicy: 'allowlist',
       allowedUsers: [],
@@ -8877,7 +9140,10 @@ describe('DwsChannel', () => {
     try {
       vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
       const name = 'transient-group-approval-dws';
-      const config = makeConfig({ groupPolicy: 'pairing' });
+      const config = makeConfig({
+        quoteGroupReply: true,
+        groupPolicy: 'pairing',
+      });
       const client = new FakeDwsClient();
       const { channel, bridge } = await readyPolicyChannel(
         client,
@@ -8944,7 +9210,10 @@ describe('DwsChannel', () => {
     try {
       vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
       const name = 'bounded-group-approval-deferral-dws';
-      const config = makeConfig({ groupPolicy: 'pairing' });
+      const config = makeConfig({
+        quoteGroupReply: true,
+        groupPolicy: 'pairing',
+      });
       const client = new FakeDwsClient();
       const { channel } = await readyPolicyChannel(client, config, name);
       await client.emit(
@@ -8999,7 +9268,11 @@ describe('DwsChannel', () => {
       client.replyToImMessage.mockRejectedValueOnce(
         new DwsCommandError('rate limited', 'unknown'),
       );
-      const first = await readyPolicyChannel(client, makeConfig(), name);
+      const first = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+        name,
+      );
       await client.emit(
         0,
         message('user_im_message_receive_at', 'disconnected-reply', 'review'),
@@ -9033,7 +9306,7 @@ describe('DwsChannel', () => {
       );
       const restarted = await readyPolicyChannel(
         restartedClient,
-        makeConfig(),
+        makeConfig({ quoteGroupReply: true }),
         name,
       );
       const [persisted] = restarted.channel.pendingImDeliveries() as Array<{
@@ -9119,7 +9392,7 @@ describe('DwsChannel', () => {
       vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
       const name = 'evicted-direct-target-delivery-dws';
       const client = new FakeDwsClient();
-      client.replyToImMessage.mockRejectedValueOnce(
+      client.sendImMessage.mockRejectedValueOnce(
         new DwsCommandError('rate limited', 'unknown'),
       );
       const { channel, bridge } = await readyPolicyChannel(
@@ -9141,12 +9414,18 @@ describe('DwsChannel', () => {
         ),
       );
 
-      expect(client.sendImMessage).not.toHaveBeenCalled();
-      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+      expect(client.sendImMessage).toHaveBeenCalledWith(
+        { kind: 'direct', openDingTalkId: 'open-alice' },
+        'response',
+        expect.any(String),
+      );
+      expect(client.replyToImMessage).not.toHaveBeenCalled();
       expect(channel.pendingImDeliveries()).toEqual([
         expect.objectContaining({
           messageId: 'evicted-direct-target',
           isGroup: false,
+          quoteReply: false,
+          directTarget: { kind: 'direct', openDingTalkId: 'open-alice' },
         }),
       ]);
       channel.disconnect();
@@ -9161,96 +9440,180 @@ describe('DwsChannel', () => {
       await restarted.channel.poll();
 
       expect(restartedClient.replyToImMessage).not.toHaveBeenCalled();
+      expect(restartedClient.sendImMessage).not.toHaveBeenCalled();
       expect(restarted.channel.pendingImDeliveries()).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('drops a queued group reply after its group allowlist entry is removed', async () => {
-    vi.useFakeTimers();
+  it('keeps a collected direct reply private when its cached target is evicted', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'collect' }),
+      'evicted-collected-direct-dws',
+    );
+    let releaseFirst!: (value: string) => void;
+    const firstPrompt = new Promise<string>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(bridge.prompt)
+      .mockImplementationOnce(() => firstPrompt)
+      .mockImplementationOnce(async () => {
+        channel.forgetImTarget('cid-1');
+        return 'collected response';
+      });
+
+    const firstDelivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'collect-first', 'first'),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    const secondDelivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'collect-second', 'second'),
+    );
     try {
-      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
-      const name = 'revoked-group-delivery-dws';
-      const allowedConfig = makeConfig({
-        groupPolicy: 'allowlist',
-        groups: { 'cid-1': {} },
-      });
-      const firstClient = new FakeDwsClient();
-      firstClient.replyToImMessage.mockRejectedValueOnce(
-        new DwsCommandError('rate limited', 'unknown'),
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toContain('collect-second'),
       );
-      const first = await readyPolicyChannel(firstClient, allowedConfig, name);
-      await firstClient.emit(
-        0,
-        message('user_im_message_receive_at', 'revoked-group', 'review this'),
-      );
-      first.channel.disconnect();
-
-      vi.advanceTimersByTime(5_000);
-      const deniedConfig = makeConfig({
-        groupPolicy: 'allowlist',
-        groups: {},
-      });
-      const secondClient = new FakeDwsClient();
-      const second = await readyPolicyChannel(secondClient, deniedConfig, name);
-      await second.channel.poll();
-      expect(secondClient.replyToImMessage).not.toHaveBeenCalled();
-      expect(second.channel.pendingImDeliveries()).toEqual([]);
-      second.channel.disconnect();
-
-      const thirdClient = new FakeDwsClient();
-      const third = await readyPolicyChannel(thirdClient, deniedConfig, name);
-      await third.channel.poll();
-      expect(thirdClient.replyToImMessage).not.toHaveBeenCalled();
-      expect(third.channel.pendingImDeliveries()).toEqual([]);
+      await secondDelivery;
     } finally {
-      vi.useRealTimers();
+      releaseFirst('first response');
+      await Promise.allSettled([firstDelivery, secondDelivery]);
     }
+
+    await vi.waitFor(() =>
+      expect(client.sendImMessage).toHaveBeenCalledWith(
+        { kind: 'direct', openDingTalkId: 'open-alice' },
+        'collected response',
+        expect.any(String),
+      ),
+    );
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
   });
 
-  it('drops a queued direct reply after direct messages are disabled', async () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
-      const name = 'disabled-dm-delivery-dws';
-      const firstClient = new FakeDwsClient();
-      firstClient.sendImMessage.mockRejectedValueOnce(
-        new DwsCommandError('rate limited', 'unknown'),
-      );
-      const first = await readyPolicyChannel(firstClient, makeConfig(), name);
-      await firstClient.emit(
-        1,
-        message(
-          'user_im_message_receive_o2o_all',
-          'disabled-dm',
-          'review this',
-        ),
-      );
-      first.channel.disconnect();
+  it.each([false, true])(
+    'drops a queued group reply after its group allowlist entry is removed (quoteGroupReply=%s)',
+    async (quoteGroupReply) => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+        const name = 'revoked-group-delivery-dws';
+        const allowedConfig = makeConfig({
+          quoteGroupReply,
+          groupPolicy: 'allowlist',
+          groups: { 'cid-1': {} },
+        });
+        const firstClient = new FakeDwsClient();
+        firstClient.sendImMessage.mockRejectedValueOnce(
+          new DwsCommandError('rate limited', 'unknown'),
+        );
+        firstClient.replyToImMessage.mockRejectedValueOnce(
+          new DwsCommandError('rate limited', 'unknown'),
+        );
+        const first = await readyPolicyChannel(
+          firstClient,
+          allowedConfig,
+          name,
+        );
+        await firstClient.emit(
+          0,
+          message('user_im_message_receive_at', 'revoked-group', 'review this'),
+        );
+        expect(first.channel.pendingImDeliveries()).toHaveLength(1);
+        first.channel.disconnect();
 
-      vi.advanceTimersByTime(5_000);
-      const disabledConfig = makeConfig({ dmPolicy: 'disabled' });
-      const secondClient = new FakeDwsClient();
-      const second = await readyPolicyChannel(
-        secondClient,
-        disabledConfig,
-        name,
-      );
-      await second.channel.poll();
-      expect(secondClient.sendImMessage).not.toHaveBeenCalled();
-      expect(second.channel.pendingImDeliveries()).toEqual([]);
-      second.channel.disconnect();
+        vi.advanceTimersByTime(5_000);
+        const deniedConfig = makeConfig({
+          quoteGroupReply,
+          groupPolicy: 'allowlist',
+          groups: {},
+        });
+        const secondClient = new FakeDwsClient();
+        const second = await readyPolicyChannel(
+          secondClient,
+          deniedConfig,
+          name,
+        );
+        await second.channel.poll();
+        expect(secondClient.sendImMessage).not.toHaveBeenCalled();
+        expect(secondClient.replyToImMessage).not.toHaveBeenCalled();
+        expect(second.channel.pendingImDeliveries()).toEqual([]);
+        second.channel.disconnect();
 
-      const thirdClient = new FakeDwsClient();
-      const third = await readyPolicyChannel(thirdClient, disabledConfig, name);
-      await third.channel.poll();
-      expect(thirdClient.sendImMessage).not.toHaveBeenCalled();
-      expect(third.channel.pendingImDeliveries()).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        const thirdClient = new FakeDwsClient();
+        const third = await readyPolicyChannel(thirdClient, deniedConfig, name);
+        await third.channel.poll();
+        expect(thirdClient.sendImMessage).not.toHaveBeenCalled();
+        expect(thirdClient.replyToImMessage).not.toHaveBeenCalled();
+        expect(third.channel.pendingImDeliveries()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'drops a queued direct reply after direct messages are disabled (quotePrivateReply=%s)',
+    async (quotePrivateReply) => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+        const name = 'disabled-dm-delivery-dws';
+        const firstClient = new FakeDwsClient();
+        firstClient.replyToImMessage.mockRejectedValueOnce(
+          new DwsCommandError('rate limited', 'unknown'),
+        );
+        firstClient.sendImMessage.mockRejectedValueOnce(
+          new DwsCommandError('rate limited', 'unknown'),
+        );
+        const first = await readyPolicyChannel(
+          firstClient,
+          makeConfig({ quotePrivateReply }),
+          name,
+        );
+        await firstClient.emit(
+          1,
+          message(
+            'user_im_message_receive_o2o_all',
+            'disabled-dm',
+            'review this',
+          ),
+        );
+        expect(first.channel.pendingImDeliveries()).toHaveLength(1);
+        first.channel.disconnect();
+
+        vi.advanceTimersByTime(5_000);
+        const disabledConfig = makeConfig({ dmPolicy: 'disabled' });
+        const secondClient = new FakeDwsClient();
+        const second = await readyPolicyChannel(
+          secondClient,
+          disabledConfig,
+          name,
+        );
+        await second.channel.poll();
+        expect(secondClient.replyToImMessage).not.toHaveBeenCalled();
+        expect(secondClient.sendImMessage).not.toHaveBeenCalled();
+        expect(second.channel.pendingImDeliveries()).toEqual([]);
+        second.channel.disconnect();
+
+        const thirdClient = new FakeDwsClient();
+        const third = await readyPolicyChannel(
+          thirdClient,
+          disabledConfig,
+          name,
+        );
+        await third.channel.poll();
+        expect(thirdClient.replyToImMessage).not.toHaveBeenCalled();
+        expect(thirdClient.sendImMessage).not.toHaveBeenCalled();
+        expect(third.channel.pendingImDeliveries()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('drops queued responses after a DWS profile switch', async () => {
     vi.useFakeTimers();
@@ -9262,7 +9625,11 @@ describe('DwsChannel', () => {
       firstClient.replyToImMessage.mockRejectedValueOnce(
         new DwsCommandError('rate limited', 'unknown'),
       );
-      const first = await readyPolicyChannel(firstClient, makeConfig(), name);
+      const first = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ quoteGroupReply: true }),
+        name,
+      );
       await firstClient.emit(
         0,
         message(
@@ -9276,7 +9643,11 @@ describe('DwsChannel', () => {
       vi.advanceTimersByTime(5_000);
       const secondClient = new FakeDwsClient();
       secondClient.identity.profile = 'corp-two';
-      const second = await readyPolicyChannel(secondClient, makeConfig(), name);
+      const second = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ quoteGroupReply: true }),
+        name,
+      );
       await second.channel.poll();
 
       expect(secondClient.replyToImMessage).not.toHaveBeenCalled();
@@ -9290,7 +9661,10 @@ describe('DwsChannel', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       const client = new FakeDwsClient();
-      const { channel, bridge } = await readyPolicyChannel(client);
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       channel.seedPendingImDeliveries(100);
 
       await client.emit(
@@ -9365,7 +9739,10 @@ describe('DwsChannel', () => {
       client.replyToImMessage.mockRejectedValueOnce(
         new DwsCommandError('rate limited', 'unknown'),
       );
-      const { channel, bridge } = await readyPolicyChannel(client);
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       vi.mocked(bridge.prompt).mockResolvedValue(content);
 
       await client.emit(
@@ -9418,7 +9795,10 @@ describe('DwsChannel', () => {
       client.replyToImMessage.mockRejectedValue(
         new DwsCommandError('permanent failure', 'not_sent'),
       );
-      const { channel, bridge } = await readyPolicyChannel(client);
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       await client.emit(
         0,
         message('user_im_message_receive_at', 'terminal-reply', 'review this'),
@@ -9457,7 +9837,10 @@ describe('DwsChannel', () => {
     client.replyToImMessage
       .mockImplementationOnce(() => firstDelivery)
       .mockResolvedValue(undefined);
-    const { channel, bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ quoteGroupReply: true }),
+    );
 
     await client.emit(
       0,
@@ -9500,7 +9883,10 @@ describe('DwsChannel', () => {
             }),
         )
         .mockResolvedValue(undefined);
-      const { channel } = await readyPolicyChannel(client);
+      const { channel } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       await client.emit(
         0,
         message('user_im_message_receive_at', 'parked-reply', 'first request'),
@@ -9541,7 +9927,10 @@ describe('DwsChannel', () => {
             releaseDelivery = resolve;
           }),
       );
-      const { channel } = await readyPolicyChannel(client);
+      const { channel } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       await client.emit(
         0,
         message(
@@ -9595,7 +9984,10 @@ describe('DwsChannel', () => {
             }),
         )
         .mockResolvedValue(undefined);
-      const { channel } = await readyPolicyChannel(client);
+      const { channel } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       await client.emit(
         0,
         message(
@@ -9644,7 +10036,10 @@ describe('DwsChannel', () => {
       client.replyToImMessage
         .mockRejectedValueOnce(new DwsCommandError('rate limited', 'unknown'))
         .mockResolvedValue(undefined);
-      const { channel } = await readyPolicyChannel(client);
+      const { channel } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       await client.emit(
         0,
         message('user_im_message_receive_at', 'dead-disk-reply', 'review this'),
@@ -9668,7 +10063,10 @@ describe('DwsChannel', () => {
       client.replyToImMessage.mockRejectedValue(
         new DwsCommandError('rate limited', 'unknown'),
       );
-      const { channel, bridge } = await readyPolicyChannel(client);
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ quoteGroupReply: true }),
+      );
       await client.emit(
         0,
         message('user_im_message_receive_at', 'backoff-reply', 'review this'),
@@ -9698,7 +10096,10 @@ describe('DwsChannel', () => {
 
   it('attributes an IM reply after checking the raw no-reply sentinel', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(client);
+    const channel = await readyChannel(
+      client,
+      makeConfig({ quoteGroupReply: true }),
+    );
     channel.responseMessageId = 'message-1';
     channel.responseSenderId = 'open-alice';
 
@@ -9838,7 +10239,10 @@ describe('DwsChannel', () => {
 
   it('suppresses the no-reply sentinel wrapped in fences or inline code', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(client);
+    const channel = await readyChannel(
+      client,
+      makeConfig({ quoteGroupReply: true }),
+    );
     channel.responseMessageId = 'message-1';
     channel.responseSenderId = 'open-alice';
 

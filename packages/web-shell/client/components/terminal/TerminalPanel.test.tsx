@@ -10,6 +10,36 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const workspace = vi.hoisted(() => ({ baseUrl: 'http://localhost' }));
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  resumes: new Set<() => void>(),
+  listeners: new Set<() => void>(),
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    subscribe: (listener: () => void) => {
+      availabilityMock.listeners.add(listener);
+      return () => availabilityMock.listeners.delete(listener);
+    },
+    check: vi.fn(async () => {}),
+    waitUntilAvailable: vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          availabilityMock.resumes.add(resolve);
+        }),
+    ),
+  },
+}));
+vi.mock('../../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+vi.mock('../../daemon/availability', () => ({
+  findDaemonAvailability: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 const fit = vi.hoisted(() => vi.fn());
 const { terminal, terminalInstances, createMockTerminal } = vi.hoisted(() => {
   const createMockTerminal = () => ({
@@ -127,6 +157,10 @@ describe('TerminalPanel', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    availabilityMock.enabled = false;
+    availabilityMock.available = true;
+    availabilityMock.resumes.clear();
+    availabilityMock.listeners.clear();
     terminalInstances.length = 0;
     workspace.baseUrl = 'http://localhost';
     FakeWebSocket.instances.length = 0;
@@ -166,6 +200,123 @@ describe('TerminalPanel', () => {
     });
     return FakeWebSocket.instances[0]!;
   }
+
+  it('waits for shared recovery without rebuilding the terminal and releases detached PTYs on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    render();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    releaseDetachedWebTerminal('http://localhost', 'detached');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(terminalInstances).toHaveLength(1);
+    expect(terminal.writeln).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('Connection lost'),
+    );
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(
+      new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+    ).toBe('1');
+    expect(terminalInstances).toHaveLength(1);
+    expect(terminal.dispose).not.toHaveBeenCalled();
+  });
+
+  it('closes a live socket when the shared daemon becomes unavailable', () => {
+    availabilityMock.enabled = true;
+    const ws = render();
+    ws.open();
+    act(() => {
+      availabilityMock.available = false;
+      for (const listener of availabilityMock.listeners) listener();
+    });
+    expect(ws.close).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('checks an unexpected close once and parks websocket retries until shared recovery', async () => {
+    availabilityMock.enabled = true;
+    const ws = render();
+    ws.open();
+    availabilityMock.controller.check.mockImplementationOnce(async () => {
+      availabilityMock.available = false;
+    });
+    await act(async () => {
+      ws.closeWith(1006);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(availabilityMock.controller.check).toHaveBeenCalledTimes(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(terminalInstances).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    'preserves a release across outage and component removal (late close: %s)',
+    async (lateClose) => {
+      availabilityMock.enabled = true;
+      const ws = render();
+      ws.open();
+      availabilityMock.available = false;
+      if (lateClose) ws.close();
+      else {
+        await act(async () => ws.closeWith(1006));
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+      }
+      act(() => {
+        releaseWebTerminal('terminal:one');
+        root.render(null);
+      });
+      if (lateClose) await act(async () => ws.closeWith(1006));
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      await act(async () => {
+        availabilityMock.available = true;
+        for (const resume of availabilityMock.resumes) resume();
+        availabilityMock.resumes.clear();
+      });
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(
+        new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+      ).toBe('1');
+    },
+  );
+
+  it('parks a failed detached release and finishes it once the daemon recovers', async () => {
+    availabilityMock.enabled = true;
+    releaseDetachedWebTerminal(
+      'http://localhost',
+      'terminal:detached',
+      '/workspace',
+    );
+    availabilityMock.controller.check.mockImplementationOnce(async () => {
+      availabilityMock.available = false;
+    });
+    await act(async () => FakeWebSocket.instances[0]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    await act(async () => FakeWebSocket.instances[1]!.closeWith(4004));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
 
   it('keeps binary PTY output distinct from text control frames', async () => {
     const ws = render();
@@ -257,15 +408,20 @@ describe('TerminalPanel', () => {
     },
   );
 
-  it('releases a connecting socket without reconnecting afterward', async () => {
+  it('confirms an unacknowledged connecting release without reconnecting a PTY', async () => {
     const ws = render();
     act(() => releaseWebTerminal('terminal:one'));
 
     act(() => ws.open());
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
     act(() => ws.closeWith(1000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(
+      new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+    ).toBe('1');
+    await act(async () => FakeWebSocket.instances[1]!.closeWith(4004));
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
-    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
   it('keeps the old terminal interactive until reconnect replay finishes', async () => {
@@ -360,6 +516,7 @@ describe('TerminalPanel', () => {
       ws.close.mock.invocationCallOrder[0]!,
     );
     expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    act(() => ws.closeWith(4002));
     // The localized restart notice is a named deliverable; without pinning it
     // the mock's `?? key` fallback would silently render the raw key instead.
     expect(terminal.writeln).toHaveBeenCalledWith(
@@ -472,6 +629,12 @@ describe('TerminalPanel', () => {
     expect(
       new URL(FakeWebSocket.instances[2]!.url).searchParams.get('release'),
     ).toBe('1');
+    await act(async () => FakeWebSocket.instances[2]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    await act(async () => FakeWebSocket.instances[3]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(4);
   });
 
   it('sends the connection contract and initial terminal size', () => {

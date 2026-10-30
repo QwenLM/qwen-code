@@ -18,6 +18,14 @@ const ready: DaemonUpdateStatus = {
   state: 'ready',
   canInstall: false,
 };
+const manual: DaemonUpdateStatus = {
+  ...available,
+  canInstall: false,
+  instructions: [
+    'Run the following to update:',
+    '  npm install -g @qwen-code/qwen-code@0.24.6',
+  ],
+};
 const client = {
   daemonUpdateStatus: vi.fn<() => Promise<DaemonUpdateStatus>>(),
   prepareDaemonUpdate: vi.fn<() => Promise<DaemonUpdateStatus>>(),
@@ -89,6 +97,59 @@ describe('UpdateControl', () => {
       expect(onError).not.toHaveBeenCalled();
     },
   );
+
+  it('shows manual instructions when one-click is unavailable and never restarts', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(manual);
+    const container = render();
+    await flushReact();
+    expect(client.prepareDaemonUpdate).not.toHaveBeenCalled();
+    const button = getByRole(container, 'button', { name: 'Update' });
+    expect(button.title).toBe('Update to v0.24.6 (manual)');
+    await act(async () => {
+      button.click();
+    });
+    const panel = document.querySelector('[data-web-shell-update-manual]');
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain(
+      'npm install -g @qwen-code/qwen-code@0.24.6',
+    );
+    expect(panel!.textContent).toContain(
+      'cannot be updated from the Web Shell',
+    );
+    expect(client.prepareDaemonUpdate).not.toHaveBeenCalled();
+    expect(client.restartDaemonForUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not promise a command when the instructions are prose', async () => {
+    client.daemonUpdateStatus.mockResolvedValue({
+      ...manual,
+      instructions: ['Running via npx, update not applicable.'],
+    });
+    const container = render();
+    await flushReact();
+    await act(async () => {
+      getByRole(container, 'button', { name: 'Update' }).click();
+    });
+    const panel = document.querySelector('[data-web-shell-update-manual]');
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain(
+      'Running via npx, update not applicable.',
+    );
+    expect(panel!.textContent).toContain('Update guidance:');
+    expect(panel!.textContent).not.toContain('Run the following in a terminal');
+    expect(client.prepareDaemonUpdate).not.toHaveBeenCalled();
+    expect(client.restartDaemonForUpdate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the manual-instructions button accessible when collapsed in Chinese', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(manual);
+    const container = render(true, 'zh-CN');
+    await flushReact();
+    const button = getByRole(container, 'button', { name: '更新' });
+    expect(button.textContent).toBe('');
+    expect(button.title).toBe('更新至 v0.24.6（手动）');
+    expect(client.prepareDaemonUpdate).not.toHaveBeenCalled();
+  });
 
   it('restarts only on click, tolerates downtime, and reloads after the new version starts', async () => {
     client.daemonUpdateStatus.mockResolvedValue(ready);

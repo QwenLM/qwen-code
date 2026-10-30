@@ -33,6 +33,7 @@ import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
   isValidSessionApprovalModePayload,
+  isValidSessionWorkflowModePayload,
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
   normalizeSessionApprovalModePayload,
@@ -41,6 +42,7 @@ import {
   type ParentSessionRecordPayload,
   type SessionModelRecordPayload,
   type SessionApprovalModeRecordPayload,
+  type SessionWorkflowModeRecordPayload,
   type SessionSourceRecordPayload,
   type TitleSource,
   type UiTelemetryRecordPayload,
@@ -267,6 +269,7 @@ export interface SessionRestoreReplayPage {
   hasMore: boolean;
   anchorRecordId?: string;
   replay?: unknown;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
   goalRecoverySourceUuid?: string;
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
@@ -282,6 +285,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
     turnPromptIds?: Array<string | undefined>;
+    turnDaemonPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -289,6 +293,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
     sourceId?: string;
     sessionModel?: SessionModelRecordPayload;
     sessionApprovalMode?: SessionApprovalModeRecordPayload;
+    sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
     lastAssistantModel?: string;
     executionEngine?: SessionExecutionEngine;
   };
@@ -412,6 +417,7 @@ function buildManagedSessionRestoreProjection(
         records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
       turnParentUuids: turnStateValue.turnParentUuids,
       turnPromptIds: turnStateValue.turnPromptIds,
+      turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
       ...(input.customTitle !== undefined
         ? { customTitle: input.customTitle }
         : {}),
@@ -1811,6 +1817,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.turnPromptId) +
+      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
@@ -2702,6 +2709,22 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
   );
 }
 
+// Null prototype: record uuids are untrusted, and '__proto__' would silently
+// drop the entry on a plain object.
+function branchPointsForRecords(
+  index: TranscriptIndex,
+  records: readonly ChatRecord[],
+): Record<string, string> | undefined {
+  let branchPoints: Record<string, string> | undefined;
+  for (const record of records) {
+    const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+    if (checkpointUuid !== undefined) {
+      (branchPoints ??= Object.create(null))[record.uuid] = checkpointUuid;
+    }
+  }
+  return branchPoints;
+}
+
 function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
@@ -3196,6 +3219,13 @@ export class SessionTranscriptReader {
       );
     });
     const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
+    const sessionWorkflowModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
+      );
+    });
+    const sessionWorkflowModeSet = new Set(sessionWorkflowModeUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -3245,6 +3275,7 @@ export class SessionTranscriptReader {
         sessionSourceUuid,
         ...sessionModelUuids,
         ...sessionApprovalModeUuids,
+        ...sessionWorkflowModeUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -3270,6 +3301,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let sessionApprovalMode: SessionApprovalModeRecordPayload | undefined;
+    let sessionWorkflowMode: SessionWorkflowModeRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
     let firstRecordSeen = false;
     const deferredPreReadRecords = new Map<string, ChatRecord>();
@@ -3309,6 +3341,10 @@ export class SessionTranscriptReader {
       } else if (sessionModelSet.has(record.uuid)) {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
+        }
+      } else if (sessionWorkflowModeSet.has(record.uuid)) {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          sessionWorkflowMode = { enabled: record.systemPayload.enabled };
         }
       } else if (sessionApprovalModeSet.has(record.uuid)) {
         if (isValidSessionApprovalModePayload(record.systemPayload)) {
@@ -3484,12 +3520,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(replayGoalRecoverySourceUuid &&
         !replaySet.has(replayGoalRecoverySourceUuid)
@@ -3526,6 +3566,7 @@ export class SessionTranscriptReader {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
         turnPromptIds: turnStateValue.turnPromptIds,
+        turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
@@ -3533,6 +3574,7 @@ export class SessionTranscriptReader {
         ...(sourceId !== undefined ? { sourceId } : {}),
         ...(sessionModel !== undefined ? { sessionModel } : {}),
         ...(sessionApprovalMode !== undefined ? { sessionApprovalMode } : {}),
+        ...(sessionWorkflowMode !== undefined ? { sessionWorkflowMode } : {}),
         ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
         ...(index.executionEngine.status === 'verified' &&
         index.executionEngine.recorded
@@ -3858,12 +3900,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(goalState
           ? {
@@ -4051,15 +4097,7 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? pageStartPosition + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    // Null prototype: record uuids are untrusted, and '__proto__' would
-    // silently drop the entry on a plain object.
-    const pageBranchPoints: Record<string, string> = Object.create(null);
-    for (const record of records) {
-      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
-      if (checkpointUuid !== undefined) {
-        pageBranchPoints[record.uuid] = checkpointUuid;
-      }
-    }
+    const pageBranchPoints = branchPointsForRecords(index, records);
     const backwardGoalState =
       direction === 'backward' || options.atRecordId !== undefined
         ? await readGoalStatePayloadBeforePosition(
@@ -4113,7 +4151,7 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
-      ...(Object.keys(pageBranchPoints).length > 0
+      ...(pageBranchPoints
         ? { branchPointsByAssistantUuid: pageBranchPoints }
         : {}),
       ...(options.atRecordId !== undefined

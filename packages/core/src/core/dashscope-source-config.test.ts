@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDashScopeSourceConfig,
   withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
 } from './dashscope-source-config.js';
 import {
   QWENCLOUD_CHINA_BASE_URL,
@@ -107,5 +108,29 @@ describe('withDashScopeSourceConfig', () => {
         'https://maas.qianwenaiapi.com/compatible-mode/v1',
       ),
     ).toEqual({ 'User-Agent': 'ua', 'X-DashScope-Source-Config': CN_PAYG });
+  });
+});
+
+describe('withoutDashScopeSourceConfig', () => {
+  it('returns undefined unchanged', () => {
+    expect(withoutDashScopeSourceConfig(undefined)).toBeUndefined();
+  });
+
+  it('keeps an object with no attribution entry by identity', () => {
+    const headers = { 'User-Agent': 'ua', 'X-Trace-Id': '1' };
+    expect(withoutDashScopeSourceConfig(headers)).toBe(headers);
+  });
+
+  it.each([
+    'x-dashscope-source-config',
+    'X-DashScope-Source-Config',
+    'X-DASHSCOPE-SOURCE-CONFIG',
+  ])('drops the entry sent as %s and keeps the rest', (casing) => {
+    expect(
+      withoutDashScopeSourceConfig({
+        'User-Agent': 'ua',
+        [casing]: '${session_id}',
+      }),
+    ).toEqual({ 'User-Agent': 'ua' });
   });
 });

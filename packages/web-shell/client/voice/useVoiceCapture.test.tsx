@@ -7,9 +7,35 @@
 // @vitest-environment jsdom
 
 import * as React from 'react';
+import { I18nProvider } from '../i18n';
+import { DaemonUnavailableError } from '../daemon/availability';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  listener: undefined as (() => void) | undefined,
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    assertAvailable: () => {
+      if (!availabilityMock.available) throw new DaemonUnavailableError();
+    },
+    check: vi.fn(async () => {}),
+    subscribe: (listener: () => void) => {
+      availabilityMock.listener = listener;
+      return () => {
+        availabilityMock.listener = undefined;
+      };
+    },
+  },
+}));
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 import { useVoiceCapture, type UseVoiceCaptureReturn } from './useVoiceCapture';
 
 (
@@ -116,13 +142,22 @@ async function renderHookHost() {
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
-    root?.render(React.createElement(TestHost));
+    root?.render(
+      React.createElement(
+        I18nProvider,
+        { language: 'zh-CN' },
+        React.createElement(TestHost),
+      ),
+    );
   });
   if (!capture) throw new Error('hook did not render');
   return capture;
 }
 
 beforeEach(() => {
+  availabilityMock.enabled = false;
+  availabilityMock.available = true;
+  availabilityMock.listener = undefined;
   capture = undefined;
   onFinal.mockReset();
   onError.mockReset();
@@ -166,6 +201,33 @@ afterEach(async () => {
 });
 
 describe('useVoiceCapture', () => {
+  it('blocks capture while unavailable and ends an active microphone without restarting on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    const result = await renderHookHost();
+    await act(async () => result.start());
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    expect(MockWebSocket.latest).toBeUndefined();
+    expect(capture!.errorMessage).toBe('Cannot reach the service.');
+    availabilityMock.available = true;
+    await act(async () => capture!.start());
+    const ws = MockWebSocket.latest;
+    expect(ws).toBeDefined();
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(track.stop).toHaveBeenCalled();
+    expect(capture!.status).toBe('error');
+    expect(capture!.errorMessage).toBe('Cannot reach the service.');
+    await act(async () => {
+      availabilityMock.available = true;
+      availabilityMock.listener?.();
+    });
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.latest).toBe(ws);
+  });
+
   it('preserves reverse-proxy base paths in the websocket URL', async () => {
     baseUrl = 'https://example.test/qwen/';
     const result = await renderHookHost();
@@ -669,7 +731,13 @@ describe('useVoiceCapture', () => {
 
     ownerKey = 'workspace-b:session-b';
     await act(async () => {
-      root?.render(React.createElement(TestHost));
+      root?.render(
+        React.createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          React.createElement(TestHost),
+        ),
+      );
     });
 
     expect(firstWs.sent).toContain(JSON.stringify({ type: 'abort' }));
@@ -700,7 +768,13 @@ describe('useVoiceCapture', () => {
 
     ownerKey = 'workspace-b:session-b';
     await act(async () => {
-      root?.render(React.createElement(TestHost));
+      root?.render(
+        React.createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          React.createElement(TestHost),
+        ),
+      );
     });
 
     expect(capture?.status).toBe('idle');
@@ -729,7 +803,13 @@ describe('useVoiceCapture', () => {
 
     ownerKey = 'workspace-b:session-b';
     await act(async () => {
-      root?.render(React.createElement(TestHost));
+      root?.render(
+        React.createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          React.createElement(TestHost),
+        ),
+      );
     });
     await act(async () => {
       resolveStream?.({ getTracks: () => [track] });

@@ -543,10 +543,9 @@ jobs:
                 done || true
           fi
 
-      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
-      # instant the branch is pushed) instead of github.ref. github.ref is the
-      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
-      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Pin PRs to the event head SHA: refs/pull/N/head can advance before a
+      # retry, while github.ref is the asynchronously rebuilt merge ref and
+      # can lag behind a push. Neither mutable ref identifies this run's head.
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
@@ -570,7 +569,7 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -788,6 +787,10 @@ jobs:
           # work runs 5x apart depending on placement (#10490). Skip those
           # assertions here — they still run locally and on the hosted lanes.
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          # The lane script's side-lane log, outside the TMPDIR this step
+          # removes. The script deletes it once replayed, so it is left only
+          # when this step is killed first; the next step prints it.
+          SIDE_LANE_LOG: '${{ runner.temp }}/side-lane-tests.log'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           test_runner=()
@@ -837,6 +840,17 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
+
+      # A timeout or a cancel kills the test step before the lane script
+      # replays its side lane, which runs every suite but the CLI and core
+      # ones. Print what the side lane got through.
+      - name: 'Print the side lane of a killed test step'
+        if: '${{ failure() || cancelled() }}'
+        run: |-
+          side_log="${RUNNER_TEMP}/side-lane-tests.log"
+          if [ -f "${side_log}" ]; then
+            cat "${side_log}"
+          fi
 
       # The host looks healthy after cleanup, so persist the disk-pressure
       # timeline from a failed run (#10035): the artifact keeps the samples
@@ -1073,10 +1087,9 @@ jobs:
                 done || true
           fi
 
-      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
-      # instant the branch is pushed) instead of github.ref. github.ref is the
-      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
-      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Pin PRs to the event head SHA: refs/pull/N/head can advance before a
+      # retry, while github.ref is the asynchronously rebuilt merge ref and
+      # can lag behind a push. Neither mutable ref identifies this run's head.
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
@@ -1100,7 +1113,7 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -1151,7 +1164,7 @@ jobs:
         run: 'node .github/scripts/check-ci-budget.mjs'
 
       # A green lane proves the branch passes the gate AS THE BRANCH defines
-      # it — the checkout above is refs/pull/N/head by deliberate trade-off —
+      # it — the checkout above is the event PR head by deliberate trade-off —
       # not as the base defines it. #11117 flipped Prettier --write →
       # --check on main while #11216's branch still ran --write; it merged
       # green and reddened every later full-profile PR (#11378 cleaned up).
@@ -1183,7 +1196,7 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          DOCUMENT='packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          DOCUMENT='packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json'
           gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | .filename, .previous_filename // empty' > "${RUNNER_TEMP}/contract-pr-files.txt"
           if ! grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"; then
             exit 0
@@ -1191,7 +1204,7 @@ jobs:
           BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
           git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
           if ! git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null; then
-            PREVIOUS_DOCUMENT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | select(.filename == "packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json") | .previous_filename // empty')"
+            PREVIOUS_DOCUMENT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | select(.filename == "packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json") | .previous_filename // empty')"
             if [ -n "${PREVIOUS_DOCUMENT}" ]; then
               git show "FETCH_HEAD:${PREVIOUS_DOCUMENT}" > "${BASE_DOCUMENT}"
             else
@@ -1222,27 +1235,46 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Blobless: `Report test growth` may already have fetched the merge
-          # base with --filter=blob:none, and a plain fetch then dies resolving
-          # thin-pack deltas against blobs this checkout lacks. lint-scope
-          # reads only commits and trees.
+          # Blobless: an earlier blobless merge-base fetch leaves this
+          # checkout without those blobs, and lint-scope reads only commits and
+          # trees anyway.
           partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
           git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
             origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
-          # Deepen until Git can prove the merge base. A fixed 100-commit
-          # window expires in about a day at this merge rate, after which every
-          # longer-lived PR silently paid for a full scan; each deepen is
-          # blobless, so the extra transfer is trees, not the whole pack.
+          # Match lint-scope's merge-base and shallow-boundary checks.
+          # Ambiguity stops deepening but still announces full-lint fallback.
+          history_usable() {
+            local merge_base above shallow
+            merge_base="$(git merge-base --all "${LINT_BASE_SHA}" HEAD 2>/dev/null)" || return 1
+            case "${merge_base}" in
+              '') return 1 ;;
+              *$'\n'*) return 2 ;;
+            esac
+            [ "$(git rev-parse --is-shallow-repository)" = 'true' ] || return 0
+            shallow="$(git rev-parse --git-path shallow)"
+            above="$(git rev-list "${merge_base}..HEAD" "${merge_base}..${LINT_BASE_SHA}")" || return 1
+            ! grep -qxF -f "${shallow}" <<< "${above}"
+          }
+          deepens=0
+          reason='deepen cap reached'
           for _attempt in 1 2 3; do
-            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
-              break
-            fi
+            state=0
+            history_usable || state=$?
+            case "${state}" in 0|2) break ;; esac
             git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
-              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
+              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || { reason='deepen fetch aborted'; break; }
+            deepens=$((deepens + 1))
           done
-          # Recorded on the remote by the filtered fetch; later fetches in this
-          # checkout must stay ordinary.
+          # Later fetches in this checkout must stay ordinary.
           git config --unset remote.origin.partialclonefilter || true
+          state=0
+          history_usable || state=$?
+          if [ "${state}" != 0 ]; then
+            [ "${state}" != 2 ] || reason='ambiguous merge base'
+            message="Incremental lint history: ${deepens} deepen(s), base depth $(git rev-list --count "${LINT_BASE_SHA}") — ${reason}"
+            echo "::warning::${message}"
+            echo "- ${message}" >>"${GITHUB_STEP_SUMMARY}"
+          fi
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -1506,16 +1538,13 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
-    # Keep the classifier's trust and hosted overrides, but use ARM64 for
-    # this lane independently of the ordinary Linux CI fleet. The history
-    # below is x64-specific, not a verdict on ARM64, but it is why this lane
-    # is fragile: #11250 moved it back to hosted after four pool attempts
-    # failed (run 34081409590). Three ran the smoke unpinned at 8 workers,
-    # half the host's 16 cores, against hosted's 2, and timed out broadly on
-    # visibility and clock waits. The fourth's transcript gate took 73 s
-    # against its 60 s budget while npm install alone took 28 min on that
-    # host. The smoke step pins the hosted worker count.
-    runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Run 40915920935 lost module requests to ERR_NETWORK_CHANGED on the
+    # shared ARM64 pool, before the app mounted. Use a fresh hosted runner
+    # to isolate this browser gate from other jobs' host network changes.
+    # Self-hosted steps below are dormant on this routing and retained for
+    # reversibility. Only the checkout-metadata and Node-preflight guards are
+    # pinned by tests; the font baseline guard is parked while this lane is hosted.
+    runs-on: 'ubuntu-latest'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
     timeout-minutes: 60
@@ -1637,7 +1666,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
@@ -1746,9 +1775,15 @@ jobs:
           echo "Using web-shell Playwright port ${port}"
 
       - name: 'Run transcript document browser gate'
+        env:
+          # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
+          TMPDIR: '${{ runner.temp }}'
         run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
+        env:
+          # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
+          TMPDIR: '${{ runner.temp }}'
         # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
         # job would start browsers for half the host's cores while the host
         # runs its other jobs.
@@ -1805,14 +1840,32 @@ jobs:
   # is most of the traffic here and most of what the macOS queue was spent
   # on.
   #
-  # Two named jobs, not a matrix: a skipped matrix job reports one collapsed
-  # check name, never the per-OS contexts, so a required-check configuration
-  # would sit "Expected" forever. A skipped named job reports under its exact
-  # name. (No status check is required on `main` today — the ruleset carries
-  # only deletion, non-fast-forward and pull_request rules — so this shape is
-  # currently insurance, not a live constraint.)
+  # Preserve the original macOS check name while running its complete suites
+  # in bounded groups. The aggregate rejects failed, skipped or cancelled
+  # groups, including when one group fails before the others finish.
   test_macos:
     name: 'Test (macos-latest, Node 22.x)'
+    needs: 'test_macos_shards'
+    if: |-
+      ${{
+        always() && (
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
+        )
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Require every macOS test group to pass'
+        env:
+          MACOS_RESULT: '${{ needs.test_macos_shards.result }}'
+        run: 'test "$MACOS_RESULT" = success'
+
+  test_macos_shards:
+    name: 'macOS unit tests (${{ matrix.group }} ${{ matrix.shard }})'
     needs: 'classify_pr'
     if: |-
       ${{
@@ -1822,13 +1875,31 @@ jobs:
           github.event_name == 'workflow_dispatch'
         )
       }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: 'cli'
+            shard: '1/3'
+          - group: 'cli'
+            shard: '2/3'
+          - group: 'cli'
+            shard: '3/3'
+          - group: 'core'
+            shard: '1/2'
+          - group: 'core'
+            shard: '2/2'
+          - group: 'rest'
+            shard: ''
+          - group: 'scripts'
+            shard: ''
     runs-on: 'macos-latest'
     timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
-      # See the Ubuntu gate's checkout: PRs use the immutable refs/pull/N/head
-      # and merge queue uses the event head SHA.
+      # merge_group/schedule/dispatch only: this lane keeps
+      # refs/pull/N/head; the PR lanes pin the event head SHA.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1857,19 +1928,22 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        id: 'install'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Hosted portable process smoke'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && matrix.group == 'scripts' }}"
         timeout-minutes: 5
         run: |-
           npm run test:integration:hosted:sandbox:none -- -t 'portable startup'
 
       - name: 'Run tests and generate reports'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
+          MACOS_TEST_GROUP: '${{ matrix.group }}'
+          MACOS_TEST_SHARD: '${{ matrix.shard }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
@@ -1898,7 +1972,7 @@ jobs:
           ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
-          npm run test:ci
+          node scripts/run-macos-ci-group.js "$MACOS_TEST_GROUP" "$MACOS_TEST_SHARD"
           RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
@@ -2091,7 +2165,7 @@ jobs:
           if [ "$SCRIPTS_RC" -ne 0 ]; then
             echo '::warning::The complete Windows script suite has known baseline failures; its full result remains visible above.'
           fi
-          npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts
+          npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
           INSTALLER_RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
@@ -2259,7 +2333,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          ref: "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
