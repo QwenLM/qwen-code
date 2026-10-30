@@ -45,7 +45,7 @@ import type {
   Usage,
 } from '../types.js';
 import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
-import { sanitizeTerminalText } from '../../ui/utils/textUtils.js';
+import { sanitizeTerminalLine } from '../../ui/utils/textUtils.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
 import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
@@ -751,8 +751,10 @@ export abstract class BaseJsonOutputAdapter {
         break;
       case LlmEventType.UserPromptSubmitBlocked:
         // The reason is model-generated for prompt/HTTP-backed hooks and is
-        // written to stderr in text mode, so keep ESC/OSC bytes out of it.
-        this.preSendRefusalMessage ??= `Blocked by a UserPromptSubmit hook: ${sanitizeTerminalText(event.value.reason)}`;
+        // written as one stderr line in text mode, so keep ESC/OSC bytes out
+        // of it and flatten TAB/CR/LF instead of letting them start a second
+        // line the reader would take for genuine output.
+        this.preSendRefusalMessage ??= `Blocked by a UserPromptSubmit hook: ${sanitizeTerminalLine(event.value.reason)}`;
         break;
       default:
         break;

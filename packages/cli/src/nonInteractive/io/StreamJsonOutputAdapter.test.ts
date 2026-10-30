@@ -878,7 +878,7 @@ describe('StreamJsonOutputAdapter', () => {
       adapter.processEvent({
         type: LlmEventType.UserPromptSubmitBlocked,
         value: {
-          reason: 'policy\x1b[2J\x1b]0;title\x07',
+          reason: 'policy\x1b[2J\nFATAL: forged line\x07',
           originalPrompt: 'run it',
         },
       });
@@ -897,6 +897,10 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.error?.message).toContain('policy');
       expect(parsed.error?.message).not.toContain('\u001b');
       expect(parsed.error?.message).not.toContain('\u0007');
+      // The reason lands on a single stderr line in text mode, so a newline
+      // in it must not survive as a forged second line.
+      expect(parsed.error?.message).not.toContain('\n');
+      expect(parsed.error?.message).not.toContain('\u000a');
     });
 
     it('should keep the text a turn produced before a mid-turn refusal', () => {
