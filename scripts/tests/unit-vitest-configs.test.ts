@@ -381,12 +381,15 @@ describe('autofix gate load clamps', () => {
     vi.resetModules();
     // Re-imported under the stub: the configs read the env at import time,
     // and the static imports above already resolved the non-ECS branch.
-    const [core, cli, acpBridge, webShell] = await Promise.all([
-      import('../../packages/core/vitest.config.js'),
-      import('../../packages/cli/vitest.config.js'),
-      import('../../packages/acp-bridge/vitest.config.js'),
-      import('../../packages/web-shell/vitest.config.js'),
-    ]);
+    const [core, cli, acpBridge, webShell, vscodeCompanion] = await Promise.all(
+      [
+        import('../../packages/core/vitest.config.js'),
+        import('../../packages/cli/vitest.config.js'),
+        import('../../packages/acp-bridge/vitest.config.js'),
+        import('../../packages/web-shell/vitest.config.js'),
+        import('../../packages/vscode-ide-companion/vitest.config.js'),
+      ],
+    );
     vi.unstubAllEnvs();
 
     const script = readFileSync(
@@ -411,8 +414,12 @@ describe('autofix gate load clamps', () => {
         .map((flag) => flag.split('=') as [string, string]),
     );
 
-    // 60_000 / 60_000 / '25%' on the ECS branch of core and cli;
-    // acp-bridge and web-shell set the two timeouts but define no maxWorkers.
+    // 60_000 / 60_000 / '25%' on the ECS branch of core, cli and
+    // vscode-ide-companion; acp-bridge and web-shell set the two timeouts but
+    // define no maxWorkers. vscode-ide-companion is in the list because the
+    // gate launches it with the same clamps: a config that does not carry the
+    // ECS maxWorkers leaves the gate's 25% cap as the only ceiling there,
+    // while normal CI runs the workspace unlimited on the shared hosts.
     for (const config of [
       core.default,
       cli.default,
@@ -422,8 +429,29 @@ describe('autofix gate load clamps', () => {
       expect(String(config.test?.testTimeout)).toBe(clamps['testTimeout']);
       expect(String(config.test?.hookTimeout)).toBe(clamps['hookTimeout']);
     }
-    for (const config of [core.default, cli.default]) {
+    for (const config of [core.default, cli.default, vscodeCompanion.default]) {
       expect(config.test?.maxWorkers).toBe(clamps['maxWorkers']);
+    }
+    // Off the pool the config must leave maxWorkers alone, or a developer
+    // machine — and every fork PR lane, which passes no --maxWorkers — runs
+    // the workspace at 25% of its cores for no reason. The arms above cannot
+    // see that: they all stub a pool RUNNER_NAME, where `maxWorkers: '25%'`
+    // flattened out of the ternary is indistinguishable from the gated value.
+    // Re-stub and re-import: `vi.unstubAllEnvs()` above restored the ambient
+    // value, and the modules resolved under the ECS stub are already fixed at
+    // it, so a second import round is the only way to read the other branch.
+    vi.stubEnv('RUNNER_NAME', undefined);
+    vi.resetModules();
+    try {
+      const offPool = await import(
+        '../../packages/vscode-ide-companion/vitest.config.js'
+      );
+      expect(
+        offPool.default.test?.maxWorkers,
+        'RUNNER_NAME unset',
+      ).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
     }
     // Nothing in the gate or its report path consumes coverage, and
     // collecting it was the bulk of the 60-minute overruns.
