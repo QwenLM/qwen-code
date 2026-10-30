@@ -71,9 +71,22 @@ const mocks = vi.hoisted(() => {
         return React.createElement(Measured, { ...props, key }, children);
       }
       if (type === 'box' || type === 'text') {
+        // Carry the paint and frame props the suite asserts on.
+        const attrs: Record<string, unknown> = {
+          'data-fg': props?.['fg'],
+          'data-bg': props?.['bg'],
+          'data-wrap-mode': props?.['wrapMode'],
+          'data-padding-top': props?.['paddingTop'],
+          'data-padding-bottom': props?.['paddingBottom'],
+          'data-border':
+            props?.['border'] === undefined
+              ? undefined
+              : JSON.stringify(props['border']),
+        };
+        if (key !== undefined) attrs['key'] = key;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          attrs,
           children,
         );
       }
@@ -91,17 +104,31 @@ const mocks = vi.hoisted(() => {
   return { state, buildJsxRuntime };
 });
 
-vi.mock('@opentui/react', () => ({
-  useKeyboard: (handler: (key: unknown) => void) => {
-    mocks.state.keyboardHandlers.length = 0;
-    mocks.state.keyboardHandlers.push(handler);
-  },
-  useRenderer: () => ({
-    addInputHandler: () => {},
-    removeInputHandler: () => {},
-  }),
-  useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
-}));
+vi.mock('@opentui/react', async () => {
+  const React = await import('react');
+  return {
+    // Every hook call stays registered for the component's lifetime and
+    // delivers to the closure of its latest render, as OpenTUI does, so the
+    // Escape hook and the dialog's own key hook are both reachable.
+    useKeyboard: (handler: (key: unknown) => void) => {
+      const latest = React.useRef(handler);
+      latest.current = handler;
+      React.useEffect(() => {
+        const deliver = (key: unknown) => latest.current(key);
+        mocks.state.keyboardHandlers.push(deliver);
+        return () => {
+          const at = mocks.state.keyboardHandlers.indexOf(deliver);
+          if (at >= 0) mocks.state.keyboardHandlers.splice(at, 1);
+        };
+      }, []);
+    },
+    useRenderer: () => ({
+      addInputHandler: () => {},
+      removeInputHandler: () => {},
+    }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
+  };
+});
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
@@ -117,6 +144,7 @@ vi.mock('./key-map.js', () => ({
   }),
 }));
 
+import { C } from './theme.js';
 import {
   computeStatsBodyRows,
   OpenTuiStatsDialog,
@@ -131,6 +159,32 @@ const send = (name: string, shift = false) => {
       handler({ name, shift });
   });
 };
+
+// Keys delivered before React re-renders, as a held Tab does.
+const burst = (...names: string[]) => {
+  act(() => {
+    for (const name of names)
+      for (const handler of mocks.state.keyboardHandlers)
+        handler({ name, shift: false });
+  });
+};
+
+// The tab bar's label spans, in order, with the props that paint them.
+const tabBar = (container: HTMLElement) =>
+  Array.from(
+    container.firstElementChild?.children[0]?.querySelectorAll('span') ?? [],
+  ).map((label) => ({
+    text: label.textContent,
+    fg: label.getAttribute('data-fg'),
+    bg: label.getAttribute('data-bg'),
+  }));
+const activeTabs = (container: HTMLElement) =>
+  tabBar(container)
+    .filter((label) => label.bg === C.accent)
+    .map((label) => label.text);
+// The footer hint span, the last row of the frame.
+const footer = (container: HTMLElement) =>
+  container.firstElementChild?.lastElementChild?.querySelector('span');
 
 describe('OpenTuiStatsDialog scrolling', () => {
   beforeEach(() => {
@@ -381,5 +435,150 @@ describe('OpenTuiStatsDialog scrolling', () => {
     expect(getByText('tab · esc')).toBeTruthy();
     send('down');
     expect(mocks.state.scroller.scrollBy).not.toHaveBeenCalled();
+  });
+
+  it('remounts the frame when the region crosses the compact boundary', () => {
+    // A removed layout property can persist on a reused native node, so the
+    // frame is keyed by its style: without the key the compact frame would
+    // keep the padding rows the normal one had.
+    const dialog = (height: number) => (
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={height}
+      />
+    );
+    const { container, rerender } = render(dialog(10));
+    const normal = container.firstElementChild;
+    expect(normal?.getAttribute('data-padding-top')).toBe('1');
+    expect(normal?.getAttribute('data-padding-bottom')).toBe('1');
+
+    rerender(dialog(6));
+    const compact = container.firstElementChild;
+    expect(compact).not.toBe(normal);
+    expect(compact?.getAttribute('data-border')).toBe('true');
+    expect(compact?.getAttribute('data-padding-top')).toBe('0');
+    expect(compact?.getAttribute('data-padding-bottom')).toBe('0');
+
+    // And back: the property being removed on the way down returns.
+    rerender(dialog(10));
+    expect(container.firstElementChild).not.toBe(compact);
+    expect(container.firstElementChild?.getAttribute('data-padding-top')).toBe(
+      '1',
+    );
+  });
+
+  it('clips the footer hint to the content width on one row', () => {
+    const renderAt = (width: number) => {
+      mocks.state.width = width;
+      return render(
+        <OpenTuiStatsDialog
+          config={CONFIG}
+          onClose={() => {}}
+          availableTerminalHeight={15}
+        />,
+      );
+    };
+    // Eighteen columns leave a content width of 8, one short of the hint.
+    const narrow = renderAt(18);
+    expect(footer(narrow.container)?.textContent).toBe('tab · e…');
+    expect(footer(narrow.container)?.getAttribute('data-wrap-mode')).toBe(
+      'none',
+    );
+    narrow.unmount();
+    // Eleven leave one column: the hint is the ellipsis, and the tab bar
+    // holds only that column for the first label; the rest are dropped.
+    const tiny = renderAt(11);
+    expect(footer(tiny.container)?.textContent).toBe('…');
+    expect(tabBar(tiny.container).map((label) => label.text)).toEqual(['…']);
+  });
+
+  it('highlights the tab whose body is shown', () => {
+    mocks.state.contentRows = 30;
+    const { container, getByTestId } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    expect(activeTabs(container)).toEqual([' Session ']);
+    const [session, activity] = tabBar(container);
+    expect(session?.fg).toBe('#1e1e2e');
+    expect(activity?.fg).toBe(C.text);
+    expect(activity?.bg).toBeNull();
+    expect(getByTestId('scrollbox').textContent).toContain('Session ID');
+
+    send('tab');
+    expect(activeTabs(container)).toEqual([' Activity ']);
+    expect(getByTestId('scrollbox').textContent).toContain(
+      'Activity (this session)',
+    );
+  });
+
+  it('cycles the tabs forward and back, wrapping at both ends', () => {
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    // Shift+Tab from the first tab wraps to the last.
+    send('tab', true);
+    expect(activeTabs(container)).toEqual([' Efficiency ']);
+    send('tab');
+    expect(activeTabs(container)).toEqual([' Session ']);
+    send('tab');
+    send('tab');
+    send('tab');
+    expect(activeTabs(container)).toEqual([' Session ']);
+  });
+
+  it('advances once per Tab when several arrive before a re-render', () => {
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    burst('tab', 'tab');
+    expect(activeTabs(container)).toEqual([' Efficiency ']);
+  });
+
+  it('closes on Escape', () => {
+    const onClose = vi.fn();
+    render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={onClose}
+        availableTerminalHeight={6}
+      />,
+    );
+    // Compact chrome shows no hint, but the key still closes.
+    send('escape');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores every key while an embedding host owns the focus', () => {
+    const onClose = vi.fn();
+    mocks.state.contentRows = 30;
+    const { container, getByTestId } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={onClose}
+        isFocused={false}
+        availableTerminalHeight={15}
+      />,
+    );
+    send('tab');
+    send('down');
+    send('pagedown');
+    send('escape');
+    expect(activeTabs(container)).toEqual([' Session ']);
+    expect(getByTestId('scrollbox').textContent).toContain('Session ID');
+    expect(mocks.state.scroller.scrollBy).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

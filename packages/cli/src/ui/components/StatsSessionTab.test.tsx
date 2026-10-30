@@ -181,17 +181,50 @@ describe('<SessionTab /> height budget', () => {
     expect(lastFrame()).toContain('Session ID');
   });
 
+  // The frame's viewport rows, without the scroll-hint row below them and
+  // with the live wall-clock value masked, since it ticks between renders.
+  const viewportRows = (frame: string | undefined) =>
+    (frame ?? '')
+      .split('\n')
+      .slice(0, -1)
+      .map((row) => row.replace(/(Wall Time:\s+)\S+/, '$1<t>'));
+
   it('scrolls one row per down/up key', () => {
     const { lastFrame } = renderSessionTabInstance(metricsWithModel(), 10);
-    expect(lastFrame()).toContain('Session ID');
+    const top = viewportRows(lastFrame());
+    expect(top.length).toBeGreaterThan(3);
+
+    // One press moves the content by exactly one row in either direction:
+    // a two-row step, or a page, would drop a second row off the top.
+    sendKey({ name: 'down' });
+    const oneDown = viewportRows(lastFrame());
+    expect(oneDown.slice(0, -1)).toEqual(top.slice(1));
 
     sendKey({ name: 'down' });
-    sendKey({ name: 'down' });
-    expect(lastFrame()).not.toContain('Session ID');
+    expect(viewportRows(lastFrame()).slice(0, -1)).toEqual(oneDown.slice(1));
 
     sendKey({ name: 'up' });
+    expect(viewportRows(lastFrame())).toEqual(oneDown);
     sendKey({ name: 'up' });
-    expect(lastFrame()).toContain('Session ID');
+    expect(viewportRows(lastFrame())).toEqual(top);
+  });
+
+  it('pages by the viewport height', () => {
+    const { lastFrame } = renderSessionTabInstance(metricsWithModel(), 10);
+    const top = viewportRows(lastFrame());
+
+    sendKey({ name: 'pagedown' });
+    const paged = viewportRows(lastFrame());
+    expect(paged).not.toEqual(top);
+
+    // A page is as many rows as the viewport holds: the same frame as that
+    // many single-row steps, and pageup is the exact inverse.
+    sendKey({ name: 'pageup' });
+    expect(viewportRows(lastFrame())).toEqual(top);
+    for (let i = 0; i < top.length; i++) sendKey({ name: 'down' });
+    expect(viewportRows(lastFrame())).toEqual(paged);
+    sendKey({ name: 'pageup' });
+    expect(viewportRows(lastFrame())).toEqual(top);
   });
 
   it('renders everything without a scroll hint when the content fits', () => {
