@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -69,7 +70,7 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private ObjectMapper mapper;
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired
     private ManagedAgentStore store;
     @Autowired
@@ -77,7 +78,86 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private ManagedAgentDefinitionStore definitions;
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
+
+    @Test
+    void mcpManagementKeepsOperatorCreatorAndIdleAdmissionWithoutChangingTheDefinitionPin() {
+        String tenant = tenant();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor", true);
+        grant(tenant, "ws-a", "second", true);
+        grant(tenant, "ws-a", "reader", false);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        var selected = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var transactions = new TransactionTemplate(transactionManager);
+        String id = transactions.execute(status -> selected.insertWorkspaceSessionCommand(tenant, "actor", "create", "digest",
+                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", ".")).sessionId());
+        var before = selected.requireSession(tenant, id);
+        var admitted = transactions.execute(status -> selected.requireMcpManagement(tenant, "second", id, "operation"));
+        assertThat(admitted).isEqualTo(before);
+        assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "reader", id, null)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("session_operation_forbidden"));
+        assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "stranger", id, null)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
+        jdbc.update("UPDATE ma_session SET plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1 WHERE tenant_id=? AND session_id=?", tenant, id);
+        assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "actor", id, "operation")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("unsupported_feature"));
+        jdbc.update("UPDATE ma_session SET plan_enabled=FALSE WHERE tenant_id=? AND session_id=?", tenant, id);
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'turn', 'prompt', '[]', 'digest', 'RUNNING', 1, 1)", tenant, id);
+        var readable = transactions.execute(status -> selected.requireMcpManagement(tenant, "actor", id, null));
+        assertThat(readable).isNotNull();
+        assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "actor", id, "operation")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED' WHERE tenant_id=? AND session_id=?", tenant, id);
+        jdbc.update("UPDATE ma_workspace_access SET role='READER' WHERE tenant_id=? AND workspace_id=? AND actor_id=?",
+                tenant, "ws-a", "actor".getBytes(StandardCharsets.UTF_8));
+        assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "second", id, "operation")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThat(selected.requireSession(tenant, id).agentDefinitionDigest()).isEqualTo(before.agentDefinitionDigest());
+    }
+
+    @Test
+    void ordinaryShellPinsMcpWithoutAdvertisingOrAcceptingPlan() throws Exception {
+        String tenant = tenant();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor", true);
+        String content = FILES_DEFINITION.replace("hosted-workspace-files/1", "hosted-workspace-shell/1")
+                .replace("\"permission_policy\"", "\"mcp_servers\":[{\"server_id\":\"docs\",\"server_revision\":1,"
+                        + "\"definition_digest\":\"" + "a".repeat(64) + "\"}],\"permission_policy\"");
+        JsonNode definition = define(tenant, "definition", content);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        properties.setDefinitionToolProfiles(List.of("hosted-workspace-shell/1"));
+        var selected = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        selected.setManagedAgentDefinitionStore(definitions);
+        String agent = definition.get("id").asText();
+        assertThat(selected.workspaceSessionOptions(tenant, agent).planModeSupported()).isFalse();
+        var transactions = new TransactionTemplate(transactionManager);
+        var workspace = new WorkspaceSelection("ws-a", ".");
+        assertThatThrownBy(() -> transactions.execute(status -> selected.insertWorkspaceSessionCommand(
+                tenant, "actor", "plan", "plan-digest", agent, null, null, List.of(), null, workspace,
+                null, true, true, true, List.of())))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("unsupported_feature"));
+        String id = transactions.execute(status -> selected.insertWorkspaceSessionCommand(
+                tenant, "actor", "ordinary", "ordinary-digest", agent, null, null, List.of(), null, workspace).sessionId());
+        var session = selected.requireSession(tenant, id);
+        assertThat(session.toolProfile()).isEqualTo("hosted-workspace-shell/1");
+        assertThat(session.agentDefinitionDigest()).isEqualTo(definition.get("digest").asText());
+        assertThat(selected.hasMcpServers(session)).isTrue();
+        assertThat(selected.supportsPlanMode(session)).isFalse();
+    }
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({

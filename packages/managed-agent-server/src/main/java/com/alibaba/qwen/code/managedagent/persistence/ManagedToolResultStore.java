@@ -9,10 +9,10 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.ByteBuffer;
@@ -35,7 +35,7 @@ public class ManagedToolResultStore {
     private final TransactionTemplate transactions;
     private final AgentStateStore sessions;
 
-    public ManagedToolResultStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public ManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             AgentStateStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
@@ -60,27 +60,6 @@ public class ManagedToolResultStore {
 
     public record Projection(JsonNode descriptor, String publicationId, JsonNode binding,
             JsonNode manifestRef, List<Artifact> artifacts, String policyVersion) { }
-
-    // The caller holds the journal transaction. This hook performs no object I/O.
-    void capture(String tenant, String workspace, String session, long revision, long firstSequence,
-            int eventCount, byte[] records) {
-        List<JsonNode> events = new ArrayList<>();
-        int index = -1;
-        for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
-            index++;
-            JsonNode record = ToolPublicationContract.readJson(line.getBytes(StandardCharsets.UTF_8));
-            JsonNode event = record.path("managedSession");
-            if ("managed_session_event_v1".equals(record.path("subtype").asText())
-                    && "tool.receipt".equals(event.path("kind").asText())) {
-                require(
-                        index < eventCount
-                                && event.path("sequence").asLong(-1) == firstSequence + index,
-                        "Tool receipt has an invalid journal position");
-                events.add(event);
-            }
-        }
-        captureEvents(tenant, workspace, session, revision, events);
-    }
 
     void captureEvents(String tenant, String workspace, String session, long revision, List<JsonNode> events) {
         Map<String, Source> sources = new LinkedHashMap<>();
@@ -130,162 +109,6 @@ public class ManagedToolResultStore {
             jdbc.batchUpdate(
                     "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
-    }
-
-    public void backfillOnePage() {
-        if (TransactionSynchronizationManager.isActualTransactionActive()) {
-            throw new IllegalStateException("Backfill owns its scheduler transactions");
-        }
-        for (int index = 0; index < 50; index++) {
-            if (!backfillOneTransaction()) {
-                return;
-            }
-        }
-    }
-
-    private boolean backfillOneTransaction() {
-        var selected = new ArrayList<Map<String, Object>>(1);
-        try {
-            return Boolean.TRUE.equals(
-                    transactions.execute(
-                            status -> {
-                                var heads =
-                                        jdbc.query(
-                                                "SELECT tenant_id, workspace_id, session_id,"
-                                                    + " journal_revision, o3_backfill_revision,"
-                                                    + " o3_backfill_through FROM ma_session_head"
-                                                    + " WHERE head_kind = 'MANAGED_SESSION' AND"
-                                                    + " state NOT IN ('DELETING', 'DELETED') AND"
-                                                    + " o3_backfill_pending = TRUE AND"
-                                                    + " o3_backfill_error IS NULL AND NOT EXISTS"
-                                                    + " (SELECT 1 FROM ma_session s WHERE"
-                                                    + " s.tenant_id = ma_session_head.tenant_id AND"
-                                                    + " s.session_id = ma_session_head.session_id"
-                                                    + " AND s.csi_guard = TRUE) ORDER BY"
-                                                    + " tenant_key, harness_key LIMIT 1",
-                                                (schemaRow, schemaIndex) ->
-                                                        ManagedSchemaRows.read(schemaRow));
-                                if (heads.isEmpty()) {
-                                    return false;
-                                }
-                                var candidate = heads.getFirst();
-                                String tenant = (String) candidate.get("tenant_id");
-                                String workspace = (String) candidate.get("workspace_id");
-                                String session = (String) candidate.get("session_id");
-                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-                                if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                    return false;
-                                }
-                                var head = lockBackfillHead(tenant, workspace, session);
-                                if (head == null) {
-                                    return false;
-                                }
-                                selected.add(head);
-                                long after =
-                                        ((Number) head.get("o3_backfill_revision")).longValue();
-                                long through =
-                                        ((Number)
-                                                        (head.get("o3_backfill_through") == null
-                                                                ? head.get("journal_revision")
-                                                                : head.get("o3_backfill_through")))
-                                                .longValue();
-                                var rows =
-                                        jdbc.query(
-                                                "SELECT journal_revision, first_sequence,"
-                                                    + " event_count, record_bytes, record_digest"
-                                                    + " FROM ma_session_journal_tx WHERE tenant_id"
-                                                    + " = ? AND session_id = ? AND workspace_id = ?"
-                                                    + " AND journal_revision > ? AND"
-                                                    + " journal_revision <= ? ORDER BY"
-                                                    + " journal_revision LIMIT 1",
-                                                (schemaRow, schemaIndex) ->
-                                                        ManagedSchemaRows.read(schemaRow),
-                                                tenant,
-                                                session,
-                                                workspace,
-                                                after,
-                                                through);
-                                if (!rows.isEmpty()) {
-                                    var row = rows.getFirst();
-                                    byte[] bytes = (byte[]) row.get("record_bytes");
-                                    require(
-                                            ToolPublicationContract.sha256(bytes)
-                                                    .equals(row.get("record_digest")),
-                                            "Backfill journal digest changed");
-                                    after = ((Number) row.get("journal_revision")).longValue();
-                                    capture(
-                                            tenant,
-                                            workspace,
-                                            session,
-                                            after,
-                                            ((Number) row.get("first_sequence")).longValue(),
-                                            ((Number) row.get("event_count")).intValue(),
-                                            bytes);
-                                } else {
-                                    require(after == through, "Backfill journal is incomplete");
-                                }
-                                jdbc.update(
-                                        "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_revision = ?,"
-                                            + " o3_backfill_through = ?, o3_backfill_pending = ?"
-                                            + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key"
-                                            + " = ? AND harness_key = ? AND tenant_id = ? AND"
-                                            + " session_id = ?",
-                                        after,
-                                        through,
-                                        after < through,
-                                        ManagedSchemaKeys.key(tenant),
-                                        ManagedSchemaKeys.key(session),
-                                        tenant,
-                                        session);
-                                return true;
-                            }));
-        } catch (IllegalArgumentException error) {
-            if (!selected.isEmpty()) {
-                var failed = selected.getFirst();
-                transactions.executeWithoutResult(
-                        status -> {
-                            String tenant = (String) failed.get("tenant_id");
-                            String session = (String) failed.get("session_id");
-                            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-                            if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                return;
-                            }
-                            var current =
-                                    lockBackfillHead(
-                                            tenant, (String) failed.get("workspace_id"), session);
-                            if (failed.equals(current)) {
-                                jdbc.update(
-                                        "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_error ="
-                                            + " 'invalid_journal', o3_backfill_pending = FALSE"
-                                            + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key"
-                                            + " = ? AND harness_key = ? AND tenant_id = ? AND"
-                                            + " session_id = ?",
-                                        ManagedSchemaKeys.key(tenant),
-                                        ManagedSchemaKeys.key(session),
-                                        tenant,
-                                        session);
-                            }
-                        });
-            }
-            throw error;
-        }
-    }
-
-    private Map<String, Object> lockBackfillHead(String tenant, String workspace, String session) {
-        var rows =
-                jdbc.queryForList(
-                        "SELECT tenant_id, workspace_id, session_id, journal_revision,"
-                            + " o3_backfill_revision, o3_backfill_through FROM ma_session_head"
-                            + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND"
-                            + " head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key ="
-                            + " ? AND state NOT IN ('DELETING', 'DELETED') AND o3_backfill_pending"
-                            + " = TRUE AND o3_backfill_error IS NULL FOR UPDATE",
-                        tenant,
-                        workspace,
-                        session,
-                        ManagedSchemaKeys.key(tenant),
-                        ManagedSchemaKeys.key(session));
-        return rows.isEmpty() ? null : rows.getFirst();
     }
 
     public Optional<Claim> claim() {

@@ -14,6 +14,7 @@ import { parse } from 'yaml';
 import { expect, it } from 'vitest';
 
 const jobs = [
+  ['desktop-release', 'prepare'],
   ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
   ...[
     'test',

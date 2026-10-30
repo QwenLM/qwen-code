@@ -208,6 +208,21 @@ describe('model configuration manifest', () => {
   it.each([
     ['deepseek-flash', 'https://api.deepseek.com/v1', ['low', 'high', 'max']],
     [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alibaba-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.aliyun-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alicloudapi.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
       'deepseek-v4.1-flash-1017',
       'https://dashscope.aliyuncs.com/compatible-mode/v1',
       ['low', 'high', 'max'],
@@ -236,6 +251,7 @@ describe('model configuration manifest', () => {
       ).toMatchObject({
         currentValue: 'high',
         options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+        _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
       });
     },
   );
@@ -433,19 +449,19 @@ describe('model configuration manifest', () => {
     [
       'alibabaStandard',
       'qwen3.8-max',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-max-0902',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     ['alibabaStandard', 'deepseek-v4-pro', ['none', 'high', 'max'], 'high'],
@@ -456,12 +472,16 @@ describe('model configuration manifest', () => {
       'high',
     ],
     ['alibabaStandard', 'kimi-k3', ['low', 'high', 'max'], 'max'],
-    ['token-plan', 'qwen3.8-max', ['low', 'medium', 'xhigh'], 'xhigh'],
-    ['token-plan', 'qwen3.8-max-preview', ['low', 'medium', 'xhigh'], 'xhigh'],
+    [
+      'token-plan',
+      'qwen3.8-max',
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'xhigh',
+    ],
     [
       'token-plan',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [

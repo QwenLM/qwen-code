@@ -12,6 +12,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -23,6 +24,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * HTTP forward proxy that sits between one Broker process and its Runtime
@@ -138,6 +140,13 @@ final class FaultProxy implements AutoCloseable {
 
     List<Exchange> exchanges() {
         return List.copyOf(exchanges);
+    }
+
+    /** How many requests of each operation arrived, first arrival first. */
+    Map<String, Long> counts() {
+        return exchanges.stream().collect(Collectors.groupingBy(
+                Exchange::operation, LinkedHashMap::new,
+                Collectors.counting()));
     }
 
     @Override

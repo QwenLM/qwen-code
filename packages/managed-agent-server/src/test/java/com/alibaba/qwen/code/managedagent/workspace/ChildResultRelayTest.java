@@ -483,12 +483,13 @@ class ChildResultRelayTest {
                 .containsExactly("commit_result", "accept", "mark_accepted");
     }
 
-    @Test
-    void aRunningChildWaitsWithoutEatingAttempts() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"", AgentStateStore.HARNESS_RECOVERY_BLOCKED})
+    void aRunningChildWaitsWithoutEatingAttempts(String recoveryCode) {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "RUNNING", now + 1L, null, true,
+                new TurnLine("turn-1", "RUNNING", now + 1L, recoveryCode.isEmpty() ? null : recoveryCode, true,
                         null));
         relay.scan();
         // A running Turn is a wait, not a failure: no attempt, no error,

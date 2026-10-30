@@ -67,7 +67,14 @@ asserts:
   `hasOpenTurn` reads only public `ma_turn` rows and the automation wake turn is
   journal-side, and `countRefusal` admits at one active run for `queue_one`. The
   second run commits and its input waits in the journal — the object a cancel
-  before any attempt would have to settle model-free. No cell covers it yet.
+  before any attempt would have to settle model-free. The reachability half is
+  delivered: `fg11dQueueOneAdmitsASecondFireOnMySql` pins that the second fire
+  is admitted under `queue_one` — its own run id and a `fired` occurrence — and
+  that no prompt for it appears while the first turn stays parked. That absence
+  comes from the parked turn, not from the overlap arm; the cell bounds it with
+  a dwell. The cancel half stays open: a task cancel on that queued run is
+  accepted and the run stays `running` (measured locally, not gated), because
+  the queue is settled by the turn, not by the cancel.
   What `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` pins is narrower: under
   the default `skip` policy a second fire at one active run is refused
   `409 automation_run_skipped` with `skipped`/`overlap` and no run behind it —

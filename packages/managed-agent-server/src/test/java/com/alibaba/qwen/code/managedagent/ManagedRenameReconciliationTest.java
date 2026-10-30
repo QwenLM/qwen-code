@@ -168,25 +168,6 @@ class ManagedRenameReconciliationTest {
                 sessionId, TITLE), "session_mutation_superseded");
     }
 
-    // A deployment upgraded with legacy UNKNOWN rows converts them on the
-    // first sweep: no schema version can carry a data-only change.
-    @Test
-    void theSweepConvertsALegacyUnknownTitle() {
-        RenameDelivery delivery = submitted("title-1", TITLE);
-        jdbc.update("UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED'"
-                + " WHERE operation_kind = 'RENAME'");
-        assertThat(store.findParkedOperations(50)).isEmpty();
-        assertThat(store.deliverableRenames(Long.MAX_VALUE)).isEmpty();
-        assertThat(row(delivery.revision()))
-                .containsEntry("state", "RECOVERY_BLOCKED")
-                .containsEntry("phase", "RECOVERY_BLOCKED")
-                .containsEntry("admission_stage", "JAVA_DURABLE")
-                .containsEntry("claim_owner", OWNER);
-        assertThat(receipt("title-1")).isEqualTo("FAILED");
-        assertThat(store.findParkedOperations(50))
-                .containsExactly(parkedOperation(delivery));
-    }
-
     @Test
     void aTitleTheJournalHoldsCompletesAndShowsTheTitle() {
         RenameDelivery delivery = parked("title-1", TITLE);

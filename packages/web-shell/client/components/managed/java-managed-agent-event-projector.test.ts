@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { getLatestSuccessfulTodos } from '../../utils/todos';
+import { describe, expect, it } from 'vitest';
 import {
   projectJavaAgentEvent,
   projectJavaAgentItem,
-  toTimestamp,
 } from './java-managed-agent-event-projector';
 import { result } from './managed-tool-result.test-fixtures';
 import { managedEventsToMessages } from './managed-session-messages';
@@ -430,11 +430,6 @@ describe('java managed agent event projector', () => {
     );
   });
 
-  it('uses a safe timestamp fallback for invalid legacy values', () => {
-    vi.spyOn(Date, 'now').mockReturnValue(42);
-    expect(toTimestamp('not-a-date')).toBe(42);
-  });
-
   it('projects a durable message part as one complete delta', () => {
     expect(
       projectJavaAgentItem({
@@ -519,4 +514,61 @@ it('reports cancellation consistently for live and restored result-less tools', 
   expect(liveMessages[0]).toMatchObject({
     tools: [{ status: 'failed', wasCancelled: true }],
   });
+});
+
+it('restores a committed Todo snapshot from live events and materialized Items', () => {
+  const todos = [{ id: 'a', content: 'first', status: 'pending' }];
+  const attributes = {
+    kind: 'tool_call_update',
+    toolCallId: 'call-1',
+    name: 'todo_write',
+    status: 'completed',
+    sourceSequence: 5,
+    itemId: 'todo-item',
+    todoSnapshot: JSON.stringify(todos),
+  };
+  const live = projectJavaAgentEvent({
+    sequence: 5,
+    eventId: 'evt-5',
+    sessionId: 's',
+    turnId: 't',
+    type: 'item.tool_call.updated',
+    createdAt: 5,
+    terminal: false,
+    data: attributes,
+  })!;
+  const replay = projectJavaAgentItem({
+    itemId: 'todo-item',
+    sessionId: 's',
+    turnId: 't',
+    type: 'tool_call',
+    role: 'assistant',
+    status: 'completed',
+    content: [],
+    attributes,
+    firstSequence: 5,
+    lastSequence: 5,
+    createdAt: 5,
+    updatedAt: 5,
+  });
+  for (const events of [[live], replay]) {
+    expect(
+      getLatestSuccessfulTodos(managedEventsToMessages(events, '[truncated]')),
+    ).toEqual(todos);
+  }
+  const stale = {
+    ...live,
+    id: 6,
+    data: {
+      ...attributes,
+      toolName: 'todo_write',
+      sourceSequence: 4,
+      todoSnapshot: '[]',
+    },
+  };
+  expect(
+    getLatestSuccessfulTodos(
+      managedEventsToMessages([live, stale], '[truncated]'),
+    ),
+  ).toEqual(todos);
 });

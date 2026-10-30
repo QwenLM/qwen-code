@@ -104,7 +104,8 @@ final class ManagedSchemaCatalog {
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {
             throw new SQLException(
-                    "Managed schema must contain exactly the 32 target tables: " + actual.keySet());
+                    "Managed schema must contain exactly the " + ManagedSchemaContract.TABLES.size()
+                            + " target tables: " + actual.keySet());
         }
         if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())
                 || isMariaDb(connection)) {
@@ -417,16 +418,7 @@ final class ManagedSchemaCatalog {
             List<String> expectedTokens = numericBooleans(expressionTokens(expression));
             List<String> actualTokens =
                     stored == null ? List.of() : numericBooleans(expressionTokens(stored));
-            boolean same = expectedTokens.equals(actualTokens);
-            if (!same && "projection_pending".equals(column.group(1))) {
-                int split = expectedTokens.indexOf("or");
-                List<String> commuted =
-                        new ArrayList<>(expectedTokens.subList(split + 1, expectedTokens.size()));
-                commuted.add("or");
-                commuted.addAll(expectedTokens.subList(0, split));
-                same = commuted.equals(actualTokens);
-            }
-            if (!same) {
+            if (!expectedTokens.equals(actualTokens)) {
                 throw new SQLException(
                         "Managed schema generated column differs: " + name + "." + column.group(1));
             }
@@ -493,7 +485,8 @@ final class ManagedSchemaCatalog {
         List<String> tokens = new ArrayList<>();
         while (matcher.find()) {
             String token = matcher.group();
-            tokens.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            tokens.add("octet_length".equals(normalized) ? "length" : normalized);
         }
         return booleanShape(numericBooleans(tokens));
     }

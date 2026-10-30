@@ -9,15 +9,18 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -220,6 +223,50 @@ class SshConnectionManagerTest {
     }
 
     @Test
+    void writesStdinWhenTheCommonPoolHasOnlyOneFreeWorker() throws Exception {
+        Process probe = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Djava.util.concurrent.ForkJoinPool.common.parallelism=2", "-cp", System.getProperty("java.class.path"),
+                StdinProbe.class.getName()).redirectErrorStream(true).start();
+        try {
+            assertTrue(probe.waitFor(5, TimeUnit.SECONDS));
+            assertEquals(0, probe.exitValue(), new String(probe.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+        } finally {
+            if (probe.isAlive()) {
+                probe.destroyForcibly();
+            }
+        }
+    }
+
+    public static final class StdinProbe {
+        public static void main(String[] arguments) throws Exception {
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var blocker = ForkJoinPool.commonPool().submit(() -> {
+                entered.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+            });
+            try {
+                if (!entered.await(1, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Common pool blocker did not start");
+                }
+                byte[] input = "workspace upload".getBytes(StandardCharsets.UTF_8);
+                var result = SshConnectionManager.runCommand(List.of("/bin/cat"), input, Duration.ofSeconds(2));
+                if (result.exitCode() != 0 || !Arrays.equals(input, result.stdout())) {
+                    throw new IllegalStateException("Command did not receive its stdin");
+                }
+            } finally {
+                release.countDown();
+                blocker.get(1, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
     void keepsCredentialsInStdinAndQuotesOnlyTrustedRemoteEntryPaths() {
         var commands = new ArrayList<List<String>>();
         var payload = new AtomicReference<byte[]>();
@@ -317,10 +364,14 @@ class SshConnectionManagerTest {
         var release = new CountDownLatch(1);
         var lease = new RuntimeLease("runtime", URI.create("http://127.0.0.1:41234"), "token", "lease", 1);
         try (var manager = manager(URI.create("http://127.0.0.1:8080"), (command, input, timeout) -> {
-            if (input.length == 0) return success();
+            if (input.length == 0) {
+                return success();
+            }
             entered.countDown();
             try {
-                if (!release.await(3, TimeUnit.SECONDS)) throw new AssertionError("Bootstrap was not released");
+                if (!release.await(3, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Bootstrap was not released");
+                }
             } catch (InterruptedException failure) {
                 Thread.currentThread().interrupt();
                 throw new AssertionError(failure);

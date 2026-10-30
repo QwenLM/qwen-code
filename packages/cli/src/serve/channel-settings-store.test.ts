@@ -240,6 +240,20 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('keeps an existing multiSession channel savable without a stored scope', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    // The channel was configured with multiSession and no sessionScope: the
+    // parser resolved 'user'. The store must resolve the same value, or every
+    // later save is rejected by the multiSession compatibility check.
+    await store.upsert('non-user-default-management-test', {
+      expectedRevision: store.snapshot().revision,
+      config: { type: 'non-user-default-management-test', multiSession: true },
+    });
+    expect(readStoredChannel('non-user-default-management-test')).toMatchObject(
+      { multiSession: true },
+    );
+  });
+
   it('persists normalized message routes and their default', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     await store.upsert('routed', {
@@ -700,12 +714,10 @@ describe('WorkspaceChannelSettingsStore', () => {
       extra: { sessionScope: 'chat_thread' },
       message: 'requires sessionScope "user"',
     },
-    {
-      label: 'a plugin non-user default session scope',
-      type: 'non-user-default-management-test',
-      extra: {},
-      message: 'requires sessionScope "user"',
-    },
+    // A plugin's non-user default is NOT rejected any more: with multiSession
+    // and no explicit scope the resolved scope is 'user' (see
+    // effectiveSessionScope), which the acceptance test below pins. An
+    // explicit non-user scope is still rejected (the row above).
     {
       label: 'channel group history',
       type: 'user-default-management-test',
