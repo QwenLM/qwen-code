@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactService;
 import com.alibaba.qwen.code.managedagent.artifact.ManagedToolDetailsService;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
@@ -69,7 +70,7 @@ class ManagedArtifactApiIntegrationTest {
         var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
         stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
         stderr = artifacts.stream().filter(a -> "stderr".equals(a.streamId())).findFirst().orElseThrow().descriptor();
-        itemId = fixture.sessions().findSnapshot("tenant-1", "session-1").orElseThrow()
+        itemId = fixture.sessions().findMessagePage("tenant-1", "session-1", null, 100, false)
                 .items().getFirst().itemId();
     }
 
@@ -580,8 +581,11 @@ class ManagedArtifactApiIntegrationTest {
         fixtureJson.set("toolResult", JSON.readTree(result));
         fixtureJson.set("artifactList", JSON.readTree(list));
         fixtureJson.set("transcript", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", null, 100)));
-        String before = Long.toString(fixture.sessions().requireSession("tenant-1", "session-1").lastSequence() + 1);
-        fixtureJson.set("events", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", before, 100).events()));
+        var events = fixture.sessions().findEvents("tenant-1", "session-1", 0, 100);
+        fixtureJson.set("events", JSON.valueToTree(events.stream().map(event -> new WebShellEvent(
+                event.schemaVersion(), event.projectionVersion(), event.sequence(), event.eventId(),
+                event.sessionId(), event.turnId(), event.itemId(), event.contentPartId(), event.type(),
+                event.createdAt(), event.data(), event.terminal())).toList()));
         String output = System.getProperty("qwen.o3.fixture-output");
         if (output != null) {
             Files.writeString(Path.of(output), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(fixtureJson));
