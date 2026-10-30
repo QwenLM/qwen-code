@@ -47,7 +47,7 @@
 5760 qwen-pr-safety-precheck.yml
 3243 qwen-review-runner-schedule.yml
 27648 qwen-triage-finalize.yml
-370027 qwen-triage.yml
+370588 qwen-triage.yml
 15726 release-chrome-extension.yml
 26801 release-managed-agent-reference.yml
 13464 release-managed-runtime.yml

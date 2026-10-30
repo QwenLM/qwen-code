@@ -5236,7 +5236,7 @@ jobs:
             scripts/upload-aliyun-oss-assets.js
             scripts/release-script-utils.js
             scripts/verify-pr-check.mjs
-            scripts/lib/entry-point.js
+            scripts/lib/
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -5986,26 +5986,30 @@ jobs:
             # The checker local rounds run before posting, from this trusted
             # checkout, so both paths share one set of rules. It must pass on
             # the report's directory and read the verdict this run reported.
-            # A refusal is exit 1 plus its `failed:` line; node also exits 1
-            # when the script cannot load. Only `error` lines are echoed:
-            # warnings can name agent-chosen evidence files.
+            # Only its last stdout line is the summary: warnings above it can
+            # carry agent-chosen evidence filenames, so they are never echoed.
+            # node also exits 1 when the script cannot load; stderr says why.
             ARTIFACT_CHECK=''
             if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
               check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
               check_status=0
-              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2>&1 || check_status=$?
-              if [ "$check_status" -eq 0 ] && grep -qF "  ok: verdict=${AGENT_VERDICT} (" "$check_log"; then
-                ARTIFACT_CHECK=ok
-              elif [ "$check_status" -eq 0 ]; then
-                ARTIFACT_CHECK=refused
-                echo "verdict.txt beside report.md is not the reported ${AGENT_VERDICT}"
-              elif [ "$check_status" -eq 1 ] && grep -q '^  failed: verdict=' "$check_log"; then
-                ARTIFACT_CHECK=refused
-                grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
-              else
-                ARTIFACT_CHECK=error
-                echo "::warning::The artifact check could not run (exit ${check_status}); not trusting the agent verdict."
-              fi
+              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
+              case "${check_status}:$(tail -n 1 "$check_log")" in
+                "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
+                '0:'*)
+                  ARTIFACT_CHECK=mismatch
+                  echo "verdict.txt beside report.md is not the reported ${AGENT_VERDICT}"
+                  ;;
+                '1:  failed: verdict='*)
+                  ARTIFACT_CHECK=refused
+                  grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
+                  ;;
+                *)
+                  ARTIFACT_CHECK=error
+                  echo "::warning::The artifact check could not run (exit ${check_status}); not trusting the agent verdict."
+                  head -n 8 "$check_log.err" | cut -c1-300 || true
+                  ;;
+              esac
             fi
             # The agent's own verdict is only honoured for a run that
             # actually completed AND left consistent evidence: an early
@@ -6118,12 +6122,16 @@ jobs:
                ! { [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; }; then
               case "$ARTIFACT_CHECK" in
                 refused)
-                  CHECK_NOTE='its artifacts fail the consistency check'
-                  CHECK_NOTE_ZH='其产物未通过一致性检查'
+                  CHECK_NOTE='its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors'
+                  CHECK_NOTE_ZH='其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志'
+                  ;;
+                mismatch)
+                  CHECK_NOTE='the `verdict.txt` beside its report names a different verdict, so that verdict was not trusted'
+                  CHECK_NOTE_ZH='其报告旁的 `verdict.txt` 写的是另一个判定，因此该判定未被采信'
                   ;;
                 error)
-                  CHECK_NOTE='the consistency check could not run on its artifacts'
-                  CHECK_NOTE_ZH='一致性检查无法在其产物上运行'
+                  CHECK_NOTE='the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why'
+                  CHECK_NOTE_ZH='一致性检查（`verify-pr-check.mjs`）无法在其产物上运行，因此该判定未被采信——原因见工作流运行日志'
                   ;;
               esac
             fi
@@ -6168,7 +6176,7 @@ jobs:
                 printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
               fi
               if [ -n "$CHECK_NOTE" ]; then
-                printf 'The agent reported `%s`, but %s (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors.\n\n' "$AGENT_VERDICT" "$CHECK_NOTE"
+                printf 'The agent reported `%s`, but %s.\n\n' "$AGENT_VERDICT" "$CHECK_NOTE"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
@@ -6196,7 +6204,7 @@ jobs:
                 printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
               fi
               if [ -n "$CHECK_NOTE_ZH" ]; then
-                printf 'agent 报告了 `%s`，但%s（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志。\n\n' "$AGENT_VERDICT" "$CHECK_NOTE_ZH"
+                printf 'agent 报告了 `%s`，但%s。\n\n' "$AGENT_VERDICT" "$CHECK_NOTE_ZH"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"

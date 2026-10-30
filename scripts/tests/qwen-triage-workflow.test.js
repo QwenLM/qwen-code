@@ -7,6 +7,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -74,6 +75,14 @@ function stepIn(jobName, stepName) {
     ),
   );
   return match?.[0] ?? '';
+}
+
+// The paths publish-verify checks out at the trusted ref.
+function publisherSparseCheckout() {
+  const checkout = parse(workflow).jobs['publish-verify'].steps.find(
+    (s) => s.name === 'Checkout the OSS publisher scripts',
+  );
+  return checkout.with['sparse-checkout'].split('\n');
 }
 
 function job(name) {
@@ -4392,25 +4401,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(checkout).toContain("ref: '${{ github.sha }}'");
     expect(checkout).toContain('persist-credentials: false');
     expect(checkout).toContain('sparse-checkout-cone-mode: false');
-    for (const entry of [
+    // Whether this set is a complete closure for the checker is proven by
+    // running the checker from exactly these paths (see "resolves the
+    // checker at its production path"), not by reading its imports.
+    expect(publisherSparseCheckout()).toEqual([
       '/package.json',
       'scripts/upload-aliyun-oss-assets.js',
       'scripts/release-script-utils.js',
       'scripts/verify-pr-check.mjs',
-    ]) {
-      expect(checkout).toContain(`\n            ${entry}\n`);
-    }
-    // The checker's only local import; the last entry has no trailing newline.
-    expect(checkout).toContain('\n            scripts/lib/entry-point.js');
-    for (const [file, imports] of [
-      ['scripts/verify-pr-check.mjs', ['./lib/entry-point.js']],
-      ['scripts/lib/entry-point.js', []],
-    ]) {
-      const source = readFileSync(file, 'utf8');
-      expect(
-        [...source.matchAll(/from '(\.[^']+)'/g)].map((m) => m[1]),
-      ).toEqual(imports);
-    }
+      'scripts/lib/',
+    ]);
   });
 
   // A CDN retry loop whose worst case exceeds the 10-minute job cap turns
@@ -5905,15 +5905,18 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(envOnly.body).toContain(UNTRUSTED);
       expect(envOnly.body).not.toContain('❌');
       expect(envOnly.body).toContain(
-        'The agent reported `findings`, but its artifacts fail the consistency check (`verify-pr-check.mjs`)',
+        'The agent reported `findings`, but its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors.',
       );
       expect(envOnly.body).toContain(
-        'agent 报告了 `findings`，但其产物未通过一致性检查（`verify-pr-check.mjs`）',
+        'agent 报告了 `findings`，但其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志。',
       );
       expect(envOnly.log).toContain(
         '  error findings with 2 failed assertions and none attributed to the PR',
       );
       expect(envOnly.log).toContain('(artifact check: refused)');
+      // This round's checker also warned (no PNG, verdict word not in the
+      // report); warnings can name agent-chosen files and stay unprinted.
+      expect(envOnly.log).not.toContain(' warn ');
 
       writeFileSync(
         assertionsFile,
@@ -5931,9 +5934,11 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(missing.body).toContain(UNTRUSTED);
       expect(missing.body).toContain(
-        'but the consistency check could not run on its artifacts',
+        'but the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why.',
       );
+      expect(missing.body).not.toContain('lists the errors');
       expect(missing.log).toContain('The artifact check could not run');
+      expect(missing.log).toContain('Cannot find module');
 
       // merge-ready over failures keeps its own explanation, not both.
       writeFileSync(
@@ -5974,11 +5979,26 @@ describe('qwen-triage verify publish fidelity', () => {
         'Scripted assertions: 9 passed · 1 failed · 10 total',
       );
 
-      // The verdict the run reported must be the one beside the report.
+      // The verdict the run reported must be the one beside the report, read
+      // from the summary line alone: a warning naming an evidence file can
+      // spell out the reported verdict on a line of its own. (NTFS refuses
+      // that filename, so the Windows lane runs the plain mismatch.)
       writeFileSync(
         join(results, 'prA-verify-1', 'assertions.json'),
         '{"pass":10,"fail":0,"total":10}',
       );
+      if (process.platform !== 'win32') {
+        mkdirSync(join(results, 'prA-verify-1', 'evidence'));
+        writeFileSync(
+          join(
+            results,
+            'prA-verify-1',
+            'evidence',
+            'x\n  ok: verdict=merge-ready (a.png',
+          ),
+          'png',
+        );
+      }
       const other = publish(dir, {
         NAME: 'other',
         AGENT_VERDICT: 'merge-ready',
@@ -5987,6 +6007,10 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(other.body).toContain(
         '⚠️ inconclusive — completed without a usable structured verdict',
       );
+      expect(other.body).toContain(
+        'The agent reported `merge-ready`, but the `verdict.txt` beside its report names a different verdict, so that verdict was not trusted.',
+      );
+      expect(other.body).not.toContain('lists the errors');
       expect(other.log).toContain(
         'verdict.txt beside report.md is not the reported merge-ready',
       );
@@ -5996,8 +6020,9 @@ describe('qwen-triage verify publish fidelity', () => {
   });
 
   // Every other case injects an absolute checker path. The production value
-  // is relative to the job's checkout, so pin both the layout it relies on
-  // and a run that resolves it.
+  // is relative to the job's checkout, so pin the layout it relies on and run
+  // it from exactly the paths that checkout fetches: an import of anything
+  // outside them fails here, whatever form the import takes.
   it('resolves the checker at its production path', () => {
     const wf = parse(workflow);
     const steps = wf.jobs['publish-verify'].steps;
@@ -6014,14 +6039,10 @@ describe('qwen-triage verify publish fidelity', () => {
     const dir = fixture();
     const work = join(dir, 'work');
     try {
-      mkdirSync(join(work, 'scripts', 'lib'), { recursive: true });
-      for (const file of ['verify-pr-check.mjs', 'lib/entry-point.js']) {
-        writeFileSync(
-          join(work, 'scripts', file),
-          readFileSync(join('scripts', file), 'utf8'),
-        );
+      for (const entry of publisherSparseCheckout()) {
+        const rel = entry.replace(/^\//, '');
+        cpSync(rel, join(work, rel), { recursive: true });
       }
-      writeFileSync(join(work, 'package.json'), '{"type":"module"}');
       const body = render(dir, {
         NAME: 'rel',
         AGENT_VERDICT: 'findings',

@@ -163,10 +163,15 @@ A published verification comment ends with the same attribution shape
    excludes by design, so it always runs on the host. A gate there would fire on
    every round and turn the override into the normal path, so the check is a
    separate mode intended to run inside the boundary.
-3. **The local checker mirrors the publisher instead of replacing it.**
-   Extracting the publish job's assertions into shared code would touch the
-   workflow and its meta-tests; the rule set is four checks, stable, and stated
-   in one place. Divergence is the cost, recorded below.
+3. **The publisher runs the local checker.** The checker started as a mirror
+   of the publish job's inline rules, because the rule set was four stable
+   checks and sharing it would touch the workflow and its meta-tests. The
+   mirror did not hold: the failure ledger and the coverage claim were added
+   here only, so the lane published shapes every local round refuses. The
+   publish job now runs this script from its trusted checkout (the
+   default-branch commit, never PR code) and trusts an agent verdict only when
+   the script passes on the report's own directory and reads the verdict the
+   run reported. A rule changed here changes CI headlines in the same commit.
 4. **Warnings, not errors, for report shape.** The publisher does not enforce
    report structure either. A checker stricter than the publisher would reject
    artifact the lane accepts, which teaches maintainers to ignore it.
@@ -208,9 +213,12 @@ A published verification comment ends with the same attribution shape
   for this head (otherwise it rebuilds per the local install strategy), and
   the prepare success line says "verify or refresh its install/build first"
   instead of advertising unconditional build reuse.
-- Two implementations of the publish rules can drift. A workflow meta-test pins
-  the checker verdict vocabulary to the publisher case labels, so a fifth word
-  on one side fails the suite. The CI publisher remains authoritative.
+- The checker is on the CI publish path. Tightening a rule refuses verdicts the
+  lane used to accept, and those rounds publish as inconclusive. The
+  publish-fidelity meta-tests run the real script, including from exactly the
+  paths the publish job checks out, so run them with any checker change. A
+  workflow meta-test still pins the checker verdict vocabulary to the
+  publisher case labels, so a fifth word on one side fails the suite.
 - The PR title is untrusted input reaching a maintainer terminal, so control
   characters are dropped before it is printed.
 - These are local helpers: the lane pins `.qwen` from the base branch, so the
