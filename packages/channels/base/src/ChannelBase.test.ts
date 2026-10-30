@@ -25701,6 +25701,120 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('releases the cancelled turn ledger so its injection is never replayed', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const dropMidTurnMessages = enableInjectionDrop();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-ledger-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({ text: 'cancelled injection', messageId: 'm-ledger-2' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+        // The bridge still holds the text when the cancel drops it and reports
+        // it again on every take-back. If the drop left the admission ledger
+        // behind, the turn boundary would replay the cancelled text.
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValue(['cancelled injection']);
+
+        await ch.cancelPromptForTest(sessionId);
+        expect(dropMidTurnMessages).toHaveBeenCalledWith(sessionId);
+        expect(ch.promptBufferDrops).toEqual([
+          expect.objectContaining({
+            sessionId,
+            messageIds: ['m-ledger-2'],
+          }),
+        ]);
+
+        resolvers[0]!('done');
+        await running;
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+        // The following turn starts clean: nothing of the cancelled turn is
+        // replayed into it.
+        const next = ch.handleInbound(
+          envelope({ text: 'next', messageId: 'm-ledger-3' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).not.toContain(
+          'cancelled injection',
+        );
+        resolvers[1]?.('next done');
+        await next;
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('resets the cancelled turn fallback gates so a later message can still inject', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const dropMidTurnMessages = enableInjectionDrop();
+      // The first message is rejected and parks, degrading the running turn.
+      queueMidTurnMessage.mockReturnValueOnce({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-cancel-gate-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({ text: 'parked', messageId: 'm-cancel-gate-2' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        expect(collectBuffers(ch).get(sessionId)).toHaveLength(1);
+
+        await ch.cancelPromptForTest(sessionId);
+        expect(dropMidTurnMessages).toHaveBeenCalledWith(sessionId);
+
+        // The drop cleared the turn-scoped gates, so a message arriving while
+        // the cancelled turn winds down is still handed to the bridge instead
+        // of being parked behind the cancelled turn's state.
+        await ch.handleInbound(
+          envelope({ text: 'fresh after drop', messageId: 'm-cancel-gate-3' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(2);
+        expect(queueMidTurnMessage).toHaveBeenLastCalledWith(
+          sessionId,
+          'fresh after drop',
+        );
+
+        // The bridge never drained it, so the boundary settles it back for its
+        // own turn.
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValue(['fresh after drop']);
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('fresh after drop');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('reports only the undrained tail as dropped when earlier injections were already drained', async () => {
       const queueMidTurnMessage = enableInjection();
       const dropMidTurnMessages = enableInjectionDrop();
