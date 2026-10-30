@@ -24,6 +24,12 @@ describe('keyToAnsi', () => {
     expect(keyToAnsi(key({ name: 'a', ctrl: true }))).toBe('\u0001');
     expect(keyToAnsi(key({ name: 'c', ctrl: true }))).toBe('\u0003');
     expect(keyToAnsi(key({ name: 'z', ctrl: true }))).toBe('\u001a');
+    expect(keyToAnsi(key({ name: 'a', ctrl: true, shift: true }))).toBe(
+      '\u0001',
+    );
+    expect(keyToAnsi(key({ name: 'a', ctrl: true, meta: true }))).toBe(
+      '\u0001',
+    );
   });
 
   it('maps a bare named key to its escape sequence', () => {
@@ -51,18 +57,28 @@ describe('keyToAnsi', () => {
   // Ctrl+Down and Ctrl+Delete produced 0x04 (EOF) and Ctrl+Left produced a
   // form feed — raw C0 bytes written into the shell instead of the sequence.
   it.each([
-    ['up', '\x1b[A'],
-    ['down', '\x1b[B'],
-    ['right', '\x1b[C'],
-    ['left', '\x1b[D'],
-    ['home', '\x1b[H'],
-    ['end', '\x1b[F'],
-    ['pageup', '\x1b[5~'],
-    ['pagedown', '\x1b[6~'],
-    ['delete', '\x1b[3~'],
-  ])('does not treat Ctrl + %s as Ctrl + a letter', (name, expected) => {
-    expect(keyToAnsi(key({ name, ctrl: true }))).toBe(expected);
+    ['up', '\x1b[1;5A', '\x1b[A'],
+    ['down', '\x1b[1;5B', '\x1b[B'],
+    ['right', '\x1b[1;5C', '\x1b[C'],
+    ['left', '\x1b[1;5D', '\x1b[D'],
+    ['home', '\x1b[1;5H', '\x1b[H'],
+    ['end', '\x1b[1;5F', '\x1b[F'],
+    ['pageup', '\x1b[5;5~', '\x1b[5~'],
+    ['pagedown', '\x1b[6;5~', '\x1b[6~'],
+    ['delete', '\x1b[3;5~', '\x1b[3~'],
+  ])('maps Ctrl + %s before the raw sequence', (name, sequence, expected) => {
+    expect(keyToAnsi(key({ name, ctrl: true, sequence }))).toBe(expected);
   });
+
+  it.each([
+    ['f1', '\x1b[1;5P'],
+    ['insert', '\x1b[2;5~'],
+  ])(
+    'forwards Ctrl + %s when no named-key mapping exists',
+    (name, sequence) => {
+      expect(keyToAnsi(key({ name, ctrl: true, sequence }))).toBe(sequence);
+    },
+  );
 
   it('leaves a named key sequence alone when Ctrl is also held', () => {
     // Ctrl has no translation of its own for a named key, so the mapping

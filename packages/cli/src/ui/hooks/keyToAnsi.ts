@@ -69,8 +69,8 @@ export function keyToAnsi(key: Key): string | null {
     return '\r';
   }
 
-  // If it's a simple character, return it.
-  if (!key.ctrl && !key.meta && key.sequence) {
+  // Pass through printable characters and unmapped named-key sequences.
+  if ((!key.ctrl || key.name.length > 1) && !key.meta && key.sequence) {
     return key.sequence;
   }
 
