@@ -3749,7 +3749,7 @@ export function createServeApp(
     parseAndValidateProcessGlobalClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, [
         primaryBridge,
-        ...workspaceRegistry.list().map((runtime) => runtime.bridge),
+        ...workspaceRegistry.listManaged().map((runtime) => runtime.bridge),
       ]),
     installSkillConfig: (workspaceCwd, request) =>
       installWorkspaceSkill(
