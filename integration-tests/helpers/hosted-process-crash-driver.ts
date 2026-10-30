@@ -161,6 +161,7 @@ const proxy = createServer(async (req, res) => {
       )
         report.continuationsAfterFailure++;
       let postFailureLoadIndex: number | undefined;
+      let postFailureCancellationLoad = false;
       if (injected && target.pathname.endsWith('/load')) {
         const cancellationOnly =
           fields.cancellationTakeover === true &&
@@ -182,8 +183,7 @@ const proxy = createServer(async (req, res) => {
         report.postFailureLoads.push(
           nonDriving && (cancellationOnly || cleanupOnly),
         );
-        if (nonDriving && cancellationOnly)
-          report.postFailureCancellationLoads++;
+        postFailureCancellationLoad = nonDriving && cancellationOnly;
         report.postFailureLoadOrigins.push(
           [
             `takeover=${fields.cancellationTakeover === true}`,
@@ -224,6 +224,8 @@ const proxy = createServer(async (req, res) => {
       if (postFailureLoadIndex !== undefined) {
         report.postFailureLoadOrigins[postFailureLoadIndex] +=
           ` status=${upstream.status}`;
+        if (postFailureCancellationLoad && upstream.ok)
+          report.postFailureCancellationLoads++;
       }
       if (target.pathname.endsWith('/events') && upstream.body) {
         res.writeHead(upstream.status, relayedHeaders(upstream.headers));
