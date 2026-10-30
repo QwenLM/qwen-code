@@ -219,6 +219,21 @@ describe('EmbeddedApp host wiring', () => {
     }
   });
 
+  it('never passes a language prop, so the shell resolves its own UI language', async () => {
+    // The shell resolves the UI language from its own sources (daemon setting,
+    // then browser locale). A language prop would pin the value read at mount
+    // and reset the pick back to the entry's stale readLanguage reading when
+    // the setting changes later; readLanguage still feeds the chrome copy.
+    const previousLang = document.documentElement.lang;
+    try {
+      document.documentElement.lang = 'ru';
+      const props = await renderApp();
+      expect(props.language).toBeUndefined();
+    } finally {
+      document.documentElement.lang = previousLang;
+    }
+  });
+
   it('restores an existing session without setting its source', async () => {
     const props = await renderApp();
     expect(props.sessionSourceType).toBeUndefined();

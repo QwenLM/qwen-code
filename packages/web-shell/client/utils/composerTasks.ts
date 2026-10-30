@@ -18,3 +18,20 @@ export function isComposerTask(
   if (task.kind === 'agent') return false;
   return !(task.kind === 'workflow' && task.isHistorical === true);
 }
+
+/**
+ * Whether the snapshot carries a background agent that is still executing.
+ * Paused agents are parked, not active: they stay visible in the environment
+ * panel's subagents section, so they must not re-open the footer pill in the
+ * shipped entry (which would pin a stale count to parked work).
+ */
+export function hasActiveBackgroundAgent(
+  tasks: readonly DaemonSessionTaskWithWorkflowStatus[],
+): boolean {
+  return tasks.some(
+    (task) =>
+      task.kind === 'agent' &&
+      task.isBackgrounded === true &&
+      task.status === 'running',
+  );
+}
