@@ -21,3 +21,5 @@ Record the additional five-minute aggregate job in the workflow budget (nine dec
 ## Validation and limits
 
 CI contract checks pin the complete shard partition, automatic inclusion of new workspace suites, failure propagation, and the aggregate result. No local tests or builds were run. The complete workflow must demonstrate that all groups finish within their existing limits; the previous hook timeout still requires investigation if it recurs. Seven installations cost more runner time, trading repeated setup for completion and independent failure reports. Existing trigger, permission, and checkout rules remain in place.
+
+The first complete partitioned run exposed workflow fixtures that previously had not been reached on macOS. Keep their assertions and make the exercised shell paths work with the system Bash 3.2: read failed-job IDs without `mapfile`, safely iterate empty issue-family arrays under `nounset`, and reject missing OSS credentials with an explicit exit. Include shell stderr in issue-routing assertion diagnostics. These changes require remote validation; the remaining CLI and Windows failures are not established as resolved by them.
