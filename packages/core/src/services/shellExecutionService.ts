@@ -3195,10 +3195,17 @@ export class ShellExecutionService {
         result: result.catch(async (error: unknown) => {
           if (posixGroup) {
             posixGroup.force();
-            await posixGroup.completion;
+            const cleanupError = await posixGroup.completion;
             releaseGroup();
             this.activePtys.get(ptyProcess.pid)?.headlessTerminal.dispose();
             this.activePtys.delete(ptyProcess.pid);
+            if (cleanupError) {
+              throw new AggregateError(
+                [error, cleanupError],
+                `${getErrorMessage(error)}; cleanup failed: ${cleanupError.message}`,
+                { cause: error },
+              );
+            }
             throw error;
           }
           // An initialization exception can occur after spawn. Kill that process;

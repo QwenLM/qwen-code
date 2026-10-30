@@ -694,16 +694,71 @@ describe('ShellExecutionService', () => {
     it('never replays a launch after PTY initialization fails after spawn', async () => {
       const activeBefore = ShellExecutionService['activePtys'].size;
       const disposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      const initError = new Error('posix_spawnp failed after spawn');
       mockPtyProcess.onData.mockImplementationOnce(() => {
-        throw new Error('posix_spawnp failed after spawn');
+        throw initError;
       });
-      const handle = await launchWith(launch(), true);
-      await expect(handle.result).rejects.toThrow('after spawn');
+      const previousKill = mockProcessKill.getMockImplementation()!;
+      mockProcessKill.mockImplementation((pid, signal) => {
+        if (pid === -mockPtyProcess.pid && signal === 'SIGKILL') {
+          markProcessExited(mockPtyProcess.pid);
+        }
+        return true;
+      });
+      try {
+        const handle = await launchWith(launch(), true);
+        await expect(handle.result).rejects.toBe(initError);
+      } finally {
+        mockProcessKill.mockImplementation(previousKill);
+      }
       expect(mockCpSpawn).not.toHaveBeenCalled();
       expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGKILL'));
       expect(disposeSpy).toHaveBeenCalledTimes(1);
       expect(ShellExecutionService['activePtys'].size).toBe(activeBefore);
     });
+
+    it.each([
+      new Error('PTY initialization failed'),
+      'PTY initialization failed without an Error',
+    ])(
+      'preserves unconfirmed cleanup after PTY setup failure (%s)',
+      async (initError) => {
+        const activeBefore = ShellExecutionService['activePtys'].size;
+        const disposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+        mockPtyProcess.onData.mockImplementationOnce(() => {
+          registerProcess(mockPtyProcess.pid);
+          throw initError;
+        });
+        const handle = await launchWith(launch(), true);
+        const failure = await handle.result.catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(Error);
+        const error = failure as AggregateError;
+        expect(error.message).toContain(
+          initError instanceof Error ? initError.message : initError,
+        );
+        expect(error.message).toContain(
+          'original leader identity or isolation changed',
+        );
+        expect(error.cause).toBe(initError);
+        expect(error.errors).toEqual([
+          initError,
+          expect.objectContaining({
+            message: expect.stringContaining(
+              'original leader identity or isolation changed',
+            ),
+          }),
+        ]);
+        expect(mockProcessKill).not.toHaveBeenCalledWith(
+          ...groupKill('SIGKILL'),
+        );
+        expect(mockCpSpawn).not.toHaveBeenCalled();
+        expect(disposeSpy).toHaveBeenCalledTimes(1);
+        expect(ShellExecutionService['activePtys'].size).toBe(activeBefore);
+        expect(
+          ShellExecutionService['posixGroups'].has(mockPtyProcess.pid),
+        ).toBe(false);
+      },
+    );
 
     it('ends stdin without reporting an early-close error when the exit status is known', async () => {
       const child = pipe();
