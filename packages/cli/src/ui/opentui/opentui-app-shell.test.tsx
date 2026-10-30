@@ -108,6 +108,7 @@ const mocks = vi.hoisted(() => {
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
     extensionSettingProps: null as Record<string, unknown> | null,
+    extensionChoiceProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
     mcpApprovalProps: null as Record<string, unknown> | null,
@@ -356,6 +357,11 @@ vi.mock('./dialogs-confirm.js', () => ({
   },
 }));
 vi.mock('./ExtensionAcquisition.js', () => ({
+  ExtensionPluginChoice: (props: Record<string, unknown>) => {
+    mocks.state.extensionChoiceProps = props;
+    const permission = props['permission'] as { marketplace: { name: string } };
+    return <span>{`extension-choice:${permission.marketplace.name}`}</span>;
+  },
   ExtensionSettingInput: (props: Record<string, unknown>) => {
     mocks.state.extensionSettingProps = props;
     const permission = props['permission'] as { setting: { name: string } };
@@ -405,6 +411,7 @@ vi.mock('../hooks/useStatusLine.js', () => ({
 const extensionManager = {
   setRequestConsent: vi.fn(),
   setRequestSetting: vi.fn(),
+  setRequestChoicePlugin: vi.fn(),
 };
 const CONFIG = {
   getExtensionManager: () => extensionManager,
@@ -2644,6 +2651,216 @@ describe('OpenTuiApp shell wiring', () => {
     ).toBeTruthy();
   });
 
+  describe('direct marketplace choice owner', () => {
+    type Manager = ReturnType<Config['getExtensionManager']>;
+    type ChoiceRequest = Parameters<Manager['setRequestChoicePlugin']>[0];
+    type SettingRequest = NonNullable<
+      Parameters<Manager['setRequestSetting']>[0]
+    >;
+    type ConsentRequest = Parameters<Manager['setRequestConsent']>[0];
+    const marketplace: Parameters<ChoiceRequest>[0] = {
+      name: 'Owned marketplace',
+      owner: { name: 'Owned', email: 'owned@example.invalid' },
+      plugins: [
+        {
+          name: 'alpha',
+          version: '1.0.0',
+          source: './alpha',
+          description: 'Owned Alpha',
+        },
+        {
+          name: 'beta',
+          version: '1.0.0',
+          source: './beta',
+          description: 'Owned Beta',
+        },
+      ],
+    };
+    function owner() {
+      const register = vi.fn<(request: ChoiceRequest) => void>();
+      const setting = vi.fn<(request: SettingRequest) => void>();
+      const consent = vi.fn<(request: ConsentRequest) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestChoicePlugin: register,
+          setRequestSetting: setting,
+          setRequestConsent: consent,
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+        setting: () => setting.mock.calls.at(-1)![0],
+        consent: () => consent.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    function permission() {
+      return mocks.state.extensionChoiceProps!['permission'] as {
+        resolve: (name: string) => void;
+        cancel: () => void;
+      };
+    }
+    it('resolves the selected plugin and preserves pending choice across rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(marketplace);
+      });
+      expect(
+        screen.getByText('extension-choice:Owned marketplace'),
+      ).toBeTruthy();
+      expect(screen.queryByText('input-prompt')).toBeNull();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      await act(async () => permission().resolve('beta'));
+      await expect(pending).resolves.toBe('beta');
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('rejects cancellation rather than supplying an empty plugin name', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(marketplace);
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => permission().cancel());
+      await expect(rejected).resolves.toMatchObject({
+        message: 'Plugin selection cancelled.',
+      });
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('keeps consecutive choices independent and ignores a stale submit', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await act(async () => {
+        first = o.request()(marketplace);
+        second = o.request()({ ...marketplace, name: 'Second marketplace' });
+      });
+      const old = permission();
+      expect(
+        screen.queryByText('extension-choice:Second marketplace'),
+      ).toBeNull();
+      await act(async () => old.resolve('alpha'));
+      await expect(first).resolves.toBe('alpha');
+      expect(
+        screen.getByText('extension-choice:Second marketplace'),
+      ).toBeTruthy();
+      const next = permission();
+      expect(next).not.toBe(old);
+      await act(async () => old.resolve('stale'));
+      expect(
+        screen.getByText('extension-choice:Second marketplace'),
+      ).toBeTruthy();
+      await act(async () => next.resolve('beta'));
+      await expect(second).resolves.toBe('beta');
+    });
+    it('shares FIFO with consent and setting without mixing resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let consent!: Promise<void>;
+      let choice!: Promise<string>;
+      let setting!: Promise<string>;
+      await act(async () => {
+        consent = o.consent()({
+          extensionConfig: { name: 'consent-first', version: '1.0.0' },
+          originSource: 'QwenCode',
+        });
+        choice = o.request()(marketplace);
+        setting = o.setting()({
+          name: 'Final setting',
+          description: 'Owned',
+          envVar: 'OWNED_VALUE',
+        });
+      });
+      expect(
+        screen.getByText(/Installing extension "consent-first"/),
+      ).toBeTruthy();
+      expect(
+        screen.queryByText('extension-choice:Owned marketplace'),
+      ).toBeNull();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void
+        )(true),
+      );
+      await expect(consent).resolves.toBeUndefined();
+      expect(
+        screen.getByText('extension-choice:Owned marketplace'),
+      ).toBeTruthy();
+      expect(screen.queryByText('extension-setting:Final setting')).toBeNull();
+      await act(async () => permission().resolve('beta'));
+      await expect(choice).resolves.toBe('beta');
+      expect(screen.getByText('extension-setting:Final setting')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.extensionSettingProps!['permission'] as {
+            resolve: (value: string) => void;
+          }
+        ).resolve('value'),
+      );
+      await expect(setting).resolves.toBe('value');
+    });
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured choices on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending = captured(marketplace);
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = permission().resolve;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: 'Plugin selection cancelled.',
+        });
+        await expect(captured(marketplace)).rejects.toThrow(
+          'Plugin selection cancelled.',
+        );
+        await act(async () => late('stale'));
+        if (change === 'replacement') {
+          let fresh!: Promise<string>;
+          await act(async () => {
+            fresh = next.request()(marketplace);
+          });
+          await act(async () => permission().resolve('beta'));
+          await expect(fresh).resolves.toBe('beta');
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
   describe('direct extension setting owner', () => {
     type Manager = ReturnType<Config['getExtensionManager']>;
     type SettingRequest = NonNullable<
@@ -2662,6 +2879,7 @@ describe('OpenTuiApp shell wiring', () => {
         ...CONFIG,
         getExtensionManager: () => ({
           setRequestSetting: register,
+          setRequestChoicePlugin: vi.fn(),
           setRequestConsent: consent,
         }),
       } as unknown as Config;
@@ -2826,6 +3044,7 @@ describe('OpenTuiApp shell wiring', () => {
         getExtensionManager: () => ({
           setRequestConsent: register,
           setRequestSetting: vi.fn(),
+          setRequestChoicePlugin: vi.fn(),
         }),
       } as unknown as Config;
       return {

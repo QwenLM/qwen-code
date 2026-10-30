@@ -370,7 +370,7 @@ export function ExtensionSettingInput({
   );
 }
 
-function ExtensionPluginChoice({
+export function ExtensionPluginChoice({
   permission,
   width,
   height,
