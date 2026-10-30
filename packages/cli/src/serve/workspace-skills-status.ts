@@ -376,6 +376,9 @@ async function buildWorkspaceSkillsStatus(
       workspaceCwd,
       initialized: true,
       skills: statuses.sort((a, b) => a.name.localeCompare(b.name)),
+      ...(skillManager.getOmittedSkillLevels().length > 0
+        ? { complete: false }
+        : {}),
       ...(errors ? { errors } : {}),
     };
   } catch (error) {

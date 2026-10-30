@@ -5974,7 +5974,8 @@ async function runQwenServeImpl(
           catalogEnumerated =
             isWorkspaceTrustedForPersistence(workspace) &&
             !status.snapshot &&
-            !status.errors?.length;
+            !status.errors?.length &&
+            status.complete !== false;
           catalogAvailable = catalogEnumerated;
         }
       } catch {
@@ -6324,7 +6325,8 @@ async function runQwenServeImpl(
               if (
                 !status.initialized ||
                 status.snapshot ||
-                status.errors?.length
+                status.errors?.length ||
+                status.complete === false
               ) {
                 aliasesKnown = false;
               }
@@ -6481,6 +6483,25 @@ async function runQwenServeImpl(
               }
               if (preservesDefault) {
                 outcomes[index] = { skillName, changed: false };
+                continue;
+              }
+              // A new grant cancels an identically spelled `defaultDisabled`
+              // entry in every scope and workspace for every identity that
+              // spelling names. Refuse unless the catalogs prove one owner.
+              if (
+                enabled &&
+                !isProvenUniqueSpelling(skillName) &&
+                !next.enabled.some(
+                  (name) =>
+                    name.trim().toLowerCase() ===
+                    skillName.trim().toLowerCase(),
+                )
+              ) {
+                outcomes[index] = {
+                  skillName,
+                  changed: false,
+                  reason: 'ambiguous_skill_name',
+                };
                 continue;
               }
               const updated = updateSkillActivationLists(

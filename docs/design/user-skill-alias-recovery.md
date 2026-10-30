@@ -2,8 +2,8 @@
 
 [English](user-skill-alias-recovery.md) | [简体中文](user-skill-alias-recovery.zh-CN.md)
 
-Status: candidate correction to PR #15466. New shared-spelling grants remain
-blocked on a maintainer decision; this is not full permission-isolation sign-off.
+Status: candidate correction to PR #15466. New shared-spelling grants are
+refused without writing; this is not full permission-isolation sign-off.
 
 ## Problem and scope
 
@@ -43,23 +43,20 @@ checking the full identity without assuming that any entries will be removed.
 Unresolved hard-to-default conversions cannot establish ownership and retain
 the existing hard restriction; pre-registration hard disables remain allowed.
 
-## Boundaries requiring a decision
+## Decided boundary: new grants
 
-There is a separate unresolved new-grant path: with no global restriction but a
-Workspace `defaultDisabled: ["pdf"]`, a new shared User `enabled: ["pdf"]`
-can still affect both project `pdf` and extension `rust:pdf`. The User guard
-deliberately excludes Workspace entries, and there is no existing ambiguity
-disposition for an otherwise resolved name. Do not fabricate a global block or
-treat this remaining isolation issue as accepted behavior.
-
-Recommended decision: add an explicit refusal for new grants whose spelling is
-shared or whose ownership cannot be established. Ordinary proven-unique grants
-remain available; shared names require settings intervention. The alternative
-is a per-identity permission representation, which allows selective shared-name
-recovery but requires a separate contract and migration design. Neither is
-implicitly accepted by this correction. Catalog checks cover managed workspaces
-only and do not establish an atomic inventory across concurrent installations
-or unregistered workspaces.
+There is a separate new-grant path: with no User restriction but a Workspace
+`defaultDisabled: ["pdf"]`, a new User `enabled: ["pdf"]` would affect both
+project `pdf` and extension `rust:pdf`. The User guard deliberately excludes
+Workspace entries, so the write path refuses the grant instead: `changed: false`
+with `reason: "ambiguous_skill_name"` unless complete fresh managed catalogs
+prove the written spelling has exactly one registry identity. An existing grant
+is not refused. Ordinary proven-unique grants remain available;
+shared names require settings intervention. The alternative — a per-identity
+permission representation that allows selective shared-name recovery — remains
+a separate contract and migration design and is not claimed here. Catalog
+checks cover managed workspaces only and do not establish an atomic inventory
+across concurrent installations or unregistered workspaces.
 
 ## Validation
 
@@ -68,7 +65,8 @@ remove shared hard/default restrictions, including project/extension,
 extension/extension, secondary-workspace and colon-containing collisions.
 They must preserve restrictions when fresh enumeration fails, refuse exact-name
 recovery without fresh ownership evidence, respect higher-scope locks, preserve unresolved
-disables, allow unique-alias recovery and hard-to-default conversion, and reach
-the same batch result in both request orders. These are persistence tests with
+disables, refuse a new shared grant without writing, allow unique-alias recovery
+and hard-to-default conversion, and reach the same batch result in both request
+orders. These are persistence tests with
 real temporary settings and controlled catalogs; they do not certify a live ACP
 race or another operating system.

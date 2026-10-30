@@ -586,6 +586,12 @@ export interface ServeWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+  /**
+   * `false` when the enumeration skipped a level (safe or bare mode, or a
+   * level named in `skills.disabledLevels`), so the catalog cannot prove a
+   * name absent or a spelling uniquely owned. Absent means complete.
+   */
+  complete?: boolean;
   /** Daemon observation metadata; omitted by direct runtime/config reads. */
   snapshot?: {
     observedAt: number;

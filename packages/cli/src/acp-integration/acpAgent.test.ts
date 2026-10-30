@@ -10771,6 +10771,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
         hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills,
       }),
       getExtensions: vi.fn().mockReturnValue([
@@ -10903,6 +10904,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: vi.fn().mockResolvedValue(undefined),
         hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills: vi.fn().mockReturnValue([
           {
             name: 'session-skill',
@@ -11586,6 +11588,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
         getSkillManager: vi.fn().mockReturnValue({
           hasDiscoveryErrors: vi.fn().mockReturnValue(hasDiscoveryErrors),
+          getOmittedSkillLevels: vi.fn().mockReturnValue([]),
           getCachedSkills: vi.fn().mockReturnValue([
             {
               name: 'rust:pdf',
@@ -11633,6 +11636,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           });
         } else {
           expect(status).not.toHaveProperty('errors');
+          expect(status).not.toHaveProperty('complete');
         }
       } finally {
         mockConnectionState.resolve();
@@ -11640,6 +11644,63 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     },
   );
+
+  it('marks a live ACP skills status incomplete when the scan omitted a level', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue(['project']),
+        getCachedSkills: vi.fn().mockReturnValue([
+          {
+            name: 'rust:pdf',
+            authoredName: 'pdf',
+            description: 'Known extension skill',
+            level: 'extension',
+            extensionName: 'rust',
+            filePath: '/ext/rust/skills/pdf/SKILL.md',
+          },
+        ]),
+      }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+      isSkillEnabled: vi.fn().mockReturnValue(true),
+      getExtensions: vi.fn().mockReturnValue([]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+      ).resolves.toMatchObject({
+        v: 1,
+        workspaceCwd: '/work/status',
+        initialized: true,
+        complete: false,
+        skills: [{ name: 'rust:pdf', extensionName: 'rust' }],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('reports an uninitialized snapshot when catalog enumeration throws', async () => {
     // A partial build failure must not look like a valid empty catalog: the
@@ -11711,6 +11772,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
         hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills: vi.fn().mockReturnValue([]),
       }),
     } as unknown as Config;
@@ -11761,6 +11823,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
         hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills: vi.fn().mockReturnValue([]),
       }),
     } as unknown as Config;
@@ -37528,6 +37591,7 @@ describe('sessionLanguage multi-session propagation', () => {
         getSkillManager: () => ({
           refreshCache,
           hasDiscoveryErrors: () => false,
+          getOmittedSkillLevels: () => [],
           getCachedSkills: () => [
             {
               name: skillName,

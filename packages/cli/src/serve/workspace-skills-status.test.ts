@@ -131,6 +131,38 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(review?.argumentHint).toBeTruthy();
   });
 
+  it('marks a catalog that skipped a level as incomplete', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-complete-'),
+    );
+    try {
+      const skillDir = path.join(workspace, '.qwen', 'skills', 'pdf');
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: pdf\ndescription: Project pdf\n---\nBODY',
+      );
+
+      const complete = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(complete.complete).toBeUndefined();
+      expect(complete.skills.map((skill) => skill.name)).toContain('pdf');
+
+      await fsp.writeFile(
+        path.join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify({ skills: { disabledLevels: ['project'] } }),
+      );
+      const incomplete = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(incomplete.complete).toBe(false);
+      expect(incomplete.skills.map((skill) => skill.name)).not.toContain('pdf');
+
+      vi.stubEnv('QWEN_CODE_SAFE_MODE', 'true');
+      const safe = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(safe.complete).toBe(false);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('reports the queried workspace path', async () => {
     const provider = createWorkspaceSkillsStatusProvider();
 

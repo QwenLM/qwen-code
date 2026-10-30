@@ -95,6 +95,7 @@ export class SkillManager {
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private discoveryHasErrors = false;
+  private omittedSkillLevels: SkillLevel[] = [];
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
@@ -307,6 +308,14 @@ export class SkillManager {
     return this.discoveryHasErrors;
   }
 
+  /**
+   * Levels the committed scan skipped, so its catalog cannot prove that an
+   * absent name or a spelling's ownership does not exist elsewhere.
+   */
+  getOmittedSkillLevels(): readonly SkillLevel[] {
+    return this.omittedSkillLevels;
+  }
+
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
@@ -463,6 +472,16 @@ export class SkillManager {
     const levels: SkillLevel[] = this.config.isSafeMode()
       ? ['bundled']
       : ['project', 'user', 'extension', 'bundled'];
+    // A skipped level is not a discovery error: the scan omits it by
+    // configuration, so the published cache cannot prove a name absent.
+    const allLevels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
+    const disabledLevels = this.config.getDisabledSkillLevels?.();
+    const omittedSkillLevels = this.config.getBareMode()
+      ? allLevels
+      : allLevels.filter(
+          (level) =>
+            !levels.includes(level) || disabledLevels?.has(level) === true,
+        );
 
     // Use allSettled so an unrecoverable error at one level (e.g. a hung
     // FS, a permission denial, an OS-level enoent on a removed config dir)
@@ -500,6 +519,7 @@ export class SkillManager {
 
     // Publish completeness with the cache produced by this scan.
     this.discoveryHasErrors = discoveryHasErrors;
+    this.omittedSkillLevels = omittedSkillLevels;
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`

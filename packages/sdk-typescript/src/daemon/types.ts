@@ -4088,8 +4088,12 @@ export interface DaemonUserSkillActivationItem {
   changed: boolean;
   /** Present with `changed: false` when a standing entry refused an enable. */
   block?: DaemonSkillToggleBlock;
-  /** Present with `changed: false` when the name matched no catalog identity. */
-  reason?: 'unresolved_skill_name';
+  /**
+   * Present with `changed: false` when the write could not name one catalog
+   * identity: the name is unresolved, or it is a shared spelling that would
+   * be written as a new grant.
+   */
+  reason?: 'unresolved_skill_name' | 'ambiguous_skill_name';
 }
 
 export interface DaemonUserSkillActivationResult

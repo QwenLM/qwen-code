@@ -1370,7 +1370,11 @@ describe('workspace skill settings persistence', () => {
 
   const captureSkillPersistence = async (
     skills: ServeWorkspaceSkillStatus[],
-    options: { initialized?: boolean; trustedWorkspace?: boolean } = {},
+    options: {
+      initialized?: boolean;
+      trustedWorkspace?: boolean;
+      complete?: boolean;
+    } = {},
   ) => {
     const originalCreateServeApp = serverModule.createServeApp;
     let deps: Parameters<typeof serverModule.createServeApp>[2];
@@ -1385,6 +1389,7 @@ describe('workspace skill settings persistence', () => {
         workspaceCwd: workspace,
         initialized: options.initialized ?? true,
         skills,
+        ...(options.complete === false ? { complete: false } : {}),
       }),
     } as unknown as HttpAcpBridge;
     handle = await runQwenServe(
@@ -2565,6 +2570,47 @@ describe('workspace skill settings persistence', () => {
     },
   );
 
+  it('refuses a new shared user grant that could cancel another identity default', async () => {
+    writeSkillSettings([], []);
+    const { persistUserSkillActivation, workspaceRegistry } =
+      await captureSkillPersistence([skillStatus('pdf', 'project')]);
+    const secondary = path.join(workspace, 'secondary');
+    fs.mkdirSync(secondary);
+    const primary = workspaceRegistry!.primary;
+    workspaceRegistry!.add({
+      ...primary,
+      workspaceId: 'secondary-shared-new-grant',
+      workspaceCwd: secondary,
+      primary: false,
+      trusted: true,
+      workspaceService: {
+        ...primary.workspaceService,
+        getWorkspaceSkillsStatus: vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: secondary,
+          initialized: true,
+          skills: [skillStatus('rust:pdf', 'extension', 'rust')],
+        }),
+      },
+    });
+    const before = fs.readFileSync(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).resolves.toEqual({
+      outcomes: [
+        { skillName: 'pdf', changed: false, reason: 'ambiguous_skill_name' },
+      ],
+      settingsChanges: [],
+    });
+    expect(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
+  });
+
   it('preserves a shared exact hard restriction when requesting default mode', async () => {
     writeSkillSettings([], ['pdf']);
     const { persistUserSkillActivation } = await captureSkillPersistence([
@@ -2674,6 +2720,7 @@ describe('workspace skill settings persistence', () => {
     'retained',
     'errors',
     'same-identity',
+    'incomplete',
   ] as const)(
     'checks secondary workspace %s before removing a user alias',
     async (mode) => {
@@ -2721,6 +2768,7 @@ describe('workspace skill settings persistence', () => {
                         ],
                       }
                     : {}),
+                  ...(mode === 'incomplete' ? { complete: false } : {}),
                   skills: [
                     mode === 'collision'
                       ? skillStatus('go:pdf', 'extension', 'go')
@@ -2771,6 +2819,51 @@ describe('workspace skill settings persistence', () => {
       ).toBe(before);
     },
   );
+
+  it('keeps a shared alias when the primary catalog omits a level', async () => {
+    writeSkillSettings([], ['pdf']);
+    const { persistUserSkillActivation } = await captureSkillPersistence(
+      [skillStatus('rust:pdf', 'extension', 'rust')],
+      { complete: false },
+    );
+    const before = fs.readFileSync(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['rust:pdf'], true, 'hard'),
+    ).resolves.toEqual({
+      outcomes: [
+        {
+          skillName: 'rust:pdf',
+          changed: false,
+          block: {
+            reason: 'hard',
+            list: 'disabled',
+            entry: 'pdf',
+            scope: 'User',
+          },
+        },
+      ],
+      settingsChanges: [],
+    });
+    expect(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
+  });
+
+  it('keeps an unresolved enable retryable when the primary catalog omits a level', async () => {
+    writeSkillSettings([], []);
+    const { persistUserSkillActivation } = await captureSkillPersistence(
+      [skillStatus('rust:pdf', 'extension', 'rust')],
+      { complete: false },
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['go:pdf'], true, 'hard'),
+    ).rejects.toMatchObject({ name: 'SkillCatalogUnavailableError' });
+  });
 
   it.each(['pdf', 'rust:pdf'] as const)(
     'preserves recovery boundaries for a retained %s user restriction',
