@@ -627,7 +627,7 @@ describe('EditTool', () => {
         ).toBeUndefined();
       });
 
-      it('records the bytes written rather than the LF-normalized preview', async () => {
+      it('records and displays the bytes written rather than the literal proposal', async () => {
         // A new_string ending in a bare CR can be absorbed by the CRLF that
         // follows the span, so `newContent` and `contentForWrite` differ by
         // exactly that byte. The attribution hash must describe the file on
@@ -639,7 +639,9 @@ describe('EditTool', () => {
           'recordEdit',
         );
 
-        const result = await run(edit(filePath, 'const a', 'A\r'));
+        const params = edit(filePath, 'const a', 'A\r');
+        const confirmation = await confirm(params);
+        const result = await run(params);
 
         expect(result.error).toBeUndefined();
         const written = readText(filePath);
@@ -648,6 +650,16 @@ describe('EditTool', () => {
         expect(recordEdit.mock.calls[0][2]).toBe(
           written.replace(/\r\n/g, '\n'),
         );
+        const preview = written.replace(/\r\n/g, '\n');
+        expect.soft(confirmation).toMatchObject({
+          newContent: preview,
+          fileDiff: expect.stringContaining('+A = 1;'),
+        });
+        const display = result.returnDisplay as FileDiff;
+        expect.soft(display.newContent).toBe(preview);
+        expect.soft(display.fileDiff).toContain('+A = 1;');
+        expect.soft(result.llmContent).toContain('A = 1;');
+        expect.soft(result.llmContent).not.toContain('\r');
       });
     });
 

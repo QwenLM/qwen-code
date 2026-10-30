@@ -507,11 +507,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       throw new StructuredToolError(editData.error.raw, editData.error.type);
     }
 
+    const newContent = editData.contentForWrite.replace(/\r\n/g, '\n');
     const fileName = path.basename(this.params.file_path);
     const fileDiff = createPatchSmart(
       fileName,
       editData.currentContent ?? '',
-      editData.newContent,
+      newContent,
       'Current',
       'Proposed',
     );
@@ -522,7 +523,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       filePath: this.params.file_path,
       fileDiff,
       originalContent: editData.currentContent,
-      newContent: editData.newContent,
+      newContent,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
@@ -742,16 +743,16 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         });
       }
 
+      // The splice can absorb a trailing bare `\r` from the proposal. Use the
+      // written bytes in the same LF view as `currentContent` for consumers.
+      const newContent = editData.contentForWrite.replace(/\r\n/g, '\n');
+
       // Track AI contribution for commit attribution
       if (!mutation && !this.params.modified_by_user) {
-        // Record the bytes that actually reached disk, in the same LF view as
-        // `currentContent`: the splice can absorb a trailing bare `\r` from
-        // `newContent`, so the two strings differ by exactly that byte and the
-        // stored hash would not match the file (nor align in the char diff).
         CommitAttributionService.getInstance().recordEdit(
           this.params.file_path,
           editData.currentContent,
-          editData.contentForWrite.replace(/\r\n/g, '\n'),
+          newContent,
         );
       }
 
@@ -786,13 +787,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         fileName,
         editData.currentContent ?? '',
         originallyProposedContent,
-        editData.newContent,
+        newContent,
       );
 
       const fileDiff = createPatchSmart(
         fileName,
         editData.currentContent ?? '',
-        editData.newContent,
+        newContent,
         'Current',
         'Proposed',
       );
@@ -801,7 +802,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         fileName,
         filePath: this.params.file_path,
         originalContent: editData.currentContent,
-        newContent: editData.newContent,
+        newContent,
         diffStat,
       };
 
@@ -820,7 +821,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         new FileOperationEvent(
           EditTool.Name,
           operation,
-          editData.newContent.split('\n').length,
+          newContent.split('\n').length,
           mimetype,
           extension,
           programmingLanguage,
@@ -835,7 +836,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
       const snippetResult = extractEditSnippet(
         editData.currentContent,
-        editData.newContent,
+        newContent,
       );
       if (snippetResult) {
         const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
