@@ -371,12 +371,35 @@ function main(argv) {
     '--untracked-files=normal',
   ]);
   if (dirty.status !== 0) {
-    return fail(3, 'could not read the working tree status');
+    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
+    return fail(3, `could not read the working tree status: ${detail}`);
   }
   if (dirty.stdout.trim() !== '') {
+    // Name the entries and a remedy that actually clears them: a plain
+    // `git stash` leaves untracked files behind, so the advice would loop.
+    const entries = dirty.stdout.trim().split('\n');
+    const shown = entries.slice(0, 5).map(printable).join(', ');
     return fail(
       3,
-      'working tree has uncommitted changes — commit or stash them yourself, then re-run prepare; this script never stashes for you',
+      `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`,
+    );
+  }
+  // git status trusts the index: skip-worktree / assume-unchanged entries
+  // (a sparse checkout sets them en masse) hide tracked divergence from it,
+  // so refuse anything that is not a plain cached 'H' entry.
+  const flagged = run('git', ['-C', root, 'ls-files', '-v']);
+  if (flagged.status !== 0) {
+    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
+    return fail(3, `could not read the index flags: ${detail}`);
+  }
+  const opaque = flagged.stdout
+    .split('\n')
+    .filter((line) => line && !line.startsWith('H '));
+  if (opaque.length > 0) {
+    const shown = opaque.slice(0, 5).map(printable).join(', ');
+    return fail(
+      3,
+      `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`,
     );
   }
 

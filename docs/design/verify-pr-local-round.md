@@ -348,9 +348,13 @@ A published verification comment ends with the same attribution shape
   marker is present, `QWEN_VERIFY_CREDENTIAL_FREE=1` attests to a clean
   boundary, and no known credential signal is visible; otherwise it exits 4.
 - `prepare` exits 3 when HEAD is not the PR head (naming the `git checkout` to
-  run) or the tree carries uncommitted changes, tracked or untracked, and
-  writes no artifact directory in either case; it never stashes for the
-  maintainer.
+  run), when the tree carries uncommitted changes, tracked or untracked
+  (naming the entries and a stash form that clears untracked files), or when
+  index flags hide tracked state (skip-worktree / assume-unchanged, as a
+  sparse checkout sets). No refusal writes an artifact directory, and the
+  script never stashes for the maintainer. A detached HEAD at the PR head
+  passes: the identity is the OID, not a branch, and a test pins that the
+  printed checkout remedy reaches exit 0.
 - A missing OID fails with a fetch naming the `--repo` repository, not `origin`.
 - `check` rejects `merge-ready` with a failed assertion, an inconsistent
   triple, and an unknown verdict word; it accepts `findings` with the same

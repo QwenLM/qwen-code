@@ -502,15 +502,19 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(snapshotFor({ base, head }));
 
-    // A tracked modification is refused, and the change is still there.
+    // A tracked modification is refused, the entry is named, and the change
+    // is still there.
     writeFileSync(join(dir, 'head.txt'), 'changed\n');
     const modified = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(modified.status).toBe(3);
     expect(modified.stderr).toContain('uncommitted changes');
+    expect(modified.stderr).toContain('head.txt');
     expect(modified.stderr).toContain('never stashes for you');
     expect(readFileSync(join(dir, 'head.txt'), 'utf8')).toBe('changed\n');
 
     // An untracked file is refused too: it can be source the harness loads.
+    // The remedy must be one that actually clears untracked files — a plain
+    // `git stash` leaves them behind and the advice would loop.
     execFileSync('git', ['checkout', '-q', '--', 'head.txt'], {
       cwd: dir,
       env: gitEnv,
@@ -519,6 +523,8 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const untracked = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(untracked.status).toBe(3);
     expect(untracked.stderr).toContain('uncommitted changes');
+    expect(untracked.stderr).toContain('stray.txt');
+    expect(untracked.stderr).toContain('--include-untracked');
     expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
   });
 
@@ -539,10 +545,81 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
   });
 
+  // git status trusts the index: skip-worktree / assume-unchanged entries
+  // (a sparse checkout sets them en masse) hide tracked divergence, so the
+  // gate must refuse them instead of stamping a partial tree as clean.
+  it('refuses a tree whose index flags hide tracked state', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+
+    execFileSync('git', ['update-index', '--skip-worktree', 'head.txt'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    writeFileSync(join(dir, 'head.txt'), 'patched\n');
+    const skipped = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(skipped.status).toBe(3);
+    expect(skipped.stderr).toContain('hide their worktree state');
+    expect(skipped.stderr).toContain('head.txt');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+
+    execFileSync('git', ['update-index', '--no-skip-worktree', 'head.txt'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    execFileSync('git', ['checkout', '-q', '--', 'head.txt'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    execFileSync('git', ['update-index', '--assume-unchanged', 'head.txt'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    writeFileSync(join(dir, 'head.txt'), 'patched\n');
+    const assumed = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(assumed.status).toBe(3);
+    expect(assumed.stderr).toContain('hide their worktree state');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+  });
+
+  // The wrong-HEAD refusal names `git checkout <head>`, which leaves a
+  // detached HEAD — pin that the printed remedy actually reaches exit 0, so
+  // a later edit tying the gate to a branch cannot keep the suite green.
+  it('accepts a detached HEAD at the PR head', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    execFileSync('git', ['checkout', '-q', '--detach', head], {
+      cwd: dir,
+      env: gitEnv,
+    });
+
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('tree       at PR head, clean');
+    const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
+    expect(
+      JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
+    ).toEqual({ repo: REPO, pr: 42, baseRefOid: base, headRefOid: head });
+  });
+
   it('refuses to run without a repository', () => {
     const { dir } = makeRepo();
     const result = runPrepare(dir, ['42'], gitEnv);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('--repo <owner>/<repo> is required');
+  });
+});
+
+// The gate requires an empty `git status`, and prepare writes its artifacts
+// under tmp/ in that same tree — so the whole local flow depends on the real
+// repository ignoring tmp/. Pin the coupling here: if .gitignore drops the
+// entry, every second prepare on a real clone refuses on its own artifacts,
+// and this assertion is the signal that the premise changed.
+describe('repository coupling', () => {
+  it('keeps ignoring the round artifact directory', () => {
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const gitignore = readFileSync(join(repoRoot, '.gitignore'), 'utf8');
+    // CRLF-safe: a Windows checkout may carry \r\n line endings.
+    expect(gitignore.split(/\r?\n/)).toContain('tmp/');
   });
 });

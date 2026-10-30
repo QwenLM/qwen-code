@@ -147,9 +147,12 @@ trigger the sandboxed `@qwen-code /verify` lane instead.
 
 Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
 before anything else: it fetches the metadata snapshot, resolves and verifies
-both OIDs against this clone, refuses a tree that is not a clean checkout of
-the PR head (a wrong HEAD names the `git checkout` to run; a dirty tree asks
-you to commit or stash it yourself — the script never stashes for you),
+both OIDs against this clone, refuses a tree that is not a clean, fully
+materialised checkout of the PR head (a wrong HEAD names the `git checkout`
+to run; uncommitted changes name the entries and a stash form that clears
+them; index flags that hide tracked state — a sparse checkout's
+skip-worktree, assume-unchanged — are refused too; the script never stashes
+for you),
 creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
 `baseRefOid` and `headRefOid`, and reports the isolation signals it can see.
 It does not gate on them — resolving metadata

@@ -84,7 +84,7 @@
 ## 验收标准
 
 - 在同时含有两个 OID 的克隆上，`prepare` 写出的快照其 `baseRefOid`/`headRefOid` 与 PR 一致，创建符合 glob 的目录，其中 `context.json` 带 `repo`、`pr`、`baseRefOid` 与 `headRefOid`，且在宿主上退出 0。`--require-isolation` 只有在容器标记存在、`QWEN_VERIFY_CREDENTIAL_FREE=1` 声明边界干净、且看不到已知凭据信号时才通过；否则退出 4。
-- HEAD 不是 PR head（点名要跑的 `git checkout`）、或树带有未提交改动（无论已跟踪还是未跟踪）时，`prepare` 退出 3，两种情形都不写产物目录；它绝不代维护者 stash。
+- HEAD 不是 PR head（点名要跑的 `git checkout`）、树带有未提交改动（无论已跟踪还是未跟踪，消息点名条目并给出能清掉未跟踪文件的 stash 形式）、或索引标志隐藏了已跟踪状态（skip-worktree / assume-unchanged，sparse checkout 会批量设置）时，`prepare` 退出 3，任何拒绝都不写产物目录；它绝不代维护者 stash。detached 于 PR head 的 HEAD 会通过：身份是 OID 而非分支，且有测试钉住消息里打印的 checkout 补救确实能走到退出 0。
 - OID 缺失时失败，并给出用 `--repo` 指定仓库（而非 `origin`）的 fetch 命令。
 - `check` 拒绝带失败断言的 `merge-ready`、不一致的三元组、未知判定词；对相同计数下的 `findings` 予以通过。
 - 当失败账本里没有任何一条归因为 PR 时，`check` 拒绝 `findings` 与 `blocked`；账本长度与 `fail` 不一致时拒绝；对带 `harness` 失败的 `inconclusive` 予以通过；旧产物没有账本时只报警告。
