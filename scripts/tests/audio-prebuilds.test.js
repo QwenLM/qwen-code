@@ -141,7 +141,11 @@ describe('audio prebuild identity', () => {
   it('fingerprints the workflow checkout separately from the release ref', () => {
     const f = fixture();
     const workflowRoot = temporary();
-    write(workflowRoot, '.github/scripts/audio-prebuilds.mjs', 'trusted helper');
+    write(
+      workflowRoot,
+      '.github/scripts/audio-prebuilds.mjs',
+      'trusted helper',
+    );
     const path = '.github/workflows/audio-capture-prebuilds.yml';
     write(workflowRoot, path, 'workflow at dispatch');
     const key = audioPrebuildKey(f.root, f.ref, workflowRoot);
@@ -349,7 +353,9 @@ describe('audio artifact provenance', () => {
       findAudioArtifact(f.github, repo, 'key', warn),
     ).resolves.toBeUndefined();
     f.github.rest.actions.listArtifactsForRepo.mockResolvedValueOnce({
-      data: { artifacts: [{ ...f.artifact, id: 13, expired: true }, f.artifact] },
+      data: {
+        artifacts: [{ ...f.artifact, id: 13, expired: true }, f.artifact],
+      },
     });
     await expect(
       findAudioArtifact(f.github, repo, 'key', warn),
