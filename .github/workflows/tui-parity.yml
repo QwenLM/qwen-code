@@ -107,7 +107,10 @@ jobs:
                 }
                 const paths = new Set(files.flatMap((file) => [file.filename, file.previous_filename].filter(Boolean)));
                 for (const path of paths) {
-                  if (/^(docs\/|packages\/managed-agent-server\/|packages\/vscode-ide-companion\/src\/)/.test(path)) continue;
+                  // Outside the TUI build/test closure, plus web-shell: its only CLI
+                  // path is the web-templates transcript bundle no TUI suite renders,
+                  // and ci.yml owns its build + E2E health.
+                  if (/^(docs\/|packages\/(managed-agent-server|web-shell|chrome-extension|mobile-mcp|qwen-live|desktop|live-host|mobile-shell)\/|packages\/vscode-ide-companion\/src\/|integrations\/(external-context-mem0|external-context|test-failure-explorer)\/)/.test(path)) continue;
                   if (broad.some((pattern) => pattern.test(path))) {
                     all();
                     reasons.add('Shared renderer, runtime, dependency or test/build infrastructure');

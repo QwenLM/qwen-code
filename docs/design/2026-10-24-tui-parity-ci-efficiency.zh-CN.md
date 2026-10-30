@@ -32,7 +32,7 @@
 
 Core 的 turn 调度、取消、shell 执行、会话持久化和遥测即使不在 UI 目录下，也是这些行为的输入。已知共享机制可以同时选择多个组。每个选中的产品专项保留已有 `node:ink`、`bun:ink`、`bun:opentui` 三腿、整文件测试、零重试与严格未处理异常策略。Viewport 测试属于集成测试设施检查，不是快速产品单测。
 
-Java 服务、Companion 源码和文档保留无关路径排除规则。Companion 清单、打包配置和 scripts 不在排除范围内。工作流级路径过滤继续覆盖共享构建输入和全部 package；纯文档 PR 可以完全不启动该工作流。
+无关路径排除覆盖文档、Java 服务、Companion 源码，以及 TUI 构建/测试闭包之外的全部包目录：Web Shell、Chrome 扩展、mobile-mcp、qwen-live、external-context、external-context-mem0、test-failure-explorer，还有 pnpm workspace 本身就排除的 desktop、live-host 和 mobile-shell。闭包按 workspace 清单对照 `--cli-only` 构建过滤器及根目录、integration-tests 依赖审计得出。Web Shell 是唯一刻意超出纯闭包成员资格的排除：`web-templates` 的 transcript 打包会构建它，但没有任何 TUI 套件渲染该打包产物，且 ci.yml 负责 Web Shell 的构建与 E2E 健康；其余被排除的包不会被这些门禁构建或执行。Companion 清单、打包配置和 scripts 仍不在 Companion 排除范围内。被排除的清单文件不损失独有覆盖：仅改清单导致共享 frozen-lockfile 安装失败时，每个工作流的安装步骤都会失败；伴随根 lockfile 变更仍会选择全量验收。工作流级路径过滤继续覆盖共享构建输入和全部 package；纯文档 PR 可以完全不启动该工作流。
 
 ### 失败与证据契约
 

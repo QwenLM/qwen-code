@@ -179,6 +179,16 @@ describe('TUI product evidence', () => {
     ['integration-tests/test-helper.ts', lanes],
     ['.github/workflows/tui-parity.yml', lanes],
     ['docs/design/unrelated.md', []],
+    ['packages/web-shell/client/App.tsx', []],
+    ['packages/chrome-extension/package.json', []],
+    ['packages/mobile-mcp/package.json', []],
+    ['packages/qwen-live/build.mjs', []],
+    ['integrations/external-context/package.json', []],
+    ['integrations/external-context-mem0/package.json', []],
+    ['integrations/test-failure-explorer/package.json', []],
+    ['packages/desktop/package.json', []],
+    ['packages/live-host/electron-builder.yml', []],
+    ['packages/mobile-shell/build.gradle.kts', []],
     ['scripts/unrelated-maintenance.js', ['component']],
   ])(
     'selects mechanisms rather than blanket full acceptance for %s',
@@ -593,6 +603,23 @@ describe('TUI product evidence', () => {
     ).toBe(false);
   });
 
+  it('skips Web Shell-only changes but runs when CLI source rides along', async () => {
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        {
+          filename: 'packages/web-shell/client/completions/slashCompletion.ts',
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        { filename: 'packages/cli/src/ui/App.tsx' },
+      ]),
+    ).toBe(true);
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
     'packages/vscode-ide-companion/package.json',
@@ -657,6 +684,56 @@ describe('TUI product evidence', () => {
       'both ends under docs/',
       'docs/design/runtime.md',
       'docs/design/old-runtime.md',
+    ],
+    [
+      'both ends in the Web Shell',
+      'packages/web-shell/client/App.tsx',
+      'packages/web-shell/client/OldApp.tsx',
+    ],
+    [
+      'both ends in the Chrome extension',
+      'packages/chrome-extension/package.json',
+      'packages/chrome-extension/old-package.json',
+    ],
+    [
+      'both ends in mobile-mcp',
+      'packages/mobile-mcp/package.json',
+      'packages/mobile-mcp/old-package.json',
+    ],
+    [
+      'both ends in qwen-live',
+      'packages/qwen-live/build.mjs',
+      'packages/qwen-live/old-build.mjs',
+    ],
+    [
+      'both ends in external-context',
+      'integrations/external-context/package.json',
+      'integrations/external-context/old-package.json',
+    ],
+    [
+      'both ends in external-context-mem0',
+      'integrations/external-context-mem0/package.json',
+      'integrations/external-context-mem0/old-package.json',
+    ],
+    [
+      'both ends in test-failure-explorer',
+      'integrations/test-failure-explorer/package.json',
+      'integrations/test-failure-explorer/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded desktop tree',
+      'packages/desktop/package.json',
+      'packages/desktop/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded live-host tree',
+      'packages/live-host/electron-builder.yml',
+      'packages/live-host/old-electron-builder.yml',
+    ],
+    [
+      'both ends in the workspace-excluded mobile-shell tree',
+      'packages/mobile-shell/build.gradle.kts',
+      'packages/mobile-shell/old-build.gradle.kts',
     ],
   ])(
     'still skips a rename with %s',
