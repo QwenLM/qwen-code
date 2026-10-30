@@ -147,64 +147,40 @@ describe('managed session metadata', () => {
     };
   };
 
-  /**
-   * Glue the record matching `probe` onto the record on the next line, and
-   * return that next record so the caller can assert which pair was glued.
-   * Picking the site by content rather than by physical line index keeps these
-   * witnesses pointed at the same two records when the layout moves: the
-   * genesis records in `LocalManagedSessionAuthority.open` are conditional,
-   * and a domain transaction carries its `inputEvents` ahead of the marker.
-   */
-  async function glueRecordToNext(
-    filePath: string,
-    probe: (record: TranscriptRecord) => boolean,
-  ): Promise<TranscriptRecord> {
+  async function readTranscriptLines(filePath: string) {
     const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
     const records = lines.map((line) =>
       line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
     );
-    const index = records.findIndex(
-      (record) => record !== undefined && probe(record),
-    );
-    expect(index, 'no record matched the probe').toBeGreaterThanOrEqual(0);
-    const next = records[index + 1];
-    expect(next, 'the probed record is already on the last line').toBeDefined();
-    lines[index] = lines[index] + lines[index + 1];
-    lines.splice(index + 1, 1);
-    await fs.writeFile(filePath, lines.join('\n'), 'utf8');
-    return next!;
+    return { lines, records };
   }
 
-  async function glueThreeRecordsStartingAt(
+  async function glueRecords(
     filePath: string,
     probe: (record: TranscriptRecord) => boolean,
-  ): Promise<[TranscriptRecord, TranscriptRecord]> {
-    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
-    const records = lines.map((line) =>
-      line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
-    );
+    count: 2 | 3,
+  ): Promise<TranscriptRecord[]> {
+    const { lines, records } = await readTranscriptLines(filePath);
     const index = records.findIndex(
       (record) => record !== undefined && probe(record),
     );
     expect(index, 'no record matched the probe').toBeGreaterThanOrEqual(0);
-    const marker = records[index + 1];
-    const next = records[index + 2];
-    expect(marker, 'the probed record has no following marker').toBeDefined();
-    expect(next, 'the marker has no following record').toBeDefined();
-    lines[index] = lines[index] + lines[index + 1] + lines[index + 2];
-    lines.splice(index + 1, 2);
+    const following = records.slice(index + 1, index + count);
+    expect(following).toHaveLength(count - 1);
+    for (const record of following) expect(record).toBeDefined();
+    lines.splice(index, count, lines.slice(index, index + count).join(''));
     await fs.writeFile(filePath, lines.join('\n'), 'utf8');
-    return [marker!, next!];
+    return following.map((record) => record!);
   }
 
   async function removeTranscriptRecords(
     filePath: string,
     predicate: (record: TranscriptRecord) => boolean,
   ): Promise<void> {
-    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
-    const kept = lines.filter((line) => {
-      if (line.length === 0) return true;
-      return !predicate(JSON.parse(line) as TranscriptRecord);
+    const { lines, records } = await readTranscriptLines(filePath);
+    const kept = lines.filter((_, index) => {
+      const record = records[index];
+      return record === undefined || !predicate(record);
     });
     await fs.writeFile(filePath, kept.join('\n'), 'utf8');
   }
@@ -214,10 +190,7 @@ describe('managed session metadata', () => {
     movingProbe: (record: TranscriptRecord) => boolean,
     afterProbe: (record: TranscriptRecord) => boolean,
   ): Promise<void> {
-    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
-    const records = lines.map((line) =>
-      line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
-    );
+    const { lines, records } = await readTranscriptLines(filePath);
     const movingIndex = records.findIndex(
       (record) => record !== undefined && movingProbe(record),
     );
@@ -226,10 +199,10 @@ describe('managed session metadata', () => {
       'no record matched the move probe',
     ).toBeGreaterThanOrEqual(0);
     const [movingLine] = lines.splice(movingIndex, 1);
-    const afterIndex = lines.findIndex((line) => {
-      if (line.length === 0) return false;
-      return afterProbe(JSON.parse(line) as TranscriptRecord);
-    });
+    records.splice(movingIndex, 1);
+    const afterIndex = records.findIndex(
+      (record) => record !== undefined && afterProbe(record),
+    );
     expect(
       afterIndex,
       'no record matched the destination probe',
@@ -259,9 +232,10 @@ describe('managed session metadata', () => {
     // Damage can leave two records on one line, where a bare JSON.parse throws
     // and the committed title is lost with them. Glue the header to the event
     // that follows it.
-    const next = await glueRecordToNext(
+    const [next] = await glueRecords(
       harness.transcriptPath,
       (record) => record.subtype === 'managed_session_header_v1',
+      2,
     );
     expect(next.subtype).toBe('managed_session_event_v1');
 
@@ -339,9 +313,10 @@ describe('managed session metadata', () => {
       );
     });
 
-    const marker = await glueRecordToNext(
+    const [marker] = await glueRecords(
       harness.transcriptPath,
       domainEvent(1),
+      2,
     );
     expect(marker.subtype).toBe('managed_session_commit_v1');
     expect(marker.managedSession).toMatchObject({
@@ -380,9 +355,10 @@ describe('managed session metadata', () => {
 
     // The newest event shares a line with its own marker. Returning the first
     // title here would show the session list a name the user already replaced.
-    const marker = await glueRecordToNext(
+    const [marker] = await glueRecords(
       harness.transcriptPath,
       domainEvent(2),
+      2,
     );
     expect(marker.subtype).toBe('managed_session_commit_v1');
     expect(marker.managedSession).toMatchObject({
@@ -430,11 +406,12 @@ describe('managed session metadata', () => {
     // identified by the sequence window it authorises: firstSequence 1 is the
     // marker of the first rename, and the record after it is the second rename's
     // event.
-    const event = await glueRecordToNext(
+    const [event] = await glueRecords(
       harness.transcriptPath,
       (record) =>
         record.subtype === 'managed_session_commit_v1' &&
         record.managedSession?.firstSequence === 1,
+      2,
     );
     expect(event.subtype).toBe('managed_session_event_v1');
     expect(event.managedSession).toMatchObject({
@@ -493,9 +470,10 @@ describe('managed session metadata', () => {
         );
       });
 
-      const [marker, nextEvent] = await glueThreeRecordsStartingAt(
+      const [marker, nextEvent] = await glueRecords(
         harness.transcriptPath,
         domainEvent(1),
+        3,
       );
       expect(marker).toMatchObject({
         subtype: 'managed_session_commit_v1',
@@ -1158,10 +1136,12 @@ describe('managed session metadata', () => {
     const harness = await createHarness();
     await withAuthority(harness, writeLongTitleTranscript);
     const text = await fs.readFile(harness.transcriptPath, 'utf8');
-    expect(Buffer.byteLength(text)).toBeGreaterThan(64 * 1024);
     const lines = text.trimEnd().split('\n');
     lines.pop();
     await fs.writeFile(harness.transcriptPath, `${lines.join('\n')}\n`);
+    expect((await fs.stat(harness.transcriptPath)).size).toBeGreaterThan(
+      LITE_READ_BUF_SIZE,
+    );
 
     expect(
       readManagedSessionTitleInfoSync(
@@ -1175,8 +1155,8 @@ describe('managed session metadata', () => {
   });
 
   // The tail window is the only call site of the tolerant reader that a long log
-  // reaches: under 64 KiB the offset is zero and the branch never runs, so the
-  // short glue witnesses above leave it untested. And the title it has to find
+  // reaches: below the read-window size the offset is zero and the branch never
+  // runs, so the short glue witnesses above leave it untested. And the title it has to find
   // lives in the tail, so the head fallback cannot answer for it — a tail that
   // gives up returns an older title, not this one.
   it('still reads the committed title from the tail window when a glued line sits inside it', async () => {
@@ -1185,9 +1165,10 @@ describe('managed session metadata', () => {
       harness,
       writeLongTitleTranscript,
     );
-    const marker = await glueRecordToNext(
+    const [marker] = await glueRecords(
       harness.transcriptPath,
       domainEvent(newestSequence),
+      2,
     );
     expect(marker.subtype).toBe('managed_session_commit_v1');
     expect(marker.managedSession).toMatchObject({
