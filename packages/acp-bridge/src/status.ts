@@ -210,9 +210,18 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceSessionWorkflow: 'qwen/control/workspace/session-workflow',
+  /**
+   * Add or remove one extra directory in the workspace context. Applies to
+   * every live session of the runtime and persists the resulting list to the
+   * workspace setting `context.includeDirectories`. Params:
+   * `{ action: 'add' | 'remove', path }`; result:
+   * `{ primaryDirectory, directories, changed, warnings }`.
+   */
+  workspaceDirectories: 'qwen/control/workspace/directories',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryImportPlan: 'qwen/control/workspace/memory/import/plan',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   /**
@@ -577,6 +586,13 @@ export interface ServeWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /**
@@ -671,6 +687,8 @@ export interface ServeContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
@@ -714,6 +732,7 @@ export interface ServeSessionContextUsage {
   breakdown: ServeContextCategoryBreakdown;
   builtinTools: ServeContextToolDetail[];
   mcpTools: ServeContextToolDetail[];
+  instructionFiles?: ServeContextMemoryDetail[];
   memoryFiles: ServeContextMemoryDetail[];
   skills: ServeContextSkillDetail[];
   isEstimated?: boolean;
@@ -1239,7 +1258,7 @@ export interface ServeSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose output arrived in more than one chunk.
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */

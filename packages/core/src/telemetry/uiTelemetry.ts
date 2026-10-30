@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -129,6 +130,11 @@ export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
   /** Provider-normalized model totals exposed by the daemon stats route. */
   statsModels?: Record<string, StatsModelMetrics>;
+  /** Per-event output estimates; absent for models restored from raw-only history. */
+  billableOutputTokens?: Record<
+    string,
+    { total: number; bySource: Record<string, number> }
+  >;
   generation?: GenerationMetrics;
   /**
    * Per-instance subagent metadata (invocation id → business name + agent
@@ -215,6 +221,20 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
       clone.statsModels,
     );
   }
+  if (clone.billableOutputTokens) {
+    clone.billableOutputTokens = Object.assign(
+      Object.create(null) as NonNullable<
+        SessionMetrics['billableOutputTokens']
+      >,
+      clone.billableOutputTokens,
+    );
+    for (const model of Object.values(clone.billableOutputTokens)) {
+      model.bySource = Object.assign(
+        Object.create(null) as Record<string, number>,
+        model.bySource,
+      );
+    }
+  }
   return clone;
 };
 
@@ -224,6 +244,9 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   totalFail: 0,
   byName: {},
 });
+
+/** Shortest generation window that counts toward output speed. */
+const MIN_THROUGHPUT_WINDOW_MS = 100;
 
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
@@ -238,14 +261,23 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
     event.input_token_count > 0
       ? event.input_token_count
       : event.cached_content_token_count;
-  const thoughtsIncludedInOutput =
-    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
   return (
     input +
     event.output_token_count +
-    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
   );
 };
+
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },
@@ -363,6 +395,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
@@ -408,6 +441,9 @@ export class UiTelemetryService extends EventEmitter {
       ...createInitialMetrics(),
       models,
     }).models;
+    // Raw history has no per-event convention. Never replace its full estimate
+    // with an authoritative count containing only subsequent live requests.
+    delete metrics.billableOutputTokens;
     this.#sessionMetrics.set(sessionId, metrics);
     this.#closedSessions.delete(sessionId);
   }
@@ -628,6 +664,13 @@ export class UiTelemetryService extends EventEmitter {
         ? event.input_token_count
         : event.cached_content_token_count;
     const normalizedTotalTokens = getEventTotalTokenCount(event);
+    const billable = metrics.billableOutputTokens?.[event.model];
+    if (billable) {
+      const output = getEventBillableOutputTokens(event);
+      const source = event.subagent_name ?? MAIN_SOURCE;
+      billable.total += output;
+      billable.bySource[source] = (billable.bySource[source] ?? 0) + output;
+    }
     const accumulate = (
       bucket: ModelMetricsCore,
       prompt: number,
@@ -659,27 +702,28 @@ export class UiTelemetryService extends EventEmitter {
     }
 
     const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
       ttftMs === undefined ||
       !Number.isFinite(ttftMs) ||
       ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    // Events recorded before `generation_ms` existed fall back to everything
-    // after the first visible output.
-    const generationDurationMs =
-      event.generation_ms !== undefined &&
-      Number.isFinite(event.generation_ms) &&
-      event.generation_ms >= 0
-        ? event.generation_ms
-        : Math.max(0, event.duration_ms - ttftMs);
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      if (generationDurationMs > 0) {
+      // A window this short means the output arrived in a burst, so dividing
+      // the whole response's tokens by it reads as thousands of tokens/s.
+      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
         generation.totalGenerationDurationMs += generationDurationMs;
         generation.totalThroughputOutputTokens += event.output_token_count;
       }
@@ -861,6 +905,13 @@ export class UiTelemetryService extends EventEmitter {
   ): ModelMetrics {
     if (!metrics.models[modelName]) {
       metrics.models[modelName] = createInitialModelMetrics();
+      const billable = (metrics.billableOutputTokens ??= Object.create(
+        null,
+      ) as NonNullable<SessionMetrics['billableOutputTokens']>);
+      billable[modelName] = {
+        total: 0,
+        bySource: Object.create(null) as Record<string, number>,
+      };
     }
     return metrics.models[modelName];
   }

@@ -303,6 +303,7 @@ export type {
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
+export type { AutofixPrTool, AutofixPrParams } from './tools/autofix-pr.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type {
   CurrentSessionScheduledTaskCreateRequest,
@@ -340,6 +341,7 @@ export * from './providers/index.js';
 
 export {
   computeThresholds,
+  isBelowCompactionWarn,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
 export { estimateContextTextTokens } from './services/tokenEstimation.js';
@@ -350,7 +352,6 @@ export {
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export {
   isApiUserPrompt,
-  findApiRewindCutPoint,
   countApiUserPrompts,
   type ApiUserPromptOptions,
 } from './services/api-user-prompt.js';
@@ -570,6 +571,7 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
+export { getExtractNoopSkipTurns } from './memory/extract-cadence.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)

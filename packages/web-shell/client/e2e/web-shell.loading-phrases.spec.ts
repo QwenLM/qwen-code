@@ -6,8 +6,15 @@ import {
 } from './utils/mockDaemon';
 import { completeReplay } from './visuals/harness';
 
-for (const enabled of [false, true, undefined]) {
-  test(`loading phrase setting ${enabled} controls host phrases @smoke`, async ({
+for (const { enabled, theme } of [
+  { enabled: false, theme: 'light' },
+  { enabled: true, theme: 'light' },
+  { enabled: undefined, theme: 'light' },
+  { enabled: false, theme: 'dark' },
+  { enabled: true, theme: 'dark' },
+  { enabled: undefined, theme: 'dark' },
+]) {
+  test(`loading phrase setting ${enabled} controls host phrases (${theme}) @smoke`, async ({
     page,
   }, testInfo) => {
     const key = 'ui.accessibility.enableLoadingPhrases';
@@ -30,7 +37,7 @@ for (const enabled of [false, true, undefined]) {
     const params = new URLSearchParams({
       sessionId: scenario.sessionId,
       loadingPhrase: phrase,
-      theme: 'light',
+      theme,
       sidebar: 'false',
     });
     await page.clock.install();
@@ -50,16 +57,38 @@ for (const enabled of [false, true, undefined]) {
     await stream();
     const meta = page
       .locator('span')
-      .filter({ hasText: /^\(\d+s.*esc to cancel\)$/ });
+      .filter({ hasText: /^\d+s.*esc to cancel$/ });
     await expect(meta).toBeVisible();
     const status = meta.locator('..');
+    const expectPresentation = async (labelVisible: boolean) => {
+      await expect(meta).toHaveText(
+        /^\d+s · [↑↓] [\d.]+k? tokens · esc to cancel$/,
+      );
+      await expect
+        .poll(() =>
+          meta.evaluate((element) => ({
+            before: getComputedStyle(element, '::before').content,
+            after: getComputedStyle(element, '::after').content,
+            color: getComputedStyle(element).color,
+          })),
+        )
+        .toEqual({
+          before: labelVisible ? '"("' : 'none',
+          after: labelVisible ? '")"' : 'none',
+          color: await status
+            .locator('span')
+            .first()
+            .evaluate((element) => getComputedStyle(element).color),
+        });
+    };
+    await expectPresentation(enabled !== false);
     await expect(status.locator('span').first()).not.toBeEmpty();
     await expect(status).toContainText('tokens');
     await expect(page.getByText(phrase, { exact: true })).toHaveCount(
       enabled === false ? 0 : 1,
     );
     await page.screenshot({
-      path: testInfo.outputPath(`loading-phrases-${enabled}.png`),
+      path: testInfo.outputPath(`loading-phrases-${enabled}-${theme}.png`),
     });
 
     await page.clock.fastForward(16_000);
@@ -92,5 +121,15 @@ for (const enabled of [false, true, undefined]) {
     await expect(page.getByText(phrase, { exact: true })).toHaveCount(
       updated ? 1 : 0,
     );
+    await expectPresentation(updated);
+    await page.setViewportSize({ width: 600, height: 900 });
+    await expectPresentation(false);
+    await page.screenshot({
+      path: testInfo.outputPath(
+        `loading-phrases-narrow-${enabled}-${theme}.png`,
+      ),
+    });
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await expectPresentation(updated);
   });
 }

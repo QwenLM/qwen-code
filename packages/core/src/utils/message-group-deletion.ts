@@ -116,6 +116,11 @@ const GROUP_SYSTEM_SUBTYPES = new Set([
   'turn_result',
   'turn_attempt',
   'branch_checkpoint',
+  // The snapshot records a catalog part this turn appended to the model
+  // history. Keeping it after the turn is gone would reattach it to an
+  // earlier turn on replay, restoring content the rewound session never
+  // had; the next durable request re-appends the current catalog anyway.
+  'memory_catalog_snapshot',
 ]);
 
 export function telemetryRecordIdentity(record: ChatRecord): {

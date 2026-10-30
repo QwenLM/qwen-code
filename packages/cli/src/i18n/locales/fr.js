@@ -1919,6 +1919,8 @@ export default {
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fichiers d’instructions',
+  'Auto memory': 'Mémoire automatique',
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',

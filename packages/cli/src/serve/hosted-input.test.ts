@@ -30,7 +30,7 @@ describe('Hosted immutable attachment input', () => {
     const spec = JSON.parse(
       readFileSync(
         new URL(
-          '../../../managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json',
+          '../../../managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json',
           import.meta.url,
         ),
         'utf8',

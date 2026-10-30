@@ -251,7 +251,6 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
       ...(shellProfile ? ['agent'] : []),
       'edit',
       ...(shellProfile ? ['glob'] : []),
-      ...(shellProfile ? ['monitor'] : []),
       'read_file',
       ...(shellProfile
         ? [

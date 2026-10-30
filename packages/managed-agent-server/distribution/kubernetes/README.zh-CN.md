@@ -11,13 +11,15 @@
 - Kubernetes 1.33+，支持原生 sidecar 并执行 NetworkPolicy；已有 Java 控制面、持久化 Session Store 和 Runtime Broker。Server/Broker 使用匹配构建及包含 placement 列的全新单 V1 catalog；旧开发库需要独立的全新数据库和状态目录，不提供升级。Harness Pod 不持有 Kubernetes API token，也不挂载租户工作目录。
 - 构建并发布不可变 Harness 镜像，在 `harness-pool.yaml` 中将两个镜像都固定到已验证的 digest。示例 Envoy 版本为 1.39.4；上线前用实际选定镜像验证配置。
 - 填写 `settings.example.yaml`：使用 Java 同样要求的 capability digest、HTTPS Broker URL 和批准的模型配置。设置由运维持有并共享；租户文件不得成为运维 HOME、设置文件或工作目录。
-- 从文件创建 `qwen-harness-secrets` Secret，键名为 `harness-token`、`broker-token`、`model-api-key` 和 `outbound-ca.crt`。前三个文件分别只包含对应凭据。CA 文件信任真实 HTTPS Store、Broker、模型网关。启动器读取文件并通过子进程环境传递凭据；Deployment 参数不包含秘密。
+- 从文件创建 `qwen-harness-secrets` Secret，键名为 `harness-token`、`broker-token`、`model-api-key` 和 `outbound-ca.crt`。前三个文件分别只包含对应凭据。CA 文件信任真实 HTTPS Store、Broker、模型网关。启动器读取文件并通过子进程环境传递凭据；Deployment 参数不包含秘密。Broker URL 和 token 以 `QWEN_MANAGED_RUNTIME_BROKER_URL`、`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 传给 `qwen serve`，即未传 `--managed-runtime-broker-url`、`--managed-runtime-broker-token` 时 `qwen serve` 读取的环境变量。pool 以 `--profile hosted-harness` 启动，总会进入完整的 serve 处理流程，该流程在启动时把两者从自身环境中删除，因此它启动的任何进程都不会继承该 token。`qwen serve` 启动时的环境仍可通过 `/proc/<pid>/environ` 被容器内以同一用户运行的任何进程读取，因此 Broker 不应假定 pool 所运行的工作看不到该 token。`v0.26.1` 的清单把 URL 命名为 `QWEN_HOSTED_HARNESS_BROKER_URL`，现在已没有任何地方读取它。请在把 Harness 镜像更新到之后摘要的同一次 `kubectl apply` 中，将其改名为 `QWEN_MANAGED_RUNTIME_BROKER_URL`；之后的镜像如果仍读到旧名，会退出并提示需要改名。反过来的组合，即新变量名配 `v0.26.1` 镜像，会在单独提交改名或回滚镜像时出现：新 Pod 会反复崩溃，只打印 `Hosted Harness configuration or secret files are invalid.`；由于 `maxUnavailable: 0`，旧 Pod 继续提供服务，滚动更新停住。因此回滚到 `v0.26.1` 时，要把旧变量名和旧镜像一起恢复。
 - 创建 `qwen-harness-tls` Secret，提供 `tls.crt`、`tls.key` 和 `client-ca.crt`。Envoy 同时验证 Java 客户端 CA 和精确 URI SAN `spiffe://qwen.internal/managed-agent-server`；将白名单改成实际批准的身份。Java 必须提供该客户端身份，并信任 Harness 服务端 CA。
 - **端点 TLS 身份是部署前提：** Java 连接具体 Pod IP，并保留正常 HTTPS 主机名验证。每个选中 Pod IP 都必须出现在该端点证书的 IP SAN 中。请提供每个 Pod 的证书投影/签发机制，或由运维维护覆盖所有实际端点 IP 及替换 IP 的共享证书。只有 Service DNS 的证书不能验证这些连接。模板的 Secret 挂载只是该机制的输入，不负责签发证书。不得关闭主机名验证来部署。
 - 将 `discovery-rbac.yaml` 绑定到真实 Java service account 和 namespace。发现逻辑只在配置的 namespace 读取指定 Service 并列出 EndpointSlice，核验精确 Service UID、命名端口、Pod UID 和就绪状态。Harness 进程不持有集群发现权限。
 - 入口 NetworkPolicy 假设 Java Pod 与 Harness 位于同一 namespace。如果 Java 位于独立 namespace，在同一个 ingress peer 中为 `podSelector` 加上获准的 `namespaceSelector`。出口目标和端口也须适配真实 HTTPS 网关。如果 Service 将 `443` 映射到目标端口 `8443`，CNI 可能按后端端口执行策略；仅为批准的 Store/Broker peer 放行该目标端口，并从实际 Harness Pod 验证连通性。本次实测的 Terway 部署需要这条显式后端端口规则。
 
 ## 构建与配置
+
+可选的[验收工具](qualification/README.zh-CN.md)可构建匹配的 Harness/Java-worker 镜像、生成只匹配既有业务节点的模板，并执行签名公开多用户、工具和 SSE 场景。部署就绪、公开执行、owner/故障验收与容量结果分别记录；生成验收包不会 apply 或购买资源。
 
 在干净的源码 checkout 中从仓库根目录构建。Dockerfile 专用 ignore 文件排除本地设置、凭据、日志与构建产物：
 

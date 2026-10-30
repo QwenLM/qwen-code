@@ -24,6 +24,20 @@ import {
 
 const script = fileURLToPath(import.meta.url);
 const repo = path.dirname(path.dirname(script));
+// The release pool shares a runner with the rest of the matrix, so these
+// subprocess probes run about twice as slowly there: in release run
+// 39621619809 (v0.26.0, then capped at 300 s per worker and 600 s outer) the
+// node worker passed at 294 s while the bun worker was SIGTERM'd at 301 s, so
+// bun's full duration was never observed. Main has since raised those caps to
+// 600 s / 1200 s (#15025); this change brings both DOWN, deriving the outer
+// spawn from the worker cap so the closed budget fits quality_scripts'
+// 30-minute ceiling: 2 x 540 s + 60 s setup. Each process's setup shares that
+// small cap so a slow download, tar or probe fails on its own budget instead
+// of consuming a worker's share of the outer cap. release-workflow.test.js
+// checks the closed budget against the job's total.
+const SETUP_TIMEOUT_MS = 60_000;
+const WORKER_TIMEOUT_MS = 540_000;
+const CI_TIMEOUT_MS = 2 * WORKER_TIMEOUT_MS + SETUP_TIMEOUT_MS;
 const sha = (file) =>
   createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const run = (bin, args, options = {}) => {
@@ -37,6 +51,21 @@ const run = (bin, args, options = {}) => {
   assert.equal(result.signal, null, `${bin}: ${result.signal}`);
   assert.equal(result.status, 0, `${bin}: ${result.stderr}`);
   return result.stdout.trim();
+};
+
+// A setup phase shares one deadline across its downloads, extractions and
+// probes: each call spends what remains instead of inheriting run()'s 300 s
+// default, and fetchVerifiedArchive's per-attempt 300 s signal is replaced by
+// the same budget. Wrapped here rather than by lowering run()'s default, which
+// also serves the worker/updater fixtures.
+const makeSetupBudget = () => {
+  const deadline = Date.now() + SETUP_TIMEOUT_MS;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  return {
+    run: (bin, args) => run(bin, args, { timeout: remaining() }),
+    fetch: (url, init) =>
+      fetch(url, { ...init, signal: AbortSignal.timeout(remaining()) }),
+  };
 };
 
 async function worker(root, node, bun, expectedHost) {
@@ -953,13 +982,17 @@ async function ci() {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-tools-'),
   );
+  const setup = makeSetupBudget();
   // Persistent runners point this at a host-wide directory, so each archive
   // is downloaded once per host instead of on every run.
   const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;
   const used = [];
   const fetchArchive = (url, filename, pin) => {
     used.push(filename);
-    return fetchVerifiedArchive(url, filename, pin, { cacheDir });
+    return fetchVerifiedArchive(url, filename, pin, {
+      cacheDir,
+      fetchImpl: setup.fetch,
+    });
   };
   try {
     let node = process.env.PINNED_NODE;
@@ -989,7 +1022,7 @@ async function ci() {
       });
       const archive = path.join(root, 'node.tgz');
       fs.writeFileSync(archive, bytes);
-      run('tar', ['-xzf', archive, '-C', root]);
+      setup.run('tar', ['-xzf', archive, '-C', root]);
       node = path.join(root, filename.slice(0, -7), 'bin/node');
     }
     if (!bun) {
@@ -1008,7 +1041,7 @@ async function ci() {
       fs.mkdirSync(dir);
       const archive = path.join(root, 'bun.tgz');
       fs.writeFileSync(archive, bytes);
-      run('tar', ['-xzf', archive, '-C', dir]);
+      setup.run('tar', ['-xzf', archive, '-C', dir]);
       bun = path.join(dir, 'package/bin/bun');
     }
     // Only now: sweeping after the first archive would remove the second one
@@ -1017,7 +1050,7 @@ async function ci() {
     const result = spawnSync(node, [script], {
       env: { ...process.env, PINNED_NODE: node, PINNED_BUN: bun },
       stdio: 'inherit',
-      timeout: 1_200_000,
+      timeout: CI_TIMEOUT_MS,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
@@ -1037,13 +1070,17 @@ if (process.argv[2] === '--ci') {
     'win32',
     'This POSIX tar fixture does not cover Windows updates',
   );
-  const node = run(process.env.PINNED_NODE || process.execPath, [
+  const setup = makeSetupBudget();
+  const node = setup.run(process.env.PINNED_NODE || process.execPath, [
     '-p',
     'process.execPath',
   ]);
-  const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath']);
-  assert.equal(run(node, ['--version']), `v${NODE_VERSION}`);
-  assert.equal(run(bun, ['--version']), BUN_VERSION);
+  const bun = setup.run(process.env.PINNED_BUN || 'bun', [
+    '-p',
+    'process.execPath',
+  ]);
+  assert.equal(setup.run(node, ['--version']), `v${NODE_VERSION}`);
+  assert.equal(setup.run(bun, ['--version']), BUN_VERSION);
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-test-'),
   );
@@ -1053,7 +1090,7 @@ if (process.argv[2] === '--ci') {
       config,
       '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\n',
     );
-    run('openssl', [
+    setup.run('openssl', [
       'req',
       '-x509',
       '-newkey',
@@ -1090,7 +1127,7 @@ if (process.argv[2] === '--ci') {
           env,
           encoding: 'utf8',
           // This bounds the whole sequential matrix, not an individual probe.
-          timeout: 600_000,
+          timeout: WORKER_TIMEOUT_MS,
           maxBuffer: 8 * 1024 * 1024,
         },
       );

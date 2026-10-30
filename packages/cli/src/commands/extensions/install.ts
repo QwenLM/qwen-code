@@ -157,7 +157,7 @@ export async function handleInstall(args: InstallArgs) {
 export const installCommand: CommandModule = {
   command: 'install <source>',
   describe: t(
-    'Installs an extension from a git repository URL, local path or archive, archive URL, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+    'Installs an extension from a git repository URL, local path or archive, archive URL, npm package (name or @scope/name), or claude marketplace (marketplace-url:plugin-name).',
   ),
   builder: (yargs) =>
     yargs

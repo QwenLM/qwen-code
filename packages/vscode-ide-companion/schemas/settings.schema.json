@@ -29,6 +29,12 @@
           "type": "boolean",
           "default": false
         },
+        "maxSessions": {
+          "description": "Per-workspace cap on concurrent live sessions. New spawn requests beyond this return 503; attaching to an existing session still works. Set to 0 to disable. Honored from user, system, and system-defaults settings only — a workspace settings file must not raise a daemon-wide resource cap; qwen serve --max-sessions wins when passed.",
+          "type": "integer",
+          "default": 32,
+          "minimum": 0
+        },
         "maxConcurrentSubSessionsPerCaller": {
           "description": "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
           "type": "integer",
@@ -282,6 +288,20 @@
           "description": "How many rounds a pull request must reach before the review may add one advisory paragraph saying the shape of the change, rather than the current patch, looks like the open question. It appears only when the diff has also grown several times over since the review first measured it, and never on an Approve. It is disclosure only: it adds no finding, changes no verdict, and blocks nothing — it exists because every finding is anchored to a line in the current diff, so the review can report where an approach leaks but never that a different approach would retire all of the leaks at once. Leave at 0 to keep the built-in threshold of 5 rounds; raise it to make the paragraph appear later, and set it very high to silence it. A value that is not a whole number above zero is ignored. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
           "type": "number",
           "default": 0
+        }
+      }
+    },
+    "verifyPr": {
+      "description": "Coordinates for a manual /verify-pr publish round. Each value is surfaced at startup as the environment variable the skill already reads, so the host does not have to be repeated per round. Only honored from User, System, and SystemDefaults settings scopes.",
+      "type": "object",
+      "properties": {
+        "assetsRepo": {
+          "description": "The `owner/repo` that hosts the screenshots a `--publish` round links from its PR comment, surfaced as `QWEN_VERIFY_ASSETS_REPO`; `--assets-repo` still overrides it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot choose where its own verification evidence is published.",
+          "type": "string"
+        },
+        "assetsBranch": {
+          "description": "The branch inside that repository, surfaced as `QWEN_VERIFY_ASSETS_BRANCH`; without it a round publishes to `assets/pr<n>-validation`. Only honored from User, System, and SystemDefaults settings scopes, for the same reason as `verifyPr.assetsRepo`.",
+          "type": "string"
         }
       }
     },
@@ -1521,7 +1541,7 @@
           "type": "string"
         },
         "webSearch": {
-          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION, WEB_SEARCH_ALLOWED_HOSTS. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
           "type": "object",
           "properties": {
             "enabled": {
@@ -1548,6 +1568,13 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 10000
+            },
+            "allowedHosts": {
+              "description": "Extra host suffixes trusted for an explicitly configured search backend, for gateways that serve the DashScope Responses API under their own domain (exact host, or any subdomain of a listed suffix). Empty by default, so behaviour is unchanged unless set. Automatic derivation never uses this list, so a custom host is only used when WEB_SEARCH_BASE_URL or a modelProviders entry names it. The configured host receives the API key. Env override: WEB_SEARCH_ALLOWED_HOSTS (comma-separated).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           }
         },
@@ -4496,9 +4523,9 @@
       "type": "object",
       "properties": {
         "generatedUi": {
-          "description": "Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.",
+          "description": "Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default; set to false to turn it off. Restart the owning session to apply changes.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "mods": {
           "description": "Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.",
@@ -4569,6 +4596,11 @@
         },
         "agentTeam": {
           "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
+        "unifiedAgentLoop": {
+          "description": "Run headless sessions (`-p` and stream-json) and the model rounds of ACP user prompts (Zed, VS Code, Web Shell) on the shared agent loop (experimental). Other turns and surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
           "type": "boolean",
           "default": false
         },
