@@ -147,14 +147,14 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
 
 runtime 构建器只要求匹配的服务 JAR、Java runtime 和本 checkout 中的 CLI 版本，
 不依赖编译好的 CLI 资源或 Node archive。默认输出到
-`packages/managed-agent-server/target/managed-runtime`，位于 CLI 的 `dist/` 资源树
+`packages/managed-agent-server/server/target/managed-runtime`，位于 CLI 的 `dist/` 资源树
 之外。输出 runtime archive 及单独的 `.sha256`
 文件。普通 CLI 独立构建和发行。
 
@@ -163,7 +163,7 @@ runtime 构建器只要求匹配的服务 JAR、Java runtime 和本 checkout 中
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -175,7 +175,7 @@ npm run package:managed-runtime -- \
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --managed-server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```

@@ -30,7 +30,7 @@ if (values.help) {
       'Packages the server JAR and manifest, optionally with Java 21. Reuses an installed matching Qwen CLI.\n' +
       '--without-jre builds a lite archive requiring local Java 21.\n' +
       'Targets: darwin-arm64, darwin-x64, linux-arm64, linux-x64.\n' +
-      'Default output: packages/managed-agent-server/target/managed-runtime.',
+      'Default output: packages/managed-agent-server/server/target/managed-runtime.',
   );
 } else {
   for (const option of ['target', 'server-jar']) {
@@ -50,6 +50,7 @@ if (values.help) {
         root,
         'packages',
         'managed-agent-server',
+        'server',
         'target',
         'managed-runtime',
       ),
