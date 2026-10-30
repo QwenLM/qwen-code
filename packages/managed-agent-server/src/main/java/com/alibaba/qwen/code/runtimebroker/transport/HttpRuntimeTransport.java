@@ -539,11 +539,39 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private static void validateExternalDrain(byte[] bytes) {
         // Reuse only the strict JSON reader, not the CSI identity or protocol validators.
         Map<String, Object> response = ManagedCsiFilesProtocol.parse(bytes, EXTERNAL_STOP_LIMIT);
+        if (!Long.valueOf(2).equals(BrokerValues.exactLong(response.get("protocolVersion")))) {
+            throw protocol("External Workspace drain was not confirmed.");
+        }
+        if ("unknown".equals(response.get("state"))
+                && response.keySet().equals(Set.of("protocolVersion", "state"))) {
+            throw unavailable(null);
+        }
+        if ("undrained".equals(response.get("state"))
+                && response.keySet().equals(Set.of("protocolVersion", "state", "channels"))
+                && response.get("channels") instanceof List<?> channels && !channels.isEmpty()
+                && channels.stream().allMatch(channel -> channel instanceof String id
+                        && id.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"))) {
+            throw unavailable(null);
+        }
         if (!response.keySet().equals(Set.of("protocolVersion", "state", "proof", "receipts"))
-                || !Long.valueOf(2).equals(BrokerValues.exactLong(response.get("protocolVersion")))
                 || !"drained".equals(response.get("state"))
-                || !(response.get("receipts") instanceof List<?> receipts) || !receipts.isEmpty()
-                || !(response.get("proof") instanceof Map<?, ?> proof)
+                || !(response.get("receipts") instanceof List<?> receipts)) {
+            throw protocol("External Workspace drain was not confirmed.");
+        }
+        validateExternalDrainReference(response.get("proof"));
+        for (Object value : receipts) {
+            if (!(value instanceof Map<?, ?> receipt)
+                    || !receipt.keySet().equals(Set.of("channelId", "receipt"))
+                    || !(receipt.get("channelId") instanceof String channelId)
+                    || !channelId.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                throw protocol("External Workspace drain receipt is invalid.");
+            }
+            validateExternalDrainReference(receipt.get("receipt"));
+        }
+    }
+
+    private static void validateExternalDrainReference(Object value) {
+        if (!(value instanceof Map<?, ?> proof)
                 || !proof.keySet().equals(V3_MANIFEST_REF_FIELDS)
                 || !(proof.get("resourceId") instanceof String resourceId)
                 || !resourceId.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")

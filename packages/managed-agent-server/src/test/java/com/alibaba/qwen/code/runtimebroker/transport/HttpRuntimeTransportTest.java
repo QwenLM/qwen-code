@@ -177,13 +177,59 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void externalDrainAcceptsPublicationReceiptsButRejectsMalformedEntries() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        ObjectNode body = (ObjectNode) JSON.readTree(externalDrained());
+        ObjectNode receipt = body.putArray("receipts").addObject();
+        String channelId = "d349deae-7931-48c2-9f22-39c340bbaaf9";
+        receipt.put("channelId", channelId);
+        receipt.set("receipt", body.get("proof").deepCopy());
+        String valid = JSON.writeValueAsString(body);
+        reply.set(json(200, valid.getBytes(StandardCharsets.UTF_8)));
+        transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        for (String invalid : List.of(valid.replace(channelId, "../private"),
+                valid.replace("\"receipt\":", "\"unexpected\":"),
+                valid.replace("\"receipt\":{", "\"receipt\":{\"extra\":true,"))) {
+            reply.set(json(200, invalid.getBytes(StandardCharsets.UTF_8)));
+            var failure = assertThrows(ExecutionException.class,
+                    () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                            .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            var refusal = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertEquals(400, refusal.getStatusCode());
+            assertFalse(refusal.isRetryable());
+        }
+    }
+
+    @Test
+    void externalDrainKeepsWorkerUncertaintyAndPendingChannelsRetryable() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        for (String body : List.of("{\"protocolVersion\":2,\"state\":\"unknown\"}",
+                "{\"protocolVersion\":2,\"state\":\"undrained\","
+                        + "\"channels\":[\"d349deae-7931-48c2-9f22-39c340bbaaf9\"]}")) {
+            reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
+            var failure = assertThrows(ExecutionException.class,
+                    () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                            .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            var pending = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertEquals(503, pending.getStatusCode());
+            assertEquals("managed_runtime_unavailable", pending.getCode());
+            assertTrue(pending.isRetryable());
+        }
+    }
+
+    @Test
     void externalDrainRejectsAmbiguousOrNonFileProofsAndUnboundedReplies() throws Exception {
         var request = externalRequest();
         var seed = ManagedContextProtocolTest.seed();
         externalAttestation(request, seed);
         String valid = externalDrained();
         List<String> invalid = List.of(
-                "{\"protocolVersion\":2,\"state\":\"unknown\"}",
+                "{\"protocolVersion\":2,\"state\":\"unknown\",\"extra\":true}",
                 "{\"protocolVersion\":2,\"state\":\"undrained\",\"channels\":[\"shell\"]}",
                 valid.replace("\"receipts\":[]", "\"receipts\":[{}]"),
                 valid.replace("\"receipts\":[]", "\"receipts\":[],\"channels\":[]"),
