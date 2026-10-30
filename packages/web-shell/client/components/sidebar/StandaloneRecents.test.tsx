@@ -194,7 +194,9 @@ describe('StandaloneRecents', () => {
     const newSession = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
     );
-    expect(newSession?.parentElement?.className).toContain('invisible');
+    expect(newSession?.parentElement?.className).toContain(
+      'projectsHeaderActions',
+    );
     const sessions = container.querySelector(
       '[data-testid="standalone-active-group"] > div:nth-child(2)',
     );

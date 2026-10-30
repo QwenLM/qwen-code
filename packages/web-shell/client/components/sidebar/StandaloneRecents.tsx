@@ -5,7 +5,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { CircleDashedIcon, SquarePenIcon } from 'lucide-react';
+import { ChevronDownIcon, ChevronRightIcon, SquarePenIcon } from 'lucide-react';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionArchiveState,
@@ -469,7 +469,7 @@ export function StandaloneRecents({
   return (
     <>
       <section
-        className={`${workspaceStyles.section} mb-3`}
+        className={workspaceStyles.section}
         aria-label={
           archiveState === 'active'
             ? t('sidebar.noWorkspaceSessions')
@@ -477,10 +477,10 @@ export function StandaloneRecents({
         }
         data-testid={`standalone-${archiveState}-group`}
       >
-        <div className={`${workspaceStyles.headerRow} group`}>
+        <div className={sidebarStyles.projectsHeader}>
           <button
             type="button"
-            className={workspaceStyles.header}
+            className={sidebarStyles.projectsHeaderToggle}
             aria-expanded={expanded}
             disabled={Boolean(query)}
             onClick={(event) => {
@@ -490,24 +490,17 @@ export function StandaloneRecents({
               if (event.detail > 0) event.currentTarget.blur();
             }}
           >
-            <CircleDashedIcon
-              className={workspaceStyles.folderIcon}
-              size={14}
-              strokeWidth={1.4}
-              aria-hidden="true"
-            />
-            <span className={workspaceStyles.headerContent}>
-              <span className={workspaceStyles.name}>
-                {t('sidebar.noWorkspaceSessions')}
-              </span>
-            </span>
+            <span>{t('sidebar.noWorkspaceSessions')}</span>
+            {expanded ? (
+              <ChevronDownIcon size={14} aria-hidden="true" />
+            ) : (
+              <ChevronRightIcon size={14} aria-hidden="true" />
+            )}
           </button>
           {archiveState === 'active' && onNewSession && (
-            <div
-              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover:visible group-focus-within:visible`}
-            >
+            <div className={sidebarStyles.projectsHeaderActions}>
               <button
-                className={sidebarStyles.workspaceHeaderAction}
+                className={sidebarStyles.projectsHeaderAction}
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}

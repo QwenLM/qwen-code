@@ -110,12 +110,11 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
 
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
-  const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New session',
-    exact: true,
-  });
-  await expect(newTaskButtons).toHaveCount(2);
-  await newTaskButtons.last().click();
+  const newTaskButtons = workspaceRow
+    .locator('..')
+    .getByRole('button', { name: 'New session', exact: true });
+  await expect(newTaskButtons).toHaveCount(1);
+  await newTaskButtons.click();
 
   await fillComposer(page, 'Back to the workspace');
   await page.locator('[data-web-shell-composer-submit]').click();
