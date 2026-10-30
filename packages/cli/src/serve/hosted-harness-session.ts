@@ -677,6 +677,7 @@ interface HostedSession {
   recoveryReason?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   foregroundOnly?: boolean;
+  fileRewindEnabled?: boolean;
   publicChildAgentsVersion?: 1;
   publicChildModelRoute?: PublicChildModelRoute;
   publicChildLaunchEnabled?: boolean;
@@ -4666,6 +4667,15 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 400, 'hosted_tool_profile_unavailable');
       return;
     }
+    const requestedFileRewindEnabled = body?.['fileRewindEnabled'];
+    if (
+      requestedFileRewindEnabled !== undefined &&
+      typeof requestedFileRewindEnabled !== 'boolean'
+    ) {
+      error(res, 400, 'invalid_hosted_file_rewind');
+      return;
+    }
+    let fileRewindEnabled = requestedFileRewindEnabled !== false;
     const requestedForegroundOnly = body?.['foregroundOnly'];
     let foregroundOnly = requestedForegroundOnly === true;
     if (
@@ -4843,9 +4853,12 @@ export function registerHostedHarnessSessionRoutes(
     const childWorkspaces = body?.['childWorkspaces'] === true;
     const childSnapshots = childWorkspaces && body?.['childSnapshots'] === true;
     if (
-      resident &&
-      requestedForegroundOnly !== undefined &&
-      (resident.foregroundOnly === true) !== foregroundOnly
+      (resident &&
+        requestedForegroundOnly !== undefined &&
+        (resident.foregroundOnly === true) !== foregroundOnly) ||
+      (resident &&
+        requestedFileRewindEnabled !== undefined &&
+        (resident.fileRewindEnabled !== false) !== fileRewindEnabled)
     ) {
       error(res, 409, 'hosted_tool_profile_conflict');
       return;
@@ -5768,6 +5781,7 @@ export function registerHostedHarnessSessionRoutes(
                   ...(sessionSkillsRef ? { sessionSkillsRef } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
+                  ...(!fileRewindEnabled ? { fileRewindEnabled: false } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
                   ...(hookCatalog ? { hookCatalog } : {}),
                   ...(isHostedWorkspaceShellProfile(toolProfile)
@@ -5868,6 +5882,11 @@ export function registerHostedHarnessSessionRoutes(
       }
       const savedProfile = definition?.['toolProfile'];
       if (
+        (definition?.['fileRewindEnabled'] !== undefined &&
+          typeof definition['fileRewindEnabled'] !== 'boolean') ||
+        (requestedFileRewindEnabled !== undefined &&
+          fileRewindEnabled !==
+            (definition?.['fileRewindEnabled'] !== false)) ||
         (definition?.['foregroundOnly'] !== undefined &&
           typeof definition['foregroundOnly'] !== 'boolean') ||
         (requestedForegroundOnly !== undefined &&
@@ -5904,6 +5923,7 @@ export function registerHostedHarnessSessionRoutes(
         return;
       }
       foregroundOnly = definition?.['foregroundOnly'] === true;
+      fileRewindEnabled = definition?.['fileRewindEnabled'] !== false;
       if (
         !create &&
         toolProfile === undefined &&
@@ -6011,6 +6031,7 @@ export function registerHostedHarnessSessionRoutes(
         ...(childSnapshots ? { childSnapshots: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
         ...(foregroundOnly ? { foregroundOnly: true } : {}),
+        ...(!fileRewindEnabled ? { fileRewindEnabled: false } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
           ? {
@@ -12322,6 +12343,7 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (
+      session.fileRewindEnabled === false ||
       !session.toolProfile ||
       session.toolProfile === HOSTED_MCP_PROFILE ||
       !brokerOptions

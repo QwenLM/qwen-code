@@ -14,4 +14,8 @@ public interface ExternalRuntimeClient {
 
     /** Returns {@code state} RUNNING, STARTING, GONE or UNKNOWN, and {@code endpoint} when RUNNING. */
     CompletionStage<Map<String, Object>> observe(Map<String, Object> request);
+
+    default CompletionStage<Map<String, Object>> retire(Map<String, Object> request) {
+        return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("Provider retirement is unavailable"));
+    }
 }

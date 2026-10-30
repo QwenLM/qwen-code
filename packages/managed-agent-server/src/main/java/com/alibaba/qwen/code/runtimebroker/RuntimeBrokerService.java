@@ -4,11 +4,11 @@ import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
-import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
-import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
 
 import java.nio.charset.StandardCharsets;
@@ -740,7 +740,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
-        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+        if ((!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                && !com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind())) || binding.getLease() == null) {
             return CompletableFuture.completedFuture(null);
         }
         var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
@@ -781,7 +782,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+        if ((!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                && !com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind()))
                 || !execution.isSettled() || execution.getResult() == null
                 || ProviderRuntimeProtocol.isReference(execution.getReference())) {
             return CompletableFuture.completedFuture(null);
@@ -814,7 +816,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+        if ((!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                && !com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(binding.getRequest().getProvisionerKind()))
                 || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
                 || execution.getResult() == null || !execution.getResult().containsKey("capture")
                 || execution.getResult().get("capture") != null
@@ -4986,7 +4989,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                     return null;
                 }).thenCompose(ignored -> {
-                    if (!SshRuntimeProvisioner.KIND.equals(context.binding().getRequest().getProvisionerKind())) {
+                    if (!SshRuntimeProvisioner.KIND.equals(context.binding().getRequest().getProvisionerKind())
+                            && !com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(context.binding().getRequest().getProvisionerKind())) {
                         return CompletableFuture.completedFuture(null);
                     }
                     ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());

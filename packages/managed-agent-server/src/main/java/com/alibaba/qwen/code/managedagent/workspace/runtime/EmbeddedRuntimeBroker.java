@@ -498,7 +498,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     @Override
     public boolean supportsWorkspaceContextChange(ContextBinding binding) {
-        return residents.find(binding) == null;
+        return residents.find(binding) == null && (workspaces == null || workspaces.externalStorage(binding) == null);
     }
 
     @Override
@@ -688,7 +688,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                             + " requires the Managed Session Store database");
                 }
                 return new ExternalWorkspaceProvisioner(client, registry,
-                                broker.getExternalProviderId(), broker.getExternalStartupTimeout());
+                                broker.getExternalProviderId(), broker.getExternalStartupTimeout(),
+                                ExternalRuntimeKinds.isFiles(broker.getProvisioner()) ? transport : null, ExternalRuntimeKinds.isTools(broker.getProvisioner()));
             }
             return new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
                     broker.getExternalStartupTimeout());

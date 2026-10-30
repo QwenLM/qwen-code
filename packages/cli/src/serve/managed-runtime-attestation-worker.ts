@@ -272,7 +272,12 @@ export async function startManagedRuntimeAttestationWorker(
   const boot = externalBoot
     ? parseManagedContextBoot(
         Object.fromEntries(
-          Object.entries(externalBoot).filter(([key]) => key !== 'storage'),
+          Object.entries(externalBoot).filter(
+            ([key]) =>
+              key !== 'storage' &&
+              key !== 'externalFiles' &&
+              key !== 'externalShell',
+          ),
         ),
       )
     : resolved.version === 3
@@ -346,6 +351,8 @@ export async function startManagedRuntimeAttestationWorker(
           : (externalMount ?? csiMount),
         ledger,
         sshRuntime !== undefined || externalBoot !== undefined,
+        externalBoot?.externalFiles === 'external-files/1',
+        externalBoot?.externalShell === true,
       );
       sshRuntime?.register(app, boot, executor);
     } else {
@@ -406,8 +413,8 @@ export async function startManagedRuntimeAttestationWorker(
               ...MANAGED_TOOL_RESULT_ROUTES,
               ...(sshRuntime ? [sshRuntime.route] : []),
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
-              ...(!capturePublisher &&
-              !publication &&
+              ...((externalBoot?.externalShell === true ||
+                (!capturePublisher && !publication)) &&
               (boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
                 boot.managedExtensions !== undefined)
                 ? [PUBLICATION_INSTALL_ROUTE]
@@ -434,7 +441,9 @@ export async function startManagedRuntimeAttestationWorker(
         : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
     ),
   );
-  server.maxHeadersCount = 32;
+  const maxHeadersCount =
+    externalBoot?.externalFiles === 'external-files/1' ? 64 : 32;
+  server.maxHeadersCount = maxHeadersCount;
   server.headersTimeout = 5_000;
   server.requestTimeout = 5_000;
   server.keepAliveTimeout = 1_000;
@@ -487,7 +496,7 @@ export async function startManagedRuntimeAttestationWorker(
       )
     : undefined;
   if (publicationServer) {
-    publicationServer.maxHeadersCount = 32;
+    publicationServer.maxHeadersCount = maxHeadersCount;
     publicationServer.headersTimeout = 5_000;
     publicationServer.requestTimeout = 5_000;
     publicationServer.keepAliveTimeout = 1_000;

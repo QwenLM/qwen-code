@@ -1,0 +1,10 @@
+# Build from the repository root on Linux. Do not copy macOS native artifacts.
+FROM node:22-bookworm AS build
+WORKDIR /opt/qwen
+COPY . .
+RUN corepack enable && corepack pnpm install --frozen-lockfile && npm run build && npm run bundle
+FROM node:22-bookworm
+WORKDIR /opt/qwen
+COPY --from=build /opt/qwen /opt/qwen
+RUN command -v setsid && install -d -m 700 /run/qwen-e2b
+CMD ["sleep", "infinity"]

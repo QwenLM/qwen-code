@@ -1106,6 +1106,18 @@ but the model receives no tools until the Workspace extension lands. See the
 [Broker guide](docs/runtime-broker.md#external-scratch-runtime-opt-in) and the
 [bilingual design](../../docs/design/2026-10-23-external-runtime-provider.md).
 
+For E2B Cloud with registered persistent storage, use the separate
+`external-workspace-files` or `external-workspace-tools` profiles. They keep the
+central Hosted Harness and move execution into remote workers; tools mode adds
+foreground Shell through the central HTTPS publication service. These profiles
+require a registered Workspace selection and an explicit operator Workspace/OWNER
+publication. Close verifies worker drain and then the provider's durable physical
+retirement of the original sandbox, retaining the Volume. The older
+`external-scratch` and `external-workspace` profiles retain their prerequisites.
+See the [E2B adapter runbook](../../integrations/e2b-runtime-provider/README.md)
+and [bilingual design](../../docs/design/2026-10-28-e2b-managed-runtime.md).
+Cloud, public Hosted, MySQL and final Java/CI acceptance remain pending.
+
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `QWEN_MANAGED_RUNTIME_BROKER_`,

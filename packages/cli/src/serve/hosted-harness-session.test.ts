@@ -17140,6 +17140,62 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it('persists an external Workspace rewind refusal before it can write a pending undo', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        foregroundOnly: true,
+        fileRewindEnabled: false,
+      })
+      .expect(200);
+    const refuseRewind = () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/files/rewind`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({ requestId: randomUUID(), promptId: randomUUID() })
+        .expect(409);
+    expect((await refuseRewind()).body.error).toBe(
+      'hosted_file_history_unavailable',
+    );
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({ managedSessionStore: store(), fileRewindEnabled: true })
+      .expect(409);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+      })
+      .expect(200);
+    await refuseRewind();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId,
+    );
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+      })
+      .expect(200);
+    const answer = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({ requestId: randomUUID(), promptId: randomUUID() })
+      .expect(409);
+    expect(answer.body.error).toBe('hosted_file_history_unavailable');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      loaded.body.clientId,
+    );
+  });
+
   it.each([
     { foregroundOnly: 'true' },
     { childWorkspaces: true },

@@ -1,0 +1,17 @@
+.git
+**/.git
+.qwen
+.codex
+.env
+.env.*
+**/.env
+**/.env.*
+node_modules
+**/node_modules
+dist
+**/dist
+target
+**/target
+**/tsconfig.tsbuildinfo
+**/*.log
+.DS_Store

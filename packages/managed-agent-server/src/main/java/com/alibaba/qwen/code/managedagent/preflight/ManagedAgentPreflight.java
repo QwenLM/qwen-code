@@ -1018,7 +1018,7 @@ public final class ManagedAgentPreflight {
                 properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
-        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && !ExternalRuntimeKinds.isFiles(broker.getProvisioner()) && (files || shell)) {
             return new Check("tool-path", Status.FAIL,
                     ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
                                     ? "External Workspace Runtime is a storage provisioning prerequisite"
@@ -1076,6 +1076,14 @@ public final class ManagedAgentPreflight {
             return new Check("tool-path", Status.FAIL,
                     "Workspace files cannot use the static provisioner",
                     "use the local-process provisioner");
+        }
+        if (ExternalRuntimeKinds.isFiles(broker.getProvisioner())) {
+            try {
+                properties.validateExternalRuntime();
+                return new Check("tool-path", Status.WARN, "External files protocol configured; Cloud mount and execution need live verification", null);
+            } catch (IllegalStateException error) {
+                return new Check("tool-path", Status.FAIL, error.getMessage(), "check the external files Runtime configuration");
+            }
         }
         if (!"local-process".equals(broker.getProvisioner())) {
             return new Check("tool-path", Status.WARN,
@@ -1185,7 +1193,7 @@ public final class ManagedAgentPreflight {
                         broker.getProvisioner() + " configuration accepted; provider reachability,"
                                 + " worker attestation and storage registration are checked on first use",
                         null));
-                if (ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())) {
+                if (ExternalRuntimeKinds.isWorkspace(broker.getProvisioner()) && !ExternalRuntimeKinds.isFiles(broker.getProvisioner())) {
                     // Configurable is not the same as usable: say so, so an
                     // operator is never misled by the PASS above.
                     checks.add(new Check("external-prerequisite", Status.WARN,

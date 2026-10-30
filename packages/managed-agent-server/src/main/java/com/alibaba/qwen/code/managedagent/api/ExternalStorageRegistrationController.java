@@ -41,28 +41,34 @@ public final class ExternalStorageRegistrationController {
             ExternalStorageRegistration.StorageAlias alias, String idempotencyKey, String requestId) {
     }
 
+    public record PublishRequest(String storageId, String providerId, long registrationRevision,
+            String actorId, String displayName, String idempotencyKey, String requestId) {
+    }
+
+    @PostMapping(value = "/internal/managed-workspaces/v1/workspaces:publish-external", consumes = "application/json")
+    public ResponseEntity<ExternalStorageRegistrationStore.WorkspacePublication> publish(
+            HttpServletRequest request, HttpServletResponse response) throws IOException {
+        byte[] bytes = operatorPayload(request, response);
+        PublishRequest input;
+        try {
+            input = json.readValue(bytes, PublishRequest.class);
+            if (input == null || input.requestId() != null && !input.requestId().matches("[\\x21-\\x7e]{1,128}")) {
+                throw new IllegalArgumentException();
+            }
+        } catch (IOException | IllegalArgumentException error) {
+            throw new RuntimeBrokerException(400, "invalid_external_workspace", "Invalid external Workspace publication.", false);
+        }
+        RequestIdFilter.useClientId(request, response, input.requestId());
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(store.publishWorkspace(
+                request.getHeader(TenantContextFilter.HEADER), input.idempotencyKey(), input.storageId(),
+                input.providerId(), input.registrationRevision(), input.actorId(), input.displayName()));
+    }
+
     @PostMapping(value = "/internal/managed-workspaces/v1/storage:register-external", consumes = "application/json")
     public ResponseEntity<ExternalStorageRegistrationStore.Receipt> register(
             HttpServletRequest request, HttpServletResponse response) throws IOException {
-        response.setHeader("Cache-Control", "no-store");
-        var internal = properties.getInternalServer();
-        boolean loopbackListener = internal.getPort() > 0
-                ? request.getLocalPort() == internal.getPort() && loopback(internal.getAddress())
-                : server.getAddress() != null && server.getAddress().isLoopbackAddress();
-        String token = properties.getRuntimeBroker().getToken();
-        String authorization = request.getHeader("Authorization");
-        if (!loopbackListener || !loopback(request.getLocalAddr()) || !loopback(request.getRemoteAddr())
-                || token == null || token.isBlank() || authorization == null || authorization.length() > 4096
-                || !MessageDigest.isEqual(("Bearer " + token).getBytes(StandardCharsets.UTF_8),
-                        authorization.getBytes(StandardCharsets.UTF_8))) {
-            throw new RuntimeBrokerException(403, "external_storage_registration_denied",
-                    "External storage registration requires a loopback operator credential.", false);
-        }
+        byte[] bytes = operatorPayload(request, response);
         String tenant = request.getHeader(TenantContextFilter.HEADER);
-        byte[] bytes = request.getInputStream().readNBytes(16385);
-        if (bytes.length > 16384) {
-            throw new RuntimeBrokerException(413, "payload_too_large", "Registration payload exceeds the limit.", false);
-        }
         Request input;
         ExternalStorageRegistration registration;
         try {
@@ -78,6 +84,28 @@ public final class ExternalStorageRegistrationController {
         RequestIdFilter.useClientId(request, response, input.requestId());
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .body(store.registerExternalStorage(tenant, input.idempotencyKey(), registration));
+    }
+
+    private byte[] operatorPayload(HttpServletRequest request, HttpServletResponse response) throws IOException {
+        response.setHeader("Cache-Control", "no-store");
+        var internal = properties.getInternalServer();
+        boolean loopbackListener = internal.getPort() > 0
+                ? request.getLocalPort() == internal.getPort() && loopback(internal.getAddress())
+                : server.getAddress() != null && server.getAddress().isLoopbackAddress();
+        String token = properties.getRuntimeBroker().getToken();
+        String authorization = request.getHeader("Authorization");
+        if (!loopbackListener || !loopback(request.getLocalAddr()) || !loopback(request.getRemoteAddr())
+                || token == null || token.isBlank() || authorization == null || authorization.length() > 4096
+                || !MessageDigest.isEqual(("Bearer " + token).getBytes(StandardCharsets.UTF_8),
+                        authorization.getBytes(StandardCharsets.UTF_8))) {
+            throw new RuntimeBrokerException(403, "external_storage_registration_denied",
+                    "External storage registration requires a loopback operator credential.", false);
+        }
+        byte[] bytes = request.getInputStream().readNBytes(16385);
+        if (bytes.length > 16384) {
+            throw new RuntimeBrokerException(413, "payload_too_large", "Registration payload exceeds the limit.", false);
+        }
+        return bytes;
     }
 
     private static boolean loopback(String address) {

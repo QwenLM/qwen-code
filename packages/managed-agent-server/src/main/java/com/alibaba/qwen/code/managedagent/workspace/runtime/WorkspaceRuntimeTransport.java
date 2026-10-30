@@ -126,6 +126,13 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.acquire(lease, session);
         }
         Context context = context(lease, session, true);
+        if (com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(context.runtime().getRequest().getProvisionerKind())) {
+            if (resolver == null || resolver.externalStorage(context.binding()) == null || !".".equals(context.binding().getCwdRelative())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return delegate.attest(lease, context.runtime().getRequest(), context.runtime().getProvisionSeed())
+                    .thenCompose(ignored -> claimAndInstall(lease, session, context));
+        }
         // Reject a missing directory before a new claim can strand storage ownership.
         if (!ResidentWorkspaceProfile.selects(session.getScope())) {
             if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
@@ -145,6 +152,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 throw WorkspaceExecutionStore.unavailable();
             }
         }
+        return claimAndInstall(lease, session, context);
+    }
+
+    private CompletionStage<Void> claimAndInstall(RuntimeLease lease, RuntimeSession session, Context context) {
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
         try {
@@ -321,6 +332,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             throw WorkspaceExecutionStore.unavailable();
         }
         Context context = requireLocalCapture(context(lease, session, true));
+        if (com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isTools(context.runtime().getRequest().getProvisionerKind())) {
+            throw new RuntimeBrokerException(501, "external_legacy_publication_unsupported", "External tools require the central publication service.", false);
+        }
         ownership.assertHeld(context.binding(), context.session());
         return delegate.installPublisherV3(lease, session, publisher);
     }
@@ -369,7 +383,8 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static Context requireLocalCapture(Context context) {
-        if (!java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner.KIND)
+        if (!java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner.KIND,
+                com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.TOOLS_KIND)
                 .contains(context.runtime().getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -405,6 +420,12 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         if (managed(session)) {
             Context selected = context(lease, session, false);
+            if (com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(selected.runtime().getRequest().getProvisionerKind())
+                    && (!java.util.Set.of("manifest", "begin-turn", "prepare", "confirmation", "preflight", "confirm", "bind-history", "checkpoint", "history", "workspace-context", "raw-file-history").contains(operation.get("kind"))
+                            || "prepare".equals(operation.get("kind")) && !java.util.Set.of("read_file", "write_file", "edit").contains(operation.get("toolName"))
+                            || "raw-file-history".equals(operation.get("kind")) && !java.util.Set.of("bind", "prepare", "snapshot").contains(operation.get("action")))) {
+                throw new RuntimeBrokerException(501, "external_files_control_unsupported", "External Runtime supports prepared files only.", false);
+            }
             boolean extensionControl = ManagedExtensionExecutionProfile.admits(session.getScope().getCapabilityDigest())
                     && (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
                             || ManagedExtensionCommandProtocol.isOperation(operation));
@@ -542,6 +563,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         // worker), so it owes the same detach; one with no holder never
         // installed anything and keeps the shortcut.
         Context context = context(lease, session, false);
+        if (com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(context.runtime().getRequest().getProvisionerKind())) {
+            throw new RuntimeBrokerException(501, "external_files_mount_transfer_unsupported", "External Runtime does not admit mount transfer.", false);
+        }
         if (ownership.hasExclusiveClaim(context.session())) {
             throw new RuntimeBrokerException(409, "workspace_writer_unproven",
                     "A Workspace rewind must settle before its mount can be handed back.", false);
@@ -560,6 +584,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return CompletableFuture.completedFuture(null);
         }
         Context context = context(lease, session, false);
+        if (com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds.isFiles(context.runtime().getRequest().getProvisionerKind())) {
+            throw new RuntimeBrokerException(501, "external_files_mount_transfer_unsupported", "External Runtime does not admit mount transfer.", false);
+        }
         if (!ownership.isHeld(context.binding(), context.session())) {
             ownership.claim(context.binding(), context.session());
         }
