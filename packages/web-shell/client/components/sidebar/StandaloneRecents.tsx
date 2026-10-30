@@ -5,7 +5,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { CircleDashedIcon, SquarePenIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CircleDashedIcon,
+  SquarePenIcon,
+} from 'lucide-react';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionArchiveState,
@@ -23,8 +28,12 @@ import {
 } from '../../daemon/session/session-context';
 import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
+import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
-import { Input } from '../ui/input';
+import {
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
 import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
@@ -49,7 +58,10 @@ interface StandaloneRecentsProps {
       onDelete: () => void;
     },
   ) => ReactNode;
-  onLoadSession: (sessionId: string) => Promise<void> | void;
+  onLoadSession: (
+    sessionId: string,
+    displayName?: string,
+  ) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
   onStatusChange?: (status: {
@@ -135,7 +147,10 @@ export function StandaloneRecents({
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [cursor, setCursor] = useState<string>();
-  const [expanded, setExpanded] = useState(true);
+  const expansionId = `standalone:${archiveState}`;
+  const [expanded, setExpanded] = useState(() =>
+    readWorkspaceExpanded(expansionId),
+  );
   const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -407,7 +422,11 @@ export function StandaloneRecents({
       openingSessionIdRef.current = sessionId;
       setSessionError(undefined);
       try {
-        await onLoadSession(sessionId);
+        await onLoadSession(
+          sessionId,
+          sessionsRef.current.find((session) => session.sessionId === sessionId)
+            ?.displayName,
+        );
       } catch (error) {
         if (generation !== openGenerationRef.current) return;
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) return;
@@ -455,7 +474,11 @@ export function StandaloneRecents({
   return (
     <>
       <section
-        className={`${workspaceStyles.section} mb-3`}
+        className={
+          archiveState === 'active'
+            ? workspaceStyles.section
+            : `${workspaceStyles.section} mb-3`
+        }
         aria-label={
           archiveState === 'active'
             ? t('sidebar.noWorkspaceSessions')
@@ -463,32 +486,56 @@ export function StandaloneRecents({
         }
         data-testid={`standalone-${archiveState}-group`}
       >
-        <div className={`${workspaceStyles.headerRow} group`}>
+        <div
+          className={
+            archiveState === 'active'
+              ? sidebarStyles.projectsHeader
+              : `${workspaceStyles.headerRow} group`
+          }
+        >
           <button
             type="button"
-            className={workspaceStyles.header}
+            className={
+              archiveState === 'active'
+                ? sidebarStyles.projectsHeaderToggle
+                : workspaceStyles.header
+            }
             aria-expanded={expanded}
+            disabled={Boolean(query)}
             onClick={(event) => {
-              setExpanded((value) => !value);
+              const nextExpanded = !expanded;
+              writeWorkspaceExpanded(expansionId, nextExpanded);
+              setExpanded(nextExpanded);
               if (event.detail > 0) event.currentTarget.blur();
             }}
           >
-            <CircleDashedIcon
-              className={workspaceStyles.folderIcon}
-              size={14}
-              strokeWidth={1.4}
-              aria-hidden="true"
-            />
-            <span className={workspaceStyles.headerContent}>
-              <span className={workspaceStyles.name}>
-                {t('sidebar.noWorkspaceSessions')}
-              </span>
-            </span>
+            {archiveState === 'active' ? (
+              <>
+                <span>{t('sidebar.noWorkspaceSessions')}</span>
+                {expanded ? (
+                  <ChevronDownIcon size={14} aria-hidden="true" />
+                ) : (
+                  <ChevronRightIcon size={14} aria-hidden="true" />
+                )}
+              </>
+            ) : (
+              <>
+                <CircleDashedIcon
+                  className={workspaceStyles.folderIcon}
+                  size={14}
+                  strokeWidth={1.4}
+                  aria-hidden="true"
+                />
+                <span className={workspaceStyles.headerContent}>
+                  <span className={workspaceStyles.name}>
+                    {t('sidebar.noWorkspaceSessions')}
+                  </span>
+                </span>
+              </>
+            )}
           </button>
           {archiveState === 'active' && onNewSession && (
-            <div
-              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover:visible group-focus-within:visible`}
-            >
+            <div className={sidebarStyles.projectsHeaderActions}>
               <button
                 className={sidebarStyles.workspaceHeaderAction}
                 type="button"
@@ -532,7 +579,13 @@ export function StandaloneRecents({
           </div>
         )}
         {(expanded || Boolean(query)) && (
-          <div className="flex flex-col gap-0.5">
+          <div
+            className={
+              archiveState === 'active'
+                ? sidebarStyles.pinnedSessionList
+                : 'flex flex-col gap-0.5'
+            }
+          >
             {displayedSessions.map((session) => {
               const isCurrent = session.sessionId === currentSessionId;
               return renderSession(session, {
@@ -597,54 +650,30 @@ export function StandaloneRecents({
         )}
       </section>
       {renameCandidate && (
-        <DialogShell
-          title={t('sidebar.rename')}
-          size="sm"
+        <SessionRenameDialog
+          value={renameValue}
+          busy={busySessionId === renameCandidate.sessionId}
+          onChange={setRenameValue}
           onClose={() => setRenameCandidate(undefined)}
-        >
-          <form
-            className="flex flex-col gap-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const displayName = renameValue.trim();
-              if (!displayName) return;
-              void run(renameCandidate.sessionId, async () => {
-                await workspace.client.renameStandaloneSession(
-                  renameCandidate.sessionId,
-                  displayName,
-                );
-                setSessions((current) =>
-                  current.map((session) =>
-                    session.sessionId === renameCandidate.sessionId
-                      ? { ...session, displayName }
-                      : session,
-                  ),
-                );
-                onRenameSession?.(renameCandidate.sessionId, displayName);
-              }).then((succeeded) => {
-                if (succeeded) setRenameCandidate(undefined);
-              });
-            }}
-          >
-            <Input
-              autoFocus
-              value={renameValue}
-              onChange={(event) => setRenameValue(event.target.value)}
-            />
-            <div className="flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setRenameCandidate(undefined)}
-              >
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" disabled={!renameValue.trim()}>
-                {t('common.save')}
-              </Button>
-            </div>
-          </form>
-        </DialogShell>
+          onSubmit={(displayName) => {
+            void run(renameCandidate.sessionId, async () => {
+              await workspace.client.renameStandaloneSession(
+                renameCandidate.sessionId,
+                displayName,
+              );
+              setSessions((current) =>
+                current.map((session) =>
+                  session.sessionId === renameCandidate.sessionId
+                    ? { ...session, displayName }
+                    : session,
+                ),
+              );
+              onRenameSession?.(renameCandidate.sessionId, displayName);
+            }).then((succeeded) => {
+              if (succeeded) setRenameCandidate(undefined);
+            });
+          }}
+        />
       )}
       {deleteCandidate && (
         <DialogShell

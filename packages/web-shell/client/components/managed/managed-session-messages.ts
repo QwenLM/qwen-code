@@ -1,6 +1,31 @@
+import { isTodoWriteToolName } from '../../utils/todos';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import type { ManagedToolResult } from './managed-tool-result-types';
+
+type ManagedEventEpoch = object;
+
+// The token identifies an append chain without retaining any predecessor
+// array. WeakMap entries disappear with the arrays held by session state.
+const managedEventEpochs = new WeakMap<
+  readonly ManagedAgentSessionEvent[],
+  ManagedEventEpoch
+>();
+
+function newManagedEventEpoch(): ManagedEventEpoch {
+  return {};
+}
+
+function carryManagedEventEpoch(
+  current: readonly ManagedAgentSessionEvent[],
+): ManagedEventEpoch {
+  const epoch = managedEventEpochs.get(current);
+  if (epoch !== undefined) {
+    managedEventEpochs.delete(current);
+    return epoch;
+  }
+  return newManagedEventEpoch();
+}
 
 // `current` must already be ascending and deduplicated by id (stream state
 // and transcript pages are); the append path checks only that `incoming`
@@ -8,20 +33,47 @@ import type { ManagedToolResult } from './managed-tool-result-types';
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
+  itemPages = false,
 ): ManagedAgentSessionEvent[] {
   // An empty input cannot ride the ascending check: strictlyAscendingIds
   // loops from index 1, and the fast path dereferences incoming[0].
-  if (incoming.length === 0) return [...current];
+  if (incoming.length === 0) {
+    const merged = [...current];
+    managedEventEpochs.set(merged, carryManagedEventEpoch(current));
+    return merged;
+  }
   if (
     strictlyAscendingIds(incoming) &&
     (current.length === 0 || current[current.length - 1]!.id < incoming[0]!.id)
-  )
-    return [...current, ...incoming];
-  return [
+  ) {
+    const merged = [...current, ...incoming];
+    managedEventEpochs.set(merged, carryManagedEventEpoch(current));
+    return merged;
+  }
+  const encoder = itemPages ? new TextEncoder() : undefined;
+  const merged = [
     ...new Map(
-      [...current, ...incoming].map((event) => [event.id, event]),
+      [...current, ...incoming].map((event) => [
+        itemPages
+          ? `${event.id}:${String(record(event.data)['itemId'] ?? '')}`
+          : event.id,
+        event,
+      ]),
     ).values(),
-  ].sort((a, b) => a.id - b.id);
+  ].sort((a, b) => {
+    const sequence = a.id - b.id;
+    if (sequence || !encoder) return sequence;
+    // SQL orders opaque identities by UTF-8 bytes, rather than locale.
+    const left = encoder.encode(String(record(a.data)['itemId'] ?? ''));
+    const right = encoder.encode(String(record(b.data)['itemId'] ?? ''));
+    for (let index = 0; index < Math.min(left.length, right.length); index++) {
+      const difference = left[index]! - right[index]!;
+      if (difference) return difference;
+    }
+    return left.length - right.length;
+  });
+  managedEventEpochs.set(merged, newManagedEventEpoch());
+  return merged;
 }
 
 function strictlyAscendingIds(
@@ -36,6 +88,23 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function structuredToolOutput(
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const snapshot = data['todoSnapshot'];
+  if (typeof snapshot !== 'string') return undefined;
+  try {
+    const todos: unknown = JSON.parse(snapshot);
+    return Array.isArray(todos) ? { todos } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasTodoSnapshot(value: unknown): boolean {
+  return Array.isArray(record(value)['todos']);
 }
 
 // Only these Turn-bearing types may settle a Turn boundary. Control-plane
@@ -56,21 +125,35 @@ const BOUNDARY_SETTLE_TYPES = new Set([
   'cancelled',
 ]);
 
-export function managedEventsToMessages(
-  events: readonly ManagedAgentSessionEvent[],
-  truncatedLabel: string,
-): Message[] {
-  const messages: Message[] = [];
-  const tools = new Map<string, ACPToolCall>();
+interface ManagedMessageProjectionState {
+  messages: Message[];
+  tools: Map<string, ACPToolCall>;
   // Tools the non-fatal runtime_failed diagnostic failed, keyed to their
   // Turn, so a later same-Turn cancellation can re-mark them: their status
   // has already flipped to failed by then, which the terminal-event loop
   // alone skips. An authoritative result or completion retires the booking.
-  const runtimeFailed = new Map<ACPToolCall, string>();
-  let textMessage:
-    | Extract<Message, { role: 'assistant' | 'thinking' }>
-    | undefined;
-  let currentTurnId: string | undefined;
+  runtimeFailed: Map<ACPToolCall, string>;
+  textMessage: Extract<Message, { role: 'assistant' | 'thinking' }> | undefined;
+  currentTurnId?: string;
+}
+
+function createManagedMessageProjectionState(): ManagedMessageProjectionState {
+  return {
+    messages: [],
+    tools: new Map(),
+    runtimeFailed: new Map(),
+    textMessage: undefined,
+    currentTurnId: undefined,
+  };
+}
+
+function appendManagedEvents(
+  state: ManagedMessageProjectionState,
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+): void {
+  const { messages, tools, runtimeFailed } = state;
+  let { textMessage, currentTurnId } = state;
   const stopStreaming = () => {
     for (const message of messages) {
       if (message.role === 'assistant' || message.role === 'thinking') {
@@ -179,13 +262,9 @@ export function managedEventsToMessages(
       if (event.type !== 'tool_result_updated') settle();
       const callId = data['toolCallId'];
       const itemId = data['itemId'];
-      const identity = typeof itemId === 'string' ? itemId : callId;
-      if (typeof identity !== 'string') continue;
-      const key = `${event.turnId}:${identity}`;
-      const legacyKey =
-        typeof callId === 'string' ? `${event.turnId}:${callId}` : undefined;
-      let tool =
-        tools.get(key) ?? (legacyKey ? tools.get(legacyKey) : undefined);
+      if (typeof itemId !== 'string' || !itemId) continue;
+      const key = `${event.turnId}:${itemId}`;
+      let tool = tools.get(key);
       const result = readResult(data['result'], event);
       if (!tool) {
         if (event.turnId === currentTurnId) settle();
@@ -196,7 +275,7 @@ export function managedEventsToMessages(
               ? data['toolName']
               : result
                 ? 'run_shell_command'
-                : identity,
+                : itemId,
           status: 'pending',
         };
         const message: Message = {
@@ -222,9 +301,17 @@ export function managedEventsToMessages(
         else messages.push(message);
       }
       tools.set(key, tool);
-      if (legacyKey) tools.set(legacyKey, tool);
-      if (typeof itemId === 'string') tool.callId = key;
       if (typeof callId === 'string') tool.toolCallId = callId;
+      if (Number.isSafeInteger(data['sourceSequence'])) {
+        const revision = Number(data['sourceSequence']);
+        if (
+          isTodoWriteToolName(tool.toolName) &&
+          tool.toolDetailsRevision !== undefined &&
+          revision <= tool.toolDetailsRevision
+        )
+          continue;
+        tool.toolDetailsRevision = revision;
+      }
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
       // The Harness titles each call itself; the approval card shows it as
@@ -238,6 +325,9 @@ export function managedEventsToMessages(
         tool.args = record(input);
         if (Object.keys(tool.args).length === 0) tool.args = { input };
       }
+      const structuredOutput = isTodoWriteToolName(tool.toolName)
+        ? structuredToolOutput(data)
+        : undefined;
       if (result) {
         if (
           tool.toolResult &&
@@ -272,13 +362,15 @@ export function managedEventsToMessages(
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
           if (
-            data['truncated'] !== true ||
-            typeof tool.rawOutput !== 'string' ||
-            output.length > tool.rawOutput.length
+            !hasTodoSnapshot(tool.rawOutput) &&
+            (data['truncated'] !== true ||
+              typeof tool.rawOutput !== 'string' ||
+              output.length > tool.rawOutput.length)
           ) {
             tool.rawOutput = output;
           }
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
         continue;
       }
       if (event.type === 'tool_started') {
@@ -294,11 +386,15 @@ export function managedEventsToMessages(
         tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
         runtimeFailed.delete(tool);
-        if (typeof data['output'] === 'string') {
+        if (
+          typeof data['output'] === 'string' &&
+          !hasTodoSnapshot(tool.rawOutput)
+        ) {
           tool.rawOutput =
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
       }
     } else if (
       event.type === 'completed' ||
@@ -357,7 +453,63 @@ export function managedEventsToMessages(
       }
     }
   }
-  return messages;
+  state.textMessage = textMessage;
+  state.currentTurnId = currentTurnId;
+}
+
+function snapshotManagedMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) =>
+    message.role === 'tool_group'
+      ? { ...message, tools: message.tools.map((tool) => ({ ...tool })) }
+      : { ...message },
+  );
+}
+
+export function managedEventsToMessages(
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+): Message[] {
+  const state = createManagedMessageProjectionState();
+  appendManagedEvents(state, events, truncatedLabel);
+  return snapshotManagedMessages(state.messages);
+}
+
+export function createManagedMessageProjector(): (
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+) => Message[] {
+  let epoch: ManagedEventEpoch | undefined;
+  let processedLength = 0;
+  let label: string | undefined;
+  let state: ManagedMessageProjectionState | undefined;
+  let snapshot: Message[] = [];
+
+  return (events, truncatedLabel) => {
+    const nextEpoch = managedEventEpochs.get(events);
+    const canAppend =
+      state !== undefined &&
+      nextEpoch !== undefined &&
+      nextEpoch === epoch &&
+      events.length >= processedLength &&
+      truncatedLabel === label;
+    if (!canAppend) {
+      state = createManagedMessageProjectionState();
+      appendManagedEvents(state, events, truncatedLabel);
+      epoch = nextEpoch;
+      processedLength = events.length;
+      label = truncatedLabel;
+      snapshot = snapshotManagedMessages(state.messages);
+    } else if (events.length > processedLength) {
+      appendManagedEvents(
+        state!,
+        events.slice(processedLength),
+        truncatedLabel,
+      );
+      processedLength = events.length;
+      snapshot = snapshotManagedMessages(state!.messages);
+    }
+    return snapshot;
+  };
 }
 
 function readResult(

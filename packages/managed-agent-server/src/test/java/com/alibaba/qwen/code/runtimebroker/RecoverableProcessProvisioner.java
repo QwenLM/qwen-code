@@ -2,6 +2,9 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -35,7 +38,7 @@ import java.util.concurrent.TimeUnit;
  * it so the gates can drive the service's adoption and takeover paths
  * against real workers.
  */
-final class RecoverableProcessProvisioner implements RuntimeProvisioner {
+public final class RecoverableProcessProvisioner implements RuntimeProvisioner {
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
     private static final Set<String> IDENTITY_FAILURES = Set.of(
             "managed_runtime_identity_conflict",
@@ -53,7 +56,7 @@ final class RecoverableProcessProvisioner implements RuntimeProvisioner {
                 return thread;
             });
 
-    RecoverableProcessProvisioner(LocalProcessRuntimeProvisioner local,
+    public RecoverableProcessProvisioner(LocalProcessRuntimeProvisioner local,
             HttpRuntimeTransport transport, Path records) {
         this.local = local;
         this.transport = transport;

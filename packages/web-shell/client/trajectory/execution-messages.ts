@@ -13,14 +13,11 @@ export const TRAJECTORY_EXECUTION_MESSAGES_EN: Record<
   ExecutionMessage
 > = {
   'trajectory.executions.title': 'Recent executions',
-  'trajectory.executions.scope':
-    'Bounded lifecycle records; history filters apply below.',
   'trajectory.executions.outside': (v) =>
     `${v?.count ?? 0} executions outside the historical rows`,
   'trajectory.executions.omitted': (v) =>
     `${v?.count ?? 0} input records omitted by display limit`,
   'trajectory.executions.clock': 'Clock time',
-  'trajectory.executions.empty': 'No lifecycle records available.',
   'trajectory.executions.elapsed': (v) => `About ${v?.duration ?? ''} elapsed`,
   'trajectory.executions.uncertain': 'Elapsed unavailable',
   'trajectory.executions.metadata':
@@ -45,13 +42,11 @@ export const TRAJECTORY_EXECUTION_MESSAGES_ZH: Record<
   ExecutionMessage
 > = {
   'trajectory.executions.title': '近期执行',
-  'trajectory.executions.scope': '有界生命周期记录；下方筛选仅作用于历史窗口。',
   'trajectory.executions.outside': (v) =>
     `${v?.count ?? 0} 条执行未关联当前历史行`,
   'trajectory.executions.omitted': (v) =>
     `展示上限省略了 ${v?.count ?? 0} 条输入记录`,
   'trajectory.executions.clock': '真实时间',
-  'trajectory.executions.empty': '暂无可用生命周期记录。',
   'trajectory.executions.elapsed': (v) => `约已运行 ${v?.duration ?? ''}`,
   'trajectory.executions.uncertain': '当前耗时不可确定',
   'trajectory.executions.metadata':

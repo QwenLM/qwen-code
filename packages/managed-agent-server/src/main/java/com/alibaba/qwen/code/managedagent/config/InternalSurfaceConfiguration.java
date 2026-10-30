@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
-import com.alibaba.qwen.code.managedagent.api.PublicSurface;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;

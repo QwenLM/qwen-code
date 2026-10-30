@@ -16,10 +16,11 @@ import java.util.Set;
 public final class ManagedSchemaRows {
     private static final Set<String> BOOLEANS = Set.of(
             "recovery_protected", "resource_gc_completed", "submission_attempted",
-            "o3_backfill_pending", "projection_pending", "terminal", "truncated",
+            "projection_pending", "terminal", "truncated",
             "archived", "quarantined", "write_evidence", "accepted_complete",
             "workspace_bound", "verification_ready", "is_default", "provision_seeded",
-            "drain_requested", "cancel_requested", "enabled", "csi_guard");
+            "drain_requested", "cancel_requested", "enabled", "csi_guard",
+            "execution_exclusive");
     private static final Set<String> IDENTITIES =
             Set.of(
                     "tenant_id",
@@ -59,8 +60,6 @@ public final class ManagedSchemaRows {
                     "artifact_id",
                     "result_id",
                     "occurrence_key",
-                    "snapshot_id",
-                    "current_snapshot_id",
                     "turn_id",
                     "prompt_id",
                     "item_id",
@@ -101,6 +100,8 @@ public final class ManagedSchemaRows {
                     "encryption_key_id",
                     "publish_command_id",
                     "harness_boot_id",
+                    "harness_instance_id",
+                    "harness_owner_boot_id",
                     "harness_event_epoch",
                     "workspace_storage_id",
                     "context_config_ref",

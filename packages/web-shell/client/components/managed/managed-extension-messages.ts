@@ -1,0 +1,82 @@
+export const MANAGED_EXTENSION_MESSAGES_EN = {
+  'managed.extensions.title': 'Managed extensions',
+  'managed.extensions.description':
+    'Publish a fixed package, select versions, then apply to an idle session.',
+  'managed.extensions.selectSession':
+    'Select a workspace and session to manage extensions.',
+  'managed.extensions.unsupported':
+    'Package extensions are unavailable for this target.',
+  'managed.extensions.source': 'Original Git, npm, directory or archive source',
+  'managed.extensions.ref': 'Source revision (optional)',
+  'managed.extensions.target': 'Target platform',
+  'managed.extensions.publish': 'Publish package',
+  'managed.extensions.new': 'New extension',
+  'managed.extensions.update': 'Update selected extension',
+  'managed.extensions.apply': 'Apply selection',
+  'managed.extensions.retry': 'Retry original request',
+  'managed.extensions.continue': 'Continue original operation',
+  'managed.extensions.recover': 'Restore previous version',
+  'managed.extensions.settings': 'Settings',
+  'managed.extensions.settingsDescription':
+    'Enter the complete set of environment settings. Saved values are never displayed.',
+  'managed.extensions.addSetting': 'Add setting',
+  'managed.extensions.key': 'Environment variable',
+  'managed.extensions.value': 'Value',
+  'managed.extensions.saveSettings': 'Save settings revision',
+  'managed.extensions.useSettings': 'Use saved settings revision',
+  'managed.extensions.settingsRevision': 'Settings revision (optional)',
+  'managed.extensions.installed': 'Installed',
+  'managed.extensions.pending': 'Pending apply',
+  'managed.extensions.active': 'Active',
+  'managed.extensions.preparing': 'Preparing',
+  'managed.extensions.prepared': 'Ready to apply',
+  'managed.extensions.committed': 'Applying',
+  'managed.extensions.recovery_required': 'Recovery blocked',
+  'managed.extensions.failed': 'Failed',
+  'managed.extensions.empty': 'No packages published in this workspace.',
+  'managed.extensions.failedRequest':
+    'The request could not be confirmed. Refresh status or retry the original request.',
+  'managed.extensions.localPublisher':
+    'A connected daemon is required to prepare an original source.',
+} as const;
+export const MANAGED_EXTENSION_MESSAGES_ZH: Record<
+  keyof typeof MANAGED_EXTENSION_MESSAGES_EN,
+  string
+> = {
+  'managed.extensions.title': 'Managed 扩展',
+  'managed.extensions.description':
+    '发布固定版本的包，选择版本后，在会话空闲时显式应用。',
+  'managed.extensions.selectSession': '请选择 Workspace 和会话以管理扩展。',
+  'managed.extensions.unsupported': '当前目标尚未开放整包扩展。',
+  'managed.extensions.source': '原始 Git、npm、目录或 archive 来源',
+  'managed.extensions.ref': '来源修订（可选）',
+  'managed.extensions.target': '目标平台',
+  'managed.extensions.publish': '发布扩展包',
+  'managed.extensions.new': '新扩展',
+  'managed.extensions.update': '更新所选扩展',
+  'managed.extensions.apply': '应用所选版本',
+  'managed.extensions.retry': '重试原请求',
+  'managed.extensions.continue': '继续原操作',
+  'managed.extensions.recover': '恢复上一版',
+  'managed.extensions.settings': '设置',
+  'managed.extensions.settingsDescription':
+    '输入完整的环境设置。已保存的值不会回显。',
+  'managed.extensions.addSetting': '添加设置',
+  'managed.extensions.key': '环境变量名',
+  'managed.extensions.value': '值',
+  'managed.extensions.saveSettings': '保存设置修订',
+  'managed.extensions.useSettings': '使用已保存的设置修订',
+  'managed.extensions.settingsRevision': '设置修订（可选）',
+  'managed.extensions.installed': '已安装',
+  'managed.extensions.pending': '待应用',
+  'managed.extensions.active': '已生效',
+  'managed.extensions.preparing': '准备中',
+  'managed.extensions.prepared': '已准备',
+  'managed.extensions.committed': '应用中',
+  'managed.extensions.recovery_required': '恢复阻塞',
+  'managed.extensions.failed': '失败',
+  'managed.extensions.empty': '此 Workspace 尚未发布扩展包。',
+  'managed.extensions.failedRequest':
+    '请求结果尚未确认。请刷新状态或重试原请求。',
+  'managed.extensions.localPublisher': '需要连接 daemon 才能准备原始来源。',
+};

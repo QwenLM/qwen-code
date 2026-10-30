@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
@@ -17,17 +19,17 @@ import java.util.concurrent.CompletionStage;
  * Release closes provider admission before that gate. These calls use
  * {@link HttpRuntimeTransport}, with its receipt checks.
  */
-final class FaultGateTransport implements RuntimeTransport {
+public final class FaultGateTransport implements RuntimeTransport {
     private final HttpRuntimeTransport runtime;
     private final ContextBinding context;
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
 
-    FaultGateTransport(HttpRuntimeTransport runtime) {
+    public FaultGateTransport(HttpRuntimeTransport runtime) {
         this(runtime, null, null, null);
     }
 
-    FaultGateTransport(HttpRuntimeTransport runtime, ContextBinding context,
+    public FaultGateTransport(HttpRuntimeTransport runtime, ContextBinding context,
             RuntimeBindingRepository bindings,
             RuntimeSessionRepository sessions) {
         this.runtime = runtime;

@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -18,12 +18,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Pins the deferral SQL on H2 in MySQL mode against the three columns the
+ * Pins the deferral SQL on H2 in MySQL mode against the two columns the
  * target scan reads: {@code gmt_modified} moves so the target rotates behind
  * fresher rows, {@code covered_sequence} stays put so the gap guard in
- * materializeNextBatch still freezes on a failure, and
- * {@code snapshot_stale_since} stays put so a session whose snapshot
- * rewrite was deferred keeps being re-selected.
+ * materializeNextBatch still freezes on a failure.
  */
 class ManagedMaterializationDeferTest {
     @Test
@@ -34,7 +32,7 @@ class ManagedMaterializationDeferTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/managed-schema").load().migrate();
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
         jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, status, gmt_create,"
                         + " gmt_modified) VALUES (?, ?, ?, ?,"
@@ -42,9 +40,8 @@ class ManagedMaterializationDeferTest {
                 "tenant", "session", "qwen-code", "ACTIVE", 1L, 1L);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
                         + " session_id, stream_kind, stream_id, last_sequence, covered_sequence,"
-                        + " gmt_modified, snapshot_stale_since) VALUES (?, ?,"
-                        + " ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "SESSION", "", 9L, 9L, 1L, 7L);
+                        + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "SESSION", "", 9L, 9L, 1L);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
@@ -54,15 +51,13 @@ class ManagedMaterializationDeferTest {
 
         store.deferMaterializationTarget("tenant", "session");
 
-        var row = jdbc.queryForMap("SELECT covered_sequence, gmt_modified,"
-                        + " snapshot_stale_since FROM"
+        var row = jdbc.queryForMap("SELECT covered_sequence, gmt_modified FROM"
                         + " ma_event_stream WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
                         + " stream_kind = ? AND stream_id = X''",
                 "tenant", "session", "SESSION");
         assertThat(row.get("gmt_modified")).isEqualTo(123456789L);
         assertThat(row.get("covered_sequence")).isEqualTo(9L);
-        assertThat(row.get("snapshot_stale_since")).isEqualTo(7L);
     }
 
     /**
@@ -80,7 +75,7 @@ class ManagedMaterializationDeferTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/managed-schema").load().migrate();
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
         for (int i = 0; i < 3; i++) {
             String session = "session-" + i;
             jdbc.update("INSERT INTO ma_session (tenant_id,"

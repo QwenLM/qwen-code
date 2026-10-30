@@ -200,6 +200,7 @@ const proxy = createServer(async (req, res) => {
         req.method === 'POST' &&
         [
           '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
           '/internal/runtime-broker/v1/tool-sessions:active-holds',
         ].includes(url.pathname);
       assert.equal(
@@ -311,6 +312,10 @@ async function transcript() {
   }
 }
 
+function terminalsOf<T extends { type: string }>(events: T[]) {
+  return events.filter((event) => event.type.startsWith('turn_'));
+}
+
 async function start() {
   await cli.start(model.baseUrl, {
     extraArgs: [
@@ -340,20 +345,47 @@ try {
       async () => !(await json(`${route}/status`)).hasActivePrompt,
     );
     assert.equal(current.faults, 3, `${current.fault}: retries not exhausted`);
-    assert.equal((await json(`${route}/status`)).recoveryBlocked, true);
-    assert.equal(current.modelCalls, current.fault === 'turn-reply' ? 2 : 1);
+    // A reply-lost commit landed durably before its answer was dropped. The
+    // settle (#14570) applies it once, on its own retry rather than before
+    // the fault loop returns: a result reply becomes the one committed
+    // tool_result while the Turn stays blocked, and a turn reply settles the
+    // Turn itself, so it completes without a cold load. Wait for either
+    // shape instead of pinning the settle's timing.
+    const settles = [
+      'result-checkpoint',
+      'result-reply',
+      'turn-reply',
+    ].includes(current.fault);
+    const settled = current.fault === 'turn-reply';
+    if (settles)
+      // 30 s keeps the three marked faults (at most 90 s) inside the
+      // method's @Timeout(180) with room for the harness boots either side.
+      await waitUntil(async () => {
+        const status = await json(`${route}/status`);
+        const applied = await transcript();
+        return (
+          !status.hasActivePrompt &&
+          applied.filter((event) => event.data.record?.type === 'tool_result')
+            .length === 1 &&
+          terminalsOf(applied).length === (settled ? 1 : 0) &&
+          (settled ? !status.recoveryBlocked : status.recoveryBlocked)
+        );
+      }, 30_000);
+    assert.equal((await json(`${route}/status`)).recoveryBlocked, !settled);
+    assert.equal(current.modelCalls, settled ? 2 : 1);
     const records = await transcript();
-    assert.equal(
-      records.filter((event) => event.type.startsWith('turn_')).length,
-      0,
-    );
+    const terminals = terminalsOf(records);
+    assert.equal(terminals.length, settled ? 1 : 0);
+    if (settled) {
+      assert.equal(terminals[0].type, 'turn_complete');
+      assert.equal(terminals[0].promptId, current.promptId);
+    }
     assert.equal(
       records.filter((event) => event.data.record?.type === 'tool_result')
         .length,
-      ['result-checkpoint', 'turn-reply'].includes(current.fault) ? 1 : 0,
+      settles ? 1 : 0,
     );
-    const started =
-      current.fault.startsWith('result-') || current.fault === 'turn-reply';
+    const started = current.fault.startsWith('result-') || settled;
     for (const [operation, count] of [
       ['acquire', 1],
       ['prepare', current.fault === 'arguments' ? 0 : 1],
@@ -372,10 +404,12 @@ try {
       await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
       'decoy',
     );
-    assert.equal(
-      (await json(`${route}/prompt`, input('must remain blocked'), 409)).error,
-      'hosted_turn_recovery_required',
-    );
+    if (!settled)
+      assert.equal(
+        (await json(`${route}/prompt`, input('must remain blocked'), 409))
+          .error,
+        'hosted_turn_recovery_required',
+      );
   }
   await cli.close();
   const leaseDeadline = Date.now() + 5_100;
