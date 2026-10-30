@@ -59,6 +59,11 @@ impl DesktopRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("NODE_USE_SYSTEM_CA", "1")
+            .env("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1")
+            .env("OPENAI_API_KEY", "ollama")
+            .env("OPENAI_MODEL", "dolphin3:8b")
+            .env("QWEN_MODEL", "dolphin3:8b")
             .env("QWEN_CODE_DESKTOP", "1")
             .env("QWEN_SERVER_TOKEN", &token);
         // macOS GUI apps inherit launchd's minimal PATH, which hides user
