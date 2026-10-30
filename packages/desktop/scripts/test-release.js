@@ -122,7 +122,7 @@ async function testBootstrapWorkspaceVisibility() {
   );
   assert.match(
     startBody,
-    /let mut child = spawn_runtime_group\(&mut command\)/,
+    /\n\s*let mut child = spawn_runtime_group\(&mut command\)/,
     'DesktopRuntime::start must spawn the runtime through the hidden-console helper.',
   );
   // kill_on_drop maps to KILL_ON_JOB_CLOSE; without it a force-killed desktop
