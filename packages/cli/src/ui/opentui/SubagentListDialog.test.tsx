@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   keyboard: [] as Array<(key: unknown) => void>,
   paste: [] as Array<(key: unknown) => void>,
   scrollBy: vi.fn(),
+  width: 100,
 }));
 vi.mock(
   '@opentui/core',
@@ -25,7 +26,7 @@ vi.mock('@opentui/react', async () =>
   (await import('../../test-utils/opentui-catalog.js')).catalogHooks(
     mocks.keyboard,
     mocks.paste,
-    () => ({ width: 100, height: 40 }),
+    () => ({ width: mocks.width, height: 40 }),
   ),
 );
 vi.mock('@opentui/react/jsx-runtime', async () =>
@@ -47,6 +48,7 @@ import { catalogDeferred } from '../../test-utils/opentui-catalog.js';
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.width = 100;
 });
 
 const agent: SubagentConfig = {
@@ -70,19 +72,52 @@ function press(name: string, count = 1) {
         });
   });
 }
-function fixture(result: Promise<SubagentConfig[]> = Promise.resolve([agent])) {
+function fixture(
+  result: Promise<SubagentConfig[]> = Promise.resolve([agent]),
+  availableTerminalHeight?: number,
+) {
   const listSubagents = vi.fn().mockReturnValue(result);
   const onClose = vi.fn();
   const config = {
     getSubagentManager: () => ({ listSubagents }),
   } as unknown as Config;
   const view = render(
-    <OpenTuiSubagentListDialog config={config} onClose={onClose} />,
+    <OpenTuiSubagentListDialog
+      config={config}
+      onClose={onClose}
+      availableTerminalHeight={availableTerminalHeight}
+    />,
   );
   return { ...view, listSubagents, onClose };
 }
 
 describe('native read-only agent manager', () => {
+  it.each([
+    ['list', 0, '§'],
+    ['actions', 1, '§'],
+    ['detail', 2, agent.name],
+  ] as const)(
+    'keeps the narrow %s page compact when its footer wraps',
+    async (_page, steps, name) => {
+      mocks.width = 11;
+      fixture(Promise.resolve([{ ...agent, name }]), 12);
+      await screen.findByText(name === '§' ? name : '…');
+      for (let step = 0; step < steps; step++) press('return');
+      if (steps === 0) expect(screen.getByText('§')).toBeTruthy();
+      else if (steps === 1) expect(screen.getAllByText('…')).toHaveLength(2);
+      else expect(screen.getByText(agent.systemPrompt)).toBeTruthy();
+      expect(screen.queryByText('Agents')).toBeNull();
+      expect(screen.queryByText('Choose Action')).toBeNull();
+      expect(
+        screen.queryByText('Enter to select, ↑↓ to navigate, Esc to close'),
+      ).toBeNull();
+      expect(
+        screen.queryByText('Enter to select, ↑↓ to navigate, Esc to go back'),
+      ).toBeNull();
+      expect(screen.queryByText('Esc to go back')).toBeNull();
+    },
+  );
+
   it('refreshes the public list and renders real choice labels and full details', async () => {
     const f = fixture();
     await screen.findByText(agent.name);

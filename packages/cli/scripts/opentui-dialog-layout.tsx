@@ -142,9 +142,32 @@ async function scrollAndResizeDialogs() {
       const setup = await render(<Responsive />, { width, height: 15 });
       try {
         setup.renderer.start();
-        await setup.waitFor(() => body(setup).scrollHeight >= 40, {
-          maxPasses: 100,
-        });
+        const windowed = Dialog === OpenTuiSubagentListDialog;
+        try {
+          await setup.waitFor(
+            () =>
+              windowed
+                ? setup.captureCharFrame().includes('row-0')
+                : body(setup).scrollHeight >= 40,
+            { maxPasses: 100 },
+          );
+        } catch (error) {
+          throw new Error(
+            `${Dialog.name} ${width} columns, 15 rows: scrollHeight=${body(setup).scrollHeight}\n${setup.captureCharFrame()}`,
+            { cause: error },
+          );
+        }
+        if (windowed) {
+          for (let index = 0; index < fixtureRows.length - 1; index++) {
+            await act(async () => setup.mockInput.pressKey('ARROW_DOWN'));
+            await act(async () => setup.waitForVisualIdle());
+          }
+          assert.match(
+            setup.captureCharFrame(),
+            /›\s+§/,
+            `${Dialog.name} ${width} columns: last agent is not visibly selected`,
+          );
+        }
         setup.renderer.pause();
         for (const height of [7, 20, 4, 12]) {
           const before = body(setup);
@@ -166,12 +189,20 @@ async function scrollAndResizeDialogs() {
               height,
             `${Dialog.name}: resize frame overflow`,
           );
-          after.scrollTo(after.scrollHeight);
-          await setup.renderOnce();
-          assert(
-            setup.captureCharFrame().includes(endMarker),
-            `${Dialog.name}: last content is unreachable after resize to ${height}`,
-          );
+          if (windowed) {
+            assert.match(
+              setup.captureCharFrame(),
+              /›\s+§/,
+              `${Dialog.name}: last agent is not visibly selected after resize to ${height}`,
+            );
+          } else {
+            after.scrollTo(after.scrollHeight);
+            await setup.renderOnce();
+            assert(
+              setup.captureCharFrame().includes(endMarker),
+              `${Dialog.name}: last content is unreachable after resize to ${height}`,
+            );
+          }
         }
       } finally {
         await destroy(setup);
@@ -249,6 +280,23 @@ async function main() {
     writeFileSync(
       'diff-fixture.txt',
       fixtureRows.map((row) => row.name).join('\n') + '\n',
+    );
+    const fixtureDiff = execFileSync(
+      'git',
+      ['diff', '--no-ext-diff', '--no-textconv', '--color=never'],
+      { encoding: 'utf8' },
+    );
+    assert(
+      fixtureDiff.includes(`+${endMarker}`),
+      'missing diff fixture last row',
+    );
+    assert.equal(
+      fixtureDiff
+        .split('\n')
+        .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+        .length,
+      fixtureRows.length,
+      'diff fixture must contain all added rows',
     );
     await boundedDialogs();
     await scrollAndResizeDialogs();

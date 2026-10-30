@@ -105,11 +105,6 @@ export function OpenTuiSubagentListDialog({
         ? t('Choose Action')
         : sanitizeTerminalLine(selected?.name ?? '');
   const { width } = useTerminalDimensions();
-  const layout = scrollDialogLayout(
-    clampDialogHeight(availableTerminalHeight),
-    6 + wrappedRows(title, dialogContentWidth(width)),
-    12,
-  );
   const items = useMemo(() => {
     if (page.value === 'list')
       return data.agents.map((agent, index) => ({
@@ -124,6 +119,20 @@ export function OpenTuiSubagentListDialog({
       ];
     return [];
   }, [page.value, data.agents]);
+  const footer =
+    page.value === 'detail'
+      ? t('Esc to go back')
+      : items.length > 0 && ready
+        ? page.value === 'list'
+          ? t('Enter to select, ↑↓ to navigate, Esc to close')
+          : t('Enter to select, ↑↓ to navigate, Esc to go back')
+        : t('Esc to close');
+  const contentWidth = dialogContentWidth(width);
+  const layout = scrollDialogLayout(
+    clampDialogHeight(availableTerminalHeight),
+    5 + wrappedRows(title, contentWidth) + wrappedRows(footer, contentWidth),
+    12,
+  );
   const select = useDialogSelect({
     items,
     initialIndex: page.value === 'list' ? selectedIndex : 0,
@@ -251,17 +260,7 @@ export function OpenTuiSubagentListDialog({
           />
         )}
       </scrollbox>
-      {!layout.compact && (
-        <text fg={C.dim}>
-          {page.value === 'detail'
-            ? t('Esc to go back')
-            : items.length > 0 && ready
-              ? page.value === 'list'
-                ? t('Enter to select, ↑↓ to navigate, Esc to close')
-                : t('Enter to select, ↑↓ to navigate, Esc to go back')
-              : t('Esc to close')}
-        </text>
-      )}
+      {!layout.compact && <text fg={C.dim}>{footer}</text>}
     </DialogFrame>
   );
 }
