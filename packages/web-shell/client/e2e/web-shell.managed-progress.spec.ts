@@ -2,6 +2,7 @@ import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import type {
   JavaAgentEvent,
   JavaAgentSession,
+  JavaAgentTranscript,
 } from '../components/managed/java-managed-agent-client';
 import type { components } from '../components/managed/generated/managed-agent-api';
 import {
@@ -95,9 +96,10 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       return respond({
         items: [],
         events,
+        coveredSequence: summary.lastSequence,
         lastSequence: summary.lastSequence,
         hasMore: false,
-      });
+      } satisfies JavaAgentTranscript);
     if (path === '/tool-details/get') {
       detailRequests.push({ sessionId: body.sessionId, itemId: body.itemId });
       const details = toolDetails.get(body.itemId);
@@ -651,7 +653,7 @@ test('a permanently failing pending create exposes a discard path @smoke', async
     },
   );
 
-  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
   const composer = page
     .getByRole('region', { name: 'Managed conversation' })
     .locator('[data-web-shell-composer-editor] .cm-content');

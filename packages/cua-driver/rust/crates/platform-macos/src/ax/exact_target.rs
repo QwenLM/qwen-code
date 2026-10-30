@@ -24,13 +24,14 @@ use super::bindings::{
 use super::tree::AXIdentity;
 use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
 
-/// Bounded `AXParent` ascent used when an element does not expose `AXWindow`.
+/// Bounded `AXParent` ascent to the nearest window or sheet.
 const MAX_ANCESTRY_DEPTH: usize = 40;
 
 /// Resolve the CGWindowID of the top-level AX window that owns `element`.
 ///
-/// Prefers its native window mapping, then `AXWindow` and a bounded
-/// `AXParent` walk. `None` means ancestry could not be proven — callers must
+/// Prefers the nearest `AXWindow`/`AXSheet` ancestor. Hosted save-panel controls
+/// can map to an internal native window instead of their enclosing sheet.
+/// `None` means ancestry could not be proven — callers must
 /// treat that as "not the requested window", never as a wildcard.
 ///
 /// # Safety
@@ -38,29 +39,17 @@ const MAX_ANCESTRY_DEPTH: usize = 40;
 /// `element` must be a valid `AXUIElementRef` for the duration of the call.
 pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
     let _ = AXUIElementSetMessagingTimeout(element, 0.1);
-    // AppKit sheet fields can expose their parent in AXWindow, while their
-    // native mapping identifies the actual sheet receiving keyboard input.
-    let mut window_id = 0;
-    if _AXUIElementGetWindow(element, &mut window_id) == kAXErrorSuccess && window_id != 0 {
-        return Some(window_id);
-    }
-    if let Some(window) = copy_element_attr(element, "AXWindow") {
-        let window_id = ax_get_window_id(window);
-        CFRelease(window as CFTypeRef);
-        if window_id.is_some() {
-            return window_id;
-        }
-    }
-    // Fallback: ascend AXParent until a window role, then map it.
     let mut current: AXUIElementRef = element;
     let mut owned = false;
-    let mut resolved = None;
     for _ in 0..MAX_ANCESTRY_DEPTH {
         let _ = AXUIElementSetMessagingTimeout(current, 0.1);
         match copy_string_attr(current, "AXRole").as_deref() {
             Some("AXWindow") | Some("AXSheet") => {
-                resolved = ax_get_window_id(current);
-                break;
+                let resolved = ax_get_window_id(current);
+                if owned {
+                    CFRelease(current as CFTypeRef);
+                }
+                return resolved;
             }
             Some("AXApplication") | None => break,
             _ => {}
@@ -68,19 +57,27 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
         let parent = copy_element_attr(current, "AXParent");
         if owned {
             CFRelease(current as CFTypeRef);
+            owned = false;
         }
         match parent {
             Some(parent) => {
                 current = parent;
                 owned = true;
             }
-            None => return None,
+            None => break,
         }
     }
     if owned {
         CFRelease(current as CFTypeRef);
     }
-    resolved
+    let mut window_id = 0;
+    if _AXUIElementGetWindow(element, &mut window_id) == kAXErrorSuccess && window_id != 0 {
+        return Some(window_id);
+    }
+    let window = copy_element_attr(element, "AXWindow")?;
+    let window_id = ax_get_window_id(window);
+    CFRelease(window as CFTypeRef);
+    window_id
 }
 
 unsafe fn is_app_menu(

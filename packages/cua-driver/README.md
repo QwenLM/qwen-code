@@ -11,21 +11,21 @@ documented in [`.vendored-patches.md`](.vendored-patches.md) and
 
 ## Install
 
-The commands below target release **0.26.1** and require its GitHub Release
-(`cua-driver-rs-v0.26.1`) to be published. The native driver does not require
+The commands below target release **0.27.0** and require its GitHub Release
+(`cua-driver-rs-v0.27.0`) to be published. The native driver does not require
 Node.js or npm. Install the MCP client you want to use separately.
 
 macOS and Linux:
 
 ```bash
-CUA_DRIVER_RS_VERSION=0.26.1 \
+CUA_DRIVER_RS_VERSION=0.27.0 \
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:CUA_DRIVER_RS_VERSION = "0.26.1"
+$env:CUA_DRIVER_RS_VERSION = "0.27.0"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
@@ -44,7 +44,7 @@ $driver = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin\qwen-cu
 & $driver --version
 ```
 
-Expected: qwen-cua-driver 0.26.1.
+Expected: qwen-cua-driver 0.27.0.
 
 If you chose a custom install directory, use its absolute executable path in
 the client commands below.
@@ -75,7 +75,7 @@ Choose an interface for your agent:
 
 Both interfaces work with Qwen Code, Claude Code, and Codex over stdio MCP.
 Claude Code and Codex can use them independently of Qwen Code. The version
-`0.26.1` here belongs to the CUA components; it does not require a Qwen Code
+`0.27.0` here belongs to the CUA components; it does not require a Qwen Code
 CLI or Web Shell release with that version.
 
 ### Qwen Code
@@ -159,6 +159,22 @@ applied to its `mcp_servers.cua-driver` table.
 Clients start `qwen-cua-driver mcp` themselves; a separately started MCP
 process is unnecessary. Shell-oriented automation can instead call tools
 through `qwen-cua-driver call`.
+
+The native agent cursor is enabled by default. On macOS, a local PiP also
+updates the two most recently observed, authorized windows in each session,
+including while the agent is idle. Drag a card or its Move preview handle to move the borderless window.
+Hover to reveal its floating controls, or close it to stop that preview; a later authorized observation can recreate it. It does not forward input to the target app. Use
+`--no-overlay` and `--no-pip` when starting the owning host to disable them;
+`experimental_pip: false` in `~/.cua-driver/config.json` also disables PiP.
+Restart the owning host after changing flags or editing the file, preserving its other keys.
+For the installed app's default MCP proxy, restart the app-owned daemon.
+Restarting only the MCP client or proxy does not reconfigure an existing daemon.
+CLI flags take precedence: remove an explicit `--pip` or `--experimental-pip`
+if the file should control the setting. Disable PiP and restart its owning
+host before sharing or recording the desktop if its mirrored windows should
+not be visible. Closing the panel alone is temporary; screen sharing is not
+detected automatically.
+Windows and X11 retain cursor support; PiP is macOS-only.
 
 ## 0.20 runtime and SDK surface
 

@@ -562,6 +562,7 @@ public final class JdbcCsiActivationAdmission {
                         long rowRevision = rows.getLong("journal_revision");
                         var parsed = CsiNativeActivationProof.records(bytes);
                         if (revision == 0) {
+                            require(rows.getObject("activation_lease_until") == null && rows.getObject("activation_renewal_seq") == null);
                             genesisMetadata(metadata, original.request(), CsiNativeActivationProof.sha256(bytes));
                             CsiNativeActivationProof.uuid(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id"));
                             firstWriterId = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id");
@@ -584,7 +585,11 @@ public final class JdbcCsiActivationAdmission {
                                 activation = CsiNativeActivationProof.activation(transaction, metadata, original.request(),
                                         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id"), genesis.definitionDigest(), activation,
                                         checkpointReader(connection, original, rowRevision, read));
+                                activation = CsiNativeActivationProof.renewed(activation,
+                                        rows.getObject("activation_lease_until", Long.class),
+                                        rows.getObject("activation_renewal_seq", Long.class));
                             } else {
+                                require(rows.getObject("activation_lease_until") == null && rows.getObject("activation_renewal_seq") == null);
                                 prefix = CsiNativeActivationProof.advance(transaction, metadata,
                                         original.request(), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "writer_id"), genesis, activation, rowRevision - 1, sequence, prefix,
                                         checkpointReader(connection, original, rowRevision, read));

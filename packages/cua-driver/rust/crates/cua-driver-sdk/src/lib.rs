@@ -48,6 +48,18 @@ use runtime::RuntimeOptions;
 use service_session::ServiceSessionClient;
 use worker::{ActionCompletion, PrivateWorkerClient};
 
+/// Host event-loop liveness only; this does not expose desktop state.
+#[uniffi::export]
+pub fn native_ui_needs_pump() -> bool {
+    runtime::native_ui_needs_pump()
+}
+
+/// Constructor-scoped declaration by a host that services the native UI loop.
+#[uniffi::export]
+pub fn set_native_ui_host_available(available: bool) -> bool {
+    runtime::set_native_ui_host_available(available)
+}
+
 fn host_sessions_json_for_prefix(runtime_prefix: &str) -> Value {
     let sessions = cua_driver_core::session::list_session_snapshots_with_prefix(
         runtime_prefix,

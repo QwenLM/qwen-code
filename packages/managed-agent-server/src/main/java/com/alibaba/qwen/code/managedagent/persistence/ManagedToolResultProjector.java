@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -43,7 +44,7 @@ public class ManagedToolResultProjector {
     private final ManagedArtifactPolicy policy;
     private final ManagedAgentProperties properties;
 
-    public ManagedToolResultProjector(ManagedToolResultStore store, JdbcTemplate jdbc,
+    public ManagedToolResultProjector(ManagedToolResultStore store, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             ObjectProvider<ToolPublicationDataStore> publications, ManagedArtifactReader reader,
             ManagedArtifactPolicy policy, ManagedAgentProperties properties) {
         this.store = store;

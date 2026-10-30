@@ -1,12 +1,12 @@
-# CUA input and session corrections for 0.26.1
+# CUA input and session corrections for 0.27.0
 
 [English](cua-input-contract-fixes.md) | [简体中文](cua-input-contract-fixes.zh-CN.md)
 
 ## Status and scope
 
-Prepare native driver, CUA SDK, Browser SDK and Node REPL 0.26.1 together under the existing release contract. This is a patch release for input delivery, window selection and lifecycle reporting. Browser behavior and the Qwen Code CLI version are unchanged. Cursor/PiP feature work is separate.
+Prepare native driver, CUA SDK, Browser SDK and Node REPL 0.27.0 together under the existing release contract. These input-delivery, window-selection and lifecycle corrections join main's existing cursor/PiP features in the same release. This change preserves those features and does not change browser behavior or the Qwen Code CLI version.
 
-Earlier real-host checks used private, immutable payloads with 0.26.0 compatibility metadata. Their evidence applies to the corresponding functional changes; it does not establish production signatures, installation of future 0.26.1 assets, or complete benchmark acceptance. No benchmark or monitoring operation is part of this release preparation.
+Earlier real-host checks used private, immutable payloads with 0.26.0 compatibility metadata. Their evidence applies to the corresponding functional changes; it does not establish production signatures, installation of future 0.27.0 assets, or complete benchmark acceptance. No benchmark or monitoring operation is part of this release preparation.
 
 ## Windows dispatch and cleanup
 
@@ -54,7 +54,7 @@ Node REPL's initial description directs models to `cua.getState()` or runtime do
 
 - **Windows modal/cleanup:** A public Qt fixture reproduced a 30.341-second click wait. Corrected direct MCP click, SDK click and secondary invoke returned in 150/153/149 ms with independent AX/PNG modal observations. SDK dispose waited through pending cleanup and succeeded after 25.681 seconds. These are scoped host checks; optional UIAccess-worker behavior is separate.
 - **Windows window selection:** A real idle owned helper changed a normal 624×391/14,212-byte PNG into a 2×2/86-byte PNG before the fix. Corrected direct MCP and actual Medium Node REPL/SDK returned the original main-window PNG. The kernel's loaded candidate DLL/NAPI hashes were checked. Background active-popup capture and single-minimized target selection also passed. A minimized screenshot and the foreground selection branch were not accepted by that run. Historical FX's 73-byte image and frozen executable identity are missing, so the original case is not accepted.
-- **macOS editing:** Six one-shot character/deletion, semantic text, Command-selection and Escape checks passed on an owned TextEdit sheet, with independent exact value/range, own-window pixels and process cleanup. This does not establish macOS 14/x64/Electron, standalone CLI, JSONExport or full benchmark parity.
+- **macOS editing:** Six earlier one-shot character/deletion, semantic text, Command-selection and Escape checks passed on an owned TextEdit sheet, with independent exact value/range, own-window pixels and process cleanup. Review of the previous PR head on macOS 26.6.2 found Save-sheet keyboard recipient routing unreachable. The merged main changes window-identity ancestry resolution, but this combined Save-sheet path has not been retested; its acceptance remains open. This does not establish macOS 14/x64/Electron, standalone CLI, JSONExport or full benchmark parity.
 - **Public refusal contract:** Two new Rust tests fail before the fix and pass after it; the actual public facade/schema test changes from 2 pass/1 fail to 3 pass/0 fail. The core library passes 652 tests serially. Contract checks do not prove native GUI input effects.
 
 Native tests also cover lifecycle retention, final cleanup failure, clipboard callback cancellation, process identity and the window-selection policy. Build, typecheck, version and package checks accompany PR preparation. A parallel core run stalled in existing registry tests; its result is not counted as passing.

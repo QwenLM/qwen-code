@@ -14,7 +14,7 @@ public class UserMessageDispatcher {
 
     public UserMessageDispatcher(ManagedUserMessageStore messages) { this.messages = messages; }
 
-    @Scheduled(fixedDelay = 1000)
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelay = 1000)
     public void dispatch() {
         messages.retireClosed();
         for (var session : messages.readySessions()) {

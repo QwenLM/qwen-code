@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -34,7 +35,7 @@ public class ManagedToolResultStore {
     private final TransactionTemplate transactions;
     private final AgentStateStore sessions;
 
-    public ManagedToolResultStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public ManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             AgentStateStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);

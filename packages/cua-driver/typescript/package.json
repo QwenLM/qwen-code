@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/cua-sdk",
-  "version": "0.26.1",
+  "version": "0.27.0",
   "description": "Typed CUA Driver SDK and Computer Use API for Node.js",
   "type": "module",
   "license": "MIT",
@@ -82,6 +82,6 @@
   "dependencies": {
     "@ubjs/core": "0.31.0-3",
     "tar": "7.5.22",
-    "@qwen-code/browser-use": "0.26.1"
+    "@qwen-code/browser-use": "0.27.0"
   }
 }
