@@ -12,10 +12,11 @@
 // push that touches a migration, and on a schedule. It reads each open PR's
 // changed paths from the API — no PR code is fetched — and sets a commit
 // status on every PR head that adds a migration: failure when a version it
-// adds is taken in the merge result, success otherwise, naming the other open
+// adds is taken in the merge result or is not above main's newest version,
+// success otherwise, naming the other open
 // PRs that claim the same version, so the second of them turns red as soon as
 // the first one lands. A PR whose file list could not be read in full gets
-// error unless the files read already collide. A head that already carries
+// error unless the files read already prove a failure. A head that already carries
 // the status is re-evaluated even when it no longer adds a migration, so a
 // stale failure is cleared; a head whose status already says the same is
 // left alone, so a schedule does not pile statuses onto it.
@@ -27,7 +28,8 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   LOCATIONS,
-  isMigrationFile,
+  compareMigrationVersions,
+  isMigrationPath,
   migrationFiles,
   migrationVersion,
 } from './flyway-migration-utils.js';
@@ -86,16 +88,6 @@ const nameOf = (file) =>
   path.posix.basename(file).replace(/[^A-Za-z0-9._-]/g, '?');
 const neutralize = (text) =>
   text.replace(/\s+/g, ' ').replace(/::/g, ';;').replace(/##\[/g, '##［');
-
-// Flyway scans each location's subdirectories too.
-const isTracked = (modules, file) =>
-  modules.some((module) =>
-    LOCATIONS.some(
-      (location) =>
-        file.startsWith(`${[module, ...location.dir].join('/')}/`) &&
-        isMigrationFile(path.posix.basename(file), location.suffix),
-    ),
-  );
 
 // Repository-relative paths, the same shape as the API's PR file paths.
 export function mainMigrations(root, modules) {
@@ -174,6 +166,10 @@ async function openPullRequests(repo, gh) {
 // whose head already carries this status — which may need clearing.
 function evaluate(modules, mainFiles, prs) {
   const onMain = new Set(mainFiles);
+  const newestVersion = mainFiles
+    .map(versionOf)
+    .sort(compareMigrationVersions)
+    .at(-1);
   const currentModule = 'packages/managed-agent-server';
   const relocated = modules.includes(currentModule);
   const claims = prs.map((pr) => {
@@ -189,7 +185,7 @@ function evaluate(modules, mainFiles, prs) {
             )
           : file.path,
       }))
-      .filter((file) => isTracked(modules, file.path));
+      .filter((file) => isMigrationPath(modules, file.path));
     const deleted = new Set(
       touched
         .filter((file) => file.changeType === 'DELETED')
@@ -231,6 +227,10 @@ function evaluate(modules, mainFiles, prs) {
         sha: pr.sha,
         incomplete: pr.incomplete,
         current: pr.current,
+        outOfOrder: versions.filter(
+          (version) => compareMigrationVersions(version, newestVersion) <= 0,
+        ),
+        newestVersion,
         collisions: versions
           .map((version) => ({
             version,
@@ -272,6 +272,11 @@ function statusFor(verdict) {
           `V${version} = ${files.map(nameOf).join(' + ')}`,
       )
       .join('; ')}`;
+  } else if (verdict.outOfOrder.length > 0) {
+    state = 'failure';
+    text = `Out of order when merged into main: ${verdict.outOfOrder
+      .map((version) => `V${version} is not above V${verdict.newestVersion}`)
+      .join('; ')} (newest on main)`;
   } else if (verdict.incomplete) {
     state = 'error';
     text = 'Could not list every changed file, so not checked against main';

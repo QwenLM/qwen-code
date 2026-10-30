@@ -1300,9 +1300,39 @@ workspace roles and dropped `can_read` / `can_create`; the PR's new SQL
 still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database
 migration, also run `scripts/check-flyway-migrations.js` on the trial-merge
-tree, with the module list `sdk-java.yml` passes it: the PR's own green
-check is only as fresh as the `main` it ran against. One such check
-finished at 13:20 UTC; another PR merged its own `V36` at 13:57.
+tree, using the branch the PR targets as the baseline, including `release/**`.
+Prepare the baseline outside the credential-free sandbox, alongside metadata
+from the explicit repository. Fetch its actual target branch directly; a PR's
+recorded `baseRefOid` can lag behind the current branch tip:
+
+```bash
+BASE_REF=$(gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName) ||
+  { echo "inconclusive: cannot read PR base branch"; exit 1; }
+git fetch "https://github.com/${REPO}.git" "refs/heads/${BASE_REF}" ||
+  { echo "inconclusive: baseline fetch failed"; exit 1; }
+BASE_SHA=$(git rev-parse --verify 'FETCH_HEAD^{commit}') ||
+  { echo "inconclusive: cannot read baseline SHA"; exit 1; }
+```
+
+Keep the fetch full and unfiltered: shallow history and partial-clone
+configuration affect all linked worktrees. Use the fetched `BASE_SHA` to build
+the trial merge. Then run from the root of that trial-merge tree:
+
+```bash
+export GIT_NO_LAZY_FETCH=1
+[ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null ||
+  { echo "inconclusive: resolved PR base commit is unavailable"; exit 1; }
+```
+
+Then run
+`FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js <modules>`,
+using the module list `ci.yml` passes it.
+Those module paths are repo-root-relative. Keep lazy fetching disabled for the
+check too, so a partial clone cannot silently fetch through the wrong remote.
+Omitting `FLYWAY_BASE_REF`
+checks uniqueness only; the script reports that ordering was not checked.
+The PR's own green check is only as fresh as the `main` it ran against.
+One such check finished at 13:20 UTC; another PR merged its own `V36` at 13:57.
 Trial-merge in-flight PRs that touch the same files, migration directory
 or contract version too.
 

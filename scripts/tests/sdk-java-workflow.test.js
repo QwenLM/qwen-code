@@ -1423,6 +1423,41 @@ describe('SDK Java Flyway migration version guard', () => {
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
   });
+
+  it('fetches the pull request or merge queue baseline before enforcing migration ordering', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    const steps = ci.jobs.lint_and_static.steps;
+    const fetchIndex = steps.findIndex(
+      (step) => step.name === 'Fetch base branch for version checks',
+    );
+    const checkIndex = steps.findIndex(
+      (step) => step.name === 'Check Flyway migration versions are unique',
+    );
+    expect(fetchIndex).toBeGreaterThan(
+      steps.findIndex((step) => step.name === 'Checkout'),
+    );
+    expect(fetchIndex).toBeLessThan(checkIndex);
+    expect(steps[fetchIndex].if).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
+    );
+    expect(steps[fetchIndex].env.BASE_REF).toBe(
+      '${{ github.event.pull_request.base.ref }}',
+    );
+    expect(steps[fetchIndex].env.QUEUE_BASE_SHA).toBe(
+      '${{ github.event.merge_group.base_sha }}',
+    );
+    expect(steps[fetchIndex].id).toBe('version_base');
+    expect(steps[fetchIndex].run).toContain(
+      'git fetch --quiet --depth=1 --filter=blob:none origin "${QUEUE_BASE_SHA:-refs/heads/${BASE_REF}}"',
+    );
+    expect(steps[fetchIndex].run).toContain('git rev-parse FETCH_HEAD');
+    expect(steps[fetchIndex].run).toContain(
+      'echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(steps[checkIndex].env.FLYWAY_BASE_REF).toBe(
+      '${{ steps.version_base.outputs.sha }}',
+    );
+  });
 });
 
 // #13804: the OpenAPI document's info.version must strictly advance past
@@ -1453,7 +1488,7 @@ describe('SDK Java contract version guard', () => {
       parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
     );
     expect(step.env).toEqual({
-      BASE_REF: '${{ github.event.pull_request.base.ref }}',
+      BASE_SHA: '${{ steps.version_base.outputs.sha }}',
       GH_TOKEN: '${{ github.token }}',
       REPO: '${{ github.repository }}',
       PR_NUMBER: '${{ github.event.pull_request.number }}',
@@ -1461,9 +1496,10 @@ describe('SDK Java contract version guard', () => {
     // The default checkout is one commit deep, so the comparison copy comes
     // from a depth-one fetch of the base branch's head — not of a stale
     // merge base.
-    expect(step.run).toContain(
-      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
+    expect(index).toBeGreaterThan(
+      names.indexOf('Fetch base branch for version checks'),
     );
+    expect(step.run).toContain('git show "${BASE_SHA}:${DOCUMENT}"');
     expect(step.run).toContain(CONTRACT_DOCUMENT);
     expect(parsed.permissions['pull-requests']).toBe('read');
     expect(step.run).toContain('--paginate');
@@ -1504,7 +1540,7 @@ describe('SDK Java contract version guard', () => {
           [
             'git',
             'if [ "$1" = fetch ]; then exit 0; fi\n' +
-              'if [ "$1" = show ] && [ "$2" = "FETCH_HEAD:$PREDECESSOR" ]; then cat "$BASE_FIXTURE"; else exit 1; fi',
+              'if [ "$1" = show ] && [ "$2" = "$BASE_SHA:$PREDECESSOR" ]; then cat "$BASE_FIXTURE"; else exit 1; fi',
           ],
         ]) {
           writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
@@ -1528,7 +1564,7 @@ describe('SDK Java contract version guard', () => {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
               RUNNER_TEMP: root,
-              BASE_REF: 'main',
+              BASE_SHA: 'fbde5cf0'.padEnd(40, '0'),
               REPO: 'QwenLM/qwen-code',
               PR_NUMBER: '1',
               BASE_FIXTURE: base,
