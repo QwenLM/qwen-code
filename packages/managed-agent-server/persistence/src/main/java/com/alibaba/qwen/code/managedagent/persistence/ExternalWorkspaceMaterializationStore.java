@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
+import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -46,7 +48,7 @@ public final class ExternalWorkspaceMaterializationStore {
                 throw new IllegalArgumentException();
             }
             // This key encodes the operator's grantee, not an authenticated request actor.
-            owner = ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
+            owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
         } catch (IllegalArgumentException error) {
             throw new RuntimeBrokerException(400, "invalid_external_workspace_materialization",
                     "Invalid external Workspace materialization.", false);
@@ -115,7 +117,8 @@ public final class ExternalWorkspaceMaterializationStore {
         try {
             return json.writeValueAsString(value);
         } catch (JsonProcessingException error) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore
+                    .unavailable();
         }
     }
 

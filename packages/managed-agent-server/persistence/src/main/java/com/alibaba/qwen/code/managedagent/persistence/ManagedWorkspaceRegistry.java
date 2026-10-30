@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -54,7 +55,7 @@ public class ManagedWorkspaceRegistry
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
+        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
     }
 
     public boolean externalFilesAllowed(ContextBinding binding) {
@@ -424,7 +425,7 @@ public class ManagedWorkspaceRegistry
                 selection == null ? "." : selection.cwdRelative(),
                 descriptorRef(record.getConfigRef(), record.getPolicyRef()), 1);
         if (isExternal(binding) && (!externalFilesAllowed(binding) || !".".equals(binding.getCwdRelative()))) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_unavailable", "External Workspace files are unavailable.");
+            throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace files are unavailable.");
         }
         return new ResolvedBinding(binding, record.getConfigRef(),
                 record.getPolicyRef());

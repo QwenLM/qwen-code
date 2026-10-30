@@ -83,12 +83,12 @@ final class WorkspaceMigrationAdmission {
                             .decodeRegistration(row.getString("registration_json"));
                     if (!storage.equals(registered.tenantWorkspaceId()) || !registered.ownerKey().equals(row.getString("physical_key"))
                             || registered.registrationRevision() != row.getLong("registration_revision")) {
-                        throw WorkspaceExecutionStore.unavailable();
+                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                     }
                     return registered;
                 }, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (registrations.size() != 1) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         var registered = registrations.getFirst();
         var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE storage_key = ?" + (lock ? " FOR UPDATE" : ""),
@@ -104,7 +104,7 @@ final class WorkspaceMigrationAdmission {
                         && row.getObject("csi_registration_revision") == null && row.getObject("csi_provision_request_id") == null,
                 registered.ownerKey());
         if (owners.size() != 1 || !owners.getFirst()) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }
 
