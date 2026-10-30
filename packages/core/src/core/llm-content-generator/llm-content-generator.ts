@@ -179,11 +179,9 @@ export class LlmContentGenerator implements ContentGenerator {
     return {
       ...requestConfig,
       ...(httpOptions ? { httpOptions } : {}),
-      temperature: getParameterValue<number>(
-        configSamplingParams?.temperature,
-        'temperature',
-        1,
-      ),
+      ...(configSamplingParams?.temperature !== undefined
+        ? { temperature: configSamplingParams.temperature }
+        : {}),
       topP: getParameterValue<number>(
         configSamplingParams?.top_p,
         'topP',

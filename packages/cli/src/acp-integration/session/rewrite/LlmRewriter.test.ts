@@ -230,6 +230,10 @@ describe('LlmRewriter', () => {
 
       await rewriter.rewrite(makeTurn(['hello']));
       expect(mockGenerateContent.mock.calls[0][0].model).toBe('test-model');
+      // #12928: no hard-coded temperature reaches the rewrite wire.
+      expect(
+        mockGenerateContent.mock.calls[0][0].config,
+      ).not.toHaveProperty('temperature');
     });
   });
 

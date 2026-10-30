@@ -314,12 +314,15 @@ describe('tryGenerateSessionTitle', () => {
         properties: { title: { type: string } };
       };
       maxAttempts: number;
+      config?: Record<string, unknown>;
     };
     expect(callOpts.model).toBe('qwen-turbo');
     expect(callOpts.schema.type).toBe('object');
     expect(callOpts.schema.required).toEqual(['title']);
     expect(callOpts.schema.properties.title.type).toBe('string');
     expect(callOpts.maxAttempts).toBe(1);
+    // #12928: no hard-coded temperature reaches the wire for title generation.
+    expect(callOpts.config).not.toHaveProperty('temperature');
   });
 
   // #9706: when the recent conversation carries little topical signal
