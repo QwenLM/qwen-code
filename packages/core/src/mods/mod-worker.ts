@@ -517,6 +517,7 @@ async function dispatch(
       assertLive(call);
       recovery = {
         ...call,
+        last: call.last ? (call.promptFallback ?? call.last) : undefined,
         id: ++serial,
         budget: new ModBudget(1000),
         live: true,

@@ -1220,6 +1220,42 @@ describe('ModRuntime with the real QuickJS worker', () => {
     },
   );
 
+  it.each([false, true])(
+    'retains a local drop after an earlier host next when rejecting a late drop (catch replays: %s)',
+    async (caught) => {
+      const runtime = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', async ($, e, next) => {
+            $.ui.log('first:' + JSON.stringify(await next({...e, text: 'first'})));
+            $.ui.log('second:' + JSON.stringify(await next({...e, text: 'second'})));
+            return {drop: 'too late'};
+          })${
+            caught
+              ? `.catch(($, e, next) => {
+                  $.ui.log('called:' + next.called);
+                  return next(e);
+                })`
+              : ''
+          };
+          on('prompt.*', ($, e, next) =>
+            e.text === 'second' ? {drop: 'second guard'} : next(e));
+        }`,
+      ]);
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'second guard',
+        byHook: true,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        'first:{"text":"first","origin":{"kind":"composer"}}',
+        'second:{"drop":"second guard"}',
+        caught
+          ? 'called:true'
+          : expect.stringContaining('a drop after its next(e) was answered'),
+      ]);
+    },
+  );
+
   it('keeps next.called false for a late drop within one plugin', async () => {
     const runtime = await createTurns([
       `export function register(on) {
