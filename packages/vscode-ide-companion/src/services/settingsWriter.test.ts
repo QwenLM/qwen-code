@@ -477,6 +477,28 @@ describe('settingsWriter', () => {
       ]);
     });
 
+    it('writes a custom baseUrl while preserving sibling model settings', async () => {
+      writeCliManagedModelSettings();
+
+      // Non-default endpoint: only the plan's baseUrl can produce this value.
+      const baseUrl = 'https://gateway.example/v1';
+      const plan = buildInstallPlan(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl,
+        modelIds: ['gpt-4o'],
+        apiKey: 'manual-key',
+      });
+
+      await applyProviderInstallPlanToFile(plan);
+
+      expect(readModelSettings()).toEqual({
+        name: 'gpt-4o',
+        baseUrl,
+        reasoningEffort: 'high',
+        maxSessionTurns: 40,
+      });
+    });
+
     it('strips a runtime snapshot prefix before persisting model.name', async () => {
       const plan: ProviderInstallPlan = {
         providerId: 'test',
