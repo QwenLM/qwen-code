@@ -781,6 +781,25 @@ describe('handleGroup', () => {
     expect(env['text']).toContain('auto reply');
   });
 
+  it('人类消息在 forwardBotMessages 开启时被转发且不打 [bot] 标签', async () => {
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> human reply',
+        author: {
+          member_openid: 'human-1',
+          username: 'Bob',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('human reply');
+    expect(env['text']).not.toContain('[bot] ');
+  });
+
   it('bot 消息默认不被转发（forwardBotMessages 默认关闭）', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
@@ -2446,6 +2465,32 @@ describe('群管理事件', () => {
 
       ch.disconnect();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// connect() default instructions
+// ---------------------------------------------------------------------------
+describe('connect() default instructions', () => {
+  it('surfaces the [bot] meaning when forwardBotMessages is on', async () => {
+    mockFetchAccessToken.mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    // The default prompt is assembled synchronously, before the first await.
+    const connectPromise = ch.connect().catch(() => undefined);
+    const config = (ch as unknown as Record<string, unknown>)['config'] as {
+      instructions?: string;
+    };
+    expect(config.instructions).toContain(
+      '消息前缀 [bot] 表示该消息来自另一个机器人',
+    );
+    // Drain the 3-attempt retry loop so its timers cannot leak.
+    await vi.advanceTimersByTimeAsync(4000);
+    await connectPromise;
+    mockFetchAccessToken.mockReset();
+    stderrSpy.mockRestore();
   });
 });
 
