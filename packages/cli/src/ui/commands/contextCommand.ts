@@ -466,10 +466,15 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(
+  const instructionFiles = parseMemoryFiles(
     memoryContent,
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
+  );
+  const memoryFiles: ContextMemoryDetail[] = [];
+  const instructionFilesTokens = instructionFiles.reduce(
+    (sum, f) => sum + f.tokens,
+    0,
   );
   const catalog = config.getAutoMemoryContext?.() ?? '';
   // Older snapshots remain in the request too; suppression hides all of them.
@@ -610,6 +615,7 @@ export async function collectContextData(
   const rawOverhead =
     systemPromptTokens +
     allToolsTokens +
+    instructionFilesTokens +
     memoryFilesTokens +
     skillListing.tokens +
     loadedBodiesTokens +
@@ -631,6 +637,7 @@ export async function collectContextData(
   let displaySystemPrompt: number;
   let displayBuiltinTools: number;
   let displayMcpTools: number;
+  let displayInstructionFiles: number;
   let displayMemoryFiles: number;
   let displaySkills: number;
   let displayStartupContext: number;
@@ -639,6 +646,7 @@ export async function collectContextData(
   let freeSpace: number;
   let detailBuiltinTools: ContextToolDetail[];
   let detailMcpTools: ContextToolDetail[];
+  let detailInstructionFiles: ContextMemoryDetail[];
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
 
@@ -681,6 +689,7 @@ export async function collectContextData(
     displayStartupContext = startupContextTokens;
     displayBuiltinTools = clampedBuiltinTools;
     displayMcpTools = clampedMcpTools;
+    displayInstructionFiles = instructionFilesTokens;
     displayMemoryFiles = memoryFilesTokens;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
@@ -690,6 +699,7 @@ export async function collectContextData(
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
     detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
+    detailInstructionFiles = instructionFiles;
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
@@ -720,6 +730,7 @@ export async function collectContextData(
     displaySystemPrompt = Math.floor(systemPromptTokens * scale);
     displayBuiltinTools = Math.floor(clampedBuiltinTools * scale);
     displayMcpTools = Math.floor(clampedMcpTools * scale);
+    displayInstructionFiles = Math.floor(instructionFilesTokens * scale);
     displayMemoryFiles = Math.floor(memoryFilesTokens * scale);
     displaySkills = Math.floor(clampedSkills * scale);
     displayStartupContext = Math.floor(startupContextTokens * scale);
@@ -728,6 +739,7 @@ export async function collectContextData(
       displaySystemPrompt +
       displayBuiltinTools +
       displayMcpTools +
+      displayInstructionFiles +
       displayMemoryFiles +
       displaySkills +
       displayStartupContext;
@@ -758,6 +770,7 @@ export async function collectContextData(
 
     detailBuiltinTools = scaleTokens(builtinTools, scale);
     detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
+    detailInstructionFiles = scaleTokens(instructionFiles, scale);
     detailMemoryFiles = scaleTokens(memoryFiles, scale);
     detailSkills =
       scale < 1
@@ -796,6 +809,7 @@ export async function collectContextData(
     systemPrompt: displaySystemPrompt,
     builtinTools: displayBuiltinTools,
     mcpTools: displayMcpTools,
+    instructionFiles: displayInstructionFiles,
     memoryFiles: displayMemoryFiles,
     skills: displaySkills,
     startupContext: displayStartupContext,
@@ -816,6 +830,7 @@ export async function collectContextData(
     breakdown,
     builtinTools: showDetails ? detailBuiltinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
+    instructionFiles: showDetails ? detailInstructionFiles : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
       ? detailSkills.filter(
@@ -832,6 +847,10 @@ export async function collectContextData(
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function fmtTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
@@ -875,12 +894,15 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     breakdown,
     builtinTools,
     mcpTools,
+    instructionFiles = [],
     memoryFiles,
     skills,
     isEstimated,
     showDetails,
   } = data;
   const hasTokenCount = totalTokens > 0;
+  const memoryLabel =
+    breakdown.instructionFiles === undefined ? 'Memory files' : 'Auto memory';
 
   const lines: string[] = [];
   lines.push('## Context Usage');
@@ -953,8 +975,17 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       fmtCategoryRow('MCP tools', breakdown.mcpTools, contextWindowSize),
     );
   }
+  if (breakdown.instructionFiles !== undefined) {
+    lines.push(
+      fmtCategoryRow(
+        'Instruction files',
+        breakdown.instructionFiles,
+        contextWindowSize,
+      ),
+    );
+  }
   lines.push(
-    fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
+    fmtCategoryRow(memoryLabel, breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
   if ((breakdown.startupContext ?? 0) > 0) {
@@ -1008,9 +1039,19 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
         );
       }
     }
+    if (instructionFiles.length > 0) {
+      lines.push('', '**Instruction files**');
+      for (const file of [...instructionFiles].sort(
+        (a, b) => b.tokens - a.tokens,
+      )) {
+        lines.push(
+          fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
     if (sortedMemory.length > 0) {
       lines.push('');
-      lines.push('**Memory files**');
+      lines.push('**' + memoryLabel + '**');
       for (const file of sortedMemory) {
         lines.push(
           fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
