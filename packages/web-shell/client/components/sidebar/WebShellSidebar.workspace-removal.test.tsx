@@ -2840,42 +2840,45 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.querySelector('input')).toBeNull();
   });
 
-  it('ignores F2 pressed with a modifier key held', async () => {
-    connection.sessionId = 'current-session';
-    active.sessions.push(
-      {
-        sessionId: 'current-session',
-        workspaceCwd: '/tmp/project',
-        displayName: 'Current session',
-      },
-      {
-        sessionId: 'other-session',
-        workspaceCwd: '/tmp/project',
-        displayName: 'Other session',
-      },
-    );
-
-    renderSidebar();
-    await expandWorkspace('project');
-
-    const row = inlineSessionAction(
-      'Other session',
-      'Rename',
-    )!.closest<HTMLElement>('[role="button"]')!;
-    await act(async () => {
-      row.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'F2',
-          ctrlKey: true,
-          bubbles: true,
-        }),
+  it.each(['ctrlKey', 'metaKey', 'altKey'] as const)(
+    'ignores F2 pressed with %s held',
+    async (modifier) => {
+      connection.sessionId = 'current-session';
+      active.sessions.push(
+        {
+          sessionId: 'current-session',
+          workspaceCwd: '/tmp/project',
+          displayName: 'Current session',
+        },
+        {
+          sessionId: 'other-session',
+          workspaceCwd: '/tmp/project',
+          displayName: 'Other session',
+        },
       );
-      await Promise.resolve();
-    });
 
-    expect(container.querySelector('input')).toBeNull();
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-  });
+      renderSidebar();
+      await expandWorkspace('project');
+
+      const row = inlineSessionAction(
+        'Other session',
+        'Rename',
+      )!.closest<HTMLElement>('[role="button"]')!;
+      await act(async () => {
+        row.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'F2',
+            [modifier]: true,
+            bubbles: true,
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      expect(container.querySelector('input')).toBeNull();
+      expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    },
+  );
 
   it('opens the standalone rename dialog on F2 without loading the session', async () => {
     const standaloneCapabilities = {
@@ -3082,7 +3085,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
 
     renderSidebar();
-    await expandArchived();
+    await openArchiveSettings();
 
     const row = Array.from(
       container.querySelectorAll<HTMLElement>('[class*="archivedRow"]'),
