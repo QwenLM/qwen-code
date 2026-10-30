@@ -3066,6 +3066,7 @@ export class Config {
   /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
   private autoMemoryContext = '';
+  private autoMemoryCatalogHasContent = false;
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
   private memoryRecallModeInitialized = false;
@@ -5529,6 +5530,7 @@ export class Config {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
       this.autoMemoryContext = '';
+      this.autoMemoryCatalogHasContent = false;
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -5719,6 +5721,7 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
+        this.autoMemoryCatalogHasContent = false;
       } else {
         const policy = this.memoryManager.buildAutoMemoryPrompt(
           memoryDir,
@@ -5735,11 +5738,19 @@ export class Config {
         );
         this.autoMemoryPrompt = policy;
         this.autoMemoryContext = catalog;
+        // Empty indexes still render headers and placeholders, so token cost
+        // alone cannot establish that there are memories to prune.
+        this.autoMemoryCatalogHasContent = [
+          managedAutoMemoryIndex,
+          userAutoMemoryIndex,
+          teamSection?.indexContent,
+        ].some((content) => Boolean(content?.trim()));
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
       this.autoMemoryContext = '';
+      this.autoMemoryCatalogHasContent = false;
     }
     this.setMemoryFileCount(fileCount);
     this.setContextFilePaths(contextFilePaths);
@@ -5823,12 +5834,29 @@ export class Config {
       parts.length > 2
         ? `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`
         : parts.join(' and ');
+    const actions = [
+      ...(contextFileTokens > 0 ? ['trimming context files'] : []),
+      ...(catalogTokens > 0 && this.autoMemoryCatalogHasContent
+        ? ['pruning stale memories']
+        : []),
+    ];
+    const advice: string[] = [];
+    if (actions.length > 0) {
+      advice.push(
+        `Consider ${actions.join(' or ')}${actions.length > 1 ? ',' : ''} or moving details into on-demand files.`,
+      );
+    }
+    const fixedTokens =
+      policyTokens + (this.autoMemoryCatalogHasContent ? 0 : catalogTokens);
+    if (actions.length === 0 || fixedTokens > thresholdTokens) {
+      advice.push(
+        'Managed auto-memory adds fixed overhead. Consider disabling managed auto-memory or using a model with a larger context window.',
+      );
+    }
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +
-      `Of those, there are ${breakdown}. Consider trimming context files or ` +
-      (catalogTokens > 0 ? 'pruning stale memories, or ' : '') +
-      `moving details into on-demand files.`
+      `Of those, there are ${breakdown}. ${advice.join(' ')}`
     );
   }
 
@@ -8091,6 +8119,7 @@ export class Config {
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
     this.autoMemoryContext = '';
+    this.autoMemoryCatalogHasContent = false;
 
     let memoryRefreshError: unknown;
     try {
