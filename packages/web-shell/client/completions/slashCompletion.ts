@@ -528,7 +528,12 @@ function matchSkillHintBranch(
       literals++;
     }
     consumed[idx] = true;
-    ti = token.kind === 'placeholder' && token.freeText ? typed.length : ti + 1;
+    ti++;
+    if (token.kind === 'placeholder' && token.freeText) {
+      // Free text absorbs prose, but a flag typed after it goes back through
+      // the normal flag path instead of being advertised as still missing.
+      while (ti < typed.length && !typed[ti].startsWith('--')) ti++;
+    }
   }
   // The value a just-typed flag still needs comes first: it is what the
   // matcher consumes next, regardless of its position in the template.

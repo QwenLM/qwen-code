@@ -327,7 +327,17 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
   });
 
   it('degrades gracefully on malformed hints', () => {
-    for (const hint of ['[', '<', '[--x', '|', '||', '[[]]', '[]', '<>']) {
+    for (const hint of [
+      '[',
+      '<',
+      '[--x',
+      '|',
+      '||',
+      '[[]]',
+      '[]',
+      '<>',
+      '[] []',
+    ]) {
       const commands: CommandInfo[] = [
         {
           name: 'demo',
@@ -336,13 +346,83 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
           argumentHint: hint,
         },
       ];
-      const result = getSlashCommandArgumentHint(
-        '/demo 1 --yes',
+      expect(
+        getSlashCommandArgumentHint('/demo 1 --yes', commands, 'en'),
+      ).toBeNull();
+    }
+  });
+
+  it('consumes flags typed after a free-text placeholder', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<task description> [--dry-run] [--verbose]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo update deps --dry-run',
         commands,
         'en',
-      );
-      expect(result === null || typeof result === 'string').toBe(true);
-    }
+      ),
+    ).toBe('[--verbose]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo --dry-run update deps',
+        commands,
+        'en',
+      ),
+    ).toBe('[--verbose]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo update deps --dry-run --verbose',
+        commands,
+        'en',
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/demo update deps --dry', commands, 'en'),
+    ).toBe('[--dry-run] [--verbose]');
+    expect(
+      getSlashCommandArgumentHint('/demo update deps --bogus', commands, 'en'),
+    ).toBeNull();
+  });
+
+  it('does not re-ask for a flag after a spaced single-value placeholder', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'verify-pr',
+        description: 'Verify a PR',
+        source: 'skill',
+        argumentHint: '<PR number> [--publish] [--watch]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 --publish', commands, 'en'),
+    ).toBe('[--watch]');
+  });
+
+  it('keeps absorbing multi-word prose when no flag follows', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<feature idea or bug description> [--draft]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo add dark mode --draft',
+        commands,
+        'en',
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/demo add dark mode', commands, 'en'),
+    ).toBe('[--draft]');
   });
 });
 
