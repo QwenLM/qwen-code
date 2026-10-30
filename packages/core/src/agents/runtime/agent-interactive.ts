@@ -42,6 +42,7 @@ import {
   type AgentMessage,
 } from './agent-types.js';
 import type { LoopType } from '../../telemetry/types.js';
+import { describeAgentTerminateReason } from './terminate-reason.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 
@@ -514,40 +515,40 @@ export class AgentInteractive {
   }
 }
 
+// Total on purpose: a new AgentTerminateMode has to pick a severity here,
+// or `tsc` fails. `null` means "worded nowhere, or reported elsewhere" —
+// GOAL never reaches this function, and a level on CANCELLED would
+// double-report what cancelCurrentRound() already warned about.
+const TERMINATE_MODE_LEVEL: Record<
+  AgentTerminateMode,
+  'warning' | 'error' | null
+> = {
+  [AgentTerminateMode.MAX_TURNS]: 'warning',
+  [AgentTerminateMode.TIMEOUT]: 'warning',
+  [AgentTerminateMode.ERROR]: 'error',
+  [AgentTerminateMode.LOOP_DETECTED]: 'error',
+  [AgentTerminateMode.GOAL]: null,
+  [AgentTerminateMode.CANCELLED]: null,
+  [AgentTerminateMode.SHUTDOWN]: null,
+};
+
 /**
  * Map a non-GOAL terminate mode to a visible status message for the UI,
- * or return null to suppress the message entirely.
+ * or return null to suppress the message entirely. The wording is shared
+ * with the non-interactive callers; only the severity is decided here.
  *
- * CANCELLED is suppressed here because cancelCurrentRound() already emits
- * its own warning. SHUTDOWN is suppressed as a normal lifecycle end.
+ * CANCELLED and SHUTDOWN have no wording, so they stay suppressed:
+ * cancelCurrentRound() already emits its own warning, and SHUTDOWN is a
+ * normal lifecycle end.
  */
 function terminateModeMessage(
   mode: AgentTerminateMode,
   loopType?: LoopType | null,
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
-  switch (mode) {
-    case AgentTerminateMode.MAX_TURNS:
-      return {
-        text: 'Agent stopped: maximum turns reached.',
-        level: 'warning',
-      };
-    case AgentTerminateMode.TIMEOUT:
-      return { text: 'Agent stopped: time limit reached.', level: 'warning' };
-    case AgentTerminateMode.ERROR:
-      return { text: 'Agent stopped due to an error.', level: 'error' };
-    case AgentTerminateMode.LOOP_DETECTED:
-      return {
-        // Name the exact detector so a stop is attributable (issue #9450)
-        // instead of collapsing every loop type into one generic label.
-        text: loopType
-          ? `Agent stopped: duplicate tool-call loop detected (${loopType}).`
-          : 'Agent stopped: duplicate tool-call loop detected.',
-        level: 'error',
-      };
-    case AgentTerminateMode.CANCELLED:
-    case AgentTerminateMode.SHUTDOWN:
-      return null;
-    default:
-      return null;
-  }
+  const text = describeAgentTerminateReason(mode, loopType);
+  const level = TERMINATE_MODE_LEVEL[mode];
+  // Wording and severity live in different files; a mode missing either
+  // stays silent rather than being guessed at.
+  if (!text || !level) return null;
+  return { text, level };
 }
