@@ -94,6 +94,7 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
    - **`resync`** (someone pushed since step 1) → run `sync <n>` again, then `snapshot` again, and act on its new `action`. If that is `resync` once more, someone keeps pushing: Section "Stop" with the reason "someone else is pushing to this PR".
    - **`fix`** → steps 3–9.
    - `lagging: true` means GitHub's API has not caught up with the branch yet: the snapshot carries no checks and no conflict, only comments. Handle those; the next round sees the checks. With `--once` there is no next round: say that CI could not be read yet, never that nothing needs fixing.
+   - `baseBehind: true` means a check fails while the branch is behind its base: the failure may be the base's fault (a fix, a dependency or a symbol the base already changed). The brief tells the fix agent to merge the base first; the merge goes out through the round's normal push, and the summary reports it.
    - `truncated` names lists that had more entries than one check reads: for `comments`, `reviews` or `reviewThreadComments` only the newest 100 were read, so a trusted comment older than those may be unanswered; for `checks` or `reviewThreads` only the first pages were, so a failure or a thread past them is not seen. Say so in the report (step 9); in a scheduled `wait` round, that is the one line reported.
    - A round restarts from step 1 at most once more in the same turn (step 6), and two `resync` answers in one turn stop the watch as above.
 3. **CI logs.** For each `ci_failed` event with a `runId`, run `"${QWEN_CODE_CLI:-qwen}" autofix-pr ci-log <n> <runId>` once per run id and note the log path per check. A failure without a `runId` (an external status) has only its `url`. A `ci_failed` event with `startupFailure: true` is a workflow GitHub could not start — usually an invalid workflow file — with no job, no log and nothing to re-run: it is `needs_human` (name the workflow and its `url`), and its `key` goes into `handledChecks`; it never goes into the brief's events — only under `## The round's own items`. If `ci-log` refuses because the run has no finished job that failed or timed out (it failed before any job started, or its failed jobs are still running), there is no log to fix from: leave its checks out of the brief's events, list them under `## The round's own items`, and treat them as items with outcome `rerun` in step 6. A job the log file marks `log unavailable` (it could not be read, or `ci-log` ran out of time) has no log either: leave its check out of the brief's events, list it under `## The round's own items`, and answer it `needs_human`, rather than spend the check's one re-run on a failure no one read.
@@ -127,6 +128,12 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
 
    - Conflict: `git fetch <remote> <baseRefName>` then
      `git merge --no-edit FETCH_HEAD` — merge, never rebase — and resolve.
+   - When the snapshot says `baseBehind: true`: the branch is behind its
+     base, and a failed check may be the base's fault. Merge the base first
+     — `git fetch <remote> <baseRefName>` then `git merge --no-edit FETCH_HEAD`,
+     never rebase — and resolve any conflict. A failed check the merge
+     already fixed needs no code change; handle the rest as failed checks
+     below.
    - Failed check: read its log. A defect in the PR's code or tests → fix it.
      A failure outside the PR (network, runner, an unrelated flaky test) →
      change nothing for it and report `rerun`.
@@ -226,7 +233,7 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
    }
    ```
    - **`replies`**: one per review thread the round handled, to the thread's `replyTo`, naming in `handled` the thread's comment ids it answers. Body: `Fixed in <short sha>: <one line>`, `Not changed: <reason>` or `Needs a human decision: <question>`, in the language of the comment it answers.
-   - **`summary`**: after a push, one PR comment in the language of the PR's title (`title` in the snapshot): the checks fixed or re-run, the comments addressed, the conflict resolved, and how it was verified. Answers to `review` and `issue_comment` events go here too, with their ids in `handled`. Omit it (`null`) when nothing was pushed and no review or issue comment was answered.
+   - **`summary`**: after a push, one PR comment in the language of the PR's title (`title` in the snapshot): the checks fixed or re-run, the comments addressed, the conflict resolved, the base merged when the snapshot said `baseBehind: true`, and how it was verified. Answers to `review` and `issue_comment` events go here too, with their ids in `handled`. Omit it (`null`) when nothing was pushed and no review or issue comment was answered.
    - **`handled`**: comment ids handled with no reply of their own.
    - **`handledChecks`**: the `key` of each failed check the round did not fix with a push — declined or `needs_human`. Leave out checks a push fixed and checks `rerun` already recorded. Keys of the head before a push are ignored by the helper.
    - **`handledConflict`**: true only when the conflict was left for a human.

@@ -193,6 +193,19 @@ describe('bundled autofix-pr skill', () => {
       '**Only a start or a resume asks the user anything.**',
     );
     expect(body).toContain('merge, never rebase');
+    // A failed check on a branch behind its base: the round snapshot says
+    // so, and the brief merges the base before fixing anything else.
+    expect(body).toContain(
+      '`baseBehind: true` means a check fails while the branch is behind its base',
+    );
+    expect(body).toContain('When the snapshot says `baseBehind: true`');
+    expect(body).toContain('already fixed needs no code change');
+    // A failure that survives the merge is not presumed the PR's defect:
+    // it goes through the same classification as any failed check.
+    expect(body).toContain('handle the rest as failed checks');
+    expect(body).toContain(
+      'the base merged when the snapshot said `baseBehind: true`',
+    );
     expect(body).toContain('Never list an `untrusted_comment` id');
     // A bot's PR conversation comment is dropped, not listed as untrusted.
     expect(body).toContain(
