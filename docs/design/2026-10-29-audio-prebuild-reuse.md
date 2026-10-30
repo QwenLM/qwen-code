@@ -73,10 +73,7 @@ succeed:
 - download failure → acceptance skipped (keyed on `outcome`, since
   `continue-on-error` rewrites `conclusion`)
 - payload validation failure → the step fails before writing the output
-
-Saving the fingerprint-named artifact for future releases is also non-fatal.
-If that upload fails, the validated same-run artifact still serves this release;
-the next release builds fresh unless another reusable artifact is available.
+- reusable upload failure → the current release proceeds; future reuse may miss
 
 An empty reuse ID runs the full native matrix. Fresh builds now pin Node and
 the prebuildify target to 22.22.3 and use filtered, frozen pnpm dependencies

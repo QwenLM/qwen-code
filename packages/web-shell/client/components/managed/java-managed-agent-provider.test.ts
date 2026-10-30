@@ -1432,7 +1432,6 @@ describe('createJavaManagedAgentProvider', () => {
         sessionId: 'session-1',
         cursor: 'before-1',
         limit: 25,
-        view: 'messages',
       }),
     );
   });
