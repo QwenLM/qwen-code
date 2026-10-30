@@ -31,6 +31,7 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
+  statePaths,
   trustAnchor,
   resolveWatchRoot,
   requireState,
@@ -39,6 +40,7 @@ import {
   type AutofixPrPaths,
 } from './state.js';
 import {
+  checkoutHoldsWork,
   hasUncommittedChanges,
   isAncestor,
   networkGit,
@@ -101,8 +103,17 @@ function syncLocked(
 ): SyncOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  // An in-place watch works in the checkout the state names, not the
+  // worktree path the PR number alone derives.
+  paths = statePaths(root, state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root, discard, trustAnchor(state));
+  const inPlace = state.inPlace === true;
+  if (discard && inPlace) {
+    throw new Error(
+      `an in-place watch never discards the user's checkout (${worktree}); commit or stash what it holds, or end the watch with \`qwen autofix-pr cleanup ${prNumber}\``,
+    );
+  }
+  requireWorktree(paths, prNumber, root, discard, trustAnchor(state), inPlace);
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.
@@ -195,6 +206,15 @@ function syncLocked(
     }
   } else if (!isAncestor(worktree, known, prHead)) {
     // The author rewrote the history the watch knew.
+    if (inPlace) {
+      // The user's branch is theirs to reconcile: no reset, ever.
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: `the author rewrote the PR's history; reconcile ${worktree} with the new head ${prHead.slice(0, 12)} yourself — an in-place watch never resets your branch`,
+      };
+    }
     if (hasUncommittedChanges(worktree)) {
       throw new Error(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
@@ -223,7 +243,20 @@ function syncLocked(
           `merge ${prHead} into the worktree (never rebase), then run sync again`,
       };
     }
-    if (hasUncommittedChanges(worktree)) {
+    // The checkout holds the watch's own files under .qwen/tmp: they are
+    // not the user's work.
+    const dirty = inPlace
+      ? (checkoutHoldsWork(worktree) ?? true)
+      : hasUncommittedChanges(worktree);
+    if (dirty) {
+      if (inPlace) {
+        return {
+          synced: false,
+          headSha: prHead,
+          moved,
+          reason: `${worktree} has uncommitted changes; commit or stash them before the round moves it to the new PR head.`,
+        };
+      }
       throw new Error(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
@@ -238,7 +271,8 @@ function syncLocked(
       '--quiet',
       prHead,
     );
-    alignSubmodules(worktree);
+    // In the user's checkout a submodule holding work is left alone.
+    alignSubmodules(worktree, inPlace);
   }
 
   if (!discard && (head === prHead || isAncestor(worktree, prHead, head))) {
@@ -253,13 +287,18 @@ function syncLocked(
   }
   // A submodule the new head moved, which git could not check out, would
   // otherwise be committed back to its old commit by the next fix.
-  if (!discard && dirtyOrUnreadable(worktree)) {
+  const stillDirty = inPlace
+    ? (checkoutHoldsWork(worktree) ?? true)
+    : dirtyOrUnreadable(worktree);
+  if (!discard && stillDirty) {
     return {
       synced: false,
       headSha: prHead,
       moved,
       ...(dropped === undefined ? {} : { dropped }),
-      reason: `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule git could not move; run \`qwen autofix-pr sync ${prNumber} --discard\``,
+      reason: inPlace
+        ? `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule holding work or one whose recorded commit could not be fetched; commit or stash what it holds, or fetch the submodule's commit yourself`
+        : `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule git could not move; run \`qwen autofix-pr sync ${prNumber} --discard\``,
     };
   }
   return {

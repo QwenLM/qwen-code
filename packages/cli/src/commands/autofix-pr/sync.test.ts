@@ -943,4 +943,171 @@ describe('runSync (real git, bare remote)', () => {
     expect(worktreeHead()).toBe(featSha);
     expect(known()).toBe(featSha);
   });
+
+  describe('in place', () => {
+    let other: string;
+    /** Someone else pushes to the PR branch, from a checkout of their own. */
+    const pushFromOther = (file: string) => {
+      const sha = commitIn(other, file);
+      run(other, 'push', '-q', 'origin', 'feat');
+      run(remote, 'update-ref', 'refs/pull/7/head', sha);
+      return sha;
+    };
+
+    beforeEach(() => {
+      // Turn the fixture's watch into an in-place one on repo itself.
+      run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+      run(repo, 'branch', '-D', paths.branch);
+      run(repo, 'switch', '-q', 'feat');
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        inPlace: true,
+        worktreePath: repo,
+        branch: 'feat',
+      });
+      other = join(base, 'other');
+      run(base, 'clone', '-q', remote, other);
+      run(other, 'config', 'user.email', 't@example.com');
+      run(other, 'config', 'user.name', 't');
+      run(other, 'checkout', '-q', 'feat');
+    });
+
+    it('refuses --discard and keeps what the checkout holds', () => {
+      writeFileSync(join(repo, 'dirty.txt'), 'mine');
+      expect(() => runSync(7, true)).toThrow(/never discards/);
+      expect(existsSync(join(repo, 'dirty.txt'))).toBe(true);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(known()).toBe(featSha);
+    });
+
+    it('answers synced:false for a dirty checkout, without --discard advice', () => {
+      const theirs = pushFromOther('theirs.txt');
+      writeFileSync(join(repo, 'dirty.txt'), 'mine');
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({
+        synced: false,
+        headSha: theirs,
+        moved: true,
+      });
+      expect(outcome.reason).toMatch(/commit or stash/);
+      expect(outcome.reason).not.toMatch(/--discard/);
+      // The branch did not move, and the dirty file survived.
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(existsSync(join(repo, 'dirty.txt'))).toBe(true);
+    });
+
+    it('never resets the branch when the author rewrote history', () => {
+      run(other, 'checkout', '-q', '--orphan', 'rewrite');
+      run(other, 'commit', '-q', '--allow-empty', '-m', 'rewrite');
+      const sha = run(other, 'rev-parse', 'HEAD');
+      run(other, 'push', '-q', '--force', 'origin', 'rewrite:feat');
+      run(remote, 'update-ref', 'refs/pull/7/head', sha);
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, headSha: sha });
+      expect(outcome.reason).toMatch(/rewrote the PR's history/);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/feat');
+    });
+
+    it('fast-forwards a clean checkout to the new head', () => {
+      const theirs = pushFromOther('theirs.txt');
+      expect(runSync(7)).toMatchObject({
+        synced: true,
+        headSha: theirs,
+        moved: true,
+      });
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(theirs);
+      expect(known()).toBe(theirs);
+    });
+
+    it('asks for a merge when the checkout holds unpushed commits', () => {
+      commitIn(repo, 'mine.txt');
+      pushFromOther('theirs.txt');
+      expect(runSync(7)).toMatchObject({ synced: false, action: 'merge' });
+      // Nothing moved: the merge is the round's to make, attended.
+      expect(run(repo, 'rev-parse', 'HEAD')).not.toBe(known());
+    });
+
+    it('refuses when the user switched the checkout to another branch', () => {
+      run(repo, 'switch', '-q', 'main');
+      expect(() => runSync(7)).toThrow(/branch main checked out/);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    });
+
+    /** A submodule the PR records, checked out in the user's checkout. */
+    const withSubmodule = () => {
+      const sub = join(base, 'sub-ip');
+      run(base, 'init', '-q', '-b', 'main', sub);
+      run(sub, 'config', 'user.email', 't@example.com');
+      run(sub, 'config', 'user.name', 't');
+      const s1 = commitIn(sub, 's1.txt');
+      run(
+        repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor/sub',
+      );
+      run(repo, 'commit', '-q', '-m', 'add sub');
+      run(repo, 'push', '-q', 'origin', 'HEAD:feat');
+      run(
+        join(repo, 'vendor', 'sub'),
+        'config',
+        'protocol.file.allow',
+        'always',
+      );
+      const withSub = run(repo, 'rev-parse', 'HEAD');
+      run(remote, 'update-ref', 'refs/pull/7/head', withSub);
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        lastKnownHeadSha: withSub,
+      });
+      // The author bumps the submodule to s2 in a clone of their own.
+      const s2 = commitIn(sub, 's2.txt');
+      const author = join(base, 'author-ip');
+      run(base, 'clone', '-q', '-b', 'feat', remote, author);
+      run(author, 'config', 'user.email', 'a@example.com');
+      run(author, 'config', 'user.name', 'a');
+      run(author, 'update-index', '--cacheinfo', `160000,${s2},vendor/sub`);
+      run(author, 'commit', '-q', '-m', 'bump sub');
+      run(author, 'push', '-q', 'origin', 'feat');
+      const bump = run(author, 'rev-parse', 'HEAD');
+      run(remote, 'update-ref', 'refs/pull/7/head', bump);
+      return { s1, s2, bump, inSub: join(repo, 'vendor', 'sub') };
+    };
+
+    it('moves a checked-out submodule along on a clean fast-forward', () => {
+      const { s2, bump, inSub } = withSubmodule();
+      expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(bump);
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s2);
+    });
+
+    it('leaves a submodule holding work alone, and moves nothing', () => {
+      const { s1, inSub } = withSubmodule();
+      const before = run(repo, 'rev-parse', 'HEAD');
+      writeFileSync(join(inSub, 'mine.txt'), 'mine');
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/commit or stash/);
+      expect(outcome.reason).not.toMatch(/--discard/);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(before);
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+      expect(existsSync(join(inSub, 'mine.txt'))).toBe(true);
+    });
+
+    it('names an unfetchable submodule commit in the in-place reason', () => {
+      const { inSub } = withSubmodule();
+      // The recorded commit exists only in the author's clone: the
+      // submodule's own remote can never serve it, and nothing is dirty.
+      run(inSub, 'remote', 'set-url', 'origin', join(base, 'no-such-remote'));
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/could not be fetched/);
+      expect(outcome.reason).not.toMatch(/--discard/);
+    });
+  });
 });
