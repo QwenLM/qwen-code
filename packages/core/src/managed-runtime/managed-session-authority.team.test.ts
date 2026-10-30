@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -19,7 +20,7 @@ import {
   childLaunchBody,
   childSettleCompletedBody,
 } from './managed-child-operations.js';
-import { type ChildAgentRun } from './managed-child-run-record.js';
+import { type ChildSessionRun } from './managed-child-run-record.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   type ManagedSessionDomain,
@@ -136,7 +137,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -185,7 +189,7 @@ function childLife(
   refs: Refs,
   childRunId: string,
   childSessionId = `session-${childRunId}`,
-): ChildAgentRun[] {
+): ChildSessionRun[] {
   const launched = childLaunchBody({
     childRunId,
     ownerScopeId: 'scope-main',
@@ -236,7 +240,7 @@ function commit(
 async function commitChild(
   harness: Harness,
   authority: LocalManagedSessionAuthority,
-  life: readonly ChildAgentRun[],
+  life: readonly ChildSessionRun[],
   count: number,
 ): Promise<void> {
   for (const record of life.slice(0, count)) {

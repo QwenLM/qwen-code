@@ -24,6 +24,7 @@ import {
   HARNESS_TURN_COMPLETE_BOUNDARY,
   parseHarnessCheckpointV1,
   type HarnessAgentWaitRun,
+  type HarnessCommandWaitRun,
 } from './managed-harness-checkpoint.js';
 import {
   openManagedSession,
@@ -34,6 +35,7 @@ import {
   type ManagedSessionCommand,
 } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   managedRuntimeDispatchGate,
   resetManagedRuntimeDispatchGatesForTest,
@@ -84,7 +86,11 @@ async function createWorkspace(): Promise<Workspace> {
   return { runtimeBaseDir, projectRoot, transcriptPath };
 }
 
-function open(workspace: Workspace): Promise<ManagedSession> {
+async function open(workspace: Workspace): Promise<ManagedSession> {
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: workspace.runtimeBaseDir,
+    sessionKey,
+  });
   return openManagedSession({
     runtimeBaseDir: workspace.runtimeBaseDir,
     sessionId,
@@ -95,8 +101,14 @@ function open(workspace: Workspace): Promise<ManagedSession> {
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
     create: {
-      definitionRef: ref('managed-definition'),
-      rootSnapshotRef: ref('managed-root'),
+      definitionRef: await resources.publish(
+        'managed-definition',
+        Buffer.from('{}'),
+      ),
+      rootSnapshotRef: await resources.publish(
+        'managed-root',
+        Buffer.from('{}'),
+      ),
       createdBy: 'daemon',
     },
   });
@@ -164,6 +176,50 @@ async function settleTurnComplete(
 }
 
 describe('managed harness factory', () => {
+  it('assigns checkpoint command identity and digest after an intervening activation renewal', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const authority = session.authority;
+    const before = authority.committedSequence;
+    const commit = authority.commitCheckpoint.bind(authority);
+    const boundary = vi
+      .spyOn(authority, 'commitCheckpoint')
+      .mockImplementationOnce(async (...args) => {
+        now += 10_000;
+        await authority.renewActivation({ leaseDurationMs: 60_000 });
+        return commit(...args);
+      });
+    try {
+      const checkpoint =
+        await createManagedHarnessHandle(session).ensureRunnable();
+      expect(checkpoint.identity.coveredSequence).toBe(before + 1);
+      const published = await authority.readCheckpointState();
+      const records = (await fs.readFile(workspace.transcriptPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as { managedSession?: Record<string, unknown> },
+        );
+      const marker = records.find(
+        (record) => record.managedSession?.['operation'] === 'commitCheckpoint',
+      )?.managedSession;
+      expect(marker).toMatchObject({
+        commandId: `harness:before_model:${session.activation.activationId}:${before + 1}`,
+        contentDigest: createHash('sha256').update(published!).digest('hex'),
+      });
+      expect(authority.latestCheckpoint?.stateRef.digest).toBe(
+        marker?.['contentDigest'],
+      );
+    } finally {
+      boundary.mockRestore();
+      clock.mockRestore();
+      await session.close();
+    }
+  });
+
   it('does not treat opening or accepted input as a runnable start', async () => {
     const session = await open(await createWorkspace());
     expect(session.authority.restoreBasis()).toBe('initial');
@@ -562,7 +618,25 @@ describe('managed harness factory', () => {
     const handle = createManagedHarnessHandle(session);
     await handle.ensureRunnable();
     const refs = await waitRefs(session);
+    const beforeWait = session.authority.committedSequence;
     const boundary = await handle.commitDurableWait(waitCommit(refs));
+    const waitEvents = session.authority.eventsInSequenceRange(
+      beforeWait + 1,
+      session.authority.committedSequence,
+    );
+    expect(waitEvents.map((event) => event.kind)).toEqual([
+      'action.changed',
+      'checkpoint.committed',
+    ]);
+    const journal = await fs.readFile(workspace.transcriptPath, 'utf8');
+    const records = journal
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const markers = records.filter(
+      (record) => record.subtype === 'managed_session_commit_v1',
+    );
+    expect(markers.at(-1).managedSession.eventCount).toBe(2);
     expect(boundary.kind).toBe('durable_wait');
     expect(session.authority.latestCheckpoint?.boundary).toBe(
       HARNESS_DURABLE_WAIT_BOUNDARY,
@@ -859,6 +933,43 @@ describe('managed harness factory', () => {
     expect(managedRuntimeDispatchGate(sessionKey).state('ex-2')).toBe(
       'settled',
     );
+    await session.close();
+  });
+
+  it('does not hand off a settled binding after its gate entry was evicted', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const first = await runtimeCommit(session);
+    const second = {
+      ...first,
+      functionCallId: 'fc-2',
+      executionCallId: 'ex-2',
+      invocationBindingId: 'bind-2',
+      modelMessageId: 'msg-2',
+      ordinal: 1,
+      inputDigest: '8'.repeat(64),
+    };
+    await handle.commitAwaitRuntimeBatch([first, second], {
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
+    const firstRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"executionCallId":"ex-1"}', 'utf8'),
+    );
+    await handle.resolveAwaitRuntime('ex-1', firstRef);
+
+    const gate = managedRuntimeDispatchGate(sessionKey);
+    expect(gate.state('ex-1')).toBe('settled');
+    for (let index = 0; index < 1025; index++) {
+      gate.settle(`evict-${index}`);
+    }
+    expect(gate.state('ex-1')).toBeUndefined();
+
+    await handle.detach();
+    expect(gate.state('ex-1')).toBeUndefined();
+    expect(gate.isHandedOff('ex-2')).toBe(true);
     await session.close();
   });
 
@@ -1808,6 +1919,255 @@ describe('agent wait', () => {
     await handleTwo.commitDurableWait(waitCommit(await waitRefs(awaiting)));
     await expect(handleTwo.resolveAwaitAgent('run-1')).rejects.toThrow(
       /not an await_agent phase/,
+    );
+    await awaiting.close();
+  });
+});
+
+function commandWaitRun(
+  commandId: string,
+  overrides: Partial<HarnessCommandWaitRun> = {},
+): HarnessCommandWaitRun {
+  return {
+    commandId,
+    functionCallId: 'fc-1',
+    toolName: 'task_update',
+    modelMessageId: 'msg-1',
+    folded: false,
+    ...overrides,
+  };
+}
+
+describe('command wait', () => {
+  it('commits the wait at admission and replays the identical restated set', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    const boundary = await handle.commitAwaitCommand(
+      [commandWaitRun('cmd_1')],
+      turn,
+      { holdsWorkspaceMount: false },
+    );
+    expect(boundary.kind).toBe('durable_wait');
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const parsed = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(parsed.continuation.phase).toBe('await_command');
+    expect(parsed.commandWait?.runs).toMatchObject([
+      { commandId: 'cmd_1', functionCallId: 'fc-1', folded: false },
+    ]);
+    expect(parsed.commandWait?.holdsWorkspaceMount).toBe(false);
+    await expect(handle.ensureRunnable()).rejects.toMatchObject({
+      reason: 'invalid_state',
+    });
+    await expect(handle.requestBoundary()).resolves.toMatchObject({
+      kind: 'durable_wait',
+      checkpointId: boundary.checkpointId,
+    });
+    const replayed = await handle.commitAwaitCommand(
+      [commandWaitRun('cmd_1')],
+      turn,
+      { holdsWorkspaceMount: false },
+    );
+    expect(replayed.checkpointId).toBe(boundary.checkpointId);
+    await session.close();
+  });
+
+  it('refuses a conflicting restatement, a sibling durable wait, and malformed batches', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand([commandWaitRun('cmd_1')], turn, {
+      holdsWorkspaceMount: false,
+    });
+    await expect(
+      handle.commitAwaitCommand([commandWaitRun('cmd_2')], turn, {
+        holdsWorkspaceMount: false,
+      }),
+    ).rejects.toThrow(/different commands/);
+    await expect(
+      handle.commitAwaitRuntime(await runtimeCommit(session)),
+    ).rejects.toThrow(/must resolve before/);
+    await session.close();
+
+    const second = await open(await createWorkspace());
+    const handleTwo = createManagedHarnessHandle(second);
+    await handleTwo.ensureRunnable();
+    await handleTwo.commitDurableWait(waitCommit(await waitRefs(second)));
+    await expect(
+      handleTwo.commitAwaitCommand(
+        [commandWaitRun('cmd_1')],
+        { turnId: 'turn-1', promptId: 'turn-1' },
+        { holdsWorkspaceMount: false },
+      ),
+    ).rejects.toThrow(/must resolve before the command wait/);
+    await second.close();
+
+    const third = await open(await createWorkspace());
+    const handleFake = await modelOutputCommittedTurn(third);
+    await expect(
+      handleFake.handle.commitAwaitCommand(
+        [commandWaitRun('cmd_1')],
+        { turnId: 'turn-2', promptId: 'turn-1' },
+        { holdsWorkspaceMount: false },
+      ),
+    ).rejects.toThrow(/cannot change the current unfinished turn/);
+    await expect(
+      handleFake.handle.commitAwaitCommand(
+        [commandWaitRun('cmd_1'), commandWaitRun('cmd_1')],
+        handleFake.turn,
+        { holdsWorkspaceMount: false },
+      ),
+    ).rejects.toThrow(/must be unique/);
+    await expect(
+      handleFake.handle.commitAwaitCommand(
+        [commandWaitRun('cmd_1', { folded: true })],
+        handleFake.turn,
+        { holdsWorkspaceMount: false },
+      ),
+    ).rejects.toThrow(/already folded/);
+    await third.close();
+  });
+
+  it('marks calls folded, restates idempotently, and advances the activation only at the last fold', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand(
+      [
+        commandWaitRun('cmd_1'),
+        commandWaitRun('cmd_2', { functionCallId: 'fc-2' }),
+      ],
+      turn,
+      { holdsWorkspaceMount: true },
+    );
+    const partial = await handle.resolveAwaitCommand('cmd_1');
+    expect(partial?.continuation.phase).toBe('await_command');
+    expect(partial?.commandWait?.runs).toMatchObject([
+      { commandId: 'cmd_1', folded: true },
+      { commandId: 'cmd_2', folded: false },
+    ]);
+    expect(partial?.commandWait?.holdsWorkspaceMount).toBe(true);
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const restated = await handle.resolveAwaitCommand('cmd_1');
+    expect(restated?.identity.checkpointId).toBe(
+      partial?.identity.checkpointId,
+    );
+    const takeover = await session.replaceActivation();
+    const successor = createManagedHarnessHandle(session);
+    const advanced = await successor.resolveAwaitCommand('cmd_2');
+    expect(advanced?.continuation.phase).toBe('model_output_committed');
+    expect(advanced?.commandWait?.runs.every((run) => run.folded)).toBe(true);
+    expect(advanced?.identity.activationId).toBe(takeover.activationId);
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    // The carried all-folded group replays silently under the same
+    // activation; a fresh activation would owe the replay its identity.
+    const replayed = await successor.resolveAwaitCommand('cmd_1');
+    expect(replayed?.identity.activationId).toBe(takeover.activationId);
+    expect(replayed?.identity.checkpointId).toBe(
+      advanced?.identity.checkpointId,
+    );
+    await session.close();
+  });
+
+  it('stamps the timeout lock on the fold that carried it and keeps it past a takeover', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand([commandWaitRun('cmd_1')], turn, {
+      holdsWorkspaceMount: false,
+    });
+    const folded = await handle.resolveAwaitCommand('cmd_1', {
+      timedOut: true,
+    });
+    expect(folded?.commandLock).toEqual({ turnId: turn.turnId });
+    expect(folded?.continuation.phase).toBe('model_output_committed');
+    await session.replaceActivation();
+    const settled = await session.authority.harnessRunAuthorization();
+    if (settled.status !== 'runnable')
+      throw new Error(`expected runnable, got ${settled.status}`);
+    expect(settled.checkpoint.commandLock).toEqual({ turnId: turn.turnId });
+    await session.close();
+  });
+
+  // The lock is the Turn's, not the wait group's (decision 4): the Turn's
+  // next command batch replaces the group and its Runtime work clears it,
+  // and a takeover at either point must still find the Turn locked.
+  it("keeps the timeout lock across the Turn's next command batch and its Runtime work", async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand([commandWaitRun('cmd_1')], turn, {
+      holdsWorkspaceMount: false,
+    });
+    await handle.markCommandWaitTimeout();
+    await handle.resolveAwaitCommand('cmd_1', { timedOut: true });
+    // The next batch parks afresh — and dies before its refusal folds.
+    const parked = await handle.commitAwaitCommand(
+      [commandWaitRun('cmd_2', { functionCallId: 'fc-2' })],
+      turn,
+      { holdsWorkspaceMount: false },
+    );
+    expect(parked.kind).toBe('durable_wait');
+    await session.replaceActivation();
+    const successor = createManagedHarnessHandle(session);
+    const fresh = await session.authority.harnessRunAuthorization();
+    if (fresh.status !== 'runnable')
+      throw new Error(`expected runnable, got ${fresh.status}`);
+    expect(fresh.checkpoint.commandWait?.runs[0]?.commandId).toBe('cmd_2');
+    expect(fresh.checkpoint.commandLock).toEqual({ turnId: turn.turnId });
+    await successor.resolveAwaitCommand('cmd_2');
+    // Ordinary Runtime work of the same Turn clears the wait group.
+    await successor.commitAwaitRuntime(await runtimeCommit(session));
+    const runtime = await session.authority.harnessRunAuthorization();
+    if (runtime.status !== 'runnable')
+      throw new Error(`expected runnable, got ${runtime.status}`);
+    expect(runtime.checkpoint.continuation.phase).toBe('await_runtime');
+    expect(runtime.checkpoint.commandWait).toBeNull();
+    expect(runtime.checkpoint.commandLock).toEqual({ turnId: turn.turnId });
+    await session.replaceActivation();
+    const after = await session.authority.harnessRunAuthorization();
+    if (after.status !== 'runnable')
+      throw new Error(`expected runnable, got ${after.status}`);
+    expect(after.checkpoint.commandLock).toEqual({ turnId: turn.turnId });
+    await session.close();
+  });
+
+  it('stamps the timeout lock at detection time without folding any run', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand(
+      [
+        commandWaitRun('cmd_1'),
+        commandWaitRun('cmd_2', { functionCallId: 'fc-2' }),
+      ],
+      turn,
+      { holdsWorkspaceMount: false },
+    );
+    const stamped = await handle.markCommandWaitTimeout();
+    expect(stamped?.commandLock).toEqual({ turnId: turn.turnId });
+    expect(stamped?.commandWait?.runs.every((run) => !run.folded)).toBe(true);
+    expect(stamped?.continuation.phase).toBe('await_command');
+    // Restating on an already-stamped group answers the same checkpoint.
+    const restated = await handle.markCommandWaitTimeout();
+    expect(restated?.identity.checkpointId).toBe(
+      stamped?.identity.checkpointId,
+    );
+    await session.close();
+  });
+
+  it('resolves nothing outside the command wait', async () => {
+    const session = await open(await createWorkspace());
+    const { handle } = await modelOutputCommittedTurn(session);
+    await expect(handle.resolveAwaitCommand('cmd_1')).resolves.toBeNull();
+    await session.close();
+
+    const awaiting = await open(await createWorkspace());
+    const handleTwo = createManagedHarnessHandle(awaiting);
+    await handleTwo.ensureRunnable();
+    await handleTwo.commitDurableWait(waitCommit(await waitRefs(awaiting)));
+    await expect(handleTwo.resolveAwaitCommand('cmd_1')).rejects.toThrow(
+      /not an await_command phase/,
     );
     await awaiting.close();
   });

@@ -21,6 +21,7 @@ import {
   MISSING_TOOL_RESULT_MESSAGE,
 } from './history-replayer.js';
 import {
+  blankReplayedMcpAppHtml,
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
   degradeReplayEnvelopeAppHtml,
@@ -244,6 +245,16 @@ function recordPage(
   };
 }
 
+function readBranchRecordId(update: SessionUpdate): string | undefined {
+  const meta = (update as { _meta?: Record<string, unknown> })._meta;
+  const transcript =
+    meta && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const branchRecordId = transcript?.['branchRecordId'];
+  return typeof branchRecordId === 'string' ? branchRecordId : undefined;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -456,16 +467,6 @@ describe('history replay page', () => {
       encodeCursor: vi.fn(),
     });
 
-    const readBranchRecordId = (update: SessionUpdate): string | undefined => {
-      const meta = (update as { _meta?: Record<string, unknown> })._meta;
-      const transcript =
-        meta && typeof meta['qwenTranscript'] === 'object'
-          ? (meta['qwenTranscript'] as Record<string, unknown>)
-          : undefined;
-      const branchRecordId = transcript?.['branchRecordId'];
-      return typeof branchRecordId === 'string' ? branchRecordId : undefined;
-    };
-
     const decorated = result.updates.filter(
       (update) => readBranchRecordId(update) !== undefined,
     );
@@ -488,6 +489,46 @@ describe('history replay page', () => {
     );
     expect(firstChunk).toBeDefined();
     expect(readBranchRecordId(firstChunk!)).toBeUndefined();
+  });
+
+  it('stamps load-replay updates with the checkpoint of their source record', async () => {
+    // ACP session/load replays through collectHistoryReplayUpdates; the
+    // restored window must carry branchRecordId or Web Shell hides Branch
+    // (#13782).
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [assistantRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      branchPointsByAssistantUuid: {
+        'assistant-record': 'checkpoint-record',
+      },
+    });
+
+    const chunks = result.updates.filter(
+      (update) => update.sessionUpdate === 'agent_message_chunk',
+    );
+    expect(chunks).not.toHaveLength(0);
+    const decorated = chunks.filter(
+      (update) => readBranchRecordId(update) !== undefined,
+    );
+    expect(decorated).toHaveLength(1);
+    expect(readBranchRecordId(decorated[0]!)).toBe('checkpoint-record');
+    expect(decorated[0]).toMatchObject({
+      content: { type: 'text', text: 'answer' },
+    });
+  });
+
+  it('leaves load-replay updates without branch points undecorated', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [assistantRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.updates).not.toHaveLength(0);
+    for (const update of result.updates) {
+      expect(readBranchRecordId(update)).toBeUndefined();
+    }
   });
 
   it('fails incrementally before collecting an update above the count limit', async () => {
@@ -682,6 +723,91 @@ describe('history replay page', () => {
       fallbackText: 'second chart',
     });
     expect(jsonBytes(envelope)).toBeLessThanOrEqual(4000);
+  });
+
+  it('does not blank a tiny App html when the placeholder would cost more bytes', () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-tiny',
+      status: 'completed',
+      rawOutput: { type: 'mcp_app', html: '<b/>' },
+    } as unknown as SessionUpdate;
+
+    expect(blankReplayedMcpAppHtml(update)).toBeUndefined();
+  });
+
+  it('blanks a short App html when an existing fallbackText already outweighs it', () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-tiny-with-fallback',
+      status: 'completed',
+      rawOutput: {
+        type: 'mcp_app',
+        html: '<b>chart</b>',
+        fallbackText: 'x'.repeat(300),
+      },
+    } as unknown as SessionUpdate;
+
+    const blanked = blankReplayedMcpAppHtml(update);
+
+    // The guard compares whole frames, so this reclaims the html even though
+    // it is far shorter than the placeholder it would otherwise compete with.
+    expect(blanked).toBeDefined();
+    expect(jsonBytes(blanked)).toBeLessThan(jsonBytes(update));
+    expect(
+      (blanked as unknown as { rawOutput: { html: string } }).rawOutput.html,
+    ).toBe('');
+  });
+
+  it('never grows an envelope whose only App html is smaller than the placeholder', () => {
+    const tinyUpdate = (callId: string) =>
+      ({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        status: 'completed',
+        rawOutput: { type: 'mcp_app', html: '<b/>' },
+      }) as unknown as SessionUpdate;
+    const first = tinyUpdate('call-app-tiny-1');
+    const second = tinyUpdate('call-app-tiny-2');
+    const envelope = { v: 1, updates: [first, second] };
+    const before = jsonBytes(envelope);
+
+    // The cap is unreachable for these frames; the loop must terminate
+    // without substituting a placeholder that is larger than the html it
+    // discards, which would grow the running total on every iteration.
+    degradeReplayEnvelopeAppHtml(envelope, before - 1);
+
+    expect(jsonBytes(envelope)).toBeLessThanOrEqual(before);
+    expect(envelope.updates[0]).toBe(first);
+    expect(envelope.updates[1]).toBe(second);
+  });
+
+  it('keeps a tiny App html intact while a later over-budget App degrades', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [
+        appToolResultRecord('app-record-tiny', 'call-app-tiny', '<b/>', ''),
+        appToolResultRecord(
+          'app-record-big',
+          'call-app-big',
+          'x'.repeat(3000),
+          '',
+        ),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 2000, maxUpdates: 100 },
+    });
+
+    const htmls = result.updates.map(
+      (update) =>
+        (update as unknown as { rawOutput?: { html?: string } }).rawOutput
+          ?.html,
+    );
+
+    // Only the frame that actually reclaims bytes is degraded.
+    expect(htmls).toContain('<b/>');
+    expect(htmls).toContain('');
+    expect(jsonBytes(result.updates)).toBeLessThanOrEqual(2000);
   });
 
   it('leaves a within-budget envelope untouched', () => {

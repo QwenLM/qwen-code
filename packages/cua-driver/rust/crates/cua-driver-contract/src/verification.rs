@@ -52,7 +52,7 @@ fn nonempty_string_schema(_: &mut SchemaGenerator) -> Schema {
 }
 
 fn true_only_boolean_schema(_: &mut SchemaGenerator) -> Schema {
-    json_schema!({ "type": "boolean", "enum": [true] })
+    json_schema!({ "type": "boolean", "description": "Must be true. Absence cannot be proven; false is rejected." })
 }
 
 fn nullable_string_schema(_: &mut SchemaGenerator) -> Schema {

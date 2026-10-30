@@ -61,7 +61,7 @@ Read/Write/Edit 的无效 `file_path` 在该批次获取 Workspace 或派发工�
 
 取消会中止推理，并按原始身份请求取消每个已预留或已启动调用。取消请求不等于停止证据；只有 Runtime 终态结果允许结算和释放。无法观察出结果时保留所有权并阻塞。释放失败也阻塞后续工具，不在本地清除所有权。结果未知时仍持有 Workspace 存储，因此同一 Workspace 的其它 Session 会收到可恢复的 busy 错误，直到 W0e 恢复清除原持有者。
 
-私有循环最多运行 16 轮模型请求。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制。过大的参数和 assistant 记录在获取所有权前拒绝。对已知终态执行，同时检查序列化 outcome 和完整 tool_result 记录，包括 UTF-8、JSON 转义和元数据；任一超限时，持久化保留原 executionStatus、标记 outputOmitted=true 的小型函数错误，替代原输出，read_file 响应提示模型缩小 offset/limit 范围。这份回执不表示工具未执行。仍须提交并消费回执后才能正常结算和释放；未知结果和持久化失败仍要求恢复并保持阻塞。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
+私有循环遵循已有的 `model.maxSessionTurns` 设置（默认 `-1`），包括恢复时保存的轮数，不再额外限制为 16 轮。工具 intent/receipt 元数据无需开启发布即可展示，原始参数和输出仍遵循既有发布策略。参见[进度修复](2026-10-16-managed-webshell-progress.zh-CN.md)。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制。过大的参数和 assistant 记录在获取所有权前拒绝。对已知终态执行，同时检查序列化 outcome 和完整 tool_result 记录，包括 UTF-8、JSON 转义和元数据；任一超限时，持久化保留原 executionStatus、标记 outputOmitted=true 的小型函数错误，替代原输出，read_file 响应提示模型缩小 offset/limit 范围。这份回执不表示工具未执行。仍须提交并消费回执后才能正常结算和释放；未知结果和持久化失败仍要求恢复并保持阻塞。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
 
 冷 load 保留现有对未结算输入的拒绝。进程丢失后的自动接续、孤儿 worker 接管与旧代执行对账属于 W0e/#12766/#12670。本片记录后续所需的原始身份，但不宣称完成这些能力。
 

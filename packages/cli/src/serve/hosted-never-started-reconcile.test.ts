@@ -20,7 +20,10 @@ import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-run
 import * as stdio from '../utils/stdioHelpers.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
-import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
+import {
+  probeNeverStarted,
+  reconcileNeverStartedChildRuns,
+} from './hosted-never-started-reconcile.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 
 const enablement = vi.hoisted(() => ({ childRun: true }));
@@ -257,6 +260,69 @@ async function reopen(): Promise<void> {
   session = undefined;
   await open('reopened-worker');
 }
+
+describe('probeNeverStarted', () => {
+  it.each([
+    [undefined, { proven: true }],
+    [
+      { state: 'executing' },
+      { proven: false, cause: 'ambiguous_state (executing)' },
+    ],
+    [
+      { state: 'unknown' },
+      { proven: false, cause: 'ambiguous_state (unknown)' },
+    ],
+  ] as const)(
+    'classifies a Broker answer without widening absence',
+    async (answer, expected) => {
+      const backgroundProcessStatus = vi.fn(async () => answer);
+
+      await expect(
+        probeNeverStarted({ backgroundProcessStatus }, 'shell-1'),
+      ).resolves.toEqual(expected);
+    },
+  );
+
+  it.each([
+    [
+      Object.assign(new Error('secret broker URL'), {
+        status: 401,
+        code: 'runtime_broker_auth_rejected',
+      }),
+      'probe_rejected (status 401, code runtime_broker_auth_rejected)',
+    ],
+    [
+      new Error('Runtime execution identity changed.'),
+      'probe_rejected (identity_changed)',
+    ],
+    [
+      new Error('Runtime execution outcome is unknown.'),
+      'probe_rejected (outcome_unknown)',
+    ],
+    [new TypeError('fetch failed'), 'probe_rejected (error TypeError)'],
+    [
+      new DOMException('timed out', 'TimeoutError'),
+      'probe_rejected (error TimeoutError)',
+    ],
+    ['unexpected rejection', 'probe_rejected (no status)'],
+  ])(
+    'classifies a rejected probe without logging its message',
+    async (rejection, expectedCause) => {
+      const backgroundProcessStatus = vi.fn(async () => {
+        throw rejection;
+      });
+
+      const result = await probeNeverStarted(
+        { backgroundProcessStatus },
+        'shell-1',
+      );
+
+      expect(result).toEqual({ proven: false, cause: expectedCause });
+      expect(JSON.stringify(result)).not.toContain('secret broker URL');
+      expect(JSON.stringify(result)).not.toContain('fetch failed');
+    },
+  );
+});
 
 describe('reconcileNeverStartedChildRuns', () => {
   it('settles a stranded dispatch-claimed record whose process provably does not exist', async () => {
@@ -592,10 +658,9 @@ describe('reconcileNeverStartedChildRuns', () => {
     expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
   });
 
-  it('refuses a shell admit when the production kind gate is restored', async () => {
+  it('admits a shell through the enabled production kind gate', async () => {
     await open();
     await createManagedHarnessHandle(session!).ensureRunnable();
-    enablement.childRun = false;
 
     await expect(
       orchestratorOf(session!).admit({
@@ -604,7 +669,11 @@ describe('reconcileNeverStartedChildRuns', () => {
         executionCallId: 'shell-1',
         args: { command: 'printf hi', is_background: true },
       }),
-    ).rejects.toThrow('registered but not enabled');
+    ).resolves.toMatchObject({ kind: 'managed-tool-args' });
+    expect(committed('shell-1')).toMatchObject({
+      kind: 'shell',
+      run: { state: 'admitted', execution: 'intent' },
+    });
   });
 
   it('never scans a child_agent record, the one kind production can commit today', async () => {

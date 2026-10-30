@@ -174,8 +174,22 @@ async function openPullRequests(repo, gh) {
 // whose head already carries this status — which may need clearing.
 function evaluate(modules, mainFiles, prs) {
   const onMain = new Set(mainFiles);
+  const currentModule = 'packages/managed-agent-server';
+  const relocated = modules.includes(currentModule);
   const claims = prs.map((pr) => {
-    const touched = pr.files.filter((file) => isTracked(modules, file.path));
+    // Old PR heads still expose the retired roots; normalize only their
+    // metadata so existing migrations compare as the same classpath resource.
+    const touched = pr.files
+      .map((file) => ({
+        ...file,
+        path: relocated
+          ? file.path.replace(
+              /^packages\/sdk-java\/(?:managed-agent-server|runtime-broker)\/src\//,
+              `${currentModule}/src/`,
+            )
+          : file.path,
+      }))
+      .filter((file) => isTracked(modules, file.path));
     const deleted = new Set(
       touched
         .filter((file) => file.changeType === 'DELETED')

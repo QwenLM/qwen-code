@@ -145,8 +145,9 @@ H3 设计的「one execution for the life of the watch, holding the Runtime」
 自行结束的 watch —— 即它的进程退出 —— 在下一次观测时结算其行，并经既有
 publisher finalize 结算其 monitor_run 记录；持有结束，下一次 routine
 release 成功。而两个 Harness 侧的界（`idle_timeout_ms`、`max_events`）
-只结束 loop 的观测，无法停下 worker 里的 watch，因此它们把记录 park 而非
-结算，持有由 Session close 的 drain 结束（§6）。
+经客户端 control 路由的 `monitor-stop` 停下 worker 里的 watch，只凭 worker
+的退出证据结算记录，同时结算持有行；worker 无法证明的停止把记录 park，
+直到 watch 自己的结束或 Session close 的 drain 结算它（§6，#13896）。
 
 ### D3. turn 结算把 `runtime_session_held` 视为被设计的持有
 
@@ -285,12 +286,13 @@ broker 级臂落为 runtime-broker 故障门禁测试（`fault-gates` Maven prof
   时 `runtime_lost` —— 被故障门禁钉住，不受 D1/D3 触碰；新增
   `runtime_session_held` code 的存在正是为了让被设计的持有永不搭上那条
   路径。
-- **Monitor 的自动停止无法自证其停止。** 配额与空闲窗口跑在 Harness 里，
-  watch 跑在 worker 里，而面向客户端的 control 路由只接纳 MCP 与 Hook
-  操作 —— Harness 侧没有 `monitor-stop`。因此自动停止把记录 park 在
-  `runtime_lost` 线上，而不是结算成 `max_events` 或 `idle_timeout`；watch
-  本身由 Session close 的 drain 结束，那条通道确实能到达它。worker 未
-  确认的停止一律不被声称，代价是 watch 会比它的任务记录多活到 close。
+- **Monitor 的自动停止只凭 worker 的退出证据结算。** 配额与空闲窗口跑在
+  Harness 里，watch 跑在 worker 里。自 #13896 起，客户端 control 路由为
+  Session 自己的 watch 接纳 `monitor-status` / `monitor-stop`，自动停止只在
+  worker 应答 `exited` 时结算 `max_events` 或 `idle_timeout`，并同时结算
+  watch 的持有行。worker 无法证明的停止把记录 park 在 `runtime_lost` 线上，
+  直到 watch 自己的结束或 Session close 的 drain 结算它。见
+  [Monitor 自动停止的远端退出证据](2026-10-11-managed-monitor-auto-stop-evidence.zh-CN.md)。
 - **#13846 在飞**，同样编辑 `managed-session-records.ts`；后合入的一方
   绕开另一方改号。
 
@@ -332,7 +334,6 @@ broker 级臂落为 runtime-broker 故障门禁测试（`fault-gates` Maven prof
 2. 长期持有的 Runtime 是否应超出当前字段进入 Session 的公开状态（今天
    持有经任务表面可见；专用字段是产品调用，此处不需要）。
 3. A7 重建驱动的时间安排随 W 系列 mount 工作。
-4. 让 Monitor 的自动停止取得自己的远端退出证据 —— 在客户端 control 路由
-   上接纳 `ManagedMonitorProtocol` 操作，并让远端 executor 的 terminate
-   等待 worker 的退出 —— 留作后续工作；§6 记录了"记录 park"这一过渡
-   语义。
+4. 已由 #13896 解决：Monitor 的自动停止经客户端 control 路由取得自己的
+   远端退出证据；见
+   [Monitor 自动停止的远端退出证据](2026-10-11-managed-monitor-auto-stop-evidence.zh-CN.md)。

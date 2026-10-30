@@ -9,6 +9,8 @@ import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type {
   TeamLifecycle,
   TeamMember,
+  TeamPlan,
+  TeamPlanDecision,
   TeamState,
   TeamTask,
   TeamTaskStatus,
@@ -33,6 +35,38 @@ function logicalRun(state: ExtensionRun['state']): ExtensionRun {
     runtime: null,
     delivery: null,
   });
+}
+
+export function teamPlanOpenBody(params: {
+  readonly teamId: string;
+  readonly requestId: string;
+  readonly member: string;
+  readonly planRevision: number;
+  readonly planRef: ManagedSessionDurableRef;
+}): TeamPlan {
+  return Object.freeze({
+    ...params,
+    decision: null,
+    feedbackRef: null,
+    run: logicalRun('waiting'),
+  });
+}
+
+export function teamPlanDecisionBody(
+  previous: TeamPlan,
+  decision: TeamPlanDecision,
+  feedbackRef: ManagedSessionDurableRef | null,
+): TeamPlan {
+  return Object.freeze({
+    ...previous,
+    decision,
+    feedbackRef,
+    run: logicalRun('settled'),
+  });
+}
+
+export function teamPlanWithdrawBody(previous: TeamPlan): TeamPlan {
+  return Object.freeze({ ...previous, run: logicalRun('cancelled') });
 }
 
 /** The opening of a team: active, led by this Session, with no members. */

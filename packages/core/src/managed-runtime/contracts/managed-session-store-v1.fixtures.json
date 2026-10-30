@@ -35,7 +35,9 @@
     "domain.committed",
     "message.delta",
     "message.retracted",
-    "operation.replayed"
+    "operation.replayed",
+    "hosted.batch.planned",
+    "hosted.cleanup"
   ],
   "sessionKey": {
     "tenantId": "tenant-fixture",

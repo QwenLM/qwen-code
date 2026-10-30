@@ -22,6 +22,7 @@ import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { SettingsContext } from './contexts/SettingsContext.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { StreamingState } from './types.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 vi.mock('ink', async (importOriginal) => {
   const original = await importOriginal<typeof import('ink')>();
@@ -110,7 +111,7 @@ describe('App', () => {
       </UIActionsContext.Provider>,
     );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0).each([
+  it.skipIf(!arePermissionBitsEnforced()).each([
     {
       name: 'identical 0400 original',
       mode: 0o400,

@@ -171,7 +171,7 @@ content fails with a precise error when a Session is created from it.
   adds `hosted-workspace-files/2` only after completing that rollout. Until
   then a definition selecting it is refused.
 - **`shell/1` and `shell/2`** wait for public foreground Shell admission
-  (#13271) and must pair with the `default` approval mode; see below.
+  (#13271) and may not pair with the `yolo` approval mode; see below.
 - **`mcp/1`** waits for Stage H.
 
 **Combination rules**, each answering `409 agent_definition_unsupported`:

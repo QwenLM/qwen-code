@@ -25,6 +25,12 @@ import {
   type HarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 import {
+  createAwaitCommandHarnessCheckpoint,
+  createConsumedCommandWaitHarnessCheckpoint,
+  harnessCommandLocked,
+  type HarnessCommandWaitGroup,
+} from './managed-harness-checkpoint.js';
+import {
   ManagedSessionRecordError,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
@@ -683,12 +689,15 @@ describe('harness checkpoint v1', () => {
     expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
   });
 
-  it('treats a checkpoint without an agentWait key as carrying none', () => {
-    const bytes = mutate(seed(), (value) => {
-      delete value['agentWait'];
-    });
-    expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
-  });
+  it.each(['agentWait', 'commandWait', 'commandLock'])(
+    'rejects a checkpoint without the %s group',
+    (group) => {
+      const bytes = mutate(seed(), (value) => {
+        delete value[group];
+      });
+      expect(() => parseHarnessCheckpointV1(bytes)).toThrow(group);
+    },
+  );
 
   it('rejects an await_agent checkpoint against the other wait families', () => {
     expect(() =>
@@ -1186,13 +1195,11 @@ describe('harness checkpoint v1', () => {
     ).toMatchObject([{ childRunId: 'run-1', consumed: true }]);
   });
 
-  it('omits the agentWait key whenever no group rides the checkpoint (R1-29)', () => {
-    // A pre-agentWait reader rejects unknown root keys; absent parses as
-    // null on both sides, so a checkpoint that carries no group must not
-    // name the key — an older daemon can still open these bytes.
+  it('writes a null agentWait group when no child wait is active', () => {
     const bytes = bytesOf(seed());
-    expect(Object.keys(JSON.parse(bytes.toString('utf8')))).not.toContain(
+    expect(JSON.parse(bytes.toString('utf8'))).toHaveProperty(
       'agentWait',
+      null,
     );
     expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
     // And the group itself always writes the key.
@@ -1209,5 +1216,478 @@ describe('harness checkpoint v1', () => {
       'agentWait',
     );
     expect(parseHarnessCheckpointV1(waitBytes).agentWait?.runs).toHaveLength(1);
+  });
+});
+
+function commandWaitOf(
+  commandIds: readonly string[],
+  holdsWorkspaceMount = false,
+): HarnessCommandWaitGroup {
+  return {
+    runs: commandIds.map((commandId, index) => ({
+      commandId,
+      functionCallId: `fc-${index + 1}`,
+      toolName: 'task_update',
+      modelMessageId: 'msg-1',
+      folded: false,
+    })),
+    holdsWorkspaceMount,
+  };
+}
+
+describe('command wait', () => {
+  it('round-trips an await_command checkpoint and its folded advancement', () => {
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1', 'cmd_2'], true),
+    });
+    expect(wait.continuation.phase).toBe('await_command');
+    expect(wait.approval).toBeNull();
+    expect(wait.agentWait).toBeNull();
+    expect(wait.commandWait?.runs).toHaveLength(2);
+    expect(wait.commandWait?.holdsWorkspaceMount).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(wait))).toEqual(wait);
+
+    const partial = createConsumedCommandWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+    });
+    expect(partial.continuation.phase).toBe('await_command');
+    expect(partial.commandWait?.runs).toMatchObject([
+      { commandId: 'cmd_1', folded: true },
+      { commandId: 'cmd_2', folded: false },
+    ]);
+    expect(partial.commandWait?.holdsWorkspaceMount).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(partial))).toEqual(partial);
+
+    const advanced = createConsumedCommandWaitHarnessCheckpoint({
+      previous: partial,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      commandId: 'cmd_2',
+    });
+    expect(advanced.continuation.phase).toBe('model_output_committed');
+    expect(advanced.commandWait?.runs.every((run) => run.folded)).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
+  });
+
+  // Decision 4: the fold that carried the timeout stamps the Turn's lock,
+  // and every later fold of the same wait carries it — a replacement
+  // owner re-arms from it.
+  it('carries the timeout lock on every fold after the one that stamped it', () => {
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1', 'cmd_2']),
+    });
+    expect(wait.commandLock).toBeNull();
+    const stamped = createConsumedCommandWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+      timedOut: true,
+    });
+    expect(stamped.continuation.phase).toBe('await_command');
+    expect(stamped.commandLock).toEqual({ turnId: 'turn-1' });
+    const advanced = createConsumedCommandWaitHarnessCheckpoint({
+      previous: stamped,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      commandId: 'cmd_2',
+    });
+    expect(advanced.continuation.phase).toBe('model_output_committed');
+    expect(advanced.commandLock).toEqual({ turnId: 'turn-1' });
+    expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
+  });
+
+  // The lock is the Turn's, not the wait group's: the Turn's next command
+  // batch replaces the group and its Runtime work clears it, and neither
+  // may unlock the Turn. The Turn's end drops it.
+  it("keeps the timeout lock through the Turn's later checkpoints and drops it when the Turn ends", () => {
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    const locked = createConsumedCommandWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+      timedOut: true,
+    });
+    expect(harnessCommandLocked(locked, 'turn-1')).toBe(true);
+    const nextBatch = createAwaitCommandHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      attempt: null,
+      commandWait: commandWaitOf(['cmd_2']),
+    });
+    expect(nextBatch.commandWait?.runs.map((run) => run.commandId)).toEqual([
+      'cmd_2',
+    ]);
+    expect(harnessCommandLocked(nextBatch, 'turn-1')).toBe(true);
+    expect(
+      harnessCommandLocked(
+        parseHarnessCheckpointV1(bytesOf(nextBatch)),
+        'turn-1',
+      ),
+    ).toBe(true);
+    const runtime = createAwaitRuntimeHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      attempt: committedAttempt(),
+      ...inProgressRuntime(),
+    });
+    expect(runtime.commandWait).toBeNull();
+    expect(harnessCommandLocked(runtime, 'turn-1')).toBe(true);
+    expect(
+      harnessCommandLocked(
+        parseHarnessCheckpointV1(bytesOf(runtime)),
+        'turn-1',
+      ),
+    ).toBe(true);
+    // The ready checkpoint the settled Turn writes under its own id ends
+    // it too, so an idle Session carries no lock key.
+    const settled = createNextTurnReadyHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      activationId: 'act-1',
+      turnId: 'turn-1',
+      promptId: null,
+    });
+    expect(settled.commandLock).toBeNull();
+    expect(JSON.parse(bytesOf(settled).toString('utf8'))).toHaveProperty(
+      'commandLock',
+      null,
+    );
+    const nextTurn = createNextTurnReadyHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      activationId: 'act-1',
+      turnId: 'turn-2',
+      promptId: null,
+    });
+    expect(nextTurn.commandLock).toBeNull();
+    expect(harnessCommandLocked(nextTurn, 'turn-2')).toBe(false);
+  });
+
+  it('writes a null commandLock while the Turn is unlocked and rejects a malformed lock', () => {
+    const bytes = bytesOf(seed());
+    expect(JSON.parse(bytes.toString('utf8'))).toHaveProperty(
+      'commandLock',
+      null,
+    );
+    expect(parseHarnessCheckpointV1(bytes).commandLock).toBeNull();
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(seed(), (value) => {
+          value['commandLock'] = { turnId: 'turn-1', timedOut: true };
+        }),
+      ),
+    ).toThrow(/commandLock/);
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(seed(), (value) => {
+          value['commandLock'] = { turnId: '' };
+        }),
+      ),
+    ).toThrow(/commandLock\.turnId/);
+    // The group no longer holds the lock: a stale stamp there is refused.
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          (value['commandWait'] as Record<string, unknown>)['timedOut'] = true;
+        }),
+      ),
+    ).toThrow(/commandWait/);
+  });
+
+  it('rejects an await_command checkpoint against the other wait families', () => {
+    expect(() =>
+      createAwaitCommandHarnessCheckpoint({
+        previous: createAwaitActionHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          approval: requestedUserApproval(),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        commandWait: commandWaitOf(['cmd_1']),
+      }),
+    ).toThrow(/cannot keep a requested approval/);
+    expect(() =>
+      createAwaitCommandHarnessCheckpoint({
+        previous: createAwaitCommandHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          commandWait: commandWaitOf(['cmd_1']),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        commandWait: commandWaitOf(['cmd_2']),
+      }),
+    ).toThrow(/cannot replace an unfinished command wait/);
+    expect(() =>
+      createAwaitCommandHarnessCheckpoint({
+        previous: createAwaitAgentHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          agentWait: agentWaitOf(['run-1']),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        commandWait: commandWaitOf(['cmd_1']),
+      }),
+    ).toThrow(/cannot replace an unfinished agent wait/);
+    expect(() =>
+      createAwaitCommandHarnessCheckpoint({
+        previous: createAwaitRuntimeHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          ...inProgressRuntime(),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        commandWait: commandWaitOf(['cmd_1']),
+      }),
+    ).toThrow(/cannot carry in-flight Runtime work/);
+    expect(() =>
+      createAwaitCommandHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-5',
+        coveredSequence: 4,
+        previousCheckpointId: 'ckpt-4',
+        attempt: null,
+        commandWait: commandWaitOf(['cmd_1']),
+      }),
+    ).toThrow(/requires the attempt/);
+  });
+
+  it('replaces an all-folded carried group, never an unfinished wait', () => {
+    const first = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    const folded = createConsumedCommandWaitHarnessCheckpoint({
+      previous: first,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+    });
+    const next = createAwaitCommandHarnessCheckpoint({
+      previous: folded,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      attempt: null,
+      commandWait: commandWaitOf(['cmd_2', 'cmd_3']),
+    });
+    expect(next.continuation.phase).toBe('await_command');
+    expect(next.commandWait?.runs.map((run) => run.commandId)).toEqual([
+      'cmd_2',
+      'cmd_3',
+    ]);
+  });
+
+  it('write-side guards refuse the two rejected shapes', () => {
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    expect(() =>
+      createAwaitCommandHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: committedAttempt(),
+        commandWait: { runs: [], holdsWorkspaceMount: false },
+      }),
+    ).toThrow(/requires at least one run/);
+    expect(() =>
+      createModelOutputCommittedHarnessCheckpoint({
+        previous: wait,
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+      }),
+    ).toThrow(/cannot carry an unfolded command wait/);
+    const folded = createConsumedCommandWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(folded, (value) => {
+          value['commandWait'] = { runs: [], holdsWorkspaceMount: false };
+        }),
+      ),
+    ).toThrow(/requires at least one run/);
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(folded, (value) => {
+          value['commandWait'] = JSON.parse(
+            JSON.stringify({
+              runs: folded.commandWait!.runs,
+              holdsWorkspaceMount: 'maybe',
+            }),
+          );
+        }),
+      ),
+    ).toThrow(/holdsWorkspaceMount must be a boolean/);
+    expect(
+      createModelOutputCommittedHarnessCheckpoint({
+        previous: folded,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+      }).commandWait?.runs,
+    ).toMatchObject([{ commandId: 'cmd_1', folded: true }]);
+  });
+
+  it('rejects the command group at every other phase too', () => {
+    const group = commandWaitOf(['cmd_1']);
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(seed(), (value) => {
+          value['commandWait'] = JSON.parse(JSON.stringify(group));
+        }),
+      ),
+    ).toThrow(/before_model cannot carry a command wait/);
+    const awaited = createAwaitActionHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      approval: requestedUserApproval(),
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(awaited, (value) => {
+          value['commandWait'] = JSON.parse(JSON.stringify(group));
+        }),
+      ),
+    ).toThrow(/await_action cannot carry a command wait/);
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: group,
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['approval'] = JSON.parse(
+            JSON.stringify(requestedUserApproval()),
+          );
+        }),
+      ),
+    ).toThrow(/cannot keep a requested approval/);
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['commandWait'] = JSON.parse(
+            JSON.stringify({
+              runs: [{ ...group.runs[0], folded: true }],
+              holdsWorkspaceMount: false,
+            }),
+          );
+        }),
+      ),
+    ).toThrow(/all-folded command wait/);
+  });
+
+  it('writes a null commandWait group when no command wait is active', () => {
+    const bytes = bytesOf(seed());
+    expect(JSON.parse(bytes.toString('utf8'))).toHaveProperty(
+      'commandWait',
+      null,
+    );
+    expect(parseHarnessCheckpointV1(bytes).commandWait).toBeNull();
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    const waitBytes = bytesOf(wait);
+    expect(Object.keys(JSON.parse(waitBytes.toString('utf8')))).toContain(
+      'commandWait',
+    );
+    expect(parseHarnessCheckpointV1(waitBytes).commandWait?.runs).toHaveLength(
+      1,
+    );
   });
 });

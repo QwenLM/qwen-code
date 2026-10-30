@@ -680,6 +680,7 @@ export class HostedChannelSession {
   settle(
     deliveryId: string,
     outcome: 'unknown' | 'rejected',
+    reconciliationId?: string,
   ): Promise<ChannelDelivery> {
     return this.serial(async () => {
       const delivery = this.mustDelivery(deliveryId);
@@ -697,6 +698,7 @@ export class HostedChannelSession {
           ? channelDeliveryUnknownBody(delivery)
           : channelDeliveryRejectedBody(delivery),
         'acceptChannelReceipt',
+        reconciliationId,
       );
     });
   }
@@ -801,12 +803,18 @@ export class HostedChannelSession {
     previous: ChannelDelivery,
     next: ChannelDelivery,
     operation: string,
+    commandId?: string,
   ): Promise<ChannelDelivery> {
     const existing = this.store.authority.extensionRecord(
       'channel_delivery',
       previous.deliveryId,
     );
-    await this.commitDelivery(next, (existing?.revision ?? 0) + 1, operation);
+    await this.commitDelivery(
+      next,
+      (existing?.revision ?? 0) + 1,
+      operation,
+      commandId,
+    );
     return next;
   }
 
@@ -814,11 +822,12 @@ export class HostedChannelSession {
     record: ChannelDelivery,
     revision: number,
     operation: string,
+    commandId?: string,
   ): Promise<void> {
     await this.store.authority.commitExtensionRecord(
       {
         operation,
-        commandId: `${record.deliveryId}:${revision}`,
+        commandId: commandId ?? `${record.deliveryId}:${revision}`,
         sessionKey: this.key,
         contentDigest: digest(record),
       },

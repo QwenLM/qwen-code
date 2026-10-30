@@ -19,9 +19,11 @@ import {
   type AnyChildRun,
 } from './managed-child-run-record.js';
 import {
+  CHILD_NOTIFICATION_SOURCES,
   MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS,
   MANAGED_SESSION_ENABLED_DOMAINS,
   assertManagedSessionChildRunKindEnabled,
+  isChildNotificationSource,
 } from './managed-session-records.js';
 
 interface Fixture {
@@ -95,9 +97,10 @@ function templateOf(fixture: {
 
 describe('managed-child-run-record/1 shared contract', () => {
   it('projects per-kind tasks behind a per-kind enablement gate', () => {
-    // H4b admitted the child_agent kind and H3's enablement (#13856)
-    // admitted shell; the domain itself still stays off the plain enabled
-    // list, and H4c registers the workflow kind without admitting it.
+    // H4b admitted the child_agent kind, H3's enablement (#13856) admitted
+    // shell and the workflow runtime slice (#13803) admits the workflow
+    // kind with its runtime in place; the domain itself still stays off the
+    // plain enabled list.
     const body = MANAGED_EXTENSION_RECORD_BODIES.child_run!;
     expect(
       body.taskKindOf(parseChildRun(fixtures.templates['child_run'])),
@@ -115,6 +118,7 @@ describe('managed-child-run-record/1 shared contract', () => {
     expect(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS).toEqual([
       'child_agent',
       'shell',
+      'workflow',
     ]);
     expect(() =>
       assertManagedSessionChildRunKindEnabled('child_agent'),
@@ -122,9 +126,16 @@ describe('managed-child-run-record/1 shared contract', () => {
     expect(() =>
       assertManagedSessionChildRunKindEnabled('shell'),
     ).not.toThrow();
-    expect(() => assertManagedSessionChildRunKindEnabled('workflow')).toThrow(
-      'domain child_run kind workflow is registered but not enabled for submission.',
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('workflow'),
+    ).not.toThrow();
+    expect(() => assertManagedSessionChildRunKindEnabled('unknown')).toThrow(
+      'domain child_run kind unknown is registered but not enabled for submission.',
     );
+    // Only child Sessions post acceptance notifications: an enabled
+    // background shell run never rides the child wake predicates.
+    expect(CHILD_NOTIFICATION_SOURCES).toEqual(['child_agent', 'workflow']);
+    expect(isChildNotificationSource('shell')).toBe(false);
   });
 
   it('pins the closed keys and the closed stop-reason vocabulary', () => {

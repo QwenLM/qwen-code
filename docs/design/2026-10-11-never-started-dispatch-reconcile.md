@@ -2,12 +2,10 @@
 
 [English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
 
-Status: proposed (2026-10-11, author wenshao)
+Status: reload reconciliation implemented in #13917; the in-turn background Shell proof (#13937) is implemented in this change. Original design 2026-10-11, author wenshao.
 Tracks: #12380 Stage H → #12827, finding **A3** of the #13532 acceptance run.
-Out of scope: A1 itself (#13789, merged), the cross-Session wedge (#13800),
-enabling `monitor_run` or the `child_run` `shell` kind, and #13801's Gap A
-(the in-turn never-started proof gate — see "What is deliberately NOT
-built").
+
+Scope: the #13801 reload reconciliation and the separate #13937 in-turn background Shell proof. A1 execution enablement, cross-Session wedges and Monitor absence proof remain outside these paths.
 
 ## Problem statement
 
@@ -39,9 +37,17 @@ reported as never-started.
 
 ## Key evidence chain (all verified at HEAD)
 
-1. **A missing `:process` row is a complete proof of never-started for an
-   `is_background` dispatch** — the row is admitted for that dispatch alone
-   (`RuntimeBrokerService.admitBackgroundProcess`). `RuntimeBrokerService`
+1. **A missing `:process` row after a lifecycle boundary rules out late
+   admission is a complete proof of never-started for an `is_background`
+   dispatch** — reload supplies that boundary for reconciliation; the live
+   Turn obtains it through a successful cancellation barrier. The row is
+   admitted for that execution alone,
+   under whichever hold family the dispatch belongs to
+   (`ManagedHoldFamily.SHELL` for `is_background`, `ManagedHoldFamily.MONITOR`
+   for `is_monitor`; both go through
+   `RuntimeBrokerService.admitBackgroundProcess` and share the same key). The
+   absence read is family-blind, so it is only a never-started proof for the
+   family whose record is being settled. `RuntimeBrokerService`
    admits the `:process` ledger row (keyed `<executionCallId>:process`,
    durable JDBC) at execute-admission, _before_ `beginDispatch` runs, inside
    the same `.thenApply` block (`RuntimeBrokerService.java` execute path).
@@ -92,7 +98,7 @@ not_started_proven` is an admitted execution step, `running → failed`
    record never carries `startReceiptRef`, which is exactly what a
    never-started settlement requires.
 
-## Proposed design
+## Design
 
 ### New module: reconcile-on-open scan
 
@@ -144,6 +150,50 @@ started: false })` → commits `state: failed`,
    request URL), or `ambiguous_state` — so a permanent hole (a bad
    token) can no longer read byte-identically to a transient outage.
 
+### In-turn background failure proof (#13937)
+
+The tool-turn catch handles a failed background Shell reservation before a
+publication row exists. It retains the grant owner's `NOT_STARTED` proof. If
+the close request fails or returns no state, the fallback first requires the
+original Broker to acknowledge cancellation. The Broker persists cancellation
+under the Session lock and rechecks it after a pending publication installation,
+so a successful response prevents a late process admission or dispatch. Only
+then does the Turn probe the same Broker through
+`backgroundProcessStatus(executionCallId)`. A returned state is affirmative
+counter-evidence and is never overridden by the fallback. A missing publication
+can therefore settle only after the cancellation barrier and when the
+independent process ledger also returns its definitive 404. Only the typed
+`runtime_execution_not_found` response resolves to absence and permits
+`settleFailed(..., { stopReason: 'start_failed', started: false })` in the live
+Turn. A present row, unknown result, wrong identity or rejected probe leaves
+the record unresolved. The publication error itself is never proof.
+
+For a failed turn with multiple background Shell bindings, each grant-owner
+`NOT_STARTED` decision settles its record immediately. All remaining
+grant-owner decisions finish before the permitted process-ledger probes start together.
+A silent Broker therefore consumes one 30-second probe window rather than one
+window per binding. The reload scanner and live-turn recovery share the same
+probe decision: only an absent row proves never-started; a present row reports
+`ambiguous_state (<state>)`; and a rejected lookup reports
+`probe_rejected (<safe detail>)`. Diagnostics name the execution id, distinguish
+the two known Broker contract errors and the transport error type without
+interpolating rejection messages, and record each successful process-ledger
+settlement.
+
+This fallback applies only to background Shell requests. Monitor dispatches
+create their own `:process` rows, but `request.background` deliberately excludes
+them; their settlement stays with the monitor-specific grant and remote-evidence
+paths. It adds no acquire, release, dispatch or protocol field. The original
+Turn still reports recovery required after recording the proven child terminal;
+the fix does not claim the rest of an uncertain batch completed.
+
+The regressions refuse reservation, then refuse `close_not_started` for the
+absent publication. They require immediate child settlement only after a
+successful cancellation barrier and a definitively absent original process,
+retain refusal when cancellation fails, a process row exists or the Broker is
+unavailable, and pin the Broker against dispatch after a delayed publication
+installation observes a persisted cancellation.
+
 ### Hook point: hosted session open
 
 In `registerHostedHarnessSessionRoutes`'s open/load path
@@ -174,22 +224,14 @@ if (session.childRuns && brokerOptions)
 - No `monitor_run` arm: monitor records strand at the same window but the
   issue frames R1 on `child_run` (monitor `dispatchStarted` also keeps
   `state: 'admitted'`, which is the _under_-claiming direction tracked by
-  #13377's mirror — a different symptom, out of scope). The proof itself
-  does not transfer either: the `:process` ledger row is admitted only for
-  an `is_background` dispatch
-  (`RuntimeBrokerService.admitBackgroundProcess`), and a monitor's input
-  carries `is_monitor`, never `is_background`, so no row exists to be
-  absent and the absence read is NOT a never-started proof for
-  `monitor_run` — extending this arm there requires a different proof
-  first.
-- No fix for #13801 R1 Gap A — the in-turn proof gate: when a background
-  reserve never lands a publication row (capacity or owner refusal, a
-  missing `await_runtime` checkpoint), the in-turn `close_not_started`
-  arm cannot prove never-started, and such a record strands until a
-  reopen runs this arm — which a resident Session may never see. Closing
-  that half lives in `hosted-workspace-tool-turn.ts`'s dispatch path, is
-  its own follow-up (tracked as #13937), and must stay row-absence-only
-  when it lands (R3).
+  #13377's mirror — a different symptom, out of scope). Monitor dispatches
+  admit their own `:process` rows under `ManagedHoldFamily.MONITOR`, but this
+  design does not reuse that absence read: monitor records, holds, stop
+  evidence and final output have separate lifecycle owners. Extending this
+  arm requires a monitor-specific settlement contract and witness first.
+- The reload scanner does not handle #13801 R1 Gap A, the live in-turn
+  failure path. That path is covered separately by the #13937 fallback
+  above, retaining the same original-process row-absence proof.
 - No periodic scanner: reload-only per R1. A broker-outage-at-open hole
   stays stranded until a later reload; strictly better than today (never).
 - No `release()` after probing: releasing persists `RELEASED` and wedges
@@ -246,14 +288,16 @@ Hook wiring (`hosted-harness-session.test.ts`):
 
 ## Files affected
 
-| File                                                                                    | Change                        |
-| --------------------------------------------------------------------------------------- | ----------------------------- |
-| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **new**, the arm              |
-| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **new**, witnesses            |
-| `packages/cli/src/serve/hosted-harness-session.ts`                                      | call the arm on open (~small) |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | wiring witness                |
-| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 successor pair             |
-| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | this doc                      |
+| File                                                                                    | Change                                 |
+| --------------------------------------------------------------------------------------- | -------------------------------------- |
+| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **new**, the arm                       |
+| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **new**, witnesses                     |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | in-turn proof fallback                 |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | absent and ambiguous process witnesses |
+| `packages/cli/src/serve/hosted-harness-session.ts`                                      | call the arm on open (~small)          |
+| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | wiring witness                         |
+| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 successor pair                      |
+| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | this doc                               |
 
 ## Open questions
 

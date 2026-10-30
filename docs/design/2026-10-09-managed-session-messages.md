@@ -116,7 +116,7 @@ No key changes. Decision 9's rules are commit-time checks in the authority and t
 - `packages/core/src/managed-runtime/managed-session-records.ts`: the continuation gate.
 - `packages/core/src/managed-runtime/managed-child-operations.ts`: `childContinuationBody`.
 - `packages/core/src/managed-runtime/http-managed-session-store.ts`: `session_message_lineage_refused` is a rollbackable non-commit.
-- `packages/sdk-java/managed-agent-server`:
+- `packages/managed-agent-server`:
   - `ManagedSessionMessageRecords` (new): the validator.
   - `ManagedExtensionProjection`: the body registration.
   - `ManagedExtensionRecordStore`: closure, the cross-record and lineage rules, the transaction's input binding, and the continuation rules.

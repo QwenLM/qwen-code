@@ -301,6 +301,26 @@ Key command-line options for headless usage:
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
 
+### Tool schemas in small context windows
+
+`--max-tool-calls 0` limits tool execution; it does not remove tool schemas from
+the model request. `--safe-mode` also keeps built-in tools and ignores the
+settings-sourced `tools.eager` allowlist, so it is not a text-only mode.
+
+Outside safe or bare mode, use [`tools.eager`](../configuration/settings#tools)
+to defer unlisted, non-exempt tool schemas. An empty list defers all non-exempt
+eager tools, but exempt tools and other schema-reveal paths can still contribute
+to the request. With safe mode enabled, use `--exclude-tools <name,...>` to remove
+unneeded built-in tools instead. Exclusions disable those tools, rather than
+keeping them available through deferred discovery. Recheck the tool names and
+resulting request after upgrading; the built-in set can change between releases.
+
+Budget the complete serialized input, including system instructions, history and
+tool schemas, together with the requested output. Deferral and output limits do
+not guarantee that the input fits: an oversized initial request can still be
+rejected before generation. Do not rely on a schema-size preflight warning to
+establish compatibility with a provider's context limit.
+
 ## Safety in unattended runs
 
 Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call, including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at the host process's privilege level. When Qwen Code detects this combination with no sandbox configured, it prints a one-line warning to stderr at startup. Suppress the warning with `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` once you've reviewed the trade-off.

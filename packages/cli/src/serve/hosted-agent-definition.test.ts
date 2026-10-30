@@ -74,7 +74,49 @@ it('checks instruction bytes and UTF-8 before returning the pinned section', asy
   expect(() =>
     parseHostedAgentDefinition({
       ...identity,
+      instructionsRef: { ...ref, kind: 'managed-tool-result-content' },
+    }),
+  ).toThrow('Invalid agent instructions reference.');
+  expect(() =>
+    parseHostedAgentDefinition({
+      ...identity,
+      instructionsRef: { ...ref, schemaVersion: 2 },
+    }),
+  ).toThrow('Invalid agent instructions reference.');
+  expect(() =>
+    parseHostedAgentDefinition({
+      ...identity,
       instructionsRef: { ...ref, byteLength: 65537 },
     }),
+  ).toThrow();
+});
+
+it('accepts only bounded Skill resource references on create', () => {
+  const skillsRef = {
+    resourceId: 'skills',
+    kind: 'managed-agent-skills',
+    schemaVersion: 1,
+    byteLength: 100,
+    digest: 'c'.repeat(64),
+  };
+  for (const byteLength of [100, 48 * 1024 + 1, 2 * 1024 * 1024]) {
+    const ref = { ...skillsRef, byteLength };
+    expect(
+      parseHostedAgentDefinition({ ...identity, skillsRef: ref })?.skillsRef,
+    ).toEqual(ref);
+  }
+  for (const change of [
+    { kind: 'managed-agent-instructions' },
+    { schemaVersion: 2 },
+    { byteLength: 2 * 1024 * 1024 + 1 },
+  ])
+    expect(() =>
+      parseHostedAgentDefinition({
+        ...identity,
+        skillsRef: { ...skillsRef, ...change },
+      }),
+    ).toThrow('Invalid agent skills reference.');
+  expect(() =>
+    parseHostedAgentDefinition({ ...identity, skillsRef }, false),
   ).toThrow();
 });

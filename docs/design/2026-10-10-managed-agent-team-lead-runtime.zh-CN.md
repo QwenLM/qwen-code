@@ -101,7 +101,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
   - `hosted-child-agent-session.ts`:通知中的 `<teammate>` 标签,以及 `sendToChild` 拒绝续跑未删除团队的成员。
   - `hosted-harness-session.ts`:漏斗接线与重开白名单。
   - `hosted-tool-approval.ts`:`task_list` 预批准。
-- `packages/sdk-java/managed-agent-server`:`ManagedActionService.PREVIEW_TOOLS`,一个协调器测试,证明带开启团队的 lead 关闭会取消其成员且不写任何团队记录,以及一个生命周期门禁测试,确保关闭声明下团队记录仍被拒绝。
+- `packages/managed-agent-server`:`ManagedActionService.PREVIEW_TOOLS`,一个协调器测试,证明带开启团队的 lead 关闭会取消其成员且不写任何团队记录,以及一个生命周期门禁测试,确保关闭声明下团队记录仍被拒绝。
 - 各文件旁的测试,以及 `.qwen/e2e-tests/` 中的 E2E 计划。
 
 ## 验证计划

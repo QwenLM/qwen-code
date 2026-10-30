@@ -344,3 +344,23 @@ export function matchesSearchQuery(
     field ? field.toLowerCase().includes(normalized) : false,
   );
 }
+
+/** Read-only scroll bodies keep a content row even when their chrome cannot fit. */
+export function scrollDialogLayout(
+  regionHeight: number | undefined,
+  normalChromeRows: number,
+  bodyCap: number,
+): { compact: boolean; border: boolean; bodyRows: number } {
+  const compact =
+    regionHeight !== undefined && regionHeight <= normalChromeRows;
+  const border = regionHeight === undefined || regionHeight >= 3;
+  const chrome = compact ? (border ? 2 : 0) : normalChromeRows;
+  return {
+    compact,
+    border,
+    bodyRows:
+      regionHeight === undefined
+        ? bodyCap
+        : Math.min(bodyCap, regionHeight - chrome),
+  };
+}

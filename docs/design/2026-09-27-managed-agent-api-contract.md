@@ -49,7 +49,7 @@ the checks that D2 and D3 build on.
 ### 4.1 Spec location and format
 
 The spec moves into
-`packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
+`packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
 and becomes the single source; the design repository points here from now on.
 
 It is stored as JSON rather than YAML. The repository's yamllint rules require
@@ -256,7 +256,7 @@ WebShell client sends `text`, so both must change together in D2.
 
 ## 9. Validation
 
-- `mvn test` in `packages/sdk-java/managed-agent-server` runs the three
+- `mvn test` in `packages/managed-agent-server` runs the three
   contract tests with the recorded gaps.
 - Mutations each fail the matching test: a new field on a record, a new mapped
   route, a removed gap line, and a spec change without regenerating the
