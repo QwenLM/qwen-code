@@ -254,6 +254,8 @@ export const MOD_GUEST_FACTORY = String.raw`
       run.signal = signalFor(run);
       runs.set(run.id, run);
       run.selected = hooks.filter(h => patternMatches(h.event, run.event) && !run.leftOut.includes(h.id));
+      // A caught late-drop error must not leave a stale plugin fallback.
+      const promptFallbacks = new Map();
       const invoke = async (index, input, frames) => {
         const hook = run.selected[index];
         if (!hook) return call(run.id, frames, 'next', input);
@@ -273,12 +275,18 @@ export const MOD_GUEST_FACTORY = String.raw`
         status(run.id, 'validateResult', encode(answer));
         const below = await last;
         if (object(answer) && 'drop' in answer && (!object(below) || answer.drop !== below.drop)) {
-          status(run.id, 'promptFallback', encode(below));
-          throw new Error('a drop after its next(e) was answered');
+          const error = new Error('a drop after its next(e) was answered');
+          promptFallbacks.set(error, below);
+          throw error;
         }
         return below;
       };
-      return encode(await invoke(0, run.input, []));
+      try {
+        return encode(await invoke(0, run.input, []));
+      } catch (error) {
+        if (promptFallbacks.has(error)) status(run.id, 'promptFallback', encode(promptFallbacks.get(error)));
+        throw error;
+      }
     },
     recover: async json => {
       const recovery = parse(json);

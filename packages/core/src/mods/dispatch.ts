@@ -426,5 +426,7 @@ export interface ModInvocation {
   recovering: boolean;
   aborted: boolean;
   last?: Promise<unknown>;
+  // A local late-drop fallback does not count as a host continuation.
+  promptFallback?: Promise<unknown>;
   next: (input: ModInput, frames: ModFrame[]) => Promise<unknown>;
 }

@@ -100,7 +100,7 @@ These go into the user guide:
   - which plugins hear the event, and a host that raises none skipping its hooks;
   - the prompt and context that arrive beneath the hooks, and an answer after `next` that changes nothing;
   - a hook's drop, and a hook that answers without `next`;
-  - a downstream drop's reason survives a post-next text answer across plugins, within one plugin, and during recovery;
+  - a downstream drop's reason survives a post-next text answer across plugins, within one plugin, and during recovery; a caught late drop does not replace a later local continuation's outcome or mark a host continuation as called;
   - a drop after `next`, a changed `origin` or `wait`, a context that is not a list, a wrong answer and a throw, each skipped;
   - a `.catch` that drops for a failed guard.
 - Mod session tests: no hooks, the origin, a rewrite with context, a drop's one line and its 4,096 characters, a failed worker, a cancelled prompt, and a prompt too long for a payload.

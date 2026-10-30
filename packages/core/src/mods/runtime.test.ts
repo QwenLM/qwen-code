@@ -1186,6 +1186,61 @@ describe('ModRuntime with the real QuickJS worker', () => {
     },
   );
 
+  it.each([false, true])(
+    'retains the latest local next after catching a late drop (first reaches host: %s)',
+    async (reachesHost) => {
+      const runtime = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', async ($, e, next) => {
+            try { await next({...e, text: 'first'}); }
+            catch (error) { $.ui.log(error.message); }
+            return next({...e, text: 'second'});
+          });
+          on('prompt.*', async ($, e, next) => {
+            const below = await next(e);
+            return e.text === 'first' ? {drop: 'too late'} : below;
+          });
+          on('*', {text: /^(first|second)$/}, ($, e, next) => {
+            $.ui.log('guard:' + e.text);
+            ${reachesHost ? "if (e.text === 'first') return next(e);" : ''}
+            return {drop: e.text + ' guard'};
+          });
+        }`,
+      ]);
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'second guard',
+        byHook: true,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        'guard:first',
+        'a drop after its next(e) was answered',
+        'guard:second',
+      ]);
+    },
+  );
+
+  it('keeps next.called false for a late drop within one plugin', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          await next(e);
+          return {drop: 'too late'};
+        }).catch(($, e, next) => {
+          $.ui.log('called:' + next.called);
+          return {text: e.text};
+        });
+        on('prompt.*', () => ({drop: 'secret guard'}));
+      }`,
+    ]);
+
+    expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+      drop: 'a hook answered without passing the prompt on',
+      byHook: false,
+    });
+    expect(logs.map((log) => log.text)).toEqual(['called:false']);
+  });
+
   it('skips a hook that fails, drops after its next or changes what is pinned', async () => {
     const runtime = await createTurns([
       `export function register(on) {

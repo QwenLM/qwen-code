@@ -219,7 +219,8 @@ class Realm {
         if (name === 'validate') validateInput(call.event, value, call.input);
         else {
           validateResult(call.event, value, call.input);
-          if (name === 'promptFallback') call.last = Promise.resolve(value);
+          if (name === 'promptFallback')
+            call.promptFallback = Promise.resolve(value);
         }
         return this.vm.undefined;
       }
@@ -501,7 +502,6 @@ async function dispatch(
         }),
       );
       validateResult(event, value, call.input);
-      await assertDropBeforeNext(event, value, call.last);
       if (event === 'tool.check')
         return await ownCheck(
           value as ModToolCheckResult,
@@ -569,7 +569,10 @@ async function dispatch(
           text: event + ' hook skipped: ' + why.slice(0, 2000),
         });
       }
-      return await (recovery.last ?? call.last ?? next(input, frames));
+      return await (recovery.last ??
+        call.last ??
+        call.promptFallback ??
+        next(input, frames));
     }
   } finally {
     call.live = false;
