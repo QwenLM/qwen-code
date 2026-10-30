@@ -181,8 +181,8 @@ class HostedProcessCrashIT {
                     String.class, tenant, session, turn)), 45, "recovered Turn completion");
             assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
                     null, null, 200).path("status").asText()).isEqualTo("completed");
-            await(() -> api("GET", "/v1/agents/sessions/" + session + "/items?limit=100",
-                    null, null, 200).toString().contains("RESTART_OK"), 15,
+            await(() -> itemsWhenProjected(session)
+                    .map(node -> node.toString().contains("RESTART_OK")).orElse(false), 15,
                     "materialized recovered output");
 
             JsonNode state = driverState();
@@ -216,8 +216,8 @@ class HostedProcessCrashIT {
             await(() -> "COMPLETED".equals(jdbc.queryForObject("SELECT status FROM ma_turn"
                             + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
                     String.class, tenant, session, followupTurn)), 30, "following Turn completion");
-            await(() -> api("GET", "/v1/agents/sessions/" + session + "/items?limit=100",
-                    null, null, 200).toString().contains("FOLLOW_UP_OK"), 15,
+            await(() -> itemsWhenProjected(session)
+                    .map(node -> node.toString().contains("FOLLOW_UP_OK")).orElse(false), 15,
                     "materialized following output");
             state = driverState();
             assertThat(state.path("primaryRequests").asInt()).isEqualTo(1);
@@ -284,6 +284,33 @@ class HostedProcessCrashIT {
                 assertThat(response.statusCode()).as("%s %s: %s", method, route, response.body())
                         .isEqualTo(expected);
                 return JSON.readTree(response.body());
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        // The public reader answers 503 message_projection_pending while
+        // projection catches up, and its contract calls that retryable (#15909):
+        // a projection lagging behind committed events must be retried, not
+        // exported as history. Return empty for that one response so the caller's
+        // await() loop polls again, instead of unwinding on the first lagging read
+        // taken right after the coordinator restart.
+        private java.util.Optional<JsonNode> itemsWhenProjected(String session) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder(URI.create(
+                                "http://127.0.0.1:" + port + "/v1/agents/sessions/" + session
+                                        + "/items?limit=100"))
+                        .timeout(java.time.Duration.ofSeconds(10))
+                        .header("X-Qwen-Tenant-Id", tenant).header("X-Qwen-Actor-Id", "actor")
+                        .header("Accept", "application/json")
+                        .GET().build();
+                HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() == 503
+                        && response.body().contains("message_projection_pending")) {
+                    return java.util.Optional.empty();
+                }
+                assertThat(response.statusCode()).as("GET /items: %s", response.body()).isEqualTo(200);
+                return java.util.Optional.of(JSON.readTree(response.body()));
             } catch (Exception error) {
                 throw new IllegalStateException(error);
             }
