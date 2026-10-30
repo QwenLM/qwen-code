@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
+import * as runtimeInfo from '../utils/runtime-info.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -239,6 +240,13 @@ describe('Landlock execution adapter', () => {
 
   it('launches the helper through the relay with read and write grants', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    const interpreter = path.join(policy.installation, 'bun', 'bin', 'bun');
+    mkdirSync(path.dirname(interpreter), { recursive: true });
+    writeFileSync(interpreter, 'fixture');
+    vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
+      command: interpreter,
+      runtime: 'bun',
+    });
     let relayLaunch!: ProcessLaunch;
     executeSandboxRelay.mockImplementation(
       async (_policy, _payload, _roots, createLaunch) => {
@@ -276,6 +284,10 @@ describe('Landlock execution adapter', () => {
       new AbortController().signal,
     );
 
+    expect(relayLaunch.executable).toBe(realpathSync(interpreter));
+    expect(executeSandboxRelay.mock.calls[0][2]).toContain(
+      path.dirname(realpathSync(interpreter)),
+    );
     expect(relayLaunch.env).toEqual({
       PATH: '/usr/bin:/bin',
       LANG: 'C.UTF-8',

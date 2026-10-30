@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.model;
 
+import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -71,21 +72,23 @@ public final class ApiModels {
             Map<String, Object> metadata,
             Boolean stream,
             JsonNode workspace,
-            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills,
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree) {
+        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
+                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
+                List<Pin> extensionPins) {
+            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, null);
+        }
+        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
+                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills) {
+            this(agentId, agentRevision, input, metadata, stream, workspace, skills, null);
+        }
     }
 
-    // D7-3: admission_profile asks a Turn input or cancel for the
-    // java_durable admission view; absent means harness_confirmed.
     public record SessionEventRequest(@NotBlank String type,
             @Size(max = 100) List<@Valid InputBlock> input,
-            @JsonProperty("turn_id") String turnId,
-            @Pattern(regexp = ADMISSION_PROFILES)
-            @JsonProperty("admission_profile") String admissionProfile) {
+            @JsonProperty("turn_id") String turnId) {
     }
-
-    /** The admission profiles a Turn input or cancel may ask for (D7-3). */
-    public static final String ADMISSION_PROFILES =
-            "harness_confirmed|java_durable";
 
     public record UpdateSessionRequest(
             // Single policy owner: ManagedAgentService.validRenameTitle
@@ -132,6 +135,14 @@ public final class ApiModels {
             long contextRevision, String state) {
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicSessionWorktree(String id, @JsonProperty("session_id") String sessionId,
+            @JsonProperty("workspace_id") String workspaceId, String state, String branch,
+            @JsonProperty("base_commit") String baseCommit, @JsonProperty("cwd_relative") String cwdRelative,
+            @JsonProperty("operation_id") String operationId, long revision,
+            @JsonProperty("error_code") String errorCode) {
+    }
+
     public record SessionCapabilities(
             boolean items,
             boolean snapshots,
@@ -145,22 +156,21 @@ public final class ApiModels {
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("durable_operations") Boolean durableOperations,
             @JsonProperty("context_compression") boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell, Boolean durableOperations, boolean contextCompression) {
+                Boolean foregroundShell, boolean contextCompression) {
             this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, durableOperations, contextCompression, null);
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, contextCompression, null);
         }
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell, Boolean durableOperations) {
+                Boolean foregroundShell) {
             this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, durableOperations, false);
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, false);
         }
     }
 
@@ -170,27 +180,26 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange, Boolean durableOperations,
+                Boolean modelChange, Boolean approvalModeChange,
                 Boolean inputAttachments, Boolean rename, boolean contextCompression) {
             this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
                     sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    durableOperations, inputAttachments, rename, contextCompression, null);
+                    inputAttachments, rename, contextCompression, null);
         }
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange, Boolean durableOperations,
+                Boolean modelChange, Boolean approvalModeChange,
                 Boolean inputAttachments, Boolean rename) {
             this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
                     sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    durableOperations, inputAttachments, rename, false);
+                    inputAttachments, rename, false);
         }
     }
 
@@ -212,7 +221,18 @@ public final class ApiModels {
             @JsonProperty("workspace") PublicWorkspace workspace,
             @JsonProperty("compaction_revision") Long compactionRevision,
             @JsonProperty("context_compression_operation_id") String contextCompressionOperationId,
-            SessionRecovery recovery) {
+            SessionRecovery recovery,
+            PublicSessionWorktree worktree) {
+        public PublicSession(String id, String object, String agentId, String agentRevision,
+                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
+                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
+                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
+                PublicWorkspace workspace, Long compactionRevision, String contextCompressionOperationId,
+                SessionRecovery recovery) {
+            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
+                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
+                    capabilities, workspace, compactionRevision, contextCompressionOperationId, recovery, null);
+        }
         public PublicSession(String id, String object, String agentId, String agentRevision,
                 String agentDefinitionDigest, String status, long createdAt, long updatedAt,
                 Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
@@ -243,7 +263,18 @@ public final class ApiModels {
                     agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence,
                     snapshotThroughSequence, capabilities, workspace,
-                    compactionRevision, contextCompressionOperationId, value);
+                    compactionRevision, contextCompressionOperationId, value, worktree);
+        }
+
+        public PublicSession withWorktree(com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor value) {
+            return new PublicSession(id, object, agentId, agentRevision,
+                    agentDefinitionDigest, status, createdAt, updatedAt,
+                    metadata, activeTurn, lastEventId, replayFloorSequence,
+                    snapshotThroughSequence, capabilities, workspace,
+                    compactionRevision, contextCompressionOperationId, recovery,
+                    value == null ? null : new PublicSessionWorktree(value.id(), value.sessionId(), value.workspaceId(),
+                            value.state(), value.branch(), value.baseCommit(), value.cwdRelative(), value.operationId(),
+                            value.revision(), value.errorCode()));
         }
     }
 
@@ -408,7 +439,7 @@ public final class ApiModels {
     public record WebShellSessionSkills(List<WebShellSkill> skills) { }
 
     public record WebShellTranscriptRequest(@NotBlank String sessionId,
-            String cursor, Integer limit) {
+            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit) {
     }
 
     public record WebShellStreamRequest(@NotBlank String sessionId,
@@ -418,18 +449,35 @@ public final class ApiModels {
     public record WebShellCreateRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey,
             @NotBlank @Size(max = 128) String agentId,
-            String environmentId, String title,
+            String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            JsonNode workspace, String approvalMode, Boolean planMode,
-            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
+            JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills,
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode,
+                    planMode, modelId, skills, extensionPins, null);
+        }
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode, planMode, modelId, skills, null);
+        }
     }
 
     public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {
     }
 
     public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
-            boolean planModeSupported, boolean inputAttachments, boolean skillsSupported) {
+            boolean planModeSupported, boolean inputAttachments, boolean skillsSupported,
+            boolean modelSelectionSupported) {
+        public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
+                boolean planModeSupported, boolean inputAttachments, boolean skillsSupported) {
+            this(approvalMode, availableApprovalModes, planModeSupported, inputAttachments, skillsSupported, false);
+        }
         public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
                 boolean planModeSupported, boolean inputAttachments) {
             this(approvalMode, availableApprovalModes, planModeSupported, inputAttachments, false);
@@ -439,7 +487,11 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+    public record WebShellApprovalSelection(String mode, long revision, boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {
+        public WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+            this(mode, revision, planMode, null);
+        }
         public WebShellApprovalSelection(String mode, long revision) {
             this(mode, revision, false);
         }
@@ -447,7 +499,8 @@ public final class ApiModels {
 
     public record WebShellSessionApproval(String approvalMode, long approvalRevision,
             List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported,
-            boolean liveSupported) {}
+            boolean liveSupported, boolean permissionRulesSupported,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {}
 
     public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
 
@@ -455,10 +508,15 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String sessionId,
             @NotBlank @Size(max = 128) String idempotencyKey,
             @NotBlank String approvalMode,
-            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode) {}
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode,
+            Map<String, Object> permissionRules) {}
 
     public record WebShellApprovalChangeResult(String sessionId, String approvalMode,
-            long approvalRevision, boolean replayed, boolean planMode) {
+            long approvalRevision, boolean replayed, boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, List<String>> permissionRules) {
+        public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed, boolean planMode) {
+            this(sessionId, approvalMode, approvalRevision, replayed, planMode, null);
+        }
         public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed) {
             this(sessionId, approvalMode, approvalRevision, replayed, false);
         }
@@ -486,14 +544,12 @@ public final class ApiModels {
     public record WebShellSubmitRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
             @Size(max = 100) List<@Valid InputBlock> input,
-            Map<String, Object> metadata,
-            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
+            Map<String, Object> metadata) {
     }
 
     public record WebShellCancelRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
-            @NotBlank String turnId,
-            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
+            @NotBlank String turnId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -531,12 +587,6 @@ public final class ApiModels {
             Long compactionRevision, String outcome, String failureCode, boolean replayed) {
     }
 
-    public record ChangeCwdRequest(
-            @NotNull @JsonProperty("cwd_relative") String cwdRelative,
-            @NotNull @JsonProperty("expected_context_revision")
-                    Long expectedContextRevision) {
-    }
-
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicCwdOperation(
             String id,
@@ -550,14 +600,6 @@ public final class ApiModels {
                     Long resultContextRevision,
             @JsonProperty("failure_code") String failureCode,
             boolean replayed) {
-    }
-
-    public record WebShellChangeCwdRequest(
-            @Size(max = 128) String requestId,
-            @NotBlank String sessionId,
-            @NotBlank @Size(max = 128) String idempotencyKey,
-            @NotNull String cwdRelative,
-            @NotNull Long expectedContextRevision) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -642,7 +684,20 @@ public final class ApiModels {
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
             Long compactionRevision, String contextCompressionOperationId,
-            WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery) {
+            WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery,
+            com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor worktree) {
+        public WebShellSession(String sessionId, String title, String agentId, String status,
+                long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
+                long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
+                String approvalMode, WebShellModelContext modelContext, WebShellModelSelection modelSelection,
+                Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
+                Long compactionRevision, String contextCompressionOperationId,
+                WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn, environment, lastSequence,
+                    workspace, capabilities, approvalMode, modelContext, modelSelection, approvalRevision,
+                    initialApprovalMode, planMode, planModeSupported, compactionRevision,
+                    contextCompressionOperationId, lifecycleOperation, recovery, null);
+        }
         public WebShellSession(String sessionId, String title, String agentId, String status,
                 long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
                 long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
@@ -690,11 +745,24 @@ public final class ApiModels {
                     workspace, capabilities, approvalMode, modelContext,
                     modelSelection, approvalRevision, initialApprovalMode,
                     planMode, planModeSupported, compactionRevision, contextCompressionOperationId,
-                    lifecycleOperation, value);
+                    lifecycleOperation, value, worktree);
+        }
+
+        public WebShellSession withWorktree(com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor value) {
+            return new WebShellSession(sessionId, title, agentId, status,
+                    createdAt, updatedAt, activeTurn, environment, lastSequence,
+                    workspace, capabilities, approvalMode, modelContext,
+                    modelSelection, approvalRevision, initialApprovalMode,
+                    planMode, planModeSupported, compactionRevision, contextCompressionOperationId,
+                    lifecycleOperation, recovery, value);
         }
     }
 
-    /** H6b: the definition fields a create or revise request carries. */
+    /**
+     * H6b: the definition fields a create or revise request carries. The
+     * gate is a JsonNode so an explicit null — which clears a committed
+     * gate — stays distinct from an absent field, which keeps it.
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record AutomationDefinitionRequest(
             @JsonProperty("session_id") String sessionId, String goal,
@@ -702,7 +770,24 @@ public final class ApiModels {
             @JsonProperty("session_mode") String sessionMode, String overlap,
             @JsonProperty("catch_up") String catchUp,
             @JsonProperty("catch_up_limit") Long catchUpLimit,
-            Boolean enabled) {
+            Boolean enabled, JsonNode gate) {
+        public AutomationDefinitionRequest(String sessionId, String goal,
+                String cron, String timezone, String prompt,
+                String sessionMode, String overlap, String catchUp,
+                Long catchUpLimit, Boolean enabled) {
+            this(sessionId, goal, cron, timezone, prompt, sessionMode,
+                    overlap, catchUp, catchUpLimit, enabled, null);
+        }
+    }
+
+    /** The recent outcomes of a definition's gate probe. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomationGateStatus(
+            @JsonProperty("last_outcome") String lastOutcome,
+            @JsonProperty("last_at") long lastAt,
+            @JsonProperty("quiet_since_delivery") int quietSinceDelivery,
+            @JsonProperty("consecutive_failures") int consecutiveFailures,
+            @JsonProperty("last_error") String lastError) {
     }
 
     /** H6b: one automation definition at its current revision. */
@@ -716,7 +801,8 @@ public final class ApiModels {
             @JsonProperty("catch_up_limit") Long catchUpLimit,
             boolean enabled, String state,
             @JsonProperty("created_at") long createdAt,
-            @JsonProperty("updated_at") long updatedAt) {
+            @JsonProperty("updated_at") long updatedAt, String gate,
+            @JsonProperty("gate_status") PublicAutomationGateStatus gateStatus) {
     }
 
     /** H5c: one route binding of a channel connection (PublicChannelRoute). */

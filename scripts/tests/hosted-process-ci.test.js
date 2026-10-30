@@ -145,6 +145,54 @@ const failoverArms = [
     ],
   ],
   [
+    'Run takeover load reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-load-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'load-reply-lost',
+    ],
+  ],
+  [
+    'Run committed terminal reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'terminal-reply-lost',
+    ],
+  ],
+  [
+    'Run missing terminal write E2E',
+    'test:e2e:managed-harness-restart-approval-terminal-write-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'terminal-write-failed',
+    ],
+  ],
+  [
+    'Run refused cleanup release E2E',
+    'test:e2e:managed-harness-restart-approval-cleanup-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'cleanup-failed',
+    ],
+  ],
+  [
     'Run Harness-restart continuation closeout E2E',
     'test:e2e:managed-harness-restart-continuation-closeout',
     ['--continuation-failover', '--harness-only', '--g3-verify continuation'],
@@ -241,7 +289,7 @@ describe('Hosted real-process gates', () => {
       step: 'Hosted process suite',
       after: /^Run tests and generate reports$/,
       condition:
-        "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}",
+        "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}",
       run: windowsRun,
       minutes: 10,
     },
@@ -260,25 +308,28 @@ describe('Hosted real-process gates', () => {
     },
   );
 
+  it('gates the Windows Hosted suite on a successful install', () => {
+    const steps = ci.jobs.test_windows.steps;
+    // An unknown step id reads as '' and silently disables the condition
+    // above, so the suite would never run again.
+    expect(steps.find((step) => step.name === 'Install dependencies').id).toBe(
+      'install',
+    );
+  });
+
   it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    // The non-Hosted slice runs once per engine, so the Hosted lane stays the
-    // only place Hosted*IT executes while MariaDB keeps a real leg (#14971).
+    // Hosted*IT executes only in the separate Hosted lane.
     const nonHostedLane = java.jobs['mysql-integration'];
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mysql:8.4.6' }),
-    );
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mariadb:10.11.18' }),
-    );
+    expect(nonHostedLane.strategy).toBeUndefined();
     expect(
       nonHostedLane.steps.find(
         (step) => step.name === 'Start the database without native AIO',
       ).run,
-    ).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -571,11 +622,11 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (198 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 288, 301],
-    // Twenty failover arms at 10 each.
-    ['hosted-failover-e2e', 200, 215],
+    ['hosted-harness-mysql', 291, 304],
+    // Twenty-four failover arms at 10 each.
+    ['hosted-failover-e2e', 240, 255],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
@@ -823,15 +874,46 @@ describe('Hosted real-process gates', () => {
       // cancel-isolation cell adds 11 s (2x its measured 5.1 s), moving the fork to
       // 11223 and the step to 198 minutes; the FG11d queue-one cell adds 13 s
       // (2x its measured 6.5 s), moving the fork to 11236 and leaving the step at
-      // 198 minutes):
+      // 198 minutes; the FG12e Runtime connection replacement cell adds 28 s
+      // (2x its measured 13.8 s), moving the fork to 11264 and leaving the step
+      // at 198 minutes). The pool fixture provisionally adds 180 s (its
+      // 120 s method ceiling plus 60 s for process/context cleanup), moving
+      // the fork to 11444 and the step to 201 minutes until CI measures it:
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11236);
+        expect(forkSeconds).toBe(11444);
       }
     },
   );
+
+  it('runs the Broker fault gates even when the Hosted verify fails', () => {
+    const steps = java.jobs['hosted-harness-mysql'].steps;
+    const gates = steps.find(
+      (step) => step.name === 'Run Runtime Broker fault gates',
+    );
+    // Without a condition a red Hosted verify skipped them on 11 of the 14
+    // nights to 10-27, though they need neither its build nor MySQL.
+    expect(gates.if).toBe(
+      "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
+    );
+    expect(gates['continue-on-error']).toBeUndefined();
+    // An unknown step id reads as '' and would skip the gates on every run.
+    // The install step itself runs only after every setup step before it,
+    // the CLI bundle the gates spawn among them, succeeded.
+    const install = steps.find((step) => step.id === 'managed_dependencies');
+    expect(install, 'the managed_dependencies step').toBeDefined();
+    expect(install.name).toBe('Install Managed Agent dependencies');
+    expect(install.if).toBeUndefined();
+    expect(install.run).toContain('-f packages/sdk-java/qwencode/pom.xml');
+    const bundle = steps.findIndex(
+      (step) => step.name === 'Install, build and bundle CLI',
+    );
+    expect(bundle).toBeGreaterThan(-1);
+    expect(bundle).toBeLessThan(steps.indexOf(install));
+    expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(gates));
+  });
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
@@ -923,13 +1005,16 @@ describe('Hosted real-process gates', () => {
   // 5.8s), so it becomes 10587s; the second-fire refusal cell adds 25s (2x its
   // measured 12.3s), so it becomes 10612s; the cancel-isolation cell adds 11s (2x its measured
   // 5.1s), so it becomes 10623s; the queue-one cell adds 13s (2x its measured
-  // 6.5s), so it becomes 10636s. The
+  // 6.5s), so it becomes 10636s; the FG12e Runtime connection replacement cell
+  // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
+  // provisionally reserves 180s (its 120s method ceiling plus 60s for
+  // process/context cleanup), so it becomes 10844s until CI measures it. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10636;
+  const hostedForkHealthySeconds = 10844;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -998,6 +1083,7 @@ describe('Hosted real-process gates', () => {
       'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHarnessPoolMySqlIT',
       'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
       'HostedHookMessageDisplayReloadIT',

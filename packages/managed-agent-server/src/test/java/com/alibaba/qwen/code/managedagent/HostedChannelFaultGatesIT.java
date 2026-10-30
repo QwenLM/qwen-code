@@ -379,9 +379,9 @@ class HostedChannelFaultGatesIT {
                 if (!match.find()) {
                     return null;
                 }
-                // qwen serve falls back attemptPort+1 on EADDRINUSE; a
-                // harness on a fallback port invalidates the pre-baked
-                // harness.base-url, so the bound port must be the reserved one.
+                // --profile hosted-harness exits on EADDRINUSE instead of
+                // moving, so a collision surfaces as a harness exit; this check
+                // keeps the pre-baked harness.base-url honest should it move.
                 if (Integer.parseInt(match.group(1)) != harnessPort) {
                     return new IllegalStateException("harness bound port "
                             + match.group(1) + " instead of the reserved "
@@ -468,7 +468,7 @@ class HostedChannelFaultGatesIT {
                 "--qwen.managed-agent.internal-server.address=127.0.0.1",
                 "--qwen.managed-agent.internal-server.port=" + internal);
         internalPort = internal;
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"

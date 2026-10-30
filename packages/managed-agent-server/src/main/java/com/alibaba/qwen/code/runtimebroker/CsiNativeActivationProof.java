@@ -64,6 +64,17 @@ public final class CsiNativeActivationProof {
             long leaseDurationMs, long expiresAt, long renewalSequence, long epoch, long writerGeneration) {
     }
 
+    public static Activation renewed(Activation activation, Long expiresAt, Long renewalSequence) {
+        if (expiresAt == null && renewalSequence == null) {
+            return activation;
+        }
+        require(activation != null && expiresAt != null && renewalSequence != null
+                && expiresAt >= activation.expiresAt() && expiresAt <= MAX_SAFE
+                && renewalSequence > activation.renewalSequence() && renewalSequence <= MAX_SAFE);
+        return new Activation(activation.activationId(), activation.workerId(), activation.installRef(),
+                activation.leaseDurationMs(), expiresAt, renewalSequence, activation.epoch(), activation.writerGeneration());
+    }
+
     public record TerminalProof(Activation predecessorActivation, Prefix predecessorPrefix, JsonNode boundaryRef,
             long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
             long terminalSequence, String lastRecordUuid) {
@@ -1593,7 +1604,7 @@ public final class CsiNativeActivationProof {
         require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
                 && text(ref, "digest").equals(text(metadata, "contentDigest")));
         closed(state, Set.of("identity", "resume", "continuation", "attempt", "tools", "runtime", "approval",
-                "output", "followUp"));
+                "output", "followUp", "agentWait", "commandWait", "commandLock"));
         JsonNode identity = state.path("identity");
         closed(identity, Set.of("schemaVersion", "sessionKey", "engine", "checkpointId", "coveredSequence",
                 "activationId", "turnId", "promptId", "definitionRevision", "configRevision", "inputDigest",
@@ -1626,7 +1637,7 @@ public final class CsiNativeActivationProof {
         closed(continuation, Set.of("phase", "pendingEventIds"));
         require("before_model".equals(text(continuation, "phase")));
         emptyArrays(continuation, "pendingEventIds");
-        nullFields(state, "attempt", "tools", "runtime", "approval");
+        nullFields(state, "attempt", "tools", "runtime", "approval", "agentWait", "commandWait", "commandLock");
         JsonNode output = state.path("output");
         closed(output, Set.of("llmContentRef", "physicalStatus", "hookResultRef", "mediaRefs", "parentHistory"));
         nullFields(output, "llmContentRef", "physicalStatus", "hookResultRef", "parentHistory");

@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBundledMem0Server, bundledMem0Hooks } from './mem0-settings.js';
+import * as runtimeInfo from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -24,7 +25,10 @@ vi.mock('@qwen-code/qwen-code-core/utils/bundlePaths.js', () => ({
   resolveBundleDir: () => process.cwd(),
 }));
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 
 describe('bundled Mem0 settings', () => {
   it('generates a read-only scoped MCP without serializing credentials', () => {
@@ -194,6 +198,49 @@ describe('bundled Mem0 settings', () => {
         }),
       ],
     });
+  });
+
+  it('uses the private interpreter for both Mem0 spawn and bundled identity', () => {
+    const interpreter = join(
+      process.cwd(),
+      'private runtime',
+      'bun',
+      'bin',
+      'bun',
+    );
+    vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
+      command: interpreter,
+      runtime: 'bun',
+    });
+    const server = createBundledMem0Server(
+      { baseUrl: 'https://mem0.example', enableWrites: true },
+      process.cwd(),
+      true,
+    );
+    expect(server.command).toBe(interpreter);
+    const hooks = bundledMem0Hooks(server);
+    const quote = (value: string) =>
+      "'" +
+      value.replaceAll("'", process.platform === 'win32' ? "''" : "'\\''") +
+      "'";
+    expect(hooks).toEqual({
+      PreToolUse: [
+        expect.objectContaining({
+          hooks: [
+            expect.objectContaining({
+              command:
+                (process.platform === 'win32' ? '& ' : 'exec ') +
+                quote(interpreter) +
+                ' ' +
+                quote(join(process.cwd(), 'mem0', 'write-confirmation.js')),
+            }),
+          ],
+        }),
+      ],
+    });
+    for (const command of [process.execPath, 'node', 'bun']) {
+      expect(bundledMem0Hooks({ ...server, command })).toBeUndefined();
+    }
   });
 
   it('pins the spawn interpreter and the timeout slack to the runtime contract', () => {

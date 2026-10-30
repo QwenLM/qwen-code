@@ -96,6 +96,11 @@ function SettingsHarness() {
       theme={theme}
       sidebar={params.get('sidebar') === 'false' ? false : undefined}
       settings={{ includeItems, excludeItems }}
+      loadingPhrases={
+        params.has('loadingPhrase')
+          ? () => [params.get('loadingPhrase')!]
+          : undefined
+      }
       modelManagement={modelManagement}
       unavailableModels={unavailableModels}
       mountUnavailableModelTooltip={mountUnavailableModelTooltip}

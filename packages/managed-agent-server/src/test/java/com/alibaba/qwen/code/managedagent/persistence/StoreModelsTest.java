@@ -52,9 +52,8 @@ class StoreModelsTest {
 
     // The recorder half of every command replay gate. A stamped receipt
     // answers only its recorder; the UNATTRIBUTED stamp answers nobody, so
-    // a server-keyed command stays on the creator gate; and a receipt
-    // recorded before the stamp existed (NULL) keeps the role-gated replay
-    // it was recorded under for any caller with an actor id.
+    // a server-keyed command stays on the creator gate. A missing stamp
+    // cannot identify a recorder.
     @Test
     void admitsReplayByFollowsTheRecorderStamp() {
         byte[] recorder = ManagedWorkspaceRegistry.actorKey("tenant", "actor-a");
@@ -69,13 +68,12 @@ class StoreModelsTest {
         assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy(null))
                 .isFalse();
 
-        assertThat(command(null).admitsReplayBy("actor-b")).isTrue();
+        assertThat(command(null).admitsReplayBy("actor-b")).isFalse();
         assertThat(command(null).admitsReplayBy(null)).isFalse();
     }
 
     // Every command receipt this build writes carries a recorder column: an
-    // actor-less insert stores the zero-byte UNATTRIBUTED stamp, never the
-    // NULL that marks a receipt recorded before the stamp existed.
+    // actor-less insert stores the zero-byte UNATTRIBUTED stamp.
     @Test
     void anActorlessCommandReceiptIsStampedUnattributed() {
         var data = new DriverManagerDataSource("jdbc:h2:mem:receipt-" + UUID.randomUUID()

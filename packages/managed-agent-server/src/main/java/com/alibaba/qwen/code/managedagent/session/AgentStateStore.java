@@ -30,11 +30,11 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Duration;
 import java.util.List;
@@ -221,8 +221,65 @@ public interface AgentStateStore {
                 approvalSelectionSupported, planMode, planModeSupported, skills);
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
+        if (modelId != null) {
+            throw new UnsupportedOperationException("Initial model selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported);
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles) {
+        if (extensionPins != null) {
+            throw new UnsupportedOperationException("Initial extension selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported, modelId);
+    }
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
+
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles,
+            com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Plan worktree) {
+        if (worktree != null) {
+            throw new UnsupportedOperationException("Session worktrees are unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles);
+    }
+
+    default com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor findSessionWorktree(
+            String tenantId, String sessionId) {
+        return null;
+    }
+
+    default Map<String, com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor> findSessionWorktrees(
+            String tenantId, List<String> sessionIds) {
+        return Map.of();
+    }
 
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
@@ -437,20 +494,6 @@ public interface AgentStateStore {
 
     default void awaitContextCompression(OperationRecord operation, String owner,
             boolean acceptanceKnown, String failureCode, long retryAt) {}
-
-    /**
-     * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
-     * or returns the operation the same actor already admitted under the
-     * key. The target directory is already normalized and the request digest
-     * already covers it; admission checks the read grant, replays under the
-     * key, then the caller's Workspace role, the deployment gate, the
-     * Session state, the creator-keyed Registry facts, the expected context
-     * revision and the busy barriers in the pinned order.
-     */
-    OperationAdmission beginCwdChangeOperation(String tenantId,
-            String sessionId, String actorId, String actorDigest,
-            String idempotencyKey, String requestDigest,
-            String targetCwdRelative, long expectedContextRevision);
 
     /**
      * Settles a claimed cwd change in one transaction: re-verifies the
@@ -714,6 +757,14 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("MCP management is unavailable");
     }
 
+    default SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
+    default void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
     default Set<String> findApprovalOwners(String tenantId, String actorId,
             List<String> sessionIds) { return Set.of(); }
 
@@ -734,6 +785,18 @@ public interface AgentStateStore {
         }
         return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
                 supported, agentDefinitionSupported);
+    }
+
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean planMode, boolean planModeSupported,
+            boolean liveSupported, Map<String, List<String>> permissionRules, boolean rulesSupported,
+            boolean autoSupported) {
+        if (permissionRules != null || "auto".equals(mode)) {
+            throw new UnsupportedOperationException("Extended approval policy is unavailable");
+        }
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, planMode, planModeSupported, liveSupported);
     }
 
     default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
@@ -774,23 +837,23 @@ public interface AgentStateStore {
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
-    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward);
 
-    Optional<SnapshotRecord> findSnapshot(String tenantId,
-            String sessionId);
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward, long afterSequence);
 
-    /** The snapshot's covered sequence of each given Session, in one read. */
-    Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+    /** The message projection coverage of each Session, in one read. */
+    Map<String, Long> findMessageCoveredSequences(String tenantId,
             List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
-    /** The Sessions whose Snapshot covers more than their replay floor. */
+    /** The Sessions whose message projection covers more than their replay floor. */
     List<ReplayFloorTarget> findReplayFloorTargets(int limit);
 
     /**
-     * Raises the Session's replay floor, never above the Snapshot's covered
-     * sequence, so a client told to resync can resume from the Snapshot.
+     * Raises the Session's replay floor only through readable message coverage.
      */
     ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence);

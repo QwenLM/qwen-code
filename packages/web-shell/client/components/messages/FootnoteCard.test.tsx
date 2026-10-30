@@ -732,7 +732,7 @@ describe('Host inline footnote icon selection', () => {
       .spyOn(navigator.clipboard, 'writeText')
       .mockResolvedValue();
     render(<AssistantMessage content={resourceReport} showFooterActions />);
-    click(container.querySelector('[aria-label="Copy"]'));
+    click(container.querySelector('[aria-label="Copy Markdown source"]'));
     await act(async () => {});
     expect(writeText).toHaveBeenCalledWith(resourceReport);
     const resolver = vi.fn<WebShellFootnoteIconResolver>();
