@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -71,7 +71,6 @@ class ManagedEventIdentityMigrationTest {
             advanced = transactions.execute(status -> store.materializeNextBatch(tenant, session, 200)).advanced();
         }
         while (advanced);
-        jdbc.update("UPDATE ma_snapshot SET published_at = published_at - 6000 WHERE tenant_id = ? AND session_id = ?", tenant, session);
         transactions.executeWithoutResult(status -> store.materializeNextBatch(tenant, session, 200));
         var identities =
                 jdbc.queryForList(
@@ -82,7 +81,7 @@ class ManagedEventIdentityMigrationTest {
                         session);
         assertThat(identities).hasSize(1);
         var identity = identities.getFirst();
-        var item = store.findSnapshot(tenant, session).orElseThrow().items().getFirst();
+        var item = store.findMessagePage(tenant, session, null, 100, false).items().getFirst();
         assertThat(item.itemId()).isEqualTo(identity.get("item_id"));
         assertThat(item.content()).hasSize(1);
         assertThat(item.content().getFirst().partId()).isEqualTo(identity.get("content_part_id"));

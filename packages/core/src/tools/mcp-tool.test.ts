@@ -128,6 +128,7 @@ describe('DiscoveredMCPTool', () => {
     o: {
       callable?: CallableTool;
       toolName?: string;
+      server?: string;
       trust?: boolean;
       config?: unknown;
       client?: McpDirectClient;
@@ -142,7 +143,7 @@ describe('DiscoveredMCPTool', () => {
   ) =>
     new DiscoveredMCPTool(
       o.callable ?? mockCallableToolInstance,
-      serverName,
+      o.server ?? serverName,
       o.toolName ?? serverToolName,
       baseDescription,
       inputSchema,
@@ -261,6 +262,21 @@ describe('DiscoveredMCPTool', () => {
         expect.objectContaining({ onprogress: expect.any(Function) }),
       );
     });
+
+    it.each([false, true])(
+      'keeps daemon Workflow write permission %s out of MCP metadata',
+      async (workflowModeWriteAllowed) => {
+        const mcpClient = successfulClient();
+        await runWithInvocationContext(
+          { ...invocationContext, workflowModeWriteAllowed },
+          () => exec(createDirectTool(mcpClient, true)),
+        );
+
+        expect(vi.mocked(mcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+          [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+        });
+      },
+    );
 
     it.each([
       { allowInvocationContext: false, runWithContext: true },
@@ -1200,6 +1216,96 @@ describe('DiscoveredMCPTool', () => {
       mimeType: 'text/html;profile=mcp-app',
       text: '<main>Revenue</main>',
       ...extra,
+    });
+
+    it.each([true, false])(
+      'uses only the actual host binding for the Generated UI marker: %s',
+      async (bundled) => {
+        const uri = 'ui://qwen-code-generated-ui/view-v1.html';
+        const config = {
+          isBundledGeneratedUiServer: (name: string) =>
+            bundled && name === 'generated-ui',
+          getBundledGeneratedUiStatus: () => ({ version: 1, enabled: bundled }),
+        };
+        const client = appClient(
+          reading({
+            uri,
+            mimeType: 'text/html;profile=mcp-app',
+            text: '<main>Generated</main>',
+            _meta: {
+              requiredFeature: 'generated-ui',
+              ui: { requiredFeature: 'generated-ui' },
+            },
+          }),
+        );
+        const app = mkTool({
+          server: 'generated-ui',
+          toolName: 'generated_ui_show',
+          client,
+          config,
+          appUri: uri,
+        });
+        const result = await exec(app);
+        expect(result.returnDisplay).toMatchObject({
+          type: 'mcp_app',
+          resourceUri: uri,
+        });
+        expect(
+          (result.returnDisplay as { requiredFeature?: string })
+            .requiredFeature,
+        ).toBe(bundled ? 'generated-ui' : undefined);
+      },
+    );
+
+    it('does not call an already registered bundled tool after a live restriction', async () => {
+      const client = appClient(reading(appHtml()));
+      const config = {
+        isBundledGeneratedUiServer: () => true,
+        getBundledGeneratedUiStatus: () => ({
+          version: 1,
+          enabled: false,
+          reason: 'policy-disabled',
+        }),
+      };
+      const app = mkTool({
+        server: 'generated-ui',
+        toolName: 'generated_ui_show',
+        client,
+        config,
+        appUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      });
+      await expect(exec(app)).rejects.toThrow(
+        'Bundled Generated UI is unavailable',
+      );
+      expect(client.callTool).not.toHaveBeenCalled();
+      expect(client.readResource).not.toHaveBeenCalled();
+    });
+
+    it('keeps legacy manual Generated UI calls independent of the bundled feature', async () => {
+      const uri = 'ui://generated-ui/view-v1.html';
+      const client = appClient(
+        reading({
+          uri,
+          mimeType: 'text/html;profile=mcp-app',
+          text: '<main>Legacy</main>',
+        }),
+      );
+      const config = {
+        isBundledGeneratedUiServer: () => false,
+        getBundledGeneratedUiStatus: () => ({
+          version: 1,
+          enabled: false,
+          reason: 'setting-disabled',
+        }),
+      };
+      const result = await exec(
+        mkTool({ server: 'generated-ui', client, config, appUri: uri }),
+      );
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        resourceUri: uri,
+      });
+      expect(result.returnDisplay).not.toHaveProperty('requiredFeature');
     });
 
     it('returns App results privately without rendering or leaking them', async () => {

@@ -7,7 +7,7 @@
 PR #13931 implements lifecycle v2 for exact `hosted-workspace-shell/1` and
 `hosted-workspace-mcp/1`. The native MySQL writer/claim tests and common POSIX
 process tests do not exercise a resident Harness through a production Spring
-HTTP lifecycle operation. V2 advertisement remains disabled by default.
+HTTP lifecycle operation. Shell v2 advertisement now defaults to the canonical profile; MCP remains explicitly enabled. See the [current lifecycle design](2026-10-23-managed-shell-lifecycle.md).
 
 This first acceptance slice covers public foreground Shell deletion after a
 completed Turn, resident writer expiry, a killed Spring owner and lost resource

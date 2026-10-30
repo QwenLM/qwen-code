@@ -4,7 +4,7 @@
 
 ## Status
 
-Implemented by the change for #13202. The behavior remains unavailable in a release until that change lands.
+The base key-ring support for #13202 landed in #14317. The change for #14408 extends that configuration to operator recovery and adds ID-only diagnostics; its runtime acceptance remains a separate gate.
 
 ## Problem
 
@@ -37,6 +37,12 @@ qwen:
 
 Every configured key must decode to exactly 32 bytes. The active key ID must not also appear in `previous-credential-keys`. An unknown persisted key ID continues to fail with `Runtime credential key is unavailable`. Map keys are written in Spring's bracket form (`'[…]'`): the relaxed binder normalises plain keys (an ID like `legacy/v1` binds as `legacyv1`, quoted or not), so anything else silently matches no persisted row.
 
+The Spring-bound operator-recovery entry consumes the same active pair and previous-key map. It keeps the rotated active key rather than requiring an operator to make the old key active. Load the same external YAML through `SPRING_CONFIG_ADDITIONAL_LOCATION`; the previous-key map still has no environment-variable map protocol. CSI/migration maintenance mains, including the CSI Hosted probe, retain their existing single-pair input contract.
+
+Key IDs are non-secret identifiers already persisted beside ciphertext. After successful protector construction, log the resolved active ID and sorted configured IDs once. Missing-key errors include the requested ID and the same resolved ring; existing ID-bearing key-validation errors use the same escaping. Fastjson2's JSON string encoding with `EscapeNoneAscii` preserves exact ID spelling while escaping controls and Unicode line separators. Never log key maps, key bytes, plaintext, ciphertext or lease tokens. These diagnostics support operator comparison with persisted IDs; they do not perform a startup scan or certify that every row is readable.
+
+Use only non-secret labels as key IDs; never put credential material in an ID. Missing-key faults return a generic HTTP 500 without key IDs in the response. Only the actual Broker-closed exception maps to HTTP 503 `runtime_broker_closed`; a key ID containing `closed` must not change that classification.
+
 ## Rotation procedure
 
 1. Back up the database and the complete current key ring.
@@ -50,6 +56,8 @@ The server does not rewrite old ciphertext during reads. This keeps reads side-e
 
 - The protector regression encrypts with the active key, decrypts a secret produced by the previous key, rejects the new ciphertext under the old-only protector, and rejects a duplicate active/previous ID.
 - The Spring integration test binds `previous-credential-keys`, decrypts a previous-key secret through the configured `SecretProtector`, and proves new encryption uses the active ID.
+- The existing Hosted operator-recovery case runs the real maintenance subprocess with a new active pair plus the old bound map, and checks that the original provision-seed ciphertext and key ID remain unchanged. Its parent broker is configured to read both keys. Seed-backed workers do not duplicate the token in the runtime-credential columns; do not require a lease re-encryption that their storage contract deliberately omits.
+- The diagnostic regression captures one successful constructor summary and an unavailable-key error, checking exact ID visibility, escaped control characters and absence of secret values. Full Java, Linux/MySQL and Hosted verification must be reported separately; the source changes alone do not establish acceptance.
 - Existing wrong-context, wrong-key, tampering, maximum-token, and fresh-IV coverage remains applicable because the ciphertext format and AES-GCM operation are unchanged.
 
 ## Acceptance criteria
@@ -58,3 +66,5 @@ The server does not rewrite old ciphertext during reads. This keeps reads side-e
 - A binding created after rotation records the new active key ID.
 - Missing, malformed, wrong-length, or duplicate key configuration fails closed.
 - A deployment that configures only the existing active-key pair behaves as before.
+- Operator recovery can read pre-rotation bindings through the configured previous-key map without changing the original provision seed.
+- Startup and unavailable-key diagnostics expose escaped IDs only and make the resolved ring inspectable without logging secret values.

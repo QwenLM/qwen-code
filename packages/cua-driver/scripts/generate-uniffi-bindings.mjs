@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import { resolveUbrn } from "./resolve-ubrn.mjs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -174,15 +175,9 @@ try {
   )
 
   const typescriptOutput = join(temporaryRoot, "typescript")
-  const ubrn = join(
-    typescriptRoot,
-    "node_modules",
-    "uniffi-bindgen-react-native",
-    "bin",
-    "cli.cjs",
-  )
+  const ubrn = join(resolveUbrn(typescriptRoot), "bin", "cli.cjs")
   if (!existsSync(ubrn)) {
-    throw new Error("missing pinned UBRN generator; run npm ci in packages/cua-driver/typescript")
+    throw new Error("missing pinned UBRN generator; run corepack pnpm install at the repository root")
   }
   run(
     process.execPath,

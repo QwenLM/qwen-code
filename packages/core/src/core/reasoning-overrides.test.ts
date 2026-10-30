@@ -21,6 +21,7 @@ import {
   resolveReasoningForModel,
 } from './reasoning-overrides.js';
 import type { AvailableModel } from '../models/types.js';
+import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 
 const route: ContentGeneratorConfig = {
   model: 'alias',
@@ -74,6 +75,192 @@ function snapshotConfig(
 }
 
 describe('reasoning declarations', () => {
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'resolves DeepSeek capabilities and aliases against %s.model',
+    (source) => {
+      const generation: ContentGeneratorConfig = {
+        model: 'deepseek-v4.1-flash-1017',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        thinkingMandatory: true,
+        reasoning: { effort: 'xhigh' },
+        [source]: { model: 'deepseek-v4-pro' },
+      };
+      const resolved = resolveReasoningForModel(undefined, generation);
+      expect(resolved).toMatchObject({ efforts: ['high', 'max'] });
+      expect(resolved?.canDisable).toBeUndefined();
+      expect(getEffectiveReasoning(generation, resolved)).toEqual({
+        effort: 'max',
+      });
+    },
+  );
+
+  it('uses the final static model declaration without inheriting the configured route marker', () => {
+    const { generation } = snapshotConfig(
+      [
+        model('alias', 'low'),
+        {
+          ...model('target', 'low'),
+          registryBaseUrl: 'https://original.example/v1',
+        },
+        model('target', 'high'),
+      ],
+      'https://original.example/v1',
+    );
+    Object.assign(generation, {
+      samplingParams: { model: 'alias' },
+      extra_body: { model: 'target' },
+      thinkingMandatory: true,
+    });
+    const resolved = resolveReasoningForModel(
+      undefined,
+      generation,
+      generation.model,
+      true,
+    );
+    expect(resolved).toMatchObject({ defaultEffort: 'high' });
+    expect(resolved?.canDisable).toBeUndefined();
+  });
+
+  it.each([
+    AuthType.USE_OPENAI_RESPONSES,
+    AuthType.USE_ANTHROPIC,
+    AuthType.USE_GEMINI,
+  ])('does not apply Chat Completions model overrides to %s', (authType) => {
+    const getResolvedModelConfig = vi.fn();
+    resolveReasoningForModel(
+      { getResolvedModelConfig },
+      {
+        model: 'configured',
+        authType,
+        baseUrl: route.baseUrl,
+        samplingParams: { model: 'sampling' },
+        extra_body: { model: 'extra' },
+      },
+    );
+    expect(getResolvedModelConfig).toHaveBeenCalledWith(
+      authType,
+      'configured',
+      route.baseUrl,
+    );
+  });
+
+  it.each([AuthType.USE_OPENAI, AuthType.QWEN_OAUTH])(
+    'resolves the final Chat Completions model for %s',
+    (authType) => {
+      const getResolvedModelConfig = vi.fn();
+      resolveReasoningForModel(
+        { getResolvedModelConfig },
+        {
+          model: 'configured',
+          authType,
+          samplingParams: { model: 'sampling' },
+          extra_body: { model: 'extra' },
+        },
+        'per-call',
+      );
+      expect(getResolvedModelConfig).toHaveBeenCalledWith(
+        authType,
+        'extra',
+        undefined,
+      );
+    },
+  );
+
+  it('infers known DeepSeek routes only when no capability is declared', () => {
+    const target = {
+      ...route,
+      model: 'deepseek-v4.1-flash-1017',
+      baseUrl:
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    };
+    expect(resolveReasoningCapabilities(target, undefined)).toMatchObject({
+      profile: 'deepseek-openai',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'enable_thinking',
+    });
+    expect(resolveReasoningCapabilities(target, declaration)).toMatchObject({
+      ...declaration,
+      disableField: 'reasoning_effort',
+    });
+    const legacy = {
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'max',
+      disableField: 'enable_thinking',
+    };
+    expect(resolveReasoningCapabilities(target, legacy)).toEqual(legacy);
+    expect(
+      resolveReasoningCapabilities(target, { thinking: true }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ['https://api.deepseek.com/v1', 'deepseek-flash', 'low', 'low'],
+    ['https://api.deepseek.com/v1', 'deepseek-flash', 'xhigh', 'high'],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'deepseek-v4.1-flash-1017',
+      'xhigh',
+      'high',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'deepseek-v4-flash',
+      'low',
+      'high',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'deepseek-v4-pro',
+      'xhigh',
+      'max',
+    ],
+  ] as const)(
+    'normalizes %s / %s / %s before generic clamping',
+    (baseUrl, model, effort, expected) => {
+      const target = { ...route, baseUrl, model, reasoning: { effort } };
+      const resolved = resolveReasoningCapabilities(target, undefined);
+      expect(getEffectiveReasoning(target, resolved)).toEqual({
+        effort: expected,
+      });
+      expect(
+        getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+      ).toBe(false);
+      expect(
+        getEffectiveReasoning({ ...target, reasoning: undefined }, resolved),
+      ).toEqual({ effort: 'high' });
+    },
+  );
+
+  it('keeps a DeepSeek profile declaration ahead of native alias mapping', () => {
+    const target = {
+      ...route,
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoning: { effort: 'xhigh' as const },
+    };
+    const resolved = resolveReasoningCapabilities(target, {
+      profile: 'deepseek-openai',
+      efforts: ['medium', 'xhigh'],
+      defaultEffort: 'medium',
+    });
+    expect(getEffectiveReasoning(target, resolved)).toEqual({
+      effort: 'xhigh',
+    });
+    expect(
+      getEffectiveReasoning({ ...target, reasoning: undefined }, resolved),
+    ).toEqual({ effort: 'medium' });
+    const legacy = resolveReasoningCapabilities(target, {
+      thinking: true,
+      efforts: ['low', 'max'],
+      defaultEffort: 'max',
+      disableField: 'thinking',
+    });
+    expect(getEffectiveReasoning(target, legacy)).toEqual({ effort: 'max' });
+  });
+
   it('overrides a known default without persisting a user choice', () => {
     const resolved = resolveReasoningCapabilities(
       {
@@ -85,7 +272,7 @@ describe('reasoning declarations', () => {
     );
     expect(resolved).toMatchObject({
       profile: 'dashscope-effort',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
     });
     expect(getEffectiveReasoning(route, resolved)).toEqual({
@@ -94,7 +281,7 @@ describe('reasoning declarations', () => {
     expect(route.reasoning).toBeUndefined();
     expect(
       getEffectiveReasoning({ reasoning: { effort: 'high' } }, resolved),
-    ).toEqual({ effort: 'xhigh' });
+    ).toEqual({ effort: 'high' });
     expect(getEffectiveReasoning({ reasoning: false }, resolved)).toBe(false);
   });
 
@@ -193,7 +380,7 @@ describe('reasoning declarations', () => {
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
     [
-      'deepseek-v3.2',
+      'glm-5.2',
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
   ])('inherits %s toggle capabilities from its provider', (model, baseUrl) => {
@@ -213,8 +400,10 @@ describe('reasoning declarations', () => {
   });
 
   it('inherits the selected provider policy for the same model', () => {
-    const target = { ...route, model: 'qwen3.8-max-preview' };
-    const input = { defaultEffort: 'medium' };
+    // kimi-k2.5 is a Token Plan preset model only; on the Standard endpoint
+    // the same override has no provider declaration to extend.
+    const target = { ...route, model: 'kimi-k2.5' };
+    const input = { canDisable: false };
     expect(
       resolveReasoningCapabilities(
         {
@@ -224,7 +413,7 @@ describe('reasoning declarations', () => {
         },
         input,
       ),
-    ).toMatchObject({ defaultEffort: 'medium', canDisable: false });
+    ).toMatchObject({ toggleOnly: true, canDisable: false });
     expect(
       resolveReasoningCapabilities(
         {
@@ -232,7 +421,7 @@ describe('reasoning declarations', () => {
           baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         },
         input,
-      )?.canDisable,
+      ),
     ).toBeUndefined();
   });
 
@@ -295,6 +484,24 @@ describe('reasoning declarations', () => {
         { canDisable: false },
       );
       expect(resolved).toBeDefined();
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
+    },
+  );
+
+  // Same derived-from-the-leaf shape as the telemetry pin: the gate must keep
+  // admitting every host the attribution leaf owns, including its
+  // `token-plan.` form, without restating the literals here (#15107).
+  it.each(QWENCLOUD_MAAS_HOSTS.flatMap((host) => [host, `token-plan.${host}`]))(
+    'admits QwenCloud host %s as a DashScope endpoint',
+    (host) => {
+      const resolved = resolveReasoningCapabilities(
+        {
+          ...route,
+          model: 'qwen3.8-max',
+          baseUrl: `https://${host}/compatible-mode/v1`,
+        },
+        { canDisable: false },
+      );
       expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
     },
   );

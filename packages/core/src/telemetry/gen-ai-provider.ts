@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { QWENCLOUD_MAAS_HOSTS } from '../core/dashscope-source-config.js';
+
 export type GenAiOperationName = 'chat' | 'generate_content';
 export type GenAiOutputType = 'text' | 'json' | 'image' | 'speech';
 export type GenAiAuthType =
@@ -54,12 +56,12 @@ function providerFromHostname(hostname: string): string | undefined {
     (hostname.startsWith('token-plan.') &&
       isHostOrSubdomain(hostname, 'maas.aliyuncs.com')) ||
     // QwenCloud MaaS hosts; the subdomain match also covers their
-    // `token-plan.` subscription endpoints. Literals rather than an import of
-    // QWENCLOUD_MAAS_HOSTS: this is a zero-import telemetry leaf, and the
-    // provider layer already imports core/reasoning-overrides, so importing
-    // back would cycle.
-    isHostOrSubdomain(hostname, 'maas.qianwenaiapi.com') ||
-    isHostOrSubdomain(hostname, 'maas.qwencloudapi.com') ||
+    // `token-plan.` subscription endpoints. Imported from the attribution leaf
+    // rather than repeated here: that leaf has no imports of its own, so it
+    // cannot close a cycle back through the provider layer (#15107).
+    QWENCLOUD_MAAS_HOSTS.some((domain) =>
+      isHostOrSubdomain(hostname, domain),
+    ) ||
     hostname.endsWith('.alibaba-inc.com') ||
     hostname.endsWith('.aliyun-inc.com')
   ) {

@@ -1,23 +1,24 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -52,7 +53,7 @@ class WorkspaceSessionCloseTest {
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
     @Autowired ManagedSessionStore journal;
-    @Autowired JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired CloseRuntime runtime;
 
     @Test
@@ -70,7 +71,7 @@ class WorkspaceSessionCloseTest {
         await().untilAsserted(() -> assertThat(runtime.fenced).containsKey(session));
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSING");
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "a".repeat(43),
-                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close").header(TenantContextFilter.HEADER, tenant)
                 .principal(actor(tenant, "owner")).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"close\"}"))
@@ -216,12 +217,13 @@ class WorkspaceSessionCloseTest {
         @Bean @Primary HarnessConnector uninitializedHarness() {
             return new UnavailableHarnessConnector() {
                 public boolean supportsLifecycle() { return true; }
-                public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {}
+                public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {}
             };
         }
         @Bean @Primary CloseRuntime closeRuntime() { return new CloseRuntime(); }
-        @Bean @Primary ManagedAgentStore closeStore(JdbcTemplate jdbc, ObjectMapper mapper,
-                com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry registry) {
+        @Bean @Primary ManagedAgentStore closeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                ObjectMapper mapper,
+                com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry registry) {
             var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, java.time.Clock.systemUTC(), ignored -> {}, registry, properties);

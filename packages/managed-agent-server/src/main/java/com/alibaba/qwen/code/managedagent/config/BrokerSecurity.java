@@ -44,8 +44,7 @@ public class BrokerSecurity {
     public BrokerSecurity(ManagedAgentProperties properties,
             ServerProperties server, WebMvcProperties mvc) {
         ManagedAgentProperties.Auth auth = properties.getAuth();
-        String configured = auth.getMode() == null
-                ? "auto" : auth.getMode().trim().toLowerCase(Locale.ROOT);
+        String configured = configuredMode(auth);
         this.allowInsecureBind = auth.isAllowInsecureBind();
         java.util.List<String> skippedGuards = new java.util.ArrayList<>();
         InetAddress publicAddress = server.getAddress();
@@ -121,6 +120,12 @@ public class BrokerSecurity {
             this.signingKey = key;
         } else {
             this.signingKey = null;
+        }
+        if (properties.getRuntimeBroker().isLocalDirectoryImportEnabled()
+                && (!publicLoopback || (mode == Mode.OPEN
+                        && StringUtils.isBlank(properties.getTrustedActorHeader())))) {
+            throw new IllegalStateException("Local directory import requires a loopback listener"
+                    + " with signed authentication or a trusted actor header for a single-user deployment.");
         }
         this.allowedDrift = auth.getAllowedDrift() == null
                 ? Duration.ofMinutes(5) : auth.getAllowedDrift();
@@ -268,9 +273,22 @@ public class BrokerSecurity {
     }
 
     // The broker→harness attach leg carries the issued writer credential.
-    private void checkHarnessTransport(ManagedAgentProperties properties,
+    static void checkHarnessTransport(ManagedAgentProperties properties,
             java.util.List<String> skippedGuards) {
         if (!properties.getHarness().isEnabled()) {
+            return;
+        }
+        if (properties.getHarness().getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                throw new IllegalStateException("Harness pool requires an enabled Session Store and binding key");
+            }
+            for (var instance : properties.getHarness().getPool().getInstances()) {
+                java.net.URI endpoint = java.net.URI.create(instance.getBaseUrl());
+                if (!"https".equals(endpoint.getScheme())
+                        && !("http".equals(endpoint.getScheme()) && isLoopback(hostOf(endpoint)))) {
+                    throw new IllegalStateException("Harness pool requires TLS for remote endpoints");
+                }
+            }
             return;
         }
         String baseUrl = properties.getHarness().getBaseUrl();
@@ -285,7 +303,7 @@ public class BrokerSecurity {
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
                 && !isLoopback(hostOf(uri))) {
-            if (!allowInsecureBind) {
+            if (!properties.getAuth().isAllowInsecureBind()) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.harness.base-url uses plaintext"
                                 + " http on a non-loopback host, exposing"
@@ -303,7 +321,7 @@ public class BrokerSecurity {
     private static final java.util.Set<String> PUBLICATION_LOOPBACK_HOSTS =
             java.util.Set.of("127.0.0.1", "localhost", "[::1]");
 
-    private void checkPublicationTransport(ManagedAgentProperties properties,
+    static void checkPublicationTransport(ManagedAgentProperties properties,
             java.util.List<String> skippedGuards) {
         ManagedAgentProperties.ToolPublication publication =
                 properties.getToolPublication();
@@ -336,7 +354,7 @@ public class BrokerSecurity {
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
                 && !PUBLICATION_LOOPBACK_HOSTS.contains(hostOf(uri))) {
-            if (!allowInsecureBind) {
+            if (!properties.getAuth().isAllowInsecureBind()) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.tool-publication.service-base-url"
                                 + " uses plaintext http on a non-loopback"
@@ -393,6 +411,12 @@ public class BrokerSecurity {
 
     public Mode getMode() {
         return mode;
+    }
+
+    /** The configured mode as startup reads it: trimmed, lower case, auto when unset. */
+    public static String configuredMode(ManagedAgentProperties.Auth auth) {
+        return auth.getMode() == null
+                ? "auto" : auth.getMode().trim().toLowerCase(Locale.ROOT);
     }
 
     public byte[] getSigningKey() {

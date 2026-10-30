@@ -1,21 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcome;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore.TaskCancelOutcome;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -147,8 +147,6 @@ class ManagedTaskCancelOperationTest {
 
     @Test
     void aNewRequestNeedsTheTasksCancelAction() {
-        refused(() -> begin("key-1", "digest-1", AUTOMATION),
-                HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-2", "digest-2", SETTLED_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-3", "digest-3", "task_" + "d".repeat(64)),
@@ -165,6 +163,23 @@ class ManagedTaskCancelOperationTest {
                 + " task_state = 'recovery_blocked' WHERE record_key = ?",
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
+                HttpStatus.CONFLICT, "task_action_unavailable");
+    }
+
+    @Test
+    void anAutomationRunAdmitsCancelAndReplaysAfterSettlement() {
+        OperationRecord admitted = begin("auto-key", "auto-digest", AUTOMATION)
+                .operation();
+        assertThat(admitted.kind()).isEqualTo(OperationKind.TASK_CANCEL);
+        assertThat(admitted.taskId()).isEqualTo(AUTOMATION);
+        refused(() -> begin("auto-key", "other-digest", AUTOMATION),
+                HttpStatus.CONFLICT, "idempotency_conflict");
+        settle(admitted, TaskCancelOutcome.completed());
+        jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled'"
+                + " WHERE record_key = ?", "c".repeat(64));
+        assertThat(begin("auto-key", "auto-digest", AUTOMATION).operation()
+                .operationId()).isEqualTo(admitted.operationId());
+        refused(() -> begin("auto-next", "auto-digest", AUTOMATION),
                 HttpStatus.CONFLICT, "task_action_unavailable");
     }
 
@@ -328,7 +343,7 @@ class ManagedTaskCancelOperationTest {
                     competition.executeWithoutResult(ignored -> begin(key,
                             "digest-" + key, RUNNING_CHILD));
                     outcomes.add("admitted");
-                } catch (ApiException error) {
+                } catch (ManagedAgentException error) {
                     outcomes.add(error.getCode());
                 } catch (Exception error) {
                     outcomes.add(error.getClass().getSimpleName());
@@ -553,7 +568,7 @@ class ManagedTaskCancelOperationTest {
     private static void refused(Runnable call, HttpStatus status,
             String code) {
         assertThatThrownBy(call::run).isInstanceOfSatisfying(
-                ApiException.class, error -> {
+                ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(status);
                     assertThat(error.getCode()).isEqualTo(code);
                 });

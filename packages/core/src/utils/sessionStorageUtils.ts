@@ -20,6 +20,13 @@ import {
   parseLineTolerantWithIntegrity,
 } from './jsonl-utils.js';
 import { openSyncNoFollow } from './no-follow-open.js';
+import {
+  readLocalJournalBytes,
+  readLocalJournalFirstLine,
+  readLocalJournalHeader,
+  readLocalSnapshotDomainBody,
+} from './local-managed-journal-snapshot.js';
+import { ManagedSessionRecordError } from './managed-session-format.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
 export const LITE_READ_BUF_SIZE = 64 * 1024;
@@ -892,7 +899,13 @@ export function isManagedSessionTranscriptSync(
   scratchBuffer?: Buffer,
 ): boolean {
   const head = readTranscriptHeadSync(filePath, scratchBuffer);
-  return head !== undefined && headCarriesManagedHeader(head, filePath);
+  if (head === undefined) return false;
+  if (headCarriesManagedHeader(head, filePath)) return true;
+  try {
+    return readLocalJournalHeader(filePath) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 /** True for a parsed record that is itself the Managed Session header. */
@@ -930,8 +943,8 @@ function headCarriesManagedHeader(head: string, filePath: string): boolean {
 /**
  * True when the transcript positively identifies as owned by the Managed
  * engine: it carries the Managed Session header, or an execution-engine owner
- * record naming `managed`. A Managed owner is written before anything else,
- * so the head window holds it.
+ * record naming `managed`. A large first owner may extend beyond the display
+ * window, so it is read as one bounded control record when needed.
  *
  * Lines are parsed the way the owner reader parses them, so an owner record
  * that parses whole counts even when another record shares its line. A line
@@ -966,7 +979,7 @@ export function readManagedExecutionEvidenceSync(
   // One parse pass serves both gates; a line is parsed only when it could
   // name the header subtype (the wrapped marker) or the owner subtype (the
   // bare string), literally or through a `\u` escape.
-  return head.split('\n').some((line) => {
+  const found = head.split('\n').some((line) => {
     if (
       !line.includes(MANAGED_HEADER_MARKER) &&
       !line.includes(EXECUTION_ENGINE_SUBTYPE) &&
@@ -979,6 +992,20 @@ export function readManagedExecutionEvidenceSync(
       records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
     );
   });
+  if (found) return true;
+  try {
+    const first = readLocalJournalFirstLine(filePath);
+    if (first === undefined) return false;
+    const { records } = parseLineTolerantWithIntegrity(first, filePath);
+    return (
+      records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
+    );
+  } catch (error) {
+    return error instanceof ManagedSessionRecordError ||
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
+  }
 }
 
 /**
@@ -1050,8 +1077,8 @@ function readTranscriptHeadOrThrowSync(
  * renamed, which genuinely has no custom title. Display stays tolerant: an
  * unreadable body yields `{}` rather than throwing into the session list.
  *
- * Like the legacy reader this only scans the tail and head windows, so a rename
- * buried in the middle of a very long log is not found.
+ * Ordinary layouts use head/tail windows; snapshot layouts read their complete
+ * committed tail and manifest anchor.
  */
 export function readManagedSessionTitleInfoSync(
   filePath: string,
@@ -1126,8 +1153,8 @@ export function readManagedSessionSourceSync(
  * nothing to report" (`{}`). Display stays tolerant: an unreadable body is the
  * latter rather than a throw into the session list.
  *
- * Like the legacy readers this only scans the tail and head windows, so a
- * record buried in the middle of a very long log is not found.
+ * Ordinary layouts use head/tail windows. Snapshot layouts scan the complete
+ * committed physical tail before falling back to the manifest anchor.
  */
 function readManagedDomainBodySync(
   filePath: string,
@@ -1154,6 +1181,22 @@ function readManagedDomainBodySync(
     const header = findManagedHeaderRecord(headText, filePath) as
       | { managedSession?: { sessionKey?: { sessionId?: unknown } } }
       | undefined;
+    let localHeader;
+    try {
+      localHeader = readLocalJournalHeader(filePath);
+    } catch {
+      if (header === undefined) return undefined;
+    }
+    if (localHeader?.minimumReader === 'managed-session/2') {
+      const snapshotBody = readLocalSnapshotDomainBody(
+        readLocalJournalBytes(filePath),
+        runtimeBaseDir,
+        marker === MANAGED_METADATA_MARKER
+          ? 'session_metadata'
+          : 'session_source',
+      );
+      if (snapshotBody !== undefined) return snapshotBody;
+    }
     if (header === undefined) return undefined;
 
     /* The recorded identity, not the file name, decides where the resources

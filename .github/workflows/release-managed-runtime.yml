@@ -1,0 +1,277 @@
+name: 'Release Managed server runtime'
+
+on:
+  release:
+    types: ['published']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing published CLI release tag, for example v0.25.4.'
+        type: 'string'
+        required: true
+      dry_run:
+        description: 'Build and verify without publishing to GitHub or OSS.'
+        type: 'boolean'
+        required: true
+        default: true
+
+concurrency:
+  group: 'managed-runtime-${{ github.event.release.tag_name || inputs.tag }}'
+  cancel-in-progress: false
+
+permissions:
+  contents: 'read'
+
+env:
+  RELEASE_TAG: '${{ github.event.release.tag_name || inputs.tag }}'
+
+jobs:
+  prepare:
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')) }}"
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 10
+    outputs:
+      eligible: '${{ steps.gate.outputs.eligible }}'
+      sha: '${{ steps.source.outputs.sha }}'
+      version: '${{ steps.source.outputs.version }}'
+      timestamp: '${{ steps.source.outputs.timestamp }}'
+    steps:
+      - name: 'Validate the official published CLI release'
+        id: 'gate'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          WORKFLOW_REF: '${{ github.ref }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == 'workflow_dispatch' && "${WORKFLOW_REF}" != 'refs/heads/main' ]]; then
+            echo 'Manual Managed runtime releases must run from main.' >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*)?$ ]]; then
+            if [[ "${EVENT_NAME}" == 'release' ]]; then
+              echo 'eligible=false' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo 'An exact CLI release tag is required.' >&2
+            exit 1
+          fi
+          gh api "repos/QwenLM/qwen-code/releases/tags/${RELEASE_TAG}" > "${RUNNER_TEMP}/managed-release.json"
+          jq --exit-status --arg tag "${RELEASE_TAG}" '.draft == false and .tag_name == $tag' "${RUNNER_TEMP}/managed-release.json"
+          echo 'eligible=true' >> "${GITHUB_OUTPUT}"
+
+      - name: 'Checkout the existing release tag'
+        if: "${{ steps.gate.outputs.eligible == 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ env.RELEASE_TAG }}'
+          persist-credentials: false
+
+      - name: 'Pin the source and exact CLI version'
+        id: 'source'
+        if: "${{ steps.gate.outputs.eligible == 'true' }}"
+        run: |-
+          set -euo pipefail
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
+          if [[ "${RELEASE_TAG}" != "v${version}" ]]; then
+            echo 'Release tag and CLI package version differ.' >&2
+            exit 1
+          fi
+          test -f scripts/managed-runtime-release.js
+          printf 'sha=%s\nversion=%s\ntimestamp=%s\n' "$(git rev-parse HEAD)" "${version}" "$(git show -s --format=%cI HEAD)" >> "${GITHUB_OUTPUT}"
+
+  release:
+    needs: ['prepare']
+    if: "${{ needs.prepare.outputs.eligible == 'true' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 90
+    environment:
+      name: 'production-release'
+    permissions:
+      contents: 'write'
+    env:
+      CLI_VERSION: '${{ needs.prepare.outputs.version }}'
+      SOURCE_SHA: '${{ needs.prepare.outputs.sha }}'
+      BUILD_TIMESTAMP: '${{ needs.prepare.outputs.timestamp }}'
+      ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+      OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+    steps:
+      - name: 'Checkout the pinned source'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ needs.prepare.outputs.sha }}'
+          persist-credentials: false
+
+      - name: 'Checkout release tooling from the workflow revision'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.workflow_sha }}'
+          path: '.qwen/managed-release-tools'
+          sparse-checkout: 'scripts'
+          persist-credentials: false
+
+      - name: 'Set up Java 21'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: |
+            packages/sdk-java/qwencode/pom.xml
+            packages/managed-agent-server/pom.xml
+
+      - name: 'Set up Node.js 22'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: 'Repair the 0.26.3 ownership test fixture'
+        if: "${{ env.RELEASE_TAG == 'v0.26.3' }}"
+        run: |-
+          set -euo pipefail
+          if [[ "${SOURCE_SHA}" != 'eeee1443a7e36ab22b2f1dcded8dec64b621a7ee' ]]; then
+            echo 'The 0.26.3 test repair requires the original release commit.' >&2
+            exit 1
+          fi
+          test_file='packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180HardenedVerificationTest.java'
+          patch='.qwen/managed-release-tools/scripts/patches/managed-runtime-v0.26.3-tests.patch'
+          git diff --exit-code HEAD
+          if [[ "$(git apply --numstat "${patch}" | cut -f3)" != "${test_file}" ]]; then
+            echo 'The 0.26.3 repair must change only the ownership test.' >&2
+            exit 1
+          fi
+          git apply --check "${patch}"
+          git apply "${patch}"
+          [[ "$(git diff --name-only HEAD)" == "${test_file}" ]]
+          {
+            echo '### Managed runtime 0.26.3 test repair'
+            echo "Product source: ${SOURCE_SHA}; original tag unchanged."
+            echo "Test-only patch blob: $(git hash-object "${patch}")"
+            echo 'The complete SDK and server verification gates remain enabled.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: 'Build the matching CLI prerequisites'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          npm run build
+          npm run typecheck
+          npm run bundle
+
+      - name: 'Verify and install the SDK from the same source'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml clean install -Dgpg.skip=true -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
+
+      - name: 'Set the server artifact to the exact CLI version'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml versions:set -DnewVersion="${CLI_VERSION}" -DgenerateBackupPoms=false
+
+      - name: 'Verify the executable JAR and publication profile'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -DforkCount=1 -DreuseForks=false -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
+          runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}-exec.jar"
+          # Older release tags shipped the executable as the main artifact.
+          if [[ ! -f "${runtime_jar}" ]]; then runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar"; fi
+          unzip -p "${runtime_jar}" META-INF/MANIFEST.MF | tr -d '\r' | grep -Fx 'Main-Class: org.springframework.boot.loader.launch.JarLauncher'
+          node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "${runtime_jar}" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
+
+      - name: 'Retain verified JAR and checksum'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'managed-runtime-${{ needs.prepare.outputs.version }}'
+          path: 'dist/managed-runtime/*'
+          if-no-files-found: 'error'
+
+      - name: 'Install the verified OSS uploader'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        env:
+          OSSUTIL_URL: 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip'
+          OSSUTIL_SHA256: 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343'
+        run: |-
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "${work}"' EXIT
+          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${work}/ossutil.zip"
+          echo "${OSSUTIL_SHA256}  ${work}/ossutil.zip" | sha256sum -c -
+          unzip -q "${work}/ossutil.zip" -d "${work}"
+          binary=$(find "${work}" -type f -name 'ossutil64' -print -quit)
+          test -n "${binary}"
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${binary}" "${HOME}/.local/bin/ossutil"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: 'Configure authenticated OSS access'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          umask 077
+          if [[ -z "${ALIYUN_OSS_ACCESS_KEY_ID}" || -z "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]; then
+            echo '::error::Both OSS credentials are required' >&2
+            exit 1
+          fi
+          ossutil config -e "${ALIYUN_OSS_ENDPOINT}" -i "${ALIYUN_OSS_ACCESS_KEY_ID}" -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" -L EN -c "${RUNNER_TEMP}/managed-ossutilconfig"
+
+      - name: 'Recheck the immutable tag and existing publication bytes'
+        id: 'publication'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          direct=$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}" | cut -f1)
+          peeled=$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}^{}" | cut -f1)
+          if [[ "${peeled:-${direct}}" != "${SOURCE_SHA}" ]]; then
+            echo 'The release tag moved after verification; refusing publication.' >&2
+            exit 1
+          fi
+          gh api "repos/QwenLM/qwen-code/releases/tags/${RELEASE_TAG}" | jq --exit-status '.draft == false'
+          jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
+          : > "${RUNNER_TEMP}/managed-github-missing"
+          : > "${RUNNER_TEMP}/managed-oss-missing"
+          for asset in "${jar}" "${jar}.sha256"; do
+            github="https://github.com/QwenLM/qwen-code/releases/download/${RELEASE_TAG}/${asset}"
+            oss="oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/${RELEASE_TAG}/${asset}"
+            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${github}" --file "dist/managed-runtime/${asset}") || exit 1
+            if [[ "${state}" == 'missing' ]]; then
+              echo "dist/managed-runtime/${asset}" >> "${RUNNER_TEMP}/managed-github-missing"
+            fi
+            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-oss "${oss}" --config "${RUNNER_TEMP}/managed-ossutilconfig" --file "dist/managed-runtime/${asset}") || exit 1
+            if [[ "${state}" == 'missing' ]]; then
+              echo "dist/managed-runtime/${asset}" >> "${RUNNER_TEMP}/managed-oss-missing"
+            fi
+          done
+
+      - name: 'Attach only missing GitHub release assets'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          mapfile -t assets < "${RUNNER_TEMP}/managed-github-missing"
+          if (( ${#assets[@]} )); then gh release upload "${RELEASE_TAG}" "${assets[@]}"; fi
+
+      - name: 'Upload only missing OSS release assets'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        run: |-
+          set -euo pipefail
+          mapfile -t assets < "${RUNNER_TEMP}/managed-oss-missing"
+          if (( ${#assets[@]} == 0 )); then exit 0; fi
+          node scripts/upload-aliyun-oss-assets.js --bucket "${ALIYUN_OSS_BUCKET}" --config "${RUNNER_TEMP}/managed-ossutilconfig" --prefix "releases/qwen-code/${RELEASE_TAG}" "${assets[@]}"
+
+      - name: 'Verify both public download channels'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        run: |-
+          set -euo pipefail
+          jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
+          for base in "https://github.com/QwenLM/qwen-code/releases/download/${RELEASE_TAG}" "${OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"; do
+            for asset in "${jar}" "${jar}.sha256"; do
+              [[ "$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${base}/${asset}" --file "dist/managed-runtime/${asset}")" == 'present' ]]
+            done
+          done

@@ -45,7 +45,7 @@ export const GOAL_DEFAULT_TOKEN_BUDGET = 30_000_000;
 
 /** The `lastReason` a Goal stops with when `tokensUsed` reaches its budget. */
 export function goalTokenBudgetReason(tokenBudget: number): string {
-  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} tokens). Resume the Goal to authorize another budget window, or clear it.`;
+  return `The Goal spent its autonomous token budget (${tokenBudget.toLocaleString('en-US')} ${tokenBudget === 1 ? 'token' : 'tokens'}). Resume the Goal to authorize another budget window, or clear it.`;
 }
 
 /**
@@ -204,17 +204,6 @@ export type GoalEvidenceProofKind =
   | 'delivered_output'
   | 'execution_output'
   | 'external_fact';
-
-export function isGoalEvidenceProofKind(
-  value: unknown,
-): value is GoalEvidenceProofKind {
-  return (
-    value === 'user_input' ||
-    value === 'delivered_output' ||
-    value === 'execution_output' ||
-    value === 'external_fact'
-  );
-}
 
 export interface GoalRecord {
   goalId: string;
