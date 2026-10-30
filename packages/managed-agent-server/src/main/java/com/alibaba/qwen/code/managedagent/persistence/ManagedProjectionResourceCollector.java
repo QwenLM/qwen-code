@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -10,10 +9,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** Reclaims released public projection bodies, including those of still-live Sessions. */
 final class ManagedProjectionResourceCollector {
     private static final int BATCH = 32;
-    private static final String KINDS =
-            "X'6d616e616765642d6d6573736167652d7061727473',"
-                    + "X'6d616e616765642d736e617073686f742d70616765',"
-                    + "X'6d616e616765642d736e617073686f742d6d616e6966657374'";
+    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473'";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
@@ -24,8 +20,7 @@ final class ManagedProjectionResourceCollector {
     }
 
     static void release(JdbcTemplate jdbc, String scope, String kind, String owner) {
-        // A builder can still hold this body's old RR view before publishing its snapshot ref.
-        // Mark a candidate here; the collector must wait for that builder's read lease.
+        // Readers can still hold this body's old read view; collection waits for their leases.
         jdbc.update(
                 "UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND kind IN ("
                         + KINDS
@@ -38,23 +33,8 @@ final class ManagedProjectionResourceCollector {
                 owner);
     }
 
-    static void removeSnapshot(JdbcTemplate jdbc, String tenant, String session, String id,
-            long version) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String owner = ManagedSchemaKeys.key(scope, id);
-        release(jdbc, scope, "SNAPSHOT", owner);
-        jdbc.update(
-                "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
-                        + " 'SNAPSHOT' AND owner_key = ? AND owner_revision = ?",
-                scope, owner, version);
-        jdbc.update(
-                "DELETE FROM ma_snapshot WHERE tenant_id = ? AND session_id = ? AND snapshot_id ="
-                        + " ?",
-                tenant, session, id);
-    }
-
     boolean runOnce() {
-        boolean changed = expireSnapshots();
+        boolean changed = false;
         var candidates = jdbc.queryForList(
                         "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
                                 + BATCH);
@@ -63,87 +43,6 @@ final class ManagedProjectionResourceCollector {
                     status -> collect((String) candidate.get("tenant_id"),
                             (String) candidate.get("session_id"),
                             (String) candidate.get("resource_key"))));
-        }
-        return changed;
-    }
-
-    private boolean expireSnapshots() {
-        long now = ToolPublicationRetentionStore.now(jdbc);
-        var candidates = jdbc.queryForList(
-                        "SELECT tenant_id, session_id, snapshot_id FROM ma_snapshot WHERE state ="
-                            + " 'PUBLISHED' AND retain_until <= ? AND NOT EXISTS (SELECT 1 FROM"
-                            + " ma_session s WHERE s.tenant_id = ma_snapshot.tenant_id AND"
-                            + " s.session_id = ma_snapshot.session_id AND s.csi_guard = TRUE) ORDER"
-                            + " BY retain_until LIMIT "
-                                + BATCH, now);
-        boolean changed = false;
-        for (var candidate : candidates) {
-            changed |=
-                    Boolean.TRUE.equals(
-                            ManagedSessionStore.skipContended(
-                                    transactions,
-                                    status -> {
-                                        String tenant = (String) candidate.get("tenant_id");
-                                        String session = (String) candidate.get("session_id");
-                                        String id = (String) candidate.get("snapshot_id");
-                                        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                                jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                                        if (ManagedLegacySessionGuard.isPrivate(
-                                                jdbc, tenant, session)) {
-                                            return false;
-                                        }
-                                        ToolPublicationRetentionStore.lockSession(
-                                                jdbc, tenant, session);
-                                        var streams =
-                                                jdbc.queryForList(
-                                                        "SELECT current_snapshot_id FROM"
-                                                            + " ma_event_stream WHERE tenant_id = ?"
-                                                            + " AND session_id = ? AND stream_kind"
-                                                            + " = 'SESSION' AND stream_id = X'' FOR"
-                                                            + " UPDATE",
-                                                        tenant,
-                                                        session);
-                                        var roots =
-                                                jdbc.queryForList(
-                                                        "SELECT snapshot_version, retain_until FROM"
-                                                            + " ma_snapshot WHERE tenant_id = ? AND"
-                                                            + " session_id = ? AND snapshot_id = ?"
-                                                            + " AND state = 'PUBLISHED' FOR UPDATE",
-                                                        tenant,
-                                                        session,
-                                                        id);
-                                        long time = ToolPublicationRetentionStore.now(jdbc);
-                                        if (roots.isEmpty()
-                                                || ToolPublicationRetentionStore.number(
-                                                                roots.getFirst(), "retain_until")
-                                                        > time) {
-                                            return false;
-                                        }
-                                        if (!streams.isEmpty()
-                                                && id.equals(
-                                                        streams.getFirst()
-                                                                .get("current_snapshot_id"))) {
-                                            jdbc.update(
-                                                    "UPDATE ma_snapshot SET retain_until = ? WHERE"
-                                                        + " tenant_id = ? AND session_id = ? AND"
-                                                        + " snapshot_id = ?",
-                                                    time
-                                                            + ManagedSnapshotStore
-                                                                    .CURSOR_LIFETIME_MILLIS,
-                                                    tenant,
-                                                    session,
-                                                    id);
-                                            return false;
-                                        }
-                                        removeSnapshot(
-                                                jdbc,
-                                                tenant,
-                                                session,
-                                                id,
-                                                ToolPublicationRetentionStore.number(
-                                                        roots.getFirst(), "snapshot_version"));
-                                        return true;
-                                    }));
         }
         return changed;
     }
