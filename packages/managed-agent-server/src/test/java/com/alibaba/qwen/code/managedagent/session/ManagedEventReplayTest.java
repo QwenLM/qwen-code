@@ -344,10 +344,6 @@ class ManagedEventReplayTest {
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .snapshotThroughSequence() == last);
-        // Older cursors have passed their thirty-minute retention window in this scenario.
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
-                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
-                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         return store.advanceReplayFloor(tenant, sessionId, floor);
     }
 
