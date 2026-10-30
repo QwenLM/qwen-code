@@ -57,6 +57,7 @@ import {
   historyPath,
   readHistory,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -66,6 +67,7 @@ describe('runCleanup (real git)', () => {
   let headSha: string;
   let savedCwd: string;
   let savedSession: string | undefined;
+  let savedServe: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
 
   const run = (cwd: string, ...args: string[]) =>
@@ -104,10 +106,15 @@ describe('runCleanup (real git)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, state);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     stdout.mockClear();
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    // `watchRoot` roots a daemon session's watch at its own worktree; a runner
+    // under `qwen serve` must not leak that into these clone-rooted tests.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(repo);
   });
 
@@ -117,6 +124,8 @@ describe('runCleanup (real git)', () => {
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -644,6 +653,44 @@ describe('runCleanup (real git)', () => {
     } finally {
       process.chdir(repo);
       rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('ends a main-rooted watch from a daemon session in a linked worktree', () => {
+    // The watch is rooted in the main worktree (beforeEach); a daemon session
+    // in a linked worktree must still discover and end it, not report a
+    // nonexistent path under its own root and leave the real watch running.
+    const linked = join(dirname(repo), `${basename(repo)}-linked`);
+    run(repo, 'worktree', 'add', '-q', '--detach', linked);
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linked);
+    try {
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(existsSync(paths.worktreePath)).toBe(false);
+      expect(branchExists()).toBe(false);
+    } finally {
+      process.chdir(repo);
+      delete process.env['QWEN_CODE_SERVE'];
+      run(repo, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('ends the watch despite a sibling worktree with a malformed .qwen/tmp', () => {
+    const sibling = join(dirname(repo), `${basename(repo)}-sibling`);
+    run(repo, 'worktree', 'add', '-q', '--detach', sibling);
+    mkdirSync(join(sibling, '.qwen'), { recursive: true });
+    writeFileSync(join(sibling, '.qwen', 'tmp'), 'not a directory');
+    try {
+      // Discovery must isolate the sibling's ENOTDIR, not abort: the healthy
+      // main-rooted watch is still found and ended.
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(branchExists()).toBe(false);
+    } finally {
+      run(repo, 'worktree', 'remove', '--force', sibling);
+      rmSync(sibling, { recursive: true, force: true });
     }
   });
 });

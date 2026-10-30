@@ -6174,6 +6174,12 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
+                ...(replayPage.branchPointsByAssistantUuid
+                  ? {
+                      branchPointsByAssistantUuid:
+                        replayPage.branchPointsByAssistantUuid,
+                    }
+                  : {}),
                 // The restore gate already drained active turns and blocks
                 // new ones (and a drain timeout rejects before replay), so
                 // a trailing unmatched call here is genuinely abandoned —
@@ -6418,6 +6424,12 @@ class QwenAgent implements Agent {
                     replayState: projection.replay!.replay,
                     goalBootstrap: replayGoalBootstrap(projection),
                     suppressRestoreAskUserQuestion,
+                    ...(projection.replay!.branchPointsByAssistantUuid
+                      ? {
+                          branchPointsByAssistantUuid:
+                            projection.replay!.branchPointsByAssistantUuid,
+                        }
+                      : {}),
                     ...(restoreOptions.replay.kind === 'recent'
                       ? {
                           limits: {
@@ -8616,7 +8628,7 @@ class QwenAgent implements Agent {
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
-        initialized: true,
+        initialized: false,
         skills: [],
         errors: [this.errorCell('skills', error)],
       };
@@ -9258,6 +9270,7 @@ class QwenAgent implements Agent {
           systemPrompt: 0,
           builtinTools: 0,
           mcpTools: 0,
+          instructionFiles: 0,
           memoryFiles: 0,
           skills: 0,
           messages: 0,
@@ -9266,6 +9279,7 @@ class QwenAgent implements Agent {
         },
         builtinTools: [] as Array<{ name: string; tokens: number }>,
         mcpTools: [] as Array<{ name: string; tokens: number }>,
+        instructionFiles: [] as Array<{ path: string; tokens: number }>,
         memoryFiles: [] as Array<{ path: string; tokens: number }>,
         skills: [] as Array<{
           name: string;
@@ -9288,6 +9302,7 @@ class QwenAgent implements Agent {
         breakdown: usage.breakdown,
         builtinTools: usage.builtinTools,
         mcpTools: usage.mcpTools,
+        instructionFiles: usage.instructionFiles,
         memoryFiles: usage.memoryFiles,
         skills: usage.skills,
         isEstimated: usage.isEstimated,
@@ -15060,7 +15075,14 @@ class QwenAgent implements Agent {
           // persisted to the workspace settings file and must not clobber the
           // global file (which would silently affect every other workspace and
           // session).
-          updateOutputLanguageFile(normalizedValue);
+          // The rule file is a best-effort mirror of the setting that
+          // `setValue` already persisted above, so a filesystem failure here
+          // must not fail the route and discard a change that did land.
+          try {
+            updateOutputLanguageFile(normalizedValue);
+          } catch (err) {
+            debugLogger.warn('Failed to write output-language.md:', err);
+          }
         }
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
@@ -16462,6 +16484,11 @@ class QwenAgent implements Agent {
       this.clientCapabilities?._meta?.['qwen.goalProposals'] === true
     ) {
       config.setGoalProposalHostSupported(true);
+    }
+    // Only the daemon bridge, whose Web Shell renders MCP Apps, declares this;
+    // TUI, headless, editor and channel clients never receive Generated UI.
+    if (this.clientCapabilities?._meta?.['qwen.mcpAppHost'] === true) {
+      config.setMcpAppHostSupported(true);
     }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);

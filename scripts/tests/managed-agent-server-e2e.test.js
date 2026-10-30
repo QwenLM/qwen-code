@@ -55,7 +55,7 @@ describe('managed-agent-server e2e runner', () => {
   it('queries tables from the shared fresh-database baseline', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const baseline = read(
-      'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
     );
     const tables = new Set(
       [...baseline.matchAll(/CREATE TABLE (\w+)/g)].map((match) => match[1]),
@@ -288,6 +288,28 @@ describe('managed-agent-server e2e runner', () => {
     expect(approvalDecisionCommitted('decided\t1\t1')).toBe(true);
   });
 
+  it('recognizes only a turn.settled store commit as the terminal write', () => {
+    const { commitCarriesTurnSettled } = load(
+      ['commitCarriesTurnSettled'],
+      'commitCarriesTurnSettled',
+    )();
+    const commit = (kind) =>
+      Buffer.from(
+        JSON.stringify({
+          recordBytesBase64: Buffer.from(
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: { kind },
+            }),
+          ).toString('base64'),
+        }),
+      );
+    expect(commitCarriesTurnSettled(commit('turn.settled'))).toBe(true);
+    expect(commitCarriesTurnSettled(commit('message.committed'))).toBe(false);
+    expect(commitCarriesTurnSettled(Buffer.from('{}'))).toBe(false);
+    expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
+  });
+
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const workflow = read('.github/workflows/sdk-java.yml');
@@ -296,8 +318,13 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-decision',
       'test:e2e:managed-harness-restart-approval-after-prepare',
       'test:e2e:managed-harness-restart-approval-after-result',
+      'test:e2e:managed-harness-restart-approval-finished-before-commit',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+      'test:e2e:managed-harness-restart-approval-load-reply-lost',
+      'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
+      'test:e2e:managed-harness-restart-approval-terminal-write-failed',
+      'test:e2e:managed-harness-restart-approval-cleanup-failed',
     ];
     for (const script of scripts) {
       expect(manifest, `${script} must be an npm script`).toContain(
@@ -324,8 +351,8 @@ describe('managed-agent-server e2e runner', () => {
       scrap,
       'the crashed home must be scrapped before recovery',
     ).toBeLessThan(recovery);
-    expect(source).toContain(
-      "await waitUntil(\n          'Post-fault recovery Harness adopted the Session'",
+    expect(source).toMatch(
+      /await waitUntil\(\s*'Post-fault recovery Harness adopted the Session'/,
     );
     // The partial-prepare crash needs the held :start and a PREPARED row
     // with no dispatch, or it degrades into the after-decision barrier.
@@ -376,6 +403,229 @@ describe('managed-agent-server e2e runner', () => {
     // R1-5: the pre-dispatch proxy must never hold after-result's :start.
     expect(source.slice(proxy - 500, proxy)).not.toContain(
       "approvalFault === 'after-result'",
+    );
+    // C1 arms its crash barrier only after the store confirms a 200, and
+    // records that pre-crash count; a non-200 first commit must not pass.
+    expect(source).toContain('forwarded 200 dropped reply');
+    expect(source).toContain('terminalAcceptsAtBarrier');
+    expect(source).toContain('postCrashTerminalAccepts');
+    expect(source).toContain('did not commit the terminal before recovery');
+    // C1/C2: the store proxy must be armed before the decision and must
+    // distinguish a lost reply (committed) from a refused write (missing).
+    expect(source).toContain('storeFaultProxy = await startStoreFaultProxy');
+    expect(source).toContain('Terminal commit store fault observed');
+    expect(source).toContain('storeFaultProxy?.armTerminal(');
+    expect(source).toContain('storeFaultProxy?.allowTerminal()');
+    expect(source).toContain('commitCarriesTurnSettled');
+    expect(source).toContain('Terminal write fault was not compensated');
+    // C1 must drop every bounded retry, not only the first answer, or the
+    // doomed generation can receive a replay before the crash.
+    expect(source).toContain('&& !terminalAllowed');
+    // A terminal alone is not the answer: the surviving transcript must
+    // still carry the model response.
+    expect(source).toContain('Approval recovery answer differs');
+    // C3 refuses the release until the crash, then reopens it so the
+    // replacement's own release is witnessed on the same proxy, and the
+    // crash only lands once the control plane projected the terminal.
+    expect(source).toContain('releaseFailureCount: () => releaseFailureCount');
+    expect(source).toContain('replacementBrokerProxy.allowRelease()');
+    expect(source).toContain("'Runtime cleanup release refused'");
+    expect(source).toContain(
+      "'Original Turn projected before the cleanup crash'",
+    );
+    expect(source).toContain(
+      "'Post-fault cleanup retry reached the replacement'",
+    );
+    expect(source).toContain(
+      'Cleanup fault was not retried after the replacement',
+    );
+    expect(source).toContain("owner_kind='HOSTED_CLEANUP'");
+    // A4 loses the first takeover load reply once via a test-gated hook on the
+    // replacement, and asserts the fault landed before trusting the recovery
+    // (a redrive that never lost a reply would prove nothing).
+    expect(source).toContain('QWEN_E2E_DROP_LOAD_REPLY: session.id');
+    expect(source).toContain("'Takeover load reply lost'");
+    expect(source).toContain('E2E dropping first load reply');
+    const harnessSource = read(
+      'packages/cli/src/serve/hosted-harness-session.ts',
+    );
+    expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
+    expect(harnessSource).toContain('E2E dropping first load reply');
+    // B3a crashes the replacement inside the window after its post-tool stream
+    // Finished marker is durable but before the assistant commit, via a
+    // test-gated hook set only on that generation. The barrier proves the
+    // fault landed; the recovery parity proves the next generation reissued
+    // the saved request rather than compensating an already-committed terminal.
+    expect(source).toContain(
+      'QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id',
+    );
+    expect(source).toContain(
+      "'Finished turn held before the assistant commit'",
+    );
+    expect(source).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+    // The flag rides only the crashing generation, never the recovery one.
+    // Pin both call sites and the parameter default, not merely the
+    // identifiers (which appear at several runner sites): giving the recovery
+    // generation the flag, or flipping the default to true, must red here.
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',?\s*\)/,
+    );
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Post-fault recovery Harness',?\s*\)/,
+    );
+    expect(source).toContain('crashBeforeAssistantCommit = false');
+    // B3a asserts the durable crash precondition (the approved result settled)
+    // from MySQL like the sibling crash arms, not only the hook's log line.
+    expect(source).toContain(
+      'Finished-before-commit crash did not land after the approved result settled',
+    );
+    // R1-1 (deeper): the settled execution is not the window. The barrier must
+    // also read the post-tool main attempt's durable Finished marker from the
+    // same journal the recovery reads, and assert no assistant commit follows
+    // it, before the SIGKILL. Pin this window-shaped — the journal assertion
+    // must sit between the B3a barrier and the crash, and its discriminator
+    // must mirror findHostedCommittedModelOutput — so deleting the assertion or
+    // moving the hold above the output_committed commit cannot stay green. A
+    // bare identifier check would survive both, since the recovery reader also
+    // accepts a saved request whose attempt is still started.
+    const b3aBarrier = source.indexOf(
+      "'Finished turn held before the assistant commit'",
+    );
+    const b3aCrash = source.indexOf('await crashChild(', b3aBarrier);
+    expect(b3aBarrier).toBeGreaterThan(-1);
+    expect(b3aCrash).toBeGreaterThan(b3aBarrier);
+    const b3aWindow = source.slice(b3aBarrier, b3aCrash);
+    expect(b3aWindow).toContain('finishedBeforeCommitWindow(');
+    expect(b3aWindow).toContain(
+      'SELECT prompt_id FROM qwen_managed_agent.ma_turn',
+    );
+    // R4-2: the window helper only runs through its arming ternary. Pin the
+    // condition itself, so narrowing the guard (e.g. to 'after-result') reds
+    // here instead of silently deleting the arm's only durable-window check
+    // while the helper name still appears in the barrier->crash slice.
+    expect(source).toMatch(
+      /approvalFault === 'finished-before-commit'\s*\?\s*finishedBeforeCommitWindow\(/,
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed before the model Finished marker committed',
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed after the assistant commit',
+    );
+    const windowFn = source.indexOf('function finishedBeforeCommitWindow(');
+    expect(windowFn).toBeGreaterThan(-1);
+    const windowFnBody = source.slice(
+      windowFn,
+      source.indexOf('\n}', windowFn),
+    );
+    expect(windowFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(windowFnBody).toContain(':main:');
+    expect(windowFnBody).toContain(
+      "latestAttempt.payload['state'] !== 'output_committed'",
+    );
+    expect(windowFnBody).toContain("event.payload['role'] === 'assistant'");
+    expect(windowFnBody).toContain('event.sequence > latestAttempt.sequence');
+    // B3a must take the same deep-equal parity gate as after-result; pin the
+    // combined condition so reverting it to after-result-only reds here rather
+    // than silently deleting the arm's only deep-equal assertion.
+    expect(source).toMatch(
+      /if \(\s*approvalFault === 'after-result' \|\|\s*approvalFault === 'finished-before-commit'\s*\)/,
+    );
+    expect(harnessSource).toContain(
+      "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
+    );
+    expect(harnessSource).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+  });
+
+  // R4-2 (behavioural): the source pins above assert the window helper's
+  // spelling; this exercises finishedBeforeCommitWindow itself on injected
+  // journal rows, so the latest-attempt selection and both throw branches are
+  // proven on data, not on text. runMysql is injected through load() (the
+  // parameter must be spelled exactly runMysql to shadow the free identifier);
+  // the helper stays a top-level declaration so extracted() can walk it.
+  it('behaves finishedBeforeCommitWindow on injected journal rows', () => {
+    const promptId = 'turn_b3a';
+    const attempt = (sequence, state, prompt = promptId) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: { attemptId: `${prompt}:main:${sequence}`, state },
+    });
+    const assistantCommit = (sequence) => ({
+      kind: 'message.committed',
+      sequence,
+      payload: { role: 'assistant' },
+    });
+    // The helper reads HEX(record_bytes) rows; each row decodes to UTF-8 JSON
+    // Lines of managed_session_event_v1 records. Encode the events the way the
+    // journal writer does, as one HEX blob the helper splits back into lines.
+    const rows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events) =>
+      load(
+        ['finishedBeforeCommitWindow'],
+        'finishedBeforeCommitWindow',
+        'runMysql',
+      )(() => rows(events)).finishedBeforeCommitWindow(0, 'filter', promptId);
+
+    // output_committed with no following assistant commit: the window holds.
+    expect(run([attempt(25, 'output_committed')])).toEqual({
+      attemptId: `${promptId}:main:25`,
+      attemptSequence: 25,
+    });
+    // An assistant commit before the attempt does not close the window.
+    expect(run([assistantCommit(20), attempt(25, 'output_committed')])).toEqual(
+      {
+        attemptId: `${promptId}:main:25`,
+        attemptSequence: 25,
+      },
+    );
+    // A non-assistant commit after the attempt does not close the window.
+    expect(
+      run([
+        attempt(25, 'output_committed'),
+        { kind: 'message.committed', sequence: 27, payload: { role: 'user' } },
+      ]),
+    ).toEqual({ attemptId: `${promptId}:main:25`, attemptSequence: 25 });
+    // The latest main attempt wins, even when rows arrive unsorted.
+    expect(
+      run([attempt(30, 'output_committed'), attempt(25, 'output_committed')]),
+    ).toEqual({ attemptId: `${promptId}:main:30`, attemptSequence: 30 });
+    // Another prompt's attempts are not this window's.
+    expect(() => run([attempt(25, 'output_committed', 'other_turn')])).toThrow(
+      /no main model attempt/,
+    );
+    // A still-started latest attempt: the crash landed before the Finished
+    // marker committed (a mutation the source pins alone cannot catch).
+    expect(() => run([attempt(25, 'started')])).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // A newer started attempt after an older completed one is still before the
+    // window: the recovery reader accepts a started attempt, so only the latest
+    // attempt's state discriminates.
+    expect(() =>
+      run([attempt(25, 'output_committed'), attempt(30, 'started')]),
+    ).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // An assistant commit after the attempt: the crash landed after the commit.
+    expect(() =>
+      run([attempt(25, 'output_committed'), assistantCommit(27)]),
+    ).toThrow(
+      /after the assistant commit: commitSequence=27 attemptSequence=25/,
     );
   });
 
@@ -561,7 +811,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(`'${refusal}'`);
     expect(
       read(
-        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
+        'packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
       ),
     ).toContain(`"${refusal}."`);
     const writerBefore = source.indexOf(
@@ -800,7 +1050,9 @@ describe('managed-agent-server e2e runner', () => {
     // Harness and find its workspace ID there: application.yml derives the
     // switch from the Harness, and Prerequisites exports the ID.
     expect(
-      read('packages/managed-agent-server/src/main/resources/application.yml'),
+      read(
+        'packages/managed-agent-server/server/src/main/resources/application.yml',
+      ),
       'the Session Store switch must follow the Harness by default',
     ).toContain(
       "enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:${qwen.managed-agent.harness.enabled:false}}'",
@@ -843,7 +1095,7 @@ describe('managed-agent-server e2e runner', () => {
     // document the current authority, so the false claim reaches
     // integrators in either language.
     const toolTurnIt =
-      'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+      'packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
     expect(
       existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
         read('.github/workflows/sdk-java.yml').includes(
@@ -1370,31 +1622,17 @@ describe('managed-agent-server e2e runner', () => {
     );
   });
 
-  it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {
+  it('selects the executable classifier for the runner and image', () => {
     const script = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
-    // The pom's repackage executions leave the unclassified jar plus one
-    // artifact per classifier in target/. The runner derives the
-    // unclassified name from the pom (one source of truth); the Dockerfile
-    // selects by classifier exclusion with a loud cardinality guard.
-    expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
-    expect(script).not.toContain('packagedJars');
+    expect(script).toContain(
+      'qwen-managed-agent-server-${pomVersion}-exec.jar',
+    );
     const dockerfile = read('packages/managed-agent-server/Dockerfile');
-    expect(dockerfile).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    expect(dockerfile).toContain('qwen-managed-agent-server-*-exec.jar');
     expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
-    // The exclusion set must cover every classifier the pom declares, or a
-    // pom edit surfaces as an operator's failed docker build ("found 2")
-    // instead of a red here: derive the set from the pom, the one source
-    // of truth, rather than pinning a literal copy of it.
-    const classifiers = [
-      ...read('packages/managed-agent-server/pom.xml').matchAll(
-        /<classifier>([^<]+)<\/classifier>/g,
-      ),
-    ].map((match) => match[1]);
-    expect(classifiers.length).toBeGreaterThan(0);
-    for (const classifier of classifiers) {
-      expect(dockerfile).toContain(`*-${classifier}.jar`);
-    }
+    expect(read('packages/managed-agent-server/server/pom.xml')).toContain(
+      '<classifier>exec</classifier>',
+    );
   });
 
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
@@ -1418,7 +1656,7 @@ describe('managed-agent-server e2e runner', () => {
     const pattern = new Function(`return ${patternSource};`)();
     const match = read('packages/managed-agent-server/pom.xml').match(pattern);
     expect(match?.[0]).toContain(
-      '<artifactId>qwen-managed-agent-server</artifactId>',
+      '<artifactId>qwen-managed-agent-parent</artifactId>',
     );
     expect(match?.[1]).toBeTruthy();
     expect(match?.[1]).not.toContain('${');
@@ -1430,10 +1668,10 @@ describe('managed-agent-server e2e runner', () => {
     // whitespace-tolerant, and an empty element still matches nothing, so
     // the runner's descriptive guard fires.
     const wrapped =
-      '<artifactId>qwen-managed-agent-server</artifactId>\n  <version>\n    9.9.9\n  </version>';
+      '<artifactId>qwen-managed-agent-parent</artifactId>\n  <version>\n    9.9.9\n  </version>';
     expect(wrapped.match(pattern)?.[1]).toBe('9.9.9');
     expect(
-      '<artifactId>qwen-managed-agent-server</artifactId><version></version>'.match(
+      '<artifactId>qwen-managed-agent-parent</artifactId><version></version>'.match(
         pattern,
       ),
     ).toBeNull();
@@ -1462,15 +1700,13 @@ describe('managed-agent-server e2e runner', () => {
     // --server.address on the command line and the e2e runner passes none,
     // so a flipped yml default would otherwise ship silently.
     const applicationYml = read(
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     );
     expect(applicationYml).toMatch(
       /address: '\$\{QWEN_MANAGED_AGENT_SERVER_ADDRESS:127\.0\.0\.1\}'/,
     );
     expect(dockerfile).toMatch(/\{ \[ "\$count" -eq 1 \] \|\|/);
-    expect(dockerfile).toContain(
-      'expected exactly one unclassified server jar',
-    );
+    expect(dockerfile).toContain('expected exactly one executable server jar');
     // Host Maven output must not ride the build context into the stage the
     // guard inspects: a stale jar from a developer's target/ would trip the
     // cardinality check with an artifact this build did not produce. Both
@@ -1597,7 +1833,7 @@ describe('managed-agent-server e2e runner', () => {
     () => {
       const dockerfile = read('packages/managed-agent-server/Dockerfile');
       const stage = dockerfile.match(
-        /cd packages\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+        /cd packages\/managed-agent-server\/server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
       );
       expect(
         stage,
@@ -1610,10 +1846,12 @@ describe('managed-agent-server e2e runner', () => {
         .join(' ');
       const populations = [
         { jars: [], status: 1, found: 0 },
-        { jars: ['qwen-managed-agent-server-1.0.jar'], status: 0 },
+        { jars: ['qwen-managed-agent-server-1.0.jar'], status: 1, found: 0 },
+        { jars: ['qwen-managed-agent-server-1.0-exec.jar'], status: 0 },
         {
           jars: [
             'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-exec.jar',
             'qwen-managed-agent-server-1.0-workspace-bundle.jar',
             'qwen-managed-agent-server-1.0-operator-recovery.jar',
           ],
@@ -1622,6 +1860,7 @@ describe('managed-agent-server e2e runner', () => {
         {
           jars: [
             'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-exec.jar',
             'qwen-managed-agent-server-1.0-workspace-bundle.jar',
             'qwen-managed-agent-server-1.0-workspace-migration.jar',
             'qwen-managed-agent-server-1.0-operator-recovery.jar',
@@ -1630,8 +1869,8 @@ describe('managed-agent-server e2e runner', () => {
         },
         {
           jars: [
-            'qwen-managed-agent-server-1.0.jar',
-            'qwen-managed-agent-server-2.0.jar',
+            'qwen-managed-agent-server-1.0-exec.jar',
+            'qwen-managed-agent-server-2.0-exec.jar',
           ],
           status: 1,
           found: 2,
@@ -1643,7 +1882,7 @@ describe('managed-agent-server e2e runner', () => {
           for (const jar of jars) writeFileSync(join(dir, jar), '');
           const fixture = script
             .replace(
-              'cd packages/managed-agent-server/target',
+              'cd packages/managed-agent-server/server/target',
               `cd '${dir.replaceAll('\\', '/')}'`,
             )
             .replace(
@@ -1654,7 +1893,7 @@ describe('managed-agent-server e2e runner', () => {
           expect(run.status, `${jars.length} jars: ${run.stderr}`).toBe(status);
           if (found !== undefined) {
             expect(run.stderr).toContain(
-              `expected exactly one unclassified server jar, found ${found}`,
+              `expected exactly one executable server jar, found ${found}`,
             );
           }
         } finally {

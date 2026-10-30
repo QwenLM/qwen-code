@@ -1224,6 +1224,7 @@ describe('createAcpSessionBridge', () => {
         handle.agent.initializeCalls[0]?.clientCapabilities?._meta,
       ).toEqual({
         'qwen.goalProposals': true,
+        'qwen.mcpAppHost': true,
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather

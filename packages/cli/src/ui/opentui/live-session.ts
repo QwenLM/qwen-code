@@ -680,7 +680,7 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize();
+      await getInteractiveModSession(config)?.initialize(['AbovePrompt']);
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.

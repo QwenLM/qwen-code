@@ -1,3 +1,5 @@
+import { useDaemonAvailability } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
 import {
   useCallback,
   useContext,
@@ -196,6 +198,7 @@ export function useSessionActivePromptState(
   observationRevision: number | undefined;
   requestStartedAt?: number;
 } {
+  const available = useDaemonAvailability() === 'available';
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const subscribeLiveSessionObservations = useCallback(
     (listener: () => void) =>
@@ -251,6 +254,7 @@ export function useSessionActivePromptState(
     };
   }
   const liveAnswerIsFreshForTarget =
+    available &&
     liveSessionRevision !== undefined &&
     liveSessionRevision !== authorityBaselineRef.current.revision;
   // The live-state response is authoritative and independent of catalog
@@ -414,6 +418,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       refreshQueries(queries: readonly SessionCatalogQuery[]) {
         for (const query of queries) {
           void store.loadOnce(query, { fresh: true }).catch((error) => {
+            if (isDaemonUnavailableError(error)) return;
             console.warn('[session-catalog] failed to refresh catalog:', error);
           });
         }
@@ -647,6 +652,10 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sessions: result.sessions,
     loading: result.loading,
     error: result.error,
+    // A retained page after a failed refresh (or a hidden-tab deferral) is
+    // not a fresh answer from the daemon — readers that prune on absence must
+    // treat it as "not in this page" rather than "gone".
+    stale: result.stale,
     reload,
     nextCursor: page?.nextCursor,
     liveMergeFailed: page?.liveMergeFailed === true,

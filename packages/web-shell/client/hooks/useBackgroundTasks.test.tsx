@@ -27,11 +27,17 @@ interface Deferred<T> {
 
 const sdkMock = vi.hoisted(() => ({
   ownerVersion: 0,
+  availability: 'available',
   ownerGuard: { capture: vi.fn() },
   actions: {
     getTasks: vi.fn(),
     getWorkflowTasks: vi.fn(),
   },
+}));
+
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailability: () => sdkMock.availability,
+  useDaemonAvailabilityController: () => undefined,
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -42,6 +48,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let sessionId: string | undefined = 'session-a';
+let connected = true;
 let taskActivityKey = 'monitor:running';
 /** The activity fact the transcript walk would report for the key above. */
 let taskActivityActive = false;
@@ -106,7 +113,7 @@ function Harness() {
     sessionId,
     taskActivityKey,
     taskActivityActive,
-    true,
+    connected,
     refreshTrigger,
     workflowsEnabled,
   );
@@ -131,6 +138,8 @@ async function rerenderHarness() {
 beforeEach(() => {
   vi.useFakeTimers();
   sessionId = 'session-a';
+  connected = true;
+  sdkMock.availability = 'available';
   taskActivityKey = 'monitor:running';
   taskActivityActive = false;
   refreshTrigger = 0;
@@ -143,6 +152,33 @@ beforeEach(() => {
     const version = sdkMock.ownerVersion;
     return { isCurrent: () => sdkMock.ownerVersion === version };
   });
+});
+
+it('keeps task rows while paused and reloads after the daemon and session reconnect', async () => {
+  sdkMock.actions.getTasks.mockResolvedValue(
+    snapshot('session-a', [monitor('m1', 'running')]),
+  );
+  await renderHarness();
+  expect(latestTasks.map((task) => task.id)).toEqual(['m1']);
+  sdkMock.availability = 'unavailable';
+  connected = false;
+  await rerenderHarness();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+  expect(latestTasks.map((task) => task.id)).toEqual(['m1']);
+  sdkMock.actions.getTasks.mockResolvedValue(
+    snapshot('session-a', [monitor('m2', 'running')]),
+  );
+  sdkMock.availability = 'available';
+  await rerenderHarness();
+  expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+  expect(latestTasks.map((task) => task.id)).toEqual(['m1']);
+  connected = true;
+  await rerenderHarness();
+  expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+  expect(latestTasks.map((task) => task.id)).toEqual(['m2']);
 });
 
 it('uses the opt-in task snapshot when workflows are enabled', async () => {
