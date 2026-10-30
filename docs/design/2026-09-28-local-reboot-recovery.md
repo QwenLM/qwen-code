@@ -8,11 +8,11 @@ Status: implementation design, following [durable adoption](2026-09-27-local-run
 
 A lost Runtime journal can terminate unknown executions without proving that its writers stopped. Workspace storage must remain pinned until both physical evidence and exact holder cleanup exist. Recovery must also progress after the actor loses access or the product Session is deleted. Current authorized warm and acquire routes cannot provide that independent maintenance path.
 
-This slice supports explicitly opted-in trusted workloads on one Linux host with administrator-managed persistent local storage. It does not isolate malicious same-UID tools, remote writers, external jobs that recreate writers, or restore/clone snapshots. Keep machine identity, local records, SQL keys and storage ownership stable. Worker-only death remains insufficient, even when no process is currently visible.
+This slice supports trusted workloads on one Linux host with administrator-managed persistent local storage. It does not isolate malicious same-UID tools, remote writers, external jobs that recreate writers, or restore/clone snapshots. Keep machine identity, local records, SQL keys and storage ownership stable. Worker-only death remains insufficient, even when no process is currently visible.
 
 ## Trusted reboot proof
 
-The default remains disabled. Enabling trusted local reboot recovery requires durable local provisioning. Production reads machine ID and kernel boot ID; a different boot on the same saved host establishes that writers from the original boot cannot survive within the supported local-storage contract. A systemd soft reboot does not change the kernel boot ID and is not stop proof. The original registration must still validate against its complete provision seed, placement and saved handle. Missing, corrupt or old-format records cannot be reconstructed. Same-boot PID/time namespace changes remain uncertain.
+Trusted local reboot recovery defaults to on. Enabling it requires durable local provisioning. Production reads machine ID and kernel boot ID; a different boot on the same saved host establishes that writers from the original boot cannot survive within the supported local-storage contract. A systemd soft reboot does not change the kernel boot ID and is not stop proof. The original registration must still validate against its complete provision seed, placement and saved handle. Missing, corrupt or old-format records cannot be reconstructed. Same-boot PID/time namespace changes remain uncertain.
 
 Before returning evidence, the provisioner atomically tombstones the original record under its permanent per-seed lock. It returns JOURNAL_LOST and WRITERS_STOPPED for the same original host/boot/resource domain. Earlier process-exit loss evidence stays immutable; later reboot evidence closes only the physical uncertainty. A saved seed and handle suffice for interrupted startup, without inventing a missing endpoint or lease. Observation never relaunches the original seed.
 
@@ -34,7 +34,7 @@ Spring schedules a bounded scan only when trusted local recovery is enabled. A r
 
 ## Components and compatibility
 
-The local store/provisioner add explicit reboot policy and seed-only evidence matching. Binding repositories expose bounded candidate discovery and a separate finalization step. The Workspace execution store enforces acquisition fencing and exact lost-holder cleanup. Embedded configuration wires the policy, wrapper callback and background coordinator. Existing SQL tables and evidence columns suffice; no migration is added. Default ephemeral behavior and durable live-worker adoption remain unchanged. The public `workspace_context` capability stays false.
+The local store/provisioner add explicit reboot policy and seed-only evidence matching. Binding repositories expose bounded candidate discovery and a separate finalization step. The Workspace execution store enforces acquisition fencing and exact lost-holder cleanup. Embedded configuration wires the policy, wrapper callback and background coordinator. Existing SQL tables and evidence columns suffice; no migration is added. Ephemeral behavior stays available with `durable-local-process=false` (and trusted reboot recovery off); durable live-worker adoption is unchanged. The public `workspace_context` capability stays false.
 
 ## Verification and acceptance
 
@@ -45,3 +45,5 @@ Run Java HTTP/H2 tests, the existing MySQL integration profile, real-worker Stag
 ## Acceptance evidence and limits
 
 An independent reviewer completed the physical gate on a dedicated Debian 12 Linux VM at W0e-3 head `8c2b626c`, including real reboot, power-cut controls, escaped writers, holder cleanup and receipt preservation ([round 3 report](https://github.com/QwenLM/qwen-code/pull/12869#issuecomment-5877187325)). Portable macOS tests and synthetic boot transitions remain separate evidence. Changes after that head require their own exact-head validation; the earlier physical run is not evidence that every later patch was reboot-tested.
+
+The `durable-local-process`/`trusted-local-reboot-recovery` default flip ships on portable (synthetic-identity) evidence only: under the rule above, an exact-head physical acceptance for the flip head is owed as follow-up, and the flip itself does not relax that bar.

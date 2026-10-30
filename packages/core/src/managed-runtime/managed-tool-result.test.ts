@@ -14,13 +14,16 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
 import { ManagedSessionRecordError } from './managed-session-records.js';
 import {
+  impliedStatus,
   MANAGED_TOOL_RESULT_KINDS,
   MANAGED_TOOL_RESULT_LIMITS,
   MANAGED_TOOL_RESULT_PROTOCOL,
   MANAGED_TOOL_RESULT_ROUTES,
   ToolResultSegmentLedger,
   isToolResultEnvelopeOf,
+  isToolResultManifestChainLink,
   isToolResultManifestSuccessor,
+  type ToolResultManifest,
   isToolResultPageAt,
   isToolResultPageSuccessor,
   parseToolResultEnvelope,
@@ -261,6 +264,38 @@ function withChangingField(
   return { value: copy, reads: () => reads };
 }
 
+describe('impliedStatus', () => {
+  const descriptor = (
+    state: 'open' | 'sealed' | 'incomplete',
+    byteLength = 1,
+  ): Parameters<typeof impliedStatus>[0][number] => ({
+    streamId: 'stdout',
+    role: 'stdout',
+    mimeType: 'text/plain',
+    state,
+    byteLength,
+    digest: 'a'.repeat(64),
+    missingRanges: [{ start: 0, end: null }],
+    body: { pages: [] },
+  });
+
+  it('declares the empty descriptor list unavailable, never complete', () => {
+    // The shared rule the stream and result captures both use; a private
+    // re-derivation answered 'complete' here — every([]) vacuously sealed.
+    expect(impliedStatus([])).toBe('unavailable');
+  });
+
+  it('keeps open descriptors pending and full seals complete', () => {
+    expect(impliedStatus([descriptor('open'), descriptor('sealed')])).toBe(
+      'pending',
+    );
+    expect(impliedStatus([descriptor('sealed')])).toBe('complete');
+    expect(impliedStatus([descriptor('sealed', 0)])).toBe('complete');
+    expect(impliedStatus([descriptor('incomplete', 0)])).toBe('unavailable');
+    expect(impliedStatus([descriptor('incomplete', 3)])).toBe('partial');
+  });
+});
+
 describe('Managed tool result contract', () => {
   it('validates the shared fixtures against the shared schema', () => {
     expect(validateSuite(fixtures)).toBe(true);
@@ -388,6 +423,82 @@ describe('Managed tool result contract', () => {
       expect(isToolResultManifestSuccessor(previous, next)).toBe(valid);
     },
   );
+
+  it('links only the same capture identity on a later, content-extending revision', () => {
+    const before = { ...fixtures.manifest, revision: 7 } as ToolResultManifest;
+    expect(
+      isToolResultManifestChainLink(before, { ...before, revision: 8 }),
+    ).toBe(true);
+    // A gap the funnel missed once is content-intact by construction and
+    // lands like any later link.
+    expect(
+      isToolResultManifestChainLink(before, { ...before, revision: 9 }),
+    ).toBe(true);
+    expect(
+      isToolResultManifestChainLink(before, { ...before, revision: 7 }),
+    ).toBe(false);
+    expect(
+      isToolResultManifestChainLink(before, {
+        ...before,
+        revision: 8,
+        captureId: 'other-capture',
+      }),
+    ).toBe(false);
+    expect(
+      isToolResultManifestChainLink(before, {
+        ...before,
+        revision: 8,
+        executionCallId: 'other-call',
+      }),
+    ).toBe(false);
+    // A later revision whose contents chain does not extend the earlier
+    // one loses its place, captured or not.
+    expect(
+      isToolResultManifestChainLink(before, {
+        ...before,
+        revision: 8,
+        contents: before.contents.map((entry, index) =>
+          index === 0 ? { ...entry, streamId: 'stderr' } : entry,
+        ),
+      }),
+    ).toBe(false);
+    // Unlike the successor rule the earlier revision need not stay pending:
+    // the exit leg's next revision carries the settled physical fields.
+    const sealed = {
+      ...fixtures.manifest,
+      revision: 2,
+      executionStatus: 'success',
+      exitCode: 0,
+    } as ToolResultManifest;
+    expect(
+      isToolResultManifestChainLink(sealed, { ...sealed, revision: 3 }),
+    ).toBe(true);
+    // The settle-leg of the same shape: a fully sealed revision may be
+    // followed once, on byte-for-byte identical descriptors only.
+    // The complete-unknown preview lets exactly one settled leg through;
+    // anything past it stays rejected like before.
+    expect(
+      isToolResultManifestSuccessor(
+        { ...sealed, executionStatus: 'unknown', exitCode: null },
+        { ...sealed, revision: 3 },
+      ),
+    ).toBe(true);
+    expect(
+      isToolResultManifestSuccessor(
+        { ...sealed, executionStatus: 'unknown' },
+        { ...sealed, revision: 3 },
+      ),
+    ).toBe(false);
+    expect(
+      isToolResultManifestSuccessor(sealed, {
+        ...sealed,
+        revision: 3,
+        contents: sealed.contents.map((entry, index) =>
+          index === 0 ? { ...entry, streamId: 'stderr' } : entry,
+        ),
+      }),
+    ).toBe(false);
+  });
 
   it.each(fixtures.pageRevisionCases)(
     'checks the $id page revision',

@@ -5,6 +5,7 @@ import { statusCommand } from './channel/status.js';
 import { reloadCommand } from './channel/reload.js';
 import { setCommand } from './channel/set.js';
 import { daemonWorkerCommand } from './channel/daemon-worker.js';
+import { managedEmailCommand } from './channel/managed-email.js';
 import {
   pairingListCommand,
   pairingApproveCommand,
@@ -30,6 +31,7 @@ export const channelCommand: CommandModule = {
     yargs
       .command(startCommand)
       .command(daemonWorkerCommand)
+      .command(managedEmailCommand)
       .command(stopCommand)
       .command(statusCommand)
       .command(reloadCommand)

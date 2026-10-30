@@ -700,9 +700,9 @@ describe('e2e build artifact download retry (consumer legs)', () => {
       // sandbox:none shard retry is budget-gated on the 2100s — that
       // leg's 60-minute job timeout minus a 25-minute reserve. There the
       // download sits between 'Record job start epoch' and 'Run E2E
-      // tests', so up to 600s of absorbed stall is charged to the 2100s,
-      // flipping the shard-retry decision only when pre-stall elapsed
-      // already sits in the 1500–2100s window. The other legs have no
+      // tests', so up to 600s of absorbed stall plus the 60s wait is
+      // charged to the 2100s, flipping the shard-retry decision only when
+      // pre-stall elapsed already sits in the 1440–2100s window. The other legs have no
       // shard-retry budget; there the box only bounds how long a stall
       // can delay the retry.
       assert.equal(
@@ -742,6 +742,38 @@ describe('e2e build artifact download retry (consumer legs)', () => {
       assert.ok(
         steps.indexOf(first) < steps.indexOf(retry),
         `${jobName} first attempt must run before the retry`,
+      );
+      // The retry must not fire back-to-back: the artifact client treats
+      // a network-level timeout as fail-fast (NetworkError on ETIMEDOUT —
+      // no internal retry), so two immediate attempts sample one
+      // degradation window — run 37119220504's macOS shard 1/2 lost both
+      // inside a window at least 2.5 minutes long while its sibling shard
+      // downloaded the same artifact (#13284). The wait step re-times the
+      // retry to a later network state, gated on the same outcome so the
+      // absorbed-stall path is the only one that pays it.
+      const wait = steps.find((s) => s.name === 'Wait before download retry');
+      assert.ok(
+        wait,
+        `${jobName} must have a 'Wait before download retry' step`,
+      );
+      assert.equal(
+        wait.if,
+        "${{ steps.download-build.outcome == 'failure' }}",
+        `${jobName} wait must be gated on the first attempt outcome, exactly like the retry`,
+      );
+      assert.ok(
+        !wait.uses,
+        `${jobName} wait must be a plain run step — an action would carry its own failure modes`,
+      );
+      assert.equal(
+        wait.run,
+        'sleep 60',
+        `${jobName} wait must sleep exactly 60s — the spacing is the contract, so changing it is a reviewed test diff`,
+      );
+      assert.ok(
+        steps.indexOf(first) < steps.indexOf(wait) &&
+          steps.indexOf(wait) < steps.indexOf(retry),
+        `${jobName} wait must sit between the first attempt and the retry — earlier it delays the first attempt, later the retry fires inside the same window`,
       );
       // Unpack consumes what the download produced, so it must wait for the
       // retry: wedged between the attempts it would run on the first

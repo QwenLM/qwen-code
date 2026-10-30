@@ -43,7 +43,7 @@ Scope identity is represented by a deterministic hash and is always checked toge
 
 Binding creation locks the scope slot, re-reads the binding inside the transaction, and inserts exactly one active record for that scope. Binding updates use the stored version and generation as fences. Operation leases use the database clock so competing JVMs do not depend on synchronized local clocks. The JDBC adapter converts the database clock to precise Unix epoch time in the query, preventing the connection's session time zone from shifting lease instants. Lease decisions use that precise clock, while each persisted lease deadline is rounded up to a whole second so it remains live for at least its configured duration and round-trips consistently through MySQL-compatible drivers that discard fractional seconds.
 
-Session creation relies on the database uniqueness constraint and re-reads the winning record after a concurrent insert. Session compare-and-set updates lock the current row, validate the expected version and binding generation, and reject any attempt to reactivate a terminal session. SQL failures roll back the transaction and propagate to the caller; there is no silent fallback to process-local state.
+Session creation relies on the database uniqueness constraint and re-reads the winning record after a concurrent insert. Session compare-and-set updates lock the current row, validate the expected version and binding generation, and reject any attempt to reactivate a terminal session. SQL failures roll back the transaction and propagate to the caller; there is no silent fallback to process-local state. Session release is decided in one transaction: the transition to RELEASING locks the Session row — the same row lock admission takes — and re-checks active executions before committing, so a cross-process admission cannot interleave between the check and the transition (`JdbcRuntimeBindingRepository.beginSessionRelease`).
 
 Tool Execution creation uses a unique SHA-256 key for bounded database indexing while retaining and verifying the full idempotency key. Mutations lock the execution row. Compare-and-set and `UNKNOWN` reconciliation validate the supplied immutable identity and version; cancellation validates the expected version; dispatch claim and renewal validate the applicable owner, generation, and lease fences. Dispatch leases use the same precise database-clock decisions and rounded whole-second persisted deadlines as operation leases. An expired `DISPATCHING` claim can be reissued because physical execution has not started; an expired `EXECUTING` or `CANCEL_REQUESTED` claim becomes `UNKNOWN` and cannot be dispatched again until an explicit reconciliation result settles it.
 
@@ -75,7 +75,36 @@ The repository contract covers:
 - settled result reconstruction through a new repository instance; and
 - repeatable schema initialization.
 
-The default test suite runs the contract on H2 in MySQL compatibility mode. CI also runs the `mysql-integration` Maven profile against MariaDB through MySQL Connector/J so session-time-zone handling and persisted lease round trips are exercised on a real MySQL-compatible protocol. The same profile can be run locally against a caller-supplied MySQL database.
+The default test suite runs the contract on H2 in MySQL compatibility mode. CI runs the complete `mysql-integration` Maven profile against MySQL 8.4 through MySQL Connector/J. The same profile can be run locally against a caller-supplied MySQL database.
+
+### Database verification scope
+
+MySQL is the supported database family and the full integration CI target.
+MariaDB was introduced as a real-server regression fixture for the lease-clock
+change and later gained its own full CI leg. That additional engine is no longer
+an ongoing compatibility target. Historical MariaDB measurements remain valid
+records of those runs; retained dialect handling is not a compatibility guarantee.
+No production SQL, engine admission, schema or catalog migration changes here.
+
+The database job now has one MySQL 8.4 configuration. Its two Maven forks retain
+separate disposable instances because server-wide deadlock counters cannot be
+isolated by database name. Native AIO and binary logging stay disabled, and each
+instance retains the large-packet budget. The complete unfiltered Maven profile,
+non-Hosted report guard, cancellation cleanup and full-tier trigger remain.
+Hosted/failover and EventTransport gates keep their existing jobs and coverage.
+
+The MySQL contract retains UTC, +08:00 and -04:00 clock checks and verifies both
+precise and whole-second readings. Shared repository fixtures use nonzero epoch
+milliseconds to pin binding/session/activity and persisted CAS equality on H2 and
+MySQL. Current V1 timestamps are integer epoch milliseconds; the historical
+DATETIME/Connector-J fractional-second failure is not claimed as reproduced by
+these numeric-path tests.
+
+Validation must show that the single-engine policy rejects the previous matrix,
+then exercise the actual startup/configure/verify/cleanup shell bodies with ready,
+dead and timed-out instances, including failure of the second fork. Existing
+workflow consumers, full-profile guards and selected real-MySQL JDBC contracts
+must continue to pass. Full CI acceptance remains required after submission.
 
 ## Acceptance criteria
 

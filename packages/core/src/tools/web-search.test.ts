@@ -14,6 +14,7 @@ import {
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   WebSearchTool,
   evaluateWebSearchGate,
+  normalizeWebSearchAllowedHosts,
   resolveWebSearchMaxPerSession,
   resolveWebSearchTimeoutMs,
 } from './web-search.js';
@@ -58,6 +59,7 @@ interface ConfigOverrides {
     apiKeyEnv?: string;
     timeoutMs?: number;
     maxPerSession?: number;
+    allowedHosts?: string[];
   };
   /** Session web_search counter; one shared object per config, as on Config. */
   sessionUsage?: { calls: number };
@@ -525,6 +527,30 @@ describe('evaluateWebSearchGate', () => {
     passedFor({
       models: [dsModel({ baseUrl: 'https://gw.some-team.alibaba-inc.com/v1' })],
     });
+  });
+
+  it('accepts the QwenCloud pay-as-you-go and Token Plan MaaS endpoints', () => {
+    for (const baseUrl of [
+      'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      'https://maas.qwencloudapi.com/compatible-mode/v1',
+      'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+    ]) {
+      passedFor({ models: [dsModel({ baseUrl })] });
+    }
+  });
+
+  it('rejects lookalike hosts around the QwenCloud suffixes', () => {
+    // The gate matches hostname === suffix or a dot-anchored subdomain, so an
+    // appended suffix, a forged prefix, or userinfo smuggling must not pass.
+    for (const baseUrl of [
+      'https://maas.qianwenaiapi.com.evil.com/compatible-mode/v1',
+      'https://evilmaas.qwencloudapi.com/compatible-mode/v1',
+      'https://maas.qianwenaiapi.com@evil.com/compatible-mode/v1',
+    ]) {
+      const gate = rejectedFor({ models: [dsModel({ baseUrl })] });
+      expect(gate.notice).toContain('non-DashScope');
+    }
   });
 });
 
@@ -1239,6 +1265,39 @@ describe('WebSearchTool execute', () => {
     };
     expect(opts.defaultHeaders['X-Gateway-Route']).toBe('ds');
     expect(opts.defaultHeaders['User-Agent']).toContain('QwenCode/');
+    expect(opts.defaultHeaders).not.toHaveProperty('X-DashScope-Source-Config');
+  });
+
+  it.each([
+    [undefined, 'qwen-code-cli'],
+    ['CLI', 'qwen-code-cli'],
+    ['desktop', 'qwen-code-desktop'],
+  ])('attributes searches from channel %s', async (channel, t1) => {
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
+    await runSearch({
+      ...makeConfig({
+        models: [
+          dsModel({
+            baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+            generationConfig: {
+              customHeaders: { 'x-dashscope-source-config': 'user' },
+            },
+          }),
+        ],
+      }),
+      getChannel: () => channel,
+    } as Config);
+    const opts = mockCtorOpts.current as {
+      defaultHeaders: Record<string, string>;
+    };
+    expect(opts.defaultHeaders['X-DashScope-Source-Config']).toBe(
+      JSON.stringify({
+        channel: 'qianwenai-inner-agents',
+        source: 'model',
+        tags: { t1, t2: 'payg' },
+      }),
+    );
+    expect(opts.defaultHeaders).not.toHaveProperty('x-dashscope-source-config');
   });
 
   it('installs dynamic header expansion on the search client fetch', async () => {
@@ -1950,5 +2009,122 @@ describe('WebSearchTool session budget', () => {
         String(result.returnDisplay).startsWith('Skipped:'),
       ),
     ).toHaveLength(1);
+  });
+});
+
+describe('evaluateWebSearchGate allowedHosts', () => {
+  const GATEWAY = 'https://llm-gw.example.com/dashscope/v1';
+
+  it('accepts a listed host on the env-declared backend', () => {
+    const backend = passedBackend(
+      makeConfig({
+        settings: envSettings({
+          baseUrl: GATEWAY,
+          allowedHosts: ['llm-gw.example.com'],
+        }),
+      }),
+    );
+    expect(backend.baseUrl).toBe(GATEWAY);
+  });
+
+  it('accepts a subdomain of a listed suffix', () => {
+    const backend = passedBackend(
+      makeConfig({
+        settings: envSettings({
+          baseUrl: GATEWAY,
+          allowedHosts: ['example.com'],
+        }),
+      }),
+    );
+    expect(backend.baseUrl).toBe(GATEWAY);
+  });
+
+  it('accepts a listed host declared through modelProviders', () => {
+    const backend = passedBackend(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          allowedHosts: ['llm-gw.example.com'],
+        },
+        models: [
+          {
+            id: 'qwen3.6-plus',
+            authType: 'openai',
+            envKey: TEST_ENV_KEY,
+            baseUrl: GATEWAY,
+          },
+        ],
+      }),
+    );
+    expect(backend.baseUrl).toBe(GATEWAY);
+  });
+
+  it('names the new knob when a custom host is not listed', () => {
+    const gate = rejectedGate(
+      makeConfig({ settings: envSettings({ baseUrl: GATEWAY }) }),
+    );
+    expect(gate.notice).toContain('tools.webSearch.allowedHosts');
+    expect(gate.notice).toContain('WEB_SEARCH_ALLOWED_HOSTS');
+  });
+
+  it('still rejects plaintext even when the host is listed', () => {
+    const gate = rejectedGate(
+      makeConfig({
+        settings: envSettings({
+          baseUrl: 'http://llm-gw.example.com/v1',
+          allowedHosts: ['llm-gw.example.com'],
+        }),
+      }),
+    );
+    expect(gate.notice).toContain('https://');
+  });
+
+  it('ignores a dotless entry instead of trusting a whole TLD', () => {
+    const gate = rejectedGate(
+      makeConfig({
+        settings: envSettings({ baseUrl: GATEWAY, allowedHosts: ['com'] }),
+      }),
+    );
+    expect(gate.notice).toContain('not a DashScope-compatible endpoint');
+  });
+
+  it('never widens automatic derivation', () => {
+    // The list expresses trust for an explicitly configured backend. A host
+    // nobody declared must not be adopted by derivation, or it would receive
+    // the main provider's key.
+    const gate = rejectedGate(
+      makeConfig({
+        settings: { allowedHosts: ['llm-gw.example.com'] },
+        models: [
+          {
+            id: 'main-model',
+            authType: 'openai',
+            envKey: TEST_ENV_KEY,
+            baseUrl: GATEWAY,
+          },
+        ],
+        primaryModel: 'main-model',
+      }),
+    );
+    expect(gate.silent).toBe(true);
+    expect(gate.notice).toContain('no backend could be derived automatically');
+  });
+});
+
+describe('normalizeWebSearchAllowedHosts', () => {
+  it('trims, lower-cases and de-duplicates', () => {
+    expect(
+      normalizeWebSearchAllowedHosts([
+        '  LLM-GW.Example.com ',
+        'llm-gw.example.com',
+        '',
+        'com',
+      ]),
+    ).toEqual(['llm-gw.example.com']);
+  });
+
+  it('treats undefined as empty', () => {
+    expect(normalizeWebSearchAllowedHosts(undefined)).toEqual([]);
   });
 });

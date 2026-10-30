@@ -123,6 +123,28 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
+  it('does not create orphan tool cards for lifecycle-only updates', () => {
+    const state = createDaemonTuiReducerState();
+    const updates = reduceDaemonEventToTuiUpdates(
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 's',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'orphan',
+            _meta: { toolLifecycle: { v: 1, phase: 'ended' } },
+          },
+        },
+      },
+      state,
+    );
+    expect(updates).toEqual([]);
+    expect(state.toolCallsById.size).toBe(0);
+  });
+
   it('preserves a sanitized Advisor review as structured output', () => {
     const updates = reduceDaemonEventToTuiUpdates({
       id: 1,

@@ -8,10 +8,19 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { FileManagedTerminalIdentityStore } from './managed-terminal-identity-store.js';
 import type {
   ManagedActivationFence,
   ManagedActivationOutcome,
 } from './managed-activation-store.js';
+import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
+import {
+  encodeManagedJournalSnapshot,
+  MANAGED_JOURNAL_COMPACT_BYTES,
+  parseManagedJournalSnapshot,
+  replaceManagedJournalWithSnapshot,
+  syncManagedJournalDirectory,
+} from './managed-journal-snapshot.js';
 
 export type ManagedSessionJsonValue =
   | null
@@ -137,7 +146,6 @@ type InboxEvent =
 type JsonObject = Record<string, unknown>;
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
-const MAX_JSON_DEPTH = 64;
 const MAX_IDENTITY_BYTES = 512;
 
 function object(value: unknown, name: string): JsonObject {
@@ -212,9 +220,9 @@ function canonicalJson(
   seen: WeakSet<object>,
   depth = 0,
 ): ManagedSessionJsonValue {
-  if (depth > MAX_JSON_DEPTH) {
+  if (depth > MANAGED_SESSION_LIMITS.maxJsonDepth) {
     throw new Error(
-      `payload exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}.`,
+      `payload exceeds the maximum JSON depth of ${MANAGED_SESSION_LIMITS.maxJsonDepth}.`,
     );
   }
   if (
@@ -284,13 +292,24 @@ function message(
   };
 }
 
+interface InboxSnapshot {
+  readonly type: 'inbox.snapshot';
+  readonly state: JsonObject;
+}
+
 function parseEvent(
   line: string,
   lineNumber: number,
   maxPayloadBytes: number,
-): InboxEvent {
+): InboxEvent | InboxSnapshot {
   try {
     const record = object(JSON.parse(line), 'event');
+    if (record['type'] === 'inbox.snapshot') {
+      return {
+        type: 'inbox.snapshot',
+        state: parseManagedJournalSnapshot(record),
+      };
+    }
     if (record['v'] !== 1) throw new Error('version is unsupported.');
     const base = {
       v: 1 as const,
@@ -386,12 +405,17 @@ export class FileManagedSessionInbox {
   private nextSequence = 1;
   private tail: Promise<void> = Promise.resolve();
   private fatalError: Error | undefined;
+  private syncedBytes = 0;
+  private snapshotBytes = 0;
+  private readonly terminals: FileManagedTerminalIdentityStore<ManagedSessionMessageSnapshot>;
 
   private constructor(
     readonly filePath: string,
     private readonly clock: () => number,
     private readonly maxPayloadBytes: number,
-  ) {}
+  ) {
+    this.terminals = new FileManagedTerminalIdentityStore(filePath, 'inbox');
+  }
 
   static async open(
     filePath: string,
@@ -417,6 +441,13 @@ export class FileManagedSessionInbox {
     const validLength = complete
       ? contents.length
       : contents.lastIndexOf(0x0a) + 1;
+    if (
+      !complete &&
+      validLength === 0 &&
+      contents.subarray(0, 7).toString() !== '{"v":1,'
+    ) {
+      throw new Error('Managed Session inbox has no complete record.');
+    }
     const lines = contents
       .subarray(0, validLength)
       .toString('utf8')
@@ -426,9 +457,20 @@ export class FileManagedSessionInbox {
       if (!line) {
         throw new Error(`Managed Session inbox line ${index + 1} is empty.`);
       }
-      store.apply(parseEvent(line, index + 1, maxPayloadBytes));
+      const record = parseEvent(line, index + 1, maxPayloadBytes);
+      if (record.type === 'inbox.snapshot') {
+        if (index !== 0) {
+          throw new Error('Managed Session inbox snapshot must be first.');
+        }
+        store.restoreSnapshot(record.state);
+        store.snapshotBytes = Buffer.byteLength(line) + 1;
+      } else {
+        store.apply(record);
+      }
     });
+    if (store.snapshotBytes > 0) await syncManagedJournalDirectory(filePath);
     if (!complete) await truncate(filePath, validLength);
+    store.syncedBytes = validLength;
     return store;
   }
 
@@ -461,7 +503,13 @@ export class FileManagedSessionInbox {
             `Managed Session message ${JSON.stringify(admittedMessage.messageId)} was reused with different data.`,
           );
         }
-        return { created: false, message: snapshot(existing) };
+        return {
+          created: false,
+          message:
+            existing.state === 'finished'
+              ? await this.readTerminalState(existing)
+              : snapshot(existing),
+        };
       }
 
       const pending = [...this.messages.values()].filter(
@@ -643,6 +691,28 @@ export class FileManagedSessionInbox {
     });
   }
 
+  readTerminal(
+    input: ManagedSessionMessageIdentity,
+  ): Promise<ManagedSessionMessageSnapshot | undefined> {
+    const captured = structuredClone(input);
+    return this.serial(async () => {
+      const state = this.messages.get(messageKey(identity(captured)));
+      return state?.state === 'finished'
+        ? this.readTerminalState(state)
+        : undefined;
+    });
+  }
+
+  private readTerminalState(
+    state: MessageState,
+  ): Promise<ManagedSessionMessageSnapshot> {
+    const { tenantId, sessionId, messageId } = state.message;
+    return this.terminals.read(
+      [tenantId, sessionId, messageId],
+      snapshot(state),
+    );
+  }
+
   get(
     input: ManagedSessionMessageIdentity,
   ): ManagedSessionMessageSnapshot | undefined {
@@ -696,18 +766,104 @@ export class FileManagedSessionInbox {
   }
 
   private async persist(event: InboxEvent): Promise<void> {
+    await this.compactIfNeeded();
+    const bytes = Buffer.from(`${JSON.stringify(event)}\n`);
     try {
       await mkdir(path.dirname(this.filePath), { recursive: true });
-      await appendFile(
-        this.filePath,
-        Buffer.from(`${JSON.stringify(event)}\n`),
-        { flush: true, mode: 0o600 },
-      );
+      await appendFile(this.filePath, bytes, { flush: true, mode: 0o600 });
       this.apply(event);
+      this.syncedBytes += bytes.byteLength;
     } catch (error) {
       this.fatalError =
         error instanceof Error ? error : new Error(String(error));
       throw this.fatalError;
+    }
+  }
+
+  private async compactIfNeeded(): Promise<void> {
+    if (
+      this.syncedBytes - this.snapshotBytes <
+      Math.max(MANAGED_JOURNAL_COMPACT_BYTES, this.snapshotBytes)
+    ) {
+      return;
+    }
+    const bytes = encodeManagedJournalSnapshot('inbox.snapshot', {
+      nextSequence: this.nextSequence,
+      messages: [...this.messages.values()].map(snapshot),
+    });
+    try {
+      await replaceManagedJournalWithSnapshot(this.filePath, bytes);
+      this.syncedBytes = this.snapshotBytes = bytes.byteLength;
+    } catch (error) {
+      this.fatalError =
+        error instanceof Error ? error : new Error(String(error));
+      throw this.fatalError;
+    }
+  }
+
+  private restoreSnapshot(saved: JsonObject): void {
+    this.nextSequence = integer(saved, 'nextSequence', 1);
+    if (!Array.isArray(saved['messages'])) {
+      throw new Error('Inbox snapshot messages must be an array.');
+    }
+    let previousSequence = 0;
+    for (const item of saved['messages']) {
+      const record = object(item, 'message snapshot');
+      const savedMessage = message(record['message'], this.maxPayloadBytes);
+      const admissionSequence = integer(record, 'admissionSequence', 1);
+      if (
+        admissionSequence <= previousSequence ||
+        admissionSequence >= this.nextSequence ||
+        this.messages.has(messageKey(savedMessage)) ||
+        typeof record['activationReady'] !== 'boolean' ||
+        (record['cancelRequested'] !== undefined &&
+          record['cancelRequested'] !== true)
+      ) {
+        throw new Error(
+          'Inbox snapshot identity, order, or flags are invalid.',
+        );
+      }
+      const state: MessageState = {
+        message: savedMessage,
+        admittedAt: integer(record, 'admittedAt'),
+        admissionSequence,
+        activationReady: record['activationReady'],
+        state: record['state'] as MessageState['state'],
+      };
+      if (record['cancelRequested'] === true) state.cancelRequested = true;
+      if (record['fence'] !== undefined) {
+        state.fence = fence(record['fence']);
+        this.assertFenceIdentity(savedMessage, state.fence);
+        if (!state.activationReady) {
+          throw new Error(
+            'Inbox snapshot fence requires activation readiness.',
+          );
+        }
+      }
+      if (state.state === 'finished') {
+        state.outcome = outcome(record['outcome']);
+        state.finishedAt = integer(record, 'finishedAt');
+        if (
+          !state.fence &&
+          !(state.cancelRequested && state.outcome === 'cancelled')
+        ) {
+          throw new Error('Inbox snapshot terminal has no processing fence.');
+        }
+      } else if (
+        !['admitted', 'processing'].includes(state.state) ||
+        record['outcome'] !== undefined ||
+        record['finishedAt'] !== undefined
+      ) {
+        throw new Error('Inbox snapshot terminal state is invalid.');
+      }
+      if (
+        (state.state === 'processing' && !state.fence) ||
+        (state.state === 'admitted' && (state.fence || state.cancelRequested))
+      ) {
+        throw new Error('Inbox snapshot processing state is invalid.');
+      }
+      this.messages.set(messageKey(savedMessage), state);
+      previousSequence = admissionSequence;
     }
   }
 

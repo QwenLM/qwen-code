@@ -56,6 +56,30 @@ function blockForever(): Promise<never> {
 
 const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
 
+export function validateManagedLocalFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed',
+    '--managed-data-dir',
+    '--port',
+    '--hostname',
+    '--open',
+    '--no-open',
+    '--open-with-auth',
+    '--no-open-with-auth',
+    '--web',
+    '--require-auth',
+    '--http-bridge',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed. Use --port, --managed-data-dir, and --open.`,
+    );
+  }
+}
+
 /**
  * Turn Local Control on through the daemon and print the pairing QR.
  *
@@ -197,9 +221,11 @@ interface ServeArgs {
   port: number;
   hostname: string;
   profile: 'default' | 'hosted-harness';
+  managed: boolean;
+  'managed-data-dir'?: string;
   'hosted-harness-capability-digest'?: string;
   token?: string;
-  'max-sessions': number;
+  'max-sessions'?: number;
   'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
@@ -300,6 +326,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
       })
+      .option('managed', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Start the daemon and Managed Agent with shared WebShell and embedded storage; downloads the server on first use and requires Java 21.',
+      })
+      .option('managed-data-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Private persistent data directory for --managed; defaults to <Qwen home>/managed-local.',
+      })
       .option('token', {
         type: 'string',
         description:
@@ -307,10 +345,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
-          'attach to existing sessions still works. Set to 0 to disable.',
+          'attach to existing sessions still works. Set to 0 to disable. ' +
+          'Defaults to 32, or to the serve.maxSessions setting (user, system, and ' +
+          'system-defaults scopes only); the flag wins when passed.',
       })
       .option('max-total-sessions', {
         type: 'number',
@@ -462,12 +501,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
-        // A wildcard or LAN primary bind already owns the port Local Control
-        // needs on its selected address. Token and Origin settings remain
-        // independent because the second listener owns those.
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
+        // Preserve the documented deployment boundary: Local Control adds its
+        // pairing-scoped LAN listener only to a loopback primary daemon.
         if (
           argv['local-control'] === true &&
           argv.hostname !== DEFAULT_SERVE_HOSTNAME
@@ -643,7 +681,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description: 'Cross-origin allowlist for browser clients.',
+        description:
+          'Cross-origin allowlist for browser clients. Accepts `*`, a canonical origin, or a loopback port wildcard like `http://127.0.0.1:*` (requires a bearer token).',
       })
       .option('allow-private-auth-base-url', {
         type: 'boolean',
@@ -701,13 +740,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved Broker URL for --profile hosted-harness; not implemented and rejects startup.',
+          'Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_URL.',
       })
       .option('managed-runtime-broker-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved Broker credential for --profile hosted-harness; not implemented and rejects startup.',
+          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
@@ -807,6 +846,70 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
+    if (argv.managed) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedLocalFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.hostname !== DEFAULT_SERVE_HOSTNAME ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined ||
+          argv.token !== undefined ||
+          argv['tls-cert'] ||
+          argv['tls-key'] ||
+          argv['local-control'] ||
+          argv.join ||
+          argv['agent-host-server'] ||
+          argv.channel !== undefined ||
+          argv['experimental-paired-engines'] ||
+          argv['experimental-managed-agents'] ||
+          argv['experimental-managed-runtime-worker'] ||
+          argv['experimental-managed-runtime-auto-local'] ||
+          argv['experimental-managed-runtime-url'] !== undefined ||
+          argv['managed-runtime-broker-url'] !== undefined ||
+          argv['managed-runtime-broker-token'] !== undefined ||
+          argv['allow-origin']?.length ||
+          argv['enable-session-shell'] ||
+          !argv['http-bridge']
+        ) {
+          throw new Error(
+            '--managed uses its own loopback services, persistent credentials, and application-owned Workspaces. Use --port, --managed-data-dir, and --open; other deployment, workspace-import, or execution modes cannot be combined.',
+          );
+        }
+        const { runManagedLocalServe } = await import(
+          '../serve/managed-local-serve.js'
+        );
+        const handle = await runManagedLocalServe({
+          port: argv.port,
+          dataDirectory: argv['managed-data-dir'],
+        });
+        await maybeOpenWebShellBrowser(
+          handle,
+          argv.open || argv['open-with-auth'],
+          argv['open-with-auth'],
+        );
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
+    if (argv['managed-data-dir'] !== undefined) {
+      writeStderrLine('qwen serve: --managed-data-dir requires --managed.');
+      process.exit(1);
+    }
+    const managedRuntimeBrokerUrl =
+      argv['managed-runtime-broker-url'] ??
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'];
+    const managedRuntimeBrokerToken =
+      argv['managed-runtime-broker-token'] ??
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
+    delete process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'];
+    delete process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
     const agentHostEnrollmentToken =
       process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN']?.trim();
     delete process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN'];
@@ -825,6 +928,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         'qwen serve: --token is visible in the process command line; ' +
           'prefer the QWEN_SERVER_TOKEN env var for any non-trivial ' +
           'deployment.',
+      );
+    }
+    if (argv['managed-runtime-broker-token'] !== undefined) {
+      // Same exposure for the Broker credential the Harness holds.
+      writeStderrLine(
+        'qwen serve: --managed-runtime-broker-token is visible in the ' +
+          'process command line; prefer the ' +
+          'QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
       );
     }
     let channelSelection: ServeChannelSelection | undefined;
@@ -992,9 +1103,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
-        // A joined runtime is a worker too: it runs work for the coordinator
-        // and must not also host its own collaboration routes.
-        agentHostWorker: Boolean(argv['agent-host-server'] || argv['join']),
         port: argv.port,
         hostname: argv.hostname,
         profile: argv.profile,
@@ -1066,14 +1174,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
                 argv['experimental-managed-runtime-token'],
             }
           : {}),
-        ...(argv['managed-runtime-broker-url'] !== undefined
+        ...(managedRuntimeBrokerUrl !== undefined
           ? {
-              managedRuntimeBrokerUrl: argv['managed-runtime-broker-url'],
+              managedRuntimeBrokerUrl,
             }
           : {}),
-        ...(argv['managed-runtime-broker-token'] !== undefined
+        ...(managedRuntimeBrokerToken !== undefined
           ? {
-              managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
+              managedRuntimeBrokerToken,
             }
           : {}),
         ...(argv['hosted-harness-capability-digest'] !== undefined
@@ -1191,6 +1299,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           throw error;
         }
       }
+      // Saved Host connections (`qwen agents join`) of every trusted
+      // workspace are restored by the daemon itself (serve/server.ts).
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

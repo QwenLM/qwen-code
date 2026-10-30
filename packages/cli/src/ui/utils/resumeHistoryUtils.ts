@@ -19,13 +19,12 @@ import type {
   GoalStateCause,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
-import {
-  getToolResponseDisplayText,
-  isGoalCheckpointBookkeepingRecord,
-  parseGoalStateRecordPayloadV2,
-  projectUserTranscriptForDisplay,
-  computeInitialTurnFromHistory,
-} from '@qwen-code/qwen-code-core';
+import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
+import { isGoalCheckpointBookkeepingRecord } from '@qwen-code/qwen-code-core/goals/goal-card.js';
+import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
+import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/utils/transcript-records.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
+import { getRecordRewindId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -35,7 +34,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from './tool-group-summary.js';
 import {
   formatHistoryGapNotice,
   indexGapsByChild,
@@ -272,6 +271,7 @@ function convertToHistoryItems(
       typeof record.promptId === 'string' && record.promptId.length > 0
         ? record.promptId
         : undefined;
+    const rewindId = promptId ? undefined : getRecordRewindId(record);
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -348,6 +348,7 @@ function convertToHistoryItems(
           items.push({
             type: 'user',
             text: payload.rawCommand,
+            ...(promptId ? { promptId } : {}),
             ...(sentToModel === undefined ? {} : { sentToModel }),
           });
         }
@@ -392,6 +393,31 @@ function convertToHistoryItems(
           items.push({ type: 'notification', text });
           break;
         }
+        // Session multi-agent records: `message` holds the model envelope,
+        // so restore the authored display text instead.
+        // TODO(multi-agent): the TUI has no authored-message item; an agent
+        // reply restores as a notification line prefixed with its name.
+        if (
+          record.subtype === 'agent_mention' ||
+          record.subtype === 'agent_message'
+        ) {
+          const payload = record.systemPayload as
+            | { displayText?: string; author?: { name?: string } }
+            | undefined;
+          const text = payload?.displayText;
+          if (text) {
+            if (record.subtype === 'agent_mention' && !payload?.author) {
+              items.push({ type: MessageType.USER, text, sentToModel: false });
+            } else {
+              const name = payload?.author?.name ?? record.agentName;
+              items.push({
+                type: 'notification',
+                text: name ? `${name}: ${text}` : text,
+              });
+            }
+          }
+          break;
+        }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
             | { displayText?: string; attachmentReferences?: unknown[] }
@@ -429,6 +455,7 @@ function convertToHistoryItems(
               type: 'user',
               text,
               ...(promptId ? { promptId } : {}),
+              ...(rewindId ? { rewindId } : {}),
             });
           }
 
@@ -467,6 +494,7 @@ function convertToHistoryItems(
             type: 'user',
             text,
             ...(promptId ? { promptId } : {}),
+            ...(rewindId ? { rewindId } : {}),
           });
         }
         break;
@@ -549,7 +577,8 @@ function convertToHistoryItems(
             // resumed session shows the same args row as a live one.
             args: fc.args,
             resultDisplay: undefined,
-            status: ToolCallStatus.Success, // Will be updated by tool_result
+            // Without a recorded result, completion cannot be established.
+            status: ToolCallStatus.Error,
             confirmationDetails: undefined,
           });
         }
@@ -579,7 +608,9 @@ function convertToHistoryItems(
             toolCall.status =
               rawStatus === 'error'
                 ? ToolCallStatus.Error
-                : ToolCallStatus.Success;
+                : rawStatus === 'cancelled'
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Success;
             const { images, omittedImageCount } =
               collectInlineImages(responseParts);
             if (images.length > 0) {
@@ -671,7 +702,7 @@ function convertToHistoryItems(
  * @returns Array of HistoryItem with proper IDs
  */
 export function buildResumedHistoryItems(
-  sessionData: ResumedSessionData,
+  sessionData: Pick<ResumedSessionData, 'conversation' | 'historyGaps'>,
   config: Config | null,
   baseTimestamp: number = Date.now(),
 ): HistoryItem[] {
@@ -730,7 +761,9 @@ function createHistoryCollapseSummaryItem(
  * Strips the suppressOnRestore flag from a history item's display property.
  * Used when rewinding into collapsed history to ensure rewound items remain visible.
  */
-export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+export function stripSuppressOnRestore<T extends Pick<HistoryItem, 'display'>>(
+  item: T,
+): T {
   if (!item.display?.suppressOnRestore) return item;
   const { suppressOnRestore: _, ...rest } = item.display;
   return {
@@ -750,7 +783,7 @@ export function computeResumedPromptCountSeed(
       m.subtype !== 'mid_turn_user_message' &&
       m.subtype !== 'realtime_message',
   ).length;
-  if (userTurnCount === 0) {
+  if (records.length === 0) {
     return 0;
   }
   return Math.max(

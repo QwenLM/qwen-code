@@ -177,10 +177,16 @@ describe('defaultModalities', () => {
       ['deepseek-reasoner', TEXT_ONLY],
       // (QwenLM/qwen-code#10270)
       ['non-vision deepseek-v4-flash', TEXT_ONLY, 'deepseek-v4-flash'],
+      ['deepseek-v4.1-flash', TEXT_ONLY],
+      ['deepseek-v4-pro', TEXT_ONLY],
     ]);
 
     it('returns image for deepseek-v4-flash-vision-exp', () => {
       IMAGE_NO_PDF('deepseek-v4-flash-vision-exp');
+    });
+
+    it('returns image for the official deepseek-flash', () => {
+      IMAGE_NO_PDF('deepseek-flash');
     });
   });
 
@@ -224,8 +230,12 @@ describe('defaultModalities', () => {
   describe('ByteDance Doubao', () => {
     casesFor('returns image for', [
       [
+        // #4876 wanted image support here; since #13209 the dotted spelling
+        // also reaches the catalog entry volcengine publishes for
+        // `doubao-seed-2-0-pro`, so it carries that entry's video too instead
+        // of the family row's image-only answer.
         'doubao-seed-2.0-pro (issue #4876)',
-        has({ image: true, video: undefined, audio: undefined }),
+        IMAGE_VIDEO,
         'doubao-seed-2.0-pro',
       ],
       ['doubao-seed-1.6', IMAGE],

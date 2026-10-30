@@ -78,8 +78,8 @@ QWEN_MANAGED_AGENT_JAVA_URL=http://127.0.0.1:8080 \
 
 - 单测覆盖显式选择 Java、tenant header 透传，以及未选择时行为保持不变。
 - 在现有 daemon 代理旁验证精确的 Java 代理目标。
-- 用真实浏览器跑通 Java、Hosted Harness、Runtime Broker、Tool Runtime，并在同一页面打开 daemon
-  所有的面板。
+- 用真实浏览器跑通 Java、Hosted Harness、Runtime Broker、Tool Runtime，并在同一页面打开一个
+  daemon 侧面板。
 
 ## 验收标准
 
@@ -93,6 +93,6 @@ QWEN_MANAGED_AGENT_JAVA_URL=http://127.0.0.1:8080 \
 ## 验证结果
 
 完整页面成功加载已有 Java Managed Session，新回合精确返回 `FULL_SHELL_OK`，随后在同一个浏览器页面
-打开了 daemon 所有的 Status 面板。开发代理能够同时返回 Java Session 列表和 daemon health。定向
+打开了那个 daemon 侧 Status 面板。开发代理能够同时返回 Java Session 列表和 daemon health。定向
 WebShell 测试覆盖了启动适配、代理注册，以及 daemon workspace context 尚未就绪时 Managed 面板保持
 可用的行为。

@@ -24,6 +24,59 @@ trap 'exit 1' INT TERM
 sandbox_revision="$(git rev-parse HEAD)"
 sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
+# The job-start disk floor gate predates this build: run 37374675168 passed
+# it and the runner still died on ENOSPC 24 minutes into this step (#13479).
+# Gate the build's own filesystem — the docker data root — so a saturated
+# host fails fast with a legible error and a re-run lands on an instance
+# with headroom instead of the runner worker crashing mid-step. The floor is
+# the caller's: the pre-build call charges a build-sized budget (8 GiB
+# covers a cold builder stage — monorepo install plus bundle layers — and
+# the final image, with margin); the pre-vitest call charges the repo's
+# calibrated job floor (check-disk-floor.sh's default), because the build
+# budget is spent by then and charging it twice would fail every host the
+# first gate admitted with less than that much headroom left. Self-hosted
+# only, like every other check-disk-floor.sh call site: an ephemeral hosted
+# runner starts with an order of magnitude more free disk than either floor.
+check_docker_data_root_floor() {
+  min_free_kb="$1"
+  if [ "$RUNNER_ENVIRONMENT" != 'self-hosted' ]; then
+    return 0
+  fi
+  # Validate this gate's own knobs first: the helper validates what it is
+  # handed under ITS variable names, so a malformed DISK_FLOOR_DOCKER_*
+  # value would otherwise surface as a bad DISK_FLOOR_MIN_FREE_KB — and the
+  # pre-vitest knob's typo only after the whole image build.
+  for knob in DISK_FLOOR_DOCKER_MIN_FREE_KB DISK_FLOOR_DOCKER_POST_MIN_FREE_KB DISK_FLOOR_DOCKER_MIN_FREE_INODES; do
+    if [ -n "${!knob:-}" ] && ! [[ "${!knob}" =~ ^[0-9]{1,18}$ ]]; then
+      echo "::error::${knob} must be a non-negative integer of at most 18 digits"
+      return 1
+    fi
+  done
+  if [ ! -f .github/scripts/check-disk-floor.sh ]; then
+    echo "::warning::docker data root floor gate skipped: .github/scripts/check-disk-floor.sh not present at this ref on ${RUNNER_NAME:-this runner}"
+    return 0
+  fi
+  docker_root="$(timeout 60 docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  if [ -z "$docker_root" ] || [ ! -d "$docker_root" ]; then
+    echo "::warning::docker data root floor gate skipped: docker data root '${docker_root:-<unreadable>}' is not a readable directory on ${RUNNER_NAME:-this runner}"
+    return 0
+  fi
+  # Dedicated knobs, not the job-start gate's DISK_FLOOR_MIN_FREE_KB and
+  # DISK_FLOOR_MIN_FREE_INODES: one env setting must not move both floors.
+  # The free-space floor arrives as an argument because the two checkpoints
+  # size it differently; the inode floor stays shared. An unset override is
+  # forwarded empty so the helper's own default (its :- fallback) applies:
+  # copying the calibrated value here would drift the next time the helper
+  # is retuned. A failure is re-labelled with this gate's knobs so the
+  # operator is not sent to the job-start gate's variables.
+  if ! DISK_FLOOR_MIN_FREE_KB="$min_free_kb" \
+    DISK_FLOOR_MIN_FREE_INODES="${DISK_FLOOR_DOCKER_MIN_FREE_INODES:-}" \
+    bash .github/scripts/check-disk-floor.sh "$docker_root"; then
+    echo "::error::docker data root floor gate failed for ${docker_root} on ${RUNNER_NAME:-this runner}; its knobs are DISK_FLOOR_DOCKER_MIN_FREE_KB (pre-build), DISK_FLOOR_DOCKER_POST_MIN_FREE_KB (pre-vitest) and DISK_FLOOR_DOCKER_MIN_FREE_INODES, not the job-start gate's DISK_FLOOR_MIN_FREE_KB / DISK_FLOOR_MIN_FREE_INODES"
+    return 1
+  fi
+}
+
 if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
   mkdir -p "${HOME}/.cache/qwen-code-ci"
   # Same protocol as e2e.yml: the host daemon lock is held shared for the whole
@@ -41,7 +94,36 @@ if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
   fi
 fi
 
-if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
+# Reclaim on every path, before any gate samples the data root: while these
+# prunes lived inside the image-missing branch, a re-run that found the
+# image cached reached the pre-vitest gate on the same still-saturated
+# filesystem that had just failed it, and no retry could recover. They need
+# no build mutex — the daily host sweep (ecs-runner/qwen-docker-cleanup)
+# runs both with no lock at all — but they do run under the shared daemon
+# lock, so each keeps its time bound. This lane passes --no-prune to the
+# build, and `until` on images is creation age, so the first line takes
+# dangling images older than a day; one that went dangling today waits for
+# the daily 02:30 UTC host sweep instead.
+timeout 20m docker image prune --force --filter 'until=24h' || echo "::warning::dangling image cleanup failed on ${RUNNER_NAME:-this runner}"
+# Image pruning does not reclaim BuildKit's intermediate install/build
+# layers. The daily host sweep bounds them at 30 GB, but this lane builds at
+# the end of the pool's day, hours after that sweep. No --keep-storage here:
+# it is a reserve, not a quota, so on a host with less cache than the
+# reserve — exactly the hosts this line exists for — it would reclaim
+# nothing.
+timeout 20m docker builder prune --all --force --filter 'until=24h' || echo "::warning::docker build cache cleanup failed on ${RUNNER_NAME:-this runner}"
+
+# The presence probe runs with the shared host locks held, so it keeps the
+# same bound as every other daemon call — and a timeout must not read as
+# "image absent": rebuilding against a wedged daemon would hang with the
+# locks held until the job timeout.
+image_inspect_status=0
+timeout 60 docker image inspect "$sandbox_image" > /dev/null 2>&1 || image_inspect_status=$?
+if [ "$image_inspect_status" -eq 124 ]; then
+  echo "::error::docker image inspect timed out after 60s on ${RUNNER_NAME:-this runner}; the daemon is wedged — failing instead of holding the shared locks"
+  exit 1
+fi
+if [ "$image_inspect_status" -ne 0 ]; then
   if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
     # Host build mutex, shared with the E2E lane and held only while an image
     # is prepared.
@@ -51,7 +133,12 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
       exit 1
     fi
   fi
-  docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+  # Every daemon call this script makes is time-bounded so a wedged daemon
+  # GC cannot hold the shared locks past a peer lane's 30-minute wait. The
+  # E2E lane runs this same labelled prune under this same mutex unbounded;
+  # bounding that side too is a cross-lane change tracked separately.
+  timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+  check_docker_data_root_floor "${DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608}"
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
   # that outlives this job from holding the lock.
   npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
@@ -60,12 +147,26 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
     exec 7>&-
   fi
 fi
-sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
+# Fails closed under set -e: the id read runs with the locks held, and an
+# empty id must never reach QWEN_SANDBOX_IMAGE.
+sandbox_image_id="$(timeout 60 docker image inspect --format '{{.Id}}' "$sandbox_image")"
 export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
 if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
   flock --unlock 8
   exec 8>&-
 fi
+
+# Run 37374675168 actually died in the vitest phase, ~15 minutes after the
+# build finished: re-gate now that the build's peak and the image it leaves
+# behind have landed on this filesystem. The gate sits outside the
+# image-missing branch so a re-run that finds the image already cached on a
+# still-saturated host is gated before vitest writes container layers to the
+# same filesystem. It charges the repo's calibrated job floor
+# (check-disk-floor.sh's default), not the build budget: the build has
+# already consumed that headroom, so re-charging it here would fail the lane
+# after the build succeeded. DISK_FLOOR_DOCKER_POST_MIN_FREE_KB tunes this
+# checkpoint independently of the pre-build floor.
+check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}"
 
 # The package.json docker test scripts each rebuild the sandbox image. Run
 # vitest directly here so this job reuses the image built above.

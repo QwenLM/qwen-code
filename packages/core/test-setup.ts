@@ -9,7 +9,23 @@ if (process.env['NO_COLOR'] !== undefined) {
   delete process.env['NO_COLOR'];
 }
 
+// QWEN_RUNTIME_DIR is the OPERATOR's runtime root, and it outranks
+// Storage.setRuntimeBaseDir (config/storage.ts:169). Exported on a developer
+// run, any test relying on that static override alone reads and writes the
+// ambient runtime root instead of its own temp dir. Deleting rather than
+// pinning: tests that want the variable set it in-body.
+delete process.env['QWEN_RUNTIME_DIR'];
+
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from './src/memory/extract-cadence.js';
 import { setSimulate429 } from './src/utils/testUtils.js';
+
+// The extraction-cadence experiment is default-off and its gate reads
+// process.env on every call, so an ambient export would switch it on for every
+// suite that schedules an extraction — the default-behaviour assertions then
+// fail wholesale rather than the experiment's own cases measuring it. Deleting
+// rather than pinning: tests that exercise the experiment stub the variable
+// in-body.
+delete process.env[EXTRACT_NOOP_SKIP_TURNS_ENV];
 
 // Avoid writing per-session debug log files during tests.
 // Unit tests can opt-in by overriding this env var.

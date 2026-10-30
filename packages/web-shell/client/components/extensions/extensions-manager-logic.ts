@@ -1,18 +1,18 @@
-import type { DaemonExtensionEntry } from '@qwen-code/sdk/daemon';
+import type { DaemonExtensionSummary } from '@qwen-code/sdk/daemon';
 
 export function preserveSelectedExtensionName(
   name: string | null,
-  extensions: readonly DaemonExtensionEntry[],
+  extensions: readonly DaemonExtensionSummary[],
 ): string | null {
   return name && extensions.some((extension) => extension.name === name)
     ? name
     : null;
 }
 
-export function filterExtensions(
-  extensions: readonly DaemonExtensionEntry[],
+export function filterExtensions<T extends DaemonExtensionSummary>(
+  extensions: readonly T[],
   query: string,
-): DaemonExtensionEntry[] {
+): T[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [...extensions];
   return extensions.filter((extension) =>

@@ -5,8 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import sharp from 'sharp';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -22,6 +27,7 @@ import {
   type ToolResult,
   type ToolResultDisplay,
 } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import {
   ManagedToolRuntime,
   ManagedToolPreparationError,
@@ -275,6 +281,44 @@ describe('ManagedToolRuntime', () => {
     },
   );
 
+  it.each(['before', 'after'] as const)(
+    'settles a shared history rejection %s physical execution',
+    async (phase) => {
+      const gate = deferred<void>();
+      const refusal = new Error('Shared history refused execution.');
+      useSharedHistory({
+        prepareTurn: async () => {},
+        execute: async (operation) => {
+          await gate.promise;
+          if (phase === 'after') await operation();
+          throw refusal;
+        },
+      });
+      const ref = await prepare();
+      await runtime.preflight(ref);
+      const pending = runtime.execute(ref);
+      const outcome = pending.catch((error: unknown) => error);
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+      gate.resolve();
+      expect(await outcome).toBe(refusal);
+      expect(runtime.status(ref)).toMatchObject({
+        state: 'settled',
+        result: {
+          executionStatus: phase === 'before' ? 'not_started' : 'success',
+        },
+      });
+      expect(tool.invocations[0].execute).toHaveBeenCalledTimes(
+        phase === 'before' ? 0 : 1,
+      );
+      expect(runtime.hasActiveWork()).toBe(false);
+      expect(runtime.cancel(ref).state).toBe('settled');
+      await expect(runtime.execute(ref)).rejects.toBe(refusal);
+      await expect(runtime.releasePrepared()).resolves.toBeUndefined();
+      await expect(runtime.dispose()).resolves.toBeUndefined();
+    },
+  );
+
   it('waits for queued execution cancellation before Runtime disposal finishes', async () => {
     const gate = deferred<void>();
     useSharedHistory({
@@ -315,6 +359,7 @@ describe('ManagedToolRuntime', () => {
     config.isLsToolEnabled = () => false;
     const childConfig = Object.assign(Object.create(config) as Config, {
       getTargetDir: () => '/managed-child',
+      getFileSystemService: () => new StandardFileSystemService(),
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getPlansDir: () => '/managed-child/plans',
@@ -403,6 +448,282 @@ describe('ManagedToolRuntime', () => {
         await builtin.dispose();
       }
     }
+  });
+
+  it('binds actual local factory reads to each preparation capability snapshot', async () => {
+    const { ReadFileTool } = await import('./read-file.js');
+    const { FileReadCache } = await import('../services/fileReadCache.js');
+    const directory = await fs.mkdtemp(join(tmpdir(), 'managed-local-media-'));
+    const gif = await sharp({
+      create: { width: 1, height: 1, channels: 3, background: '#306090' },
+    })
+      .gif()
+      .toBuffer();
+    const image = join(directory, 'tiny.gif');
+    const pdf = join(directory, 'native.pdf');
+    await fs.writeFile(image, gif);
+    await fs.writeFile(pdf, '%PDF-1.7');
+    const generator = vi.fn(() => ({ modalities: { image: true, pdf: true } }));
+    Object.assign(config, {
+      getTargetDir: () => directory,
+      getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
+      getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
+      getFileSystemService: () => new StandardFileSystemService(),
+      getFileReadCache: () => new FileReadCache(),
+      getFileReadCacheDisabled: () => true,
+      getEffectiveInputModalities: () => ({ image: true }),
+      getContentGeneratorConfig: generator,
+      getModel: () => 'local-test',
+      getUsageStatisticsEnabled: () => false,
+      getPlansDir: () => join(directory, 'plans'),
+      storage: {
+        getProjectTempDir: () => join(directory, 'tmp'),
+        getProjectDir: () => directory,
+        getUserSkillsDirs: () => [],
+        getWorkflowRunsDir: () => join(directory, 'workflow-runs'),
+      },
+      isLsToolEnabled: () => false,
+    });
+    const readTool = new ReadFileTool(config);
+    config.getToolRegistry = () =>
+      ({
+        getTool: (name: string) =>
+          name === ReadFileTool.Name ? readTool : undefined,
+        ensureTool: vi.fn(async () => undefined),
+      }) as unknown as ReturnType<Config['getToolRegistry']>;
+    try {
+      runtime = await createBuiltinManagedToolRuntime(config);
+      const manifest = runtime.manifest();
+      const call = {
+        ...identity,
+        capabilityDigest: manifest.capabilityDigest,
+        policyRevision: manifest.policyRevision,
+      };
+      await runtime.beginTurn(call);
+      const enabled = await runtime.prepare(
+        call,
+        ReadFileTool.Name,
+        { file_path: image },
+        undefined,
+        { inputModalities: { image: true } },
+      );
+      const disabled = await runtime.prepare(
+        { ...call, callId: 'disabled' },
+        ReadFileTool.Name,
+        { file_path: image },
+        undefined,
+        { inputModalities: {} },
+      );
+      const missing = await runtime.prepare(
+        { ...call, callId: 'missing' },
+        ReadFileTool.Name,
+        { file_path: image },
+      );
+      const native = await runtime.prepare(
+        { ...call, callId: 'pdf' },
+        ReadFileTool.Name,
+        { file_path: pdf },
+        undefined,
+        { inputModalities: { pdf: true } },
+      );
+      const execute = async (prepared: ManagedToolPrepareResponse) => {
+        const ref = reference(prepared);
+        await runtime.preflight(ref);
+        return runtime.execute(ref);
+      };
+      const delivered = await execute(enabled);
+      expect(delivered.executionStatus).toBe('success');
+      expect(delivered.result?.llmContent).toEqual({
+        inlineData: {
+          data: gif.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'tiny.gif',
+        },
+      });
+      expect((await execute(disabled)).result?.llmContent).toContain(
+        'Unsupported image',
+      );
+      expect((await execute(missing)).result?.llmContent).toEqual(
+        delivered.result?.llmContent,
+      );
+      expect((await execute(native)).result?.llmContent).toEqual({
+        inlineData: {
+          data: Buffer.from('%PDF-1.7').toString('base64'),
+          mimeType: 'application/pdf',
+          displayName: 'native.pdf',
+        },
+      });
+      await fs.writeFile(image, 'changed');
+      expect(await runtime.execute(reference(enabled))).toEqual(delivered);
+      expect(runtime.status(reference(enabled)).result).toEqual(delivered);
+      expect(generator).not.toHaveBeenCalled();
+    } finally {
+      await runtime.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a ReadFile budget refusal as the original terminal tool error', async () => {
+    const { ReadFileTool } = await import('./read-file.js');
+    const { FileReadCache } = await import('../services/fileReadCache.js');
+    const directory = await fs.mkdtemp(join(tmpdir(), 'managed-media-budget-'));
+    const file = join(directory, 'native.pdf');
+    await fs.writeFile(file, '%PDF-1.7');
+    Object.assign(config, {
+      getTargetDir: () => directory,
+      getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
+      getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
+      getFileSystemService: () => new StandardFileSystemService(),
+      getFileReadCache: () => new FileReadCache(),
+      getFileReadCacheDisabled: () => true,
+      getEffectiveInputModalities: () => ({ pdf: true }),
+      getUsageStatisticsEnabled: () => false,
+      getPlansDir: () => join(directory, 'plans'),
+      storage: {
+        getProjectTempDir: () => join(directory, 'tmp'),
+        getProjectDir: () => directory,
+        getUserSkillsDirs: () => [],
+        getWorkflowRunsDir: () => join(directory, 'workflow-runs'),
+      },
+    });
+    const bounded = new ReadFileTool(config, {
+      maxInlineMediaBase64Bytes: 768 * 1024,
+      maxMediaResultBytes: 1,
+    });
+    runtime = new ManagedToolRuntime(
+      config,
+      () => [bounded],
+      () => revision,
+    );
+    try {
+      const call = {
+        ...identity,
+        capabilityDigest: runtime.manifest().capabilityDigest,
+      };
+      await runtime.beginTurn(call);
+      const ref = reference(
+        await runtime.prepare(call, ReadFileTool.Name, { file_path: file }),
+      );
+      await runtime.preflight(ref);
+      const result = await runtime.execute(ref);
+      expect(result.executionStatus).toBe('error');
+      expect(result.result?.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(JSON.stringify(result)).not.toContain('inlineData');
+      await fs.writeFile(file, 'changed');
+      expect(runtime.status(ref)).toMatchObject({ state: 'settled', result });
+      expect(await runtime.execute(ref)).toEqual(result);
+    } finally {
+      await runtime.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('binds media-capable builtins to the modality view and rejects media on other tools', async () => {
+    const { ReadFileTool, buildReadFileDescription } = await import(
+      './read-file.js'
+    );
+    const { WriteFileTool } = await import('./write-file.js');
+    const parentRead = new ReadFileTool(config);
+    const parentWrite = new WriteFileTool(config);
+    config.isLsToolEnabled = () => false;
+    // A bound tool that inherits the host config's modalities instead of the
+    // caller's context takes the audio/video branch of the description
+    // builder, while the declared context stays image-only.
+    config.getEffectiveInputModalities = () => ({ audio: true, video: true });
+    config.getFileService = () =>
+      ({ shouldQwenIgnoreFile: () => false }) as unknown as ReturnType<
+        Config['getFileService']
+      >;
+    config.getFileReadCache = () =>
+      new Map() as unknown as ReturnType<Config['getFileReadCache']>;
+    config.getFileSystemService = () =>
+      new StandardFileSystemService() as unknown as ReturnType<
+        Config['getFileSystemService']
+      >;
+    config.getWorkspaceContext = () =>
+      ({
+        isPathWithinWorkspace: () => true,
+        getDirectories: () => ['/managed-child'],
+      }) as unknown as ReturnType<Config['getWorkspaceContext']>;
+    config.getTargetDir = () => '/managed-child';
+    config.getPlansDir = () => '/managed-child/plans';
+    config.storage = {
+      getProjectTempDir: () => '/managed-child/tmp',
+      getProjectDir: () => '/managed-child',
+      getUserSkillsDirs: () => [],
+      getWorkflowRunsDir: () => '/managed-child/workflow-runs',
+    } as unknown as Config['storage'];
+    config.getToolRegistry = () =>
+      ({
+        getTool: (name: string) =>
+          [parentRead, parentWrite].find(
+            (candidate) => candidate.name === name,
+          ),
+        ensureTool: vi.fn(async () => undefined),
+      }) as unknown as ReturnType<Config['getToolRegistry']>;
+    const build = vi.spyOn(ReadFileTool.prototype, 'build');
+    const builtin = await createBuiltinManagedToolRuntime(config);
+    try {
+      const manifest = builtin.manifest();
+      const call = {
+        ...identity,
+        policyRevision: manifest.policyRevision,
+        capabilityDigest: manifest.capabilityDigest,
+      };
+      await builtin.beginTurn(call);
+      const media = {
+        inputModalities: {
+          image: true,
+          pdf: false,
+          audio: false,
+          video: false,
+        },
+      };
+      const prepared = await builtin.prepare(
+        call,
+        ReadFileTool.Name,
+        { file_path: '/managed-child/a.png' },
+        undefined,
+        media,
+      );
+      expect(prepared.params).toEqual({ file_path: '/managed-child/a.png' });
+      expect(build).toHaveBeenCalledOnce();
+      expect(build.mock.instances[0]).not.toBe(parentRead);
+      const boundView = build.mock.instances[0] as unknown as {
+        config: { getEffectiveInputModalities: () => unknown };
+        schema: { description?: string };
+      };
+      expect(boundView.config.getEffectiveInputModalities()).toEqual(
+        media.inputModalities,
+      );
+      expect(boundView.schema.description).toBe(
+        buildReadFileDescription(media.inputModalities),
+      );
+      await expect(
+        builtin.prepare(
+          { ...call, callId: 'call-2' },
+          WriteFileTool.Name,
+          { file_path: '/managed-child/b', content: 'y' },
+          undefined,
+          media,
+        ),
+      ).rejects.toThrow('does not support media context');
+    } finally {
+      build.mockRestore();
+      await builtin.dispose();
+    }
+  });
+
+  it('projects explicit-undefined params out of the prepared digest', async () => {
+    tool.setup = (invocation) => {
+      Object.assign(invocation as { params: Record<string, unknown> }, {
+        params: { ...invocation.params, optional: undefined },
+      });
+    };
+    await runtime.beginTurn(identity);
+    const prepared = await runtime.prepare(identity, tool.name, input);
+    expect(prepared.params).toEqual(input);
+    expect(prepared.argsDigest).toBe(managedToolDigest(input));
   });
 
   it('prepares once without execution and checkpoints at the explicit turn boundary', async () => {
@@ -628,6 +949,114 @@ describe('ManagedToolRuntime', () => {
     ).rejects.toThrow('already decided');
   });
 
+  it('normalizes a switch-to-default approval to a single local approval', async () => {
+    tool.setup = (invocation) => {
+      invocation.getDefaultPermission.mockResolvedValue('ask');
+    };
+    const ref = await prepare();
+    await runtime.confirmation(ref);
+    await runtime.confirm(
+      ref,
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    );
+    expect(tool.invocations[0].onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it('settles with a hook-error record when a hook payload cannot be cloned', async () => {
+    hooks.post.mockResolvedValue({
+      shouldStop: false,
+      nonCloneable: () => {},
+    } as unknown as Awaited<ReturnType<typeof hooks.post>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('success');
+    expect(result.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(runtime.status(ref).result?.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    // The fallback drops only the hook that ran and keeps the terminal
+    // outcome with its payload.
+    expect(result.failureHook).toBeUndefined();
+    expect(runtime.status(ref).result?.failureHook).toBeUndefined();
+    expect(result.result?.llmContent).toEqual(rawResult.llmContent);
+    expect(runtime.status(ref).result?.result?.llmContent).toEqual(
+      rawResult.llmContent,
+    );
+  });
+
+  it('preserves the stop directive when the postHook payload cannot be cloned', async () => {
+    hooks.post.mockResolvedValue({
+      shouldStop: true,
+      stopReason: 'policy: no writes outside the workspace',
+      additionalContext: 'ctx-for-model',
+      nonCloneable: () => {},
+    } as unknown as Awaited<ReturnType<typeof hooks.post>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('success');
+    expect(result.postHook?.shouldStop).toBe(true);
+    expect(result.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    // The string fields are clone-safe, so the fallback keeps them.
+    expect(result.postHook?.stopReason).toBe(
+      'policy: no writes outside the workspace',
+    );
+    expect(result.postHook?.additionalContext).toBe('ctx-for-model');
+    expect(runtime.status(ref).result?.postHook).toMatchObject({
+      shouldStop: true,
+      stopReason: 'policy: no writes outside the workspace',
+      additionalContext: 'ctx-for-model',
+    });
+    expect(result.failureHook).toBeUndefined();
+  });
+
+  it('drops a hook text field that is not a string when the payload cannot be cloned', async () => {
+    hooks.post.mockResolvedValue({
+      shouldStop: true,
+      stopReason: () => {},
+      additionalContext: 'ctx-for-model',
+    } as unknown as Awaited<ReturnType<typeof hooks.post>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('success');
+    expect(result.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(result.postHook).not.toHaveProperty('stopReason');
+    expect(result.postHook?.additionalContext).toBe('ctx-for-model');
+  });
+
+  it('records only the failure hook when the failure payload cannot be cloned', async () => {
+    tool.setup = (invocation) => {
+      invocation.execute.mockRejectedValue(new Error('boom'));
+    };
+    hooks.failure.mockResolvedValue({
+      additionalContext: 'failure-ctx-for-model',
+      nonCloneable: () => {},
+    } as unknown as Awaited<ReturnType<typeof hooks.failure>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('error');
+    expect(result.failureHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(result.failureHook?.additionalContext).toBe('failure-ctx-for-model');
+    expect(runtime.status(ref).result?.failureHook?.additionalContext).toBe(
+      'failure-ctx-for-model',
+    );
+    expect(result.postHook).toBeUndefined();
+  });
+
   it('requires preflight and supports trusted automatic allow without onConfirm', async () => {
     const ref = await prepare();
     expect(() => runtime.execute(ref)).toThrow('preflight');
@@ -675,6 +1104,218 @@ describe('ManagedToolRuntime', () => {
       result: rawResult,
     });
     expect(tool.invocations).toHaveLength(1025);
+  });
+
+  it('refuses a new turn while an invocation is prepared but not yet executed', async () => {
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    expect(() =>
+      runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+    ).toThrow('unfinished');
+    expect(runtime.status(ref).state).toBe('prepared');
+    expect(runtime.hasActiveWork()).toBe(true);
+  });
+
+  it('refuses a new turn while an invocation is still executing and preserves access to it', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    const next = { ...identity, promptId: 'prompt-2' };
+    try {
+      expect(() => runtime.beginTurn(next)).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve(rawResult);
+      await executing;
+    }
+    expect((await executing).executionStatus).toBe('success');
+    expect(runtime.status(ref).state).toBe('settled');
+    await runtime.beginTurn(next);
+    expect(() => runtime.status(ref)).toThrow('identity does not match');
+  });
+
+  it('refuses a new turn while a cancellation is confirming', async () => {
+    const gate = deferred<void>();
+    tool.setup = (invocation) =>
+      invocation.onConfirm.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    const confirming = runtime.confirm(
+      ref,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    const rejection = confirming.catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() =>
+        expect(tool.invocations[0].onConfirm).toHaveBeenCalledTimes(1),
+      );
+      expect(runtime.cancel(ref).state).toBe('cancel_requested');
+      expect(() =>
+        runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+      ).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('cancel_requested');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve();
+    }
+    expect(await rejection).toMatchObject({
+      message: expect.stringContaining('cancelled'),
+    });
+    await vi.waitFor(() => expect(runtime.status(ref).state).toBe('settled'));
+    expect(runtime.status(ref).result?.executionStatus).toBe('not_started');
+  });
+
+  it.each([
+    ['a replacement', { shouldProceed: true }, { value: 'rewritten' }],
+    ['an empty replacement', { shouldProceed: true }, {}],
+    ['an identical replacement', { shouldProceed: true }, input],
+    ['an ask replacement', { shouldProceed: false, blockType: 'ask' }, {}],
+  ])(
+    'refuses %s without running the tool',
+    async (_label, decision, updatedInput) => {
+      hooks.pre.mockResolvedValue({
+        ...decision,
+        additionalContext: 'ctx',
+        updatedInput,
+      });
+      tool.setup = (invocation) => {
+        invocation.getDefaultPermission.mockResolvedValue('ask');
+      };
+      const ref = await prepare();
+      await runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce);
+
+      const result = await runtime.preflight(ref);
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockType: 'denied',
+        blockReason: expect.stringContaining('not supported'),
+        additionalContext: 'ctx',
+      });
+      expect(await runtime.preflight(ref)).toEqual(result);
+      await expect(
+        runtime.confirm(
+          ref,
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+          'preflight',
+        ),
+      ).rejects.toThrow('did not request');
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+      expect(hooks.pre).toHaveBeenCalledTimes(1);
+      expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['denied', 'policy'],
+    ['stop', 'halt'],
+  ])(
+    'keeps a %s reason that comes with a replacement',
+    async (blockType, blockReason) => {
+      hooks.pre.mockResolvedValue({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+        updatedInput: { value: 'rewritten' },
+      });
+      const ref = await prepare();
+      expect(await runtime.preflight(ref)).toEqual({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+      });
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+    },
+  );
+
+  it('refuses a real command hook replacement through the hook pipeline', async () => {
+    const { HookSystem } = await import('../hooks/hookSystem.js');
+    const { PermissionMode } = await import('../hooks/types.js');
+    const actual = await vi.importActual<
+      typeof import('../core/toolHookTriggers.js')
+    >('../core/toolHookTriggers.js');
+    hooks.pre.mockImplementation(actual.firePreToolUseHook);
+    const { mkdtemp, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const outputFile = join(
+      await mkdtemp(join(tmpdir(), 'managed-hook-')),
+      'output.json',
+    );
+    await writeFile(
+      outputFile,
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput: { value: 'rewritten' },
+        },
+      }),
+    );
+    Object.assign(config, {
+      getAllowedHttpHookUrls: () => [],
+      getAllowPrivateNetworkHooks: () => false,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({
+        PreToolUse: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: `cat '${outputFile}'`,
+              },
+            ],
+          },
+        ],
+      }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+      isTrustedFolder: () => true,
+      getTranscriptPath: () => '/tmp/transcript',
+      getWorkingDir: () => process.cwd(),
+      getSessionSourceType: () => undefined,
+      getSessionSourceId: () => undefined,
+      getUsageStatisticsEnabled: () => false,
+    });
+    const system = new HookSystem(config);
+    config.getHookSystem = () => system;
+    await system.initialize();
+    const owner = { runtimeId: system.runtimeId, sessionId, agentId: null };
+    const request = vi.fn(
+      async (
+        message: import('../confirmation-bus/types.js').HookExecutionRequest,
+      ) => ({
+        success: true,
+        output: await runWithHookExecutionOwner(message.owner, () =>
+          system.firePreToolUseEvent(
+            String(message.input['tool_name']),
+            message.input['tool_input'] as Record<string, unknown>,
+            String(message.input['tool_use_id']),
+            PermissionMode.Default,
+          ),
+        ),
+      }),
+    );
+    config.getMessageBus = () =>
+      ({ request, publish: vi.fn() }) as unknown as ReturnType<
+        Config['getMessageBus']
+      >;
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    const result = await runWithHookExecutionOwner(owner, () =>
+      runtime.preflight(ref),
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(result).not.toHaveProperty('updatedInput');
+    expect(() => runtime.execute(ref)).toThrow('preflight');
+    expect(tool.invocations[0].execute).not.toHaveBeenCalled();
   });
 
   it('runs the preflight hook once across the second confirmation bounce', async () => {
@@ -977,6 +1618,110 @@ describe('ManagedToolRuntime', () => {
     });
     expect((await executing).executionStatus).toBe('cancelled');
     expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('preserves an explicit Shell cancellation when the tool also has an error', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command failed and was cancelled.',
+      error: {
+        message: 'process terminated with signal',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command failed and was cancelled.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: 15,
+        pid: 123,
+        error: 'signal 15 (SIGTERM) received',
+        outcome: 'cancelled',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('cancelled');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'process terminated with signal',
+      true,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('classifies a timed-out Shell result carrying an error as error, not cancelled', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command timed out.',
+      error: {
+        message: 'command exceeded its timeout',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command timed out.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: null,
+        pid: 123,
+        error: 'command exceeded its timeout',
+        outcome: 'timed_out',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('error');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'command exceeded its timeout',
+      false,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
     expect(hooks.post).not.toHaveBeenCalled();
   });
 

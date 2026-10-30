@@ -1,0 +1,436 @@
+# Qwen Managed Runtime Broker Core
+
+The `com.alibaba.qwen.code.runtimebroker` package defines the state and orchestration core for a
+Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
+and Tool execution records; repository contracts; thread-safe in-memory
+and JDBC implementations; and a framework-neutral service that composes
+authoritative scope resolution, Runtime provisioning, and Runtime transport
+adapters.
+
+Runtime providers and their deployment protocols are in `runtimebroker.provisioning`,
+HTTP adapters and wire protocols in `runtimebroker.transport`, and credential
+encryption in `runtimebroker.security`. The execution and repository core stays
+in the parent package; the application still builds all of them in one Maven module.
+
+The service acquires operation and dispatch leases, renews them while external
+work is in flight, converges idempotent Tool execution, records cancellation
+intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
+`reconcileExecution` asks the original Runtime about an `UNKNOWN` execution
+and settles it only on that Runtime's terminal answer; it never replays the
+call. A persisted `READY` binding is never reused by a new process without
+proof: a binding whose request carries a durable provisioner kind is adopted
+only after the provisioner observes the physical resource and the Broker
+re-attests the Runtime identity through the transport, while a legacy binding
+still fails closed with `runtime_reconciliation_required`; see
+[Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
+
+The package contains a local process provider, `LocalProcessRuntimeProvisioner`,
+which starts the merged Managed Runtime worker and adopts it only after
+attestation; see
+[Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
+The embedding service still owns the worker command wiring, recovery-capable
+provisioners, and deployment configuration. The experimental Kubernetes provider
+below supports disposable scratch only. The Broker core stays independent of Spring and public Agent resources; the enclosing Managed Agent Server wires its HTTP and application adapters.
+
+Broker sources, classpath resources and tests are built as part of `packages/managed-agent-server`, which requires JDK 21 or later and Maven 3.8.9+ (the SpotBugs plugin floor). There is no separate Broker JAR or test JAR. Install the Java SDK first, as described in the [application README](../README.md).
+
+From `packages/managed-agent-server`, build and test with:
+
+```bash
+mvn test
+mvn checkstyle:check checkstyle:check@runtime-broker-checkstyle
+mvn verify
+```
+
+`mvn verify` needs Maven 3.8.9+ and runs the SpotBugs high-confidence gate: a
+new warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To exercise only the
+gate, run `mvn verify -DskipTests` — the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter.
+
+## JDBC persistence
+
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 38-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
+database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
+codec; the embedding service owns the connection pool and schema lifecycle.
+`JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
+(`AesGcmSecretProtector` is included): the provision seed of a durable binding
+and the lease token of a legacy binding are stored encrypted, so the key
+material must come from the embedding service's own durable secret store and
+stay stable across restarts and instances.
+Tool execution rows preserve idempotency identity, dispatch ownership and
+lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
+
+New dispatch authorization uses `RuntimeBindingRepository.authorizeDispatch`:
+the binding must be READY without a drain request and the original Session
+must be READY, under the same parent lock and transaction as the execution's
+DISPATCHING-to-EXECUTING CAS. Taking a coordinator claim grants no execution
+permission. Original authorized calls may still settle after draining.
+
+`ToolExecutionRepository.findByBinding` provides bounded inventory for the exact
+binding/generation across Sessions, including every execution state. Its hash
+cursor does not skip records when they settle; custom repositories default to
+refusal. Inventory is not a snapshot, a normal-stop receipt or permission to
+release storage. The durable CSI retirement coordinator remains unimplemented.
+Custom binding repositories must implement this atomic operation; the default
+refuses dispatch rather than falling back to a separate readiness read.
+Tool execution identifiers are globally unique repository keys. The embedding
+service must derive them from authenticated tenant, workspace, and session
+context because this repository interface does not carry separate scope
+arguments.
+The Broker core is wired by the enclosing application, which owns Spring configuration and Tool dispatch admission.
+
+`JdbcRuntimeRetention` provides an explicit off-request-path JDBC sweep for
+retired generations. The embedding owns scheduling and supplies same-connection
+reference checks for its own tables. Each sweep bounds binding checks, child
+checks and total deletions; retain its returned cursor between ticks. It preserves
+operator-recovery records, active children, physical-stop evidence requirements,
+slots and admission fences. In the managed server, publication and CSI worker ACK
+references retain their execution and its parent session and binding, including
+COLLECTED publications; unreferenced siblings may be removed.
+See [JDBC retention](../../../docs/design/runtime-broker-jdbc-retention.md)
+for eligibility and the managed-server opt-in configuration (disabled by default,
+30-day age, 100-row batches and one-minute delay). Standalone embeddings must
+also serialize new external references with the original binding lock.
+
+Enabling retention allows eligible, unreferenced historical records to be deleted
+once they age past `max-age`; it does not guarantee deletion by that age.
+Publication and CSI worker ACK references in the managed server retain executions
+and their parent sessions and bindings regardless of age, including COLLECTED
+publications. After records are removed, callers must not reuse expired
+Runtime Session identifiers or idempotency keys. A missing execution is not
+permission to replay it. No permanent execution-key tombstone is retained.
+
+The Broker and Managed Server share the canonical 38-table V1 baseline. Initialize
+a fresh database; old catalogs are refused rather than upgraded. Keep the old
+environment for historical reads and settle its work before cutover. Repeated
+initialization validates structure without repairing it or changing receipts.
+For the canonical environment, stop new admission before investigating seeded
+failures:
+
+```sql
+SELECT tenant_id, COUNT(*) AS failed_bindings
+FROM ma_runtime_binding
+WHERE binding_state = 'FAILED' AND provision_seed_ciphertext IS NOT NULL
+GROUP BY tenant_id;
+```
+
+The new placement guard blocks affected tenants, including when a later
+generation is `READY`. Do not resume their traffic until the original writer
+domain is physically stopped and an evidence-preserving operator migration is
+available. This module does not ship that migration; deleting old rows or
+fabricating stop evidence would lose the safety fence. A nonempty result is a
+rollout blocker for this database.
+
+Run the optional real-MySQL contract with:
+
+```bash
+mvn -Pmysql-integration \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/runtime_broker_test' \
+  -Dmysql.user=root \
+  -Dmysql.password= \
+  verify
+```
+
+Durable rows alone do not make a stopped local Runtime process recoverable.
+For a binding without durable identity the embedding service must reconcile a
+persisted lease before reuse and own the process adoption or reprovisioning
+policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## External scratch Runtime (opt-in)
+
+`ExternalRuntimeProvisioner` (kind `external-scratch`) delegates Session-exclusive
+scratch worker placement to an operator-run HTTP service, so a deployment can use
+an existing sandbox or container platform without Kubernetes, SSH or a vendor SDK
+inside this repository. It implements the scratch slice of
+[the external provider design](../../../docs/design/2026-10-23-external-runtime-provider.md);
+managed-context (registered Workspace) requests are refused.
+
+Select it with `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-scratch` plus
+`QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL`, `..._PROVIDER_TOKEN`,
+`..._PROVIDER_ID` and optional `..._REQUEST_TIMEOUT` / `..._STARTUP_TIMEOUT`. The
+selection does not imply the Broker itself: also set
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true`, a non-empty
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`, the
+`QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID` /
+`QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY` pair (the external path persists
+provision seeds encrypted through it) and
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. An explicit
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is required: the worker-side cwd cannot be
+hashed on the Broker host, so the local-process/Kubernetes derivation does not
+apply. The README's [Broker deployment](../README.md#broker-deployment) recipe
+lists the full export block. The provider URL must be HTTP(S) without
+credentials, query or fragment; use HTTPS for anything outside a trusted control
+plane. Workspace files and Shell must stay disabled, and the configured
+`workspace-cwd` is the worker-side path, so the Broker host does not need that
+directory. Preflight validates configuration only; reachability and worker
+identity are checked on first use.
+
+The provider implements two authenticated POST routes, `provision` and `observe`.
+`provision` is idempotent on `provisionRequestId`: the Broker persists a
+deterministic logical handle before its first call, sends it on every retry, and
+rejects a response carrying another handle. The provider must bind that handle to
+one immutable physical resource and keep the binding across its own restarts;
+neither a lost response nor a lost worker authorizes replacement under the same
+identity. `observe` is read-only and reports `RUNNING`, `STARTING` or `UNKNOWN`;
+`GONE` and unknown states fail closed. A provider `RUNNING` never establishes
+identity on its own: the Broker attests the returned origin with the existing
+bearer/lease protocol and keeps every lease, epoch and execution decision.
+
+Transient provider failures stay retryable against the same request and lease, so
+a temporary outage does not invalidate a healthy binding; endpoint or identity
+mismatch does. The provider ID, Workspace ID, Workspace generation, Workspace
+cwd and Harness capability digest are all digested into the handle identity
+described in the design; the lease token is deliberately excluded so rotation
+does not replace identity. Changing any of the frozen inputs after Sessions
+have been placed invalidates every existing binding, with no unblock path —
+set them once before the first Session. There is deliberately no `release` route. Release can run after an
+operation loses its CAS or fails attestation, so it cannot authorize stopping a
+worker another Broker may own. Closing a Session therefore does not stop its
+scratch worker: budget the provider's own TTL and inspect retained resources.
+
+This increment allocates, attests and recovers workers but has no tool consumer.
+A Session without a Workspace binding has no Hosted tool profile, so the model is
+offered no tools while every admitted Turn still warms that Session's Runtime.
+Each such Session holds a remote worker that runs no tool calls until its TTL
+expires. Workspace-backed remote tools require the extension described in the
+design; do not enable this provisioner for production tool use yet.
+
+Placement retry state is bounded at 1024 retained seeds per Broker process and is
+never evicted: a provider-conflict outcome frees its own entry, but a merely
+idle or closed Session keeps holding one, and at capacity new seeds fail with the
+retryable `runtime_external_capacity`. Plan a Broker restart or a capacity change
+before that many distinct Sessions, and budget provider-side resource retention
+separately.
+
+## External Workspace storage registration
+
+Operators can reserve an immutable `EXTERNAL` storage ownership record through
+`POST /internal/managed-workspaces/v1/storage:register-external`. This is metadata
+registration only: it creates no Workspace, Session, worker, remote call or local
+filesystem access. It needs no external provisioner profile. Existing execution
+and local recovery paths refuse these aliases. See the
+[registration design](../../../docs/design/2026-10-25-external-storage-registration.md).
+
+The listener must be explicitly bound to loopback (`server.address` for a shared
+listener, or `qwen.managed-agent.internal-server.address` for a dedicated internal
+listener). Use literal `127.0.0.1` or `::1`. Both local and peer addresses must be
+loopback; forwarded headers do not grant access. A dedicated internal listener
+also requires its configured port. Send `Authorization: Bearer <runtime-broker.token>`
+and `X-Qwen-Tenant-Id`. An empty Broker token or a non-loopback listener is refused,
+even if ordinary API authentication is open. The operator credential authorizes
+the named tenant; ordinary Workspace grants do not authorize registration.
+
+```json
+{
+  "identity": {
+    "providerId": "provider-a",
+    "physicalKey": "persistent-volume-42",
+    "registrationRevision": 1
+  },
+  "alias": {
+    "tenantWorkspaceId": "workspace-42",
+    "aliasPath": "/external/workspace-42",
+    "mountRoot": "/workspace"
+  },
+  "idempotencyKey": "register-workspace-42",
+  "requestId": "operator-request-42"
+}
+```
+
+`providerId`, `physicalKey` and `tenantWorkspaceId` use `[A-Za-z0-9._-]{1,128}`;
+`registrationRevision` is positive. The provider must supply durable storage
+identity, never a sandbox ID. `tenantWorkspaceId` reserves the tenant's storage ID
+for a future Workspace; an existing alias, Workspace or Runtime binding is never
+adopted. Paths are absolute, non-root, at most 2048 characters and use nonempty
+`[A-Za-z0-9._-]+` components other than `.` and `..`. Backslashes, duplicate or
+trailing separators are rejected. Registration does not attest permissions or
+existence on the worker; its physical owner remains `UNVERIFIED`.
+
+A provider/physicalKey pair has one immutable tenant and alias, independent of
+revision. Alias paths are exclusive across external registrations, including
+across tenants. Attempts to change ownership return `409 alias_conflict` with a
+sanitized message. The tenant-scoped `idempotencyKey` uses
+`[A-Za-z0-9._:-]{1,128}`; the same key with different registration data returns
+`409 idempotency_conflict`. A committed retry returns the original `registrationId`,
+`storageKind`, `registration` and `registeredAt` (epoch milliseconds), including
+after restart. Optional `requestId` is visible ASCII of 1–128 characters and only
+sets HTTP correlation; changing it does not change the durable request digest.
+All responses are `Cache-Control: no-store`. Success is HTTP 200; invalid input is
+400, operator admission failure 403, and payloads over 16 KiB 413.
+
+Registration, owner and idempotency receipt commit atomically. The fresh V1 schema
+adds the `EXTERNAL_STORAGE` receipt namespace; existing development catalogs must
+be recreated under the existing fresh-schema policy. There is no update,
+re-registration, retirement, mount or execution API in this increment.
+
+## Experimental Kubernetes scratch Runtime
+
+`KubernetesRuntimeProvisioner` implements the K1 slice of the
+[Kubernetes Runtime design](../../../docs/design/2026-10-01-managed-kubernetes-runtime.md).
+It creates one bare Pod and immutable boot Secret per persisted provision seed,
+with Session-exclusive `emptyDir` scratch. It rejects managed-context requests
+and mounts no PVC. This is a private SDK adapter for trusted development
+embeddings; Spring selection and public Hosted Workspace admission stay closed.
+
+Construct `KubernetesHttpRuntimeClient` with the HTTPS API origin, service-account
+token file and cluster CA file. Configure the provisioner with a stable cluster
+identifier, existing namespace, SHA-256-pinned worker image and worker command.
+The embedding scope resolver must authorize Session isolation and a container
+scratch directory such as `/workspace`; the Java-host directory is not copied
+into the Pod. Keep the Broker's encrypted seed and resource handle across
+restarts. Custom clients must bound API calls and preserve authoritative-404
+semantics.
+
+The image must include Node.js 22+, the built CLI and runtime dependencies, and
+support UID/GID 1000 with a read-only root filesystem. Broker RBAC needs `get`
+and `create` on Pods and Secrets in the namespace. The Broker must reach the
+API and the Pod's IPv4 port `43190`. Worker HTTP uses the existing bearer/lease
+protocol on a trusted development network; production TLS/workload identity and
+network-policy qualification are later gates.
+
+Recovery observes the original Pod/Secret UIDs and re-attests the same worker.
+Restarted, missing, replaced or mismatched resources block adoption. `release`
+and `close` never delete Kubernetes objects; neither is authorization to stop a
+worker another Broker may use. Budget retained Pods and Secrets: K1 provides no
+automatic garbage collection, persistent Workspace storage or volume handoff.
+
+A lost K1 scratch Pod leaves its binding LOST and blocks new placement in that
+tenant with non-retryable `runtime_placement_recovery_required`. When sharing the
+repository, new local-process and other provisioner kinds are also blocked.
+Existing healthy bindings and other tenants remain usable. K1 never emits the
+stopped-writer proof required by `recoverBinding`, so retries, Pod deletion and Broker restart do
+not recover this tenant. Operators must stop new admission for the affected tenant,
+retain the original binding/seed/UIDs and execution inventory, and escalate for an
+evidence-preserving recovery or placement-policy change. There is no supported
+in-place recovery procedure in this increment; do not delete database rows,
+relabel the binding RELEASED, or invent stop evidence to restore admission.
+This is an outstanding K1 availability gate tracked in #13395.
+
+Each instance reserves at most 1024 retained or pending seeds before Kubernetes
+writes. At capacity, new seeds fail with retryable `runtime_kubernetes_capacity`;
+existing identities remain recoverable. Broker pre-create capacity refusal leaves
+the original binding PROVISIONING with its claim released for retry; an error
+after entering ensure keeps the existing fail-closed policy. The supplied durable
+handle is never shadowed by an empty local entry. `release` does not evict, UNKNOWN retains
+the slot while revoking local endpoint usability, and only that entry's own
+validated reconciliation conflict frees it. Lease lookups use a direct identity
+index and compare the endpoint. This bounds local state; it does not retire Pods,
+Secrets or durable bindings.
+
+After building and bundling the CLI, run the opt-in real-worker test from this
+module with Node.js, a reachable non-loopback IPv4 interface and free port `43190`:
+
+```bash
+mvn -Dtest=KubernetesRuntimeWorkerTest \
+  -Dqwen.kubernetes.worker-test=true \
+  -Dqwen.cli.entry=../../dist/cli.js test
+```
+
+The test uses fake Kubernetes observations and a real Broker/worker for private
+file tools, deduplication and live-worker adoption. It does not qualify scheduling,
+container isolation, NetworkPolicy or CSI. The default suite skips this opt-in
+test; provider and API-client tests run without a cluster. Historical cloud smoke
+results in the design concern an earlier snapshot, not this PR's requalification.
+
+## Private CSI evidence components
+
+The managed-server private CSI adapter and evidence commands are described in
+[the CSI design](../../../docs/design/2026-10-01-managed-kubernetes-k2.md) and
+[the durable worker ACK design](../../../docs/design/2026-10-03-csi-durable-worker-ack.md).
+They reserve storage before creation, persist API-observed original Pod identity,
+seal dispatch and retain original publication/checkpoint/ACK evidence. Public
+Hosted CSI selection and physical holder release remain disabled. ACK success
+keeps the holder DRAINING and does not prove worker stop or NodeUnpublish.
+The K1 scratch adapter above retains its separate no-PVC contract.
+
+The private `KubernetesCsiLogReader` provides bounded native log segments for ACK
+qualification. It corroborates the expected plugin Pod/DaemonSet/Node/container/image
+API identity before and after a current-segment read and refuses changed log
+prefixes, incomplete lines and invalid timestamps. The HTTP client requests
+timestamps without `tailLines` or `limitBytes`, uses strict UTF-8 and rejects
+responses above one MiB. ConfigMap object reads separately allow one MiB plus
+64 KiB for the JSON envelope so the largest admitted base64 worker chunk fits;
+other object reads and request bodies keep their existing one-MiB limit. These are qualification inputs only: the durable
+pre-create collector, image-specific publication/unpublish parser and physical
+retirement coordinator remain gated. Log disappearance, a fresh baseline or a
+diagnostic snapshot never releases a Workspace holder.
+Kubernetes omits rotated log files and may skip malformed CRI records. Kubelet
+chooses the log container from local status asynchronously synchronized to the
+API server; these observations cannot bind log bytes to an exact container ID.
+That additional source-binding contract remains required. RFC3339 offsets are
+accepted without altering the bytes used for prefix and digest verification.
+
+## Trusted local recovery
+
+Durable local provisioning and trusted reboot recovery are separate opt-ins;
+see the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md)
+and [reboot cleanup design](../../../docs/design/2026-09-28-local-reboot-recovery.md).
+`recoverBinding(bindingId, expectedGeneration)` observes and cleans only the
+saved generation. It does not resolve current product authorization or create
+replacement workers. Managed Workspace embeddings must implement
+`RuntimeProvisioner.recoverResources` to clear their original physical holder;
+the default refuses managed cleanup. Only then may `finishLostRecovery` retire
+the saved binding. Custom binding repository implementations must implement the
+new bounded candidate query and cleanup finalization contract. There is no new
+public HTTP recovery endpoint or database migration in this slice.
+
+## Fault gates
+
+The Stage F fault gates run the service in real Broker JVMs against the real
+bundled worker, with a fault-injecting HTTP proxy between them and a
+file-backed H2 database behind a relay that can be cut. They drop, reset,
+delay or hold Runtime answers, kill workers and Broker JVMs, freeze a Broker
+past its lease, and take the database away, then check that no tool call
+runs twice or settles without the Runtime's evidence. The FG5 gates do the
+same around W0c context installation on managed-context/1: no tool runs
+before the context is installed and activated, and none runs outside the
+Session's directory; see
+[Runtime Broker Fault Gates](../../../docs/design/2026-09-26-runtime-broker-fault-gates.md).
+They need the bundle, Node.js and POSIX signals, and fail when any is
+missing. The default `mvn test` excludes them. From the repository root, run
+`npm run build && npm run bundle`, followed by:
+
+```bash
+mvn -f packages/managed-agent-server/pom.xml -Pfault-gates test
+```
+
+`-Dqwen.cli.entry=/path/to/dist/cli.js` points them at another bundle.
+
+## Workspace binding
+
+The `com.alibaba.qwen.code.runtimebroker.managedworkspace` package holds the
+W0a Workspace binding contract; see
+[Managed Workspace Binding Contract](../../../docs/design/2026-09-25-managed-workspace-binding-contract.md).
+It defines the Workspace Registry record and an immutable snapshot built from
+deployment configuration, actor-scoped access with an explicit-grant policy,
+a catalog that lists Workspaces and resolves a Session's Workspace selection
+to one resolved Workspace or one typed error, the lexical rule for a
+Session's working directory, and `ContextBinding` with its `contextDigest`.
+The TypeScript implementation in
+`packages/cli/src/serve/managed-workspace-binding.ts` produces the same
+normalized directories and digests; both run the shared fixtures in
+`packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`.
+The fixtures of the `managed-context/1` envelope,
+`packages/cli/src/serve/contracts/managed-context-v1.fixtures.json`, carry
+context digests computed with the same encoding, and
+`ManagedContextEnvelopeConformanceTest` recomputes them; see
+[Managed Context Envelope](../../../docs/design/2026-09-25-managed-context-envelope.md).
+Both fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose,
+so read them with a parser that keeps such escapes, as Jackson does.
+The package uses only the JDK and no other Broker class, and nothing wires
+it into the Broker service yet.
+
+## Tool result contract
+
+`ManagedToolResultConformanceTest` consumes the `managed-tool-result/1`
+contract in
+`packages/core/src/managed-runtime/contracts/managed-tool-result-v1.fixtures.json`:
+the result manifest, segment pages, segment publication and the Tool v3
+routes that carry the versioned result envelope. It pins the constants,
+routes, closed key sets and error table, and recomputes every segment, seal
+and prefix digest; see
+[Managed Tool Result Contract](../../../docs/design/2026-09-26-managed-tool-result-contract.md).
+The fixtures carry unpaired surrogates as `\uXXXX` escapes on purpose too.
+No Java transport speaks Tool v3 yet.

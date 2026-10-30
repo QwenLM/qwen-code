@@ -40,7 +40,7 @@ function module(name, sources, reports = {}, properties = '') {
   for (const [className, [ran, skipped]] of Object.entries(reports)) {
     const cases = [
       ...Array(ran).fill(
-        '<testcase name="passes"><system-out><![CDATA[log: <skipped/>]]></system-out></testcase>',
+        '<testcase name="passes"><system-out><![CDATA[log: <skipped/><failure/><error/>]]></system-out></testcase>',
       ),
       ...Array(skipped).fill(
         '<testcase name="skips"><skipped message="disabled"/></testcase>',
@@ -63,8 +63,31 @@ function check(...args) {
 
 describe('check-failsafe-reports', () => {
   it.each([
+    ['o4-mysql', 'O4MySqlGate', 'failure'],
+    ['o4-mysql', 'O4MySqlGate', 'error'],
+    ['o4-oss', 'O4OssGate', 'failure'],
+    ['o4-oss', 'O4OssGate', 'error'],
+    ['event-transport', 'EventTransportBrokerGate', 'failure'],
+    ['event-transport', 'EventTransportBrokerGate', 'error'],
+    ['event-transport-multi-node', 'EventTransportMultiNodeGate', 'failure'],
+    ['event-transport-multi-node', 'EventTransportMultiNodeGate', 'error'],
+  ])('rejects %s %s %s even with Maven failure-ignore', (family, gate, tag) => {
+    const className = `com.example.${gate}`;
+    const dir = module('failed', [className]);
+    writeFileSync(
+      join(dir, 'target', 'failsafe-reports', `TEST-${className}.xml`),
+      `<testsuite name="${className}" tests="1" failures="${tag === 'failure' ? 1 : 0}" errors="${tag === 'error' ? 1 : 0}" skipped="0"><properties><property name="maven.test.failure.ignore" value="true"/></properties><testcase name="fails"><${tag} message="failed"/></testcase></testsuite>`,
+    );
+    const result = check(family, dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('skipped or failed gate case');
+  });
+
+  it.each([
     ['o4-mysql', 'O4MySqlGate'],
     ['o4-oss', 'O4OssGate'],
+    ['event-transport', 'EventTransportBrokerGate'],
+    ['event-transport-multi-node', 'EventTransportMultiNodeGate'],
   ])(
     'requires complete opt-in %s evidence without changing the ordinary family',
     (family, gate) => {
@@ -72,6 +95,8 @@ describe('check-failsafe-reports', () => {
         'com.example.OrdersIT',
         'com.example.O4MySqlGate',
         'com.example.O4OssGate',
+        'com.example.EventTransportBrokerGate',
+        'com.example.EventTransportMultiNodeGate',
       ];
       const complete = module('complete', sources, {
         [`com.example.${gate}`]: [3, 0],
@@ -121,6 +146,38 @@ describe('check-failsafe-reports', () => {
       'com.example.HostedFlowIT': [1, 0],
     });
     expect(check('hosted', hosted).status).toBe(0);
+  });
+
+  it('exempts a class the module binds to surefire, and fails when the pom disagrees', () => {
+    // The real module name, because the exemption is keyed on it: the pom binds
+    // ManagedAgentPackagingIT to a surefire execution and excludes it from the
+    // mysql-integration failsafe, so it can never satisfy the non-hosted roster.
+    const name = 'packages/managed-agent-server';
+    const sources = [
+      'com.example.ManagedAgentPackagingIT',
+      'com.example.OrdersIT',
+    ];
+    const bound = module(name, sources, { 'com.example.OrdersIT': [1, 0] });
+    writeFileSync(
+      join(bound, 'pom.xml'),
+      '<project><plugin><configuration><includes><include>**/ManagedAgentPackagingIT.java</include></includes></configuration></plugin><plugin><configuration><excludes><exclude>**/ManagedAgentPackagingIT.java</exclude></excludes></configuration></plugin></project>',
+    );
+    const exempt = check('non-hosted', bound);
+    expect(exempt.output).toContain(
+      'ManagedAgentPackagingIT runs under surefire, not failsafe',
+    );
+    expect(exempt.status).toBe(0);
+
+    // Drift guard: the exemption is only valid while the pom keeps both bindings.
+    writeFileSync(
+      join(bound, 'pom.xml'),
+      '<project><plugin><configuration><excludes><exclude>**/ManagedAgentPackagingIT.java</exclude></excludes></configuration></plugin></project>',
+    );
+    const drifted = check('non-hosted', bound);
+    expect(drifted.output).toContain(
+      'no longer binds it to a surefire include',
+    );
+    expect(drifted.status).toBe(1);
   });
 
   it('counts the test cases failsafe folds into an outer report', () => {
@@ -237,6 +294,28 @@ describe('check-failsafe-reports', () => {
     const noFamily = join(root, 'no-family');
     mkdirSync(join(noFamily, 'src', 'test', 'java'), { recursive: true });
     expect(check('hosted', noFamily).status).toBe(0);
+  });
+
+  it('hosts admission gates as their own family and rejects drift in both directions', () => {
+    const gates = module('gates', ['com.example.HostedAdmissionGate'], {
+      'com.example.HostedAdmissionGate': [1, 0],
+    });
+    expect(check('hosted-gates', gates).status).toBe(0);
+    expect(check('hosted-gates', gates).output).toContain(
+      'gates: com.example.HostedAdmissionGate ran 1 test(s)',
+    );
+    const outside = module('outsiders', ['com.example.HostedFlowIT'], {
+      'com.example.HostedFlowIT': [1, 0],
+    });
+    expect(check('hosted-gates', outside).output).toContain(
+      'com.example.HostedFlowIT ran outside the hosted-gates family',
+    );
+    expect(check('hosted-gates', outside).status).toBe(1);
+    const unrun = module('unrun-gate', ['com.example.HostedWedgeGate']);
+    expect(check('hosted-gates', unrun).output).toContain(
+      'com.example.HostedWedgeGate ran no test in this job',
+    );
+    expect(check('hosted-gates', unrun).status).toBe(1);
   });
 
   it('refuses an unknown family or a missing module', () => {

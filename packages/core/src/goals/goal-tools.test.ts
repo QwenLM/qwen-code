@@ -195,29 +195,49 @@ describe('GetGoalTool', () => {
     expect(ToolDisplayNames.GET_GOAL).toBe('Goal');
     expect(tool.name).toBe(ToolNames.GET_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.GET_GOAL);
-    expect(tool.shouldDefer).toBe(false);
+    expect(tool.shouldDefer).toBe(true);
     expect(tool.build({}).getDescription()).toBe('Read the current goal');
   });
 
-  it('keeps both Goal tools visible and out of deferred search', () => {
+  it('keeps Goal tools discoverable without declaring their schemas up front', () => {
+    const visibleTools = new Set<string>();
     const config = {
       getMcpTransportPool: () => undefined,
       getDisabledTools: () => new Set<string>(),
-      getVisibleTools: () => new Set<string>(),
+      getVisibleTools: () => visibleTools,
       getGoalRuntime: () => undefined as never,
+      isGoalProposalAvailable: () => true,
     } as unknown as Config & GoalToolConfig;
     const registry = new ToolRegistry(config);
     const getGoal = new GetGoalTool(config);
     const updateGoal = new UpdateGoalTool(config);
+    const proposeGoal = new ProposeGoalTool(
+      config as unknown as ProposeGoalToolConfig,
+    );
     registry.registerTool(getGoal);
     registry.registerTool(updateGoal);
+    registry.registerTool(proposeGoal);
 
-    expect(getGoal.shouldDefer).toBe(false);
-    expect(updateGoal.shouldDefer).toBe(false);
+    const names = [
+      ToolNames.GET_GOAL,
+      ToolNames.PROPOSE_GOAL,
+      ToolNames.UPDATE_GOAL,
+    ];
+    expect(registry.getFunctionDeclarations()).toEqual([]);
+    expect(registry.getDeferredToolSummary().map((tool) => tool.name)).toEqual(
+      names,
+    );
+    for (const name of names) {
+      expect(registry.getTool(name)).toBeDefined();
+      visibleTools.add(name);
+    }
     expect(registry.getDeferredToolSummary()).toEqual([]);
     expect(
-      registry.getFunctionDeclarations().map((declaration) => declaration.name),
-    ).toEqual([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL]);
+      registry
+        .getFunctionDeclarations()
+        .map((declaration) => declaration.name)
+        .sort(),
+    ).toEqual(names);
   });
 
   it('reports no active Goal outside a permitted Goal turn', async () => {
@@ -557,13 +577,31 @@ describe('UpdateGoalTool', () => {
   });
 
   it('carries the blocker rules into the code-mode declaration', () => {
+    // The predicate is production's `isDeferredAndHidden`, true for this tool.
+    // With `tool_search` unavailable the exec declaration is the model's only
+    // surface, so the signature and its blocker rules have to survive there.
     const plan = planCodeModeBindings(
       [new UpdateGoalTool(makeConfig({}))],
-      () => false,
+      () => true,
     );
     const declaration = buildExecDescription(plan);
     expect(declaration).toContain('three consecutive Goal turns');
     expect(declaration).toContain('never for difficulty');
+  });
+
+  it('routes the deferred Goal tool to the bridge in a default code-mode session', () => {
+    // The other corner, and the one production defaults to: the tool is
+    // deferred and `tool_search` is available, so the exec declaration drops
+    // its signature and points at the discovery path instead.
+    const plan = planCodeModeBindings(
+      [new UpdateGoalTool(makeConfig({}))],
+      () => true,
+    );
+    const declaration = buildExecDescription(plan, true);
+    expect(declaration).toContain(
+      'Deferred tool signatures and descriptions are omitted below',
+    );
+    expect(declaration).not.toContain('three consecutive Goal turns');
   });
 
   it('repairs a mistyped value on the object the invocation executes with, deprecated key or not', async () => {
@@ -1065,11 +1103,11 @@ describe('ProposeGoalTool', () => {
       .build(params)
       .getConfirmationDetails(new AbortController().signal);
 
-  it('uses the canonical name, stays visible, and always goes through the dialog', async () => {
+  it('uses the canonical name, stays deferred, and always goes through the dialog', async () => {
     const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
     expect(tool.name).toBe(ToolNames.PROPOSE_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.PROPOSE_GOAL);
-    expect(tool.shouldDefer).toBe(false);
+    expect(tool.shouldDefer).toBe(true);
 
     const invocation = tool.build({ objective });
     // Consent for an autonomous loop cannot come from a rule or an approval
@@ -1099,13 +1137,19 @@ describe('ProposeGoalTool', () => {
     ]) {
       expect(tool.description).toContain(fragment);
     }
-    const declaration = buildExecDescription(
-      planCodeModeBindings([tool], () => false),
-    );
+    const plan = planCodeModeBindings([tool], () => true);
+    const declaration = buildExecDescription(plan);
     expect(declaration).toContain('Done when');
     expect(declaration).toContain(
       String(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS),
     );
+    // A default code-mode session has the bridge, so the signature moves out
+    // of the exec declaration and the discovery path is announced instead.
+    const bridged = buildExecDescription(plan, true);
+    expect(bridged).toContain(
+      'Deferred tool signatures and descriptions are omitted below',
+    );
+    expect(bridged).not.toContain('Done when');
   });
 
   it('validates the objective', () => {
@@ -1133,11 +1177,19 @@ describe('ProposeGoalTool', () => {
   });
 
   it('keeps what the Goal tools cost every request inside a budget', () => {
-    // get_goal and update_goal are registered in every session, Goal or not,
-    // so their schemas ride along with every model request. The figure is
-    // what the three tools cost today plus room for a sentence; growing past
-    // it should be a decision, not drift. (5 860 before the descriptions
-    // were trimmed.)
+    // get_goal and update_goal are registered in every session, Goal or not.
+    // Since this change they are natively deferred, so their schemas ride
+    // along with a model request only once they are revealed or declared —
+    // an explicit reveal, `tools.visible`, the incomplete-bridge eager
+    // fallback, or the `tools.toolSearch.threshold` preload (which does cover
+    // natively deferred tools). Listing one in `tools.eager` does NOT force it
+    // resident: that allowlist only clears the permission-deferred flag, and
+    // these tools defer natively. The figure is what the three tools cost
+    // today plus room for a sentence; growing past it should be a decision, not
+    // drift. (5 860 before the descriptions were trimmed; the deferred
+    // discovery catalog renders `description.split('\n')[0]` only, so each
+    // description keeps one short self-contained first line and the body opens
+    // without restating it.)
     const tools = [
       new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
       new UpdateGoalTool(makeConfig({})),
@@ -1151,6 +1203,30 @@ describe('ProposeGoalTool', () => {
       .join('');
 
     expect(advertised.length).toBeLessThan(3_800);
+  });
+
+  it('gives each Goal tool a catalog entry that is a whole first line', () => {
+    // A deferred tool's only up-front surface is its discovery-catalog entry,
+    // and `truncateDeferredToolDescription` (core/environmentContext.ts)
+    // renders that entry as `description.split('\n')[0]` capped at
+    // `MAX_DEFERRED_TOOL_DESC_LEN = 160`. A single-paragraph description would
+    // reach the model as a mid-clause slice dropping the clauses that gate the
+    // tool's use, so each one carries a short self-contained first line and
+    // keeps the full text below it, where `tool_search select:` still returns
+    // it verbatim.
+    const tools = [
+      new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
+      new UpdateGoalTool(makeConfig({})),
+      new ProposeGoalTool(proposeConfig(idleRuntime().runtime)),
+    ];
+    for (const tool of tools) {
+      const [firstLine, ...rest] = tool.description.split('\n');
+      // At or under the cap the catalog shows the line whole; over it the
+      // entry becomes the first 157 characters plus an ellipsis.
+      expect(firstLine!.length).toBeLessThanOrEqual(160);
+      expect(firstLine!.endsWith('.')).toBe(true);
+      expect(rest.join('\n').trim().length).toBeGreaterThan(0);
+    }
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {

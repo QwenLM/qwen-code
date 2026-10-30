@@ -540,7 +540,9 @@ describe('createLoadedSettingsAdapter', () => {
         expect(fs.readFileSync(workspaceFile, 'utf8')).toBe(originalWorkspace);
         expect(loaded.merged).toEqual(before);
         expect(process.env[envKey]).toBe(originalEnv);
-        expect(fs.existsSync(userFile + '.orig')).toBe(false);
+        expect(fs.readdirSync(userHome)).toEqual(
+          existingFile ? ['settings.json'] : [],
+        );
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(loaded, SettingScope.Workspace),
           doRefreshAuth: false,
@@ -549,7 +551,9 @@ describe('createLoadedSettingsAdapter', () => {
         expect(loaded.merged.modelProviders?.['openai']?.[0]?.id).toBe(
           'new-model',
         );
-        expect(fs.existsSync(workspaceFile + '.orig')).toBe(false);
+        expect(fs.readdirSync(path.dirname(workspaceFile))).toEqual([
+          'settings.json',
+        ]);
         if (originalEnv === undefined) delete process.env[envKey];
         else process.env[envKey] = originalEnv;
       } finally {

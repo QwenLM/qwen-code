@@ -36,8 +36,11 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     return {
       connection: {
         status: 'connected',
+        error: undefined as Error | undefined,
         sessionId: null as string | null,
+        loadingTranscript: false,
         workspaceCwd: '/tmp/project',
+        sessionContext: undefined as { kind: 'standalone' } | undefined,
         capabilities: undefined as
           | {
               qwenCodeVersion: string;
@@ -53,6 +56,13 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
             }
           | undefined,
         client: {
+          listWorkspaceSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: [] }),
+          listStandaloneSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: [] }),
+          archiveStandaloneSessions: vi.fn(),
           workspaceByCwd: vi.fn(() => ({
             listWorkspaceSessions: vi.fn().mockResolvedValue([]),
             listSessionGroups: vi.fn().mockResolvedValue({
@@ -88,6 +98,13 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     };
   });
 const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
+const sessionCatalogController = vi.hoisted(() => ({
+  refreshQueries: refreshSessionCatalogQueries,
+  invalidateWorkspace: vi.fn(),
+  refreshWorkspace: vi.fn(),
+  renamed: vi.fn(),
+  toggleSessionPinned: vi.fn(),
+}));
 const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
 const loadSession = vi.hoisted(() => vi.fn());
 
@@ -98,6 +115,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
+  useStreamingState: () => 'idle',
   useSessions: (options?: { archiveState?: string; group?: string }) => {
     if (options?.archiveState === 'archived') return archived;
     if (options?.group === 'pinned') return pinned;
@@ -117,23 +135,24 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
         : options?.group === 'pinned'
           ? pinned
           : active;
-    const catalogQuery = {
-      routeKind: 'legacy',
-      workspaceCwd: connection.workspaceCwd,
-      options,
-    };
+    const { enabled: _enabled, ...catalogOptions } = options ?? {};
+    const optionsKey = JSON.stringify(catalogOptions);
+    const workspaceCwd = connection.workspaceCwd;
+    const catalogQuery = React.useMemo(
+      () => ({
+        routeKind: 'legacy',
+        workspaceCwd,
+        options: JSON.parse(optionsKey) as typeof catalogOptions,
+      }),
+      [optionsKey, workspaceCwd],
+    );
     return resolveWebShellSessions(
       state,
       options?.enabled !== false,
       catalogQuery,
     );
   },
-  useSessionCatalogController: () => ({
-    refreshQueries: refreshSessionCatalogQueries,
-    invalidateWorkspace: vi.fn(),
-    refreshWorkspace: vi.fn(),
-    renamed: vi.fn(),
-  }),
+  useSessionCatalogController: () => sessionCatalogController,
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
     client: typeof workspace.client,
@@ -187,22 +206,42 @@ const namedGroup = {
 
 let root: Root;
 let container: HTMLDivElement;
+let archivedSessionsTarget: HTMLDivElement;
 
 function renderSidebar(
   collapsed = false,
   props: {
+    archivedSessionsTarget?: HTMLElement | null;
+    onNewSession?: () => Promise<boolean> | boolean;
     onSelectCurrentSession?: () => void;
+    currentSessionActive?: boolean;
+    onLoadStandaloneSession?: (sessionId: string) => void;
+    onStandaloneNotice?: (message: string) => void;
+    layout?: 'single' | 'rail';
+    activePage?: string;
+    containerWidth?: number;
+    onOpenHome?: () => void;
     onCollapsedChange?: (collapsed: boolean) => void;
     mobileOpen?: boolean;
     onMobileClose?: () => void;
     footer?: false;
     sessionActions?: WebShellSidebarSessionActionsOptions;
     strict?: boolean;
+    showLive?: boolean;
+    onOpenLive?: () => void;
   } = {},
 ) {
   const sidebar = (
     <WebShellSidebar
+      archivedSessionsTarget={props.archivedSessionsTarget}
       collapsed={collapsed}
+      currentSessionActive={props.currentSessionActive}
+      layout={props.layout}
+      activePage={props.activePage}
+      containerWidth={props.containerWidth}
+      onOpenHome={props.onOpenHome}
+      onOpenLive={props.onOpenLive}
+      showLive={props.showLive}
       onCollapsedChange={props.onCollapsedChange ?? (() => {})}
       onOpenSettings={() => {}}
       onOpenDaemonStatus={() => {}}
@@ -211,8 +250,10 @@ function renderSidebar(
       onOpenGoals={() => {}}
       onOpenSessions={() => {}}
       onOpenSplitView={() => {}}
-      onNewSession={() => false}
+      onNewSession={props.onNewSession ?? (() => false)}
       onLoadSession={loadSession}
+      onLoadStandaloneSession={props.onLoadStandaloneSession}
+      onStandaloneNotice={props.onStandaloneNotice}
       onSelectCurrentSession={props.onSelectCurrentSession}
       mobileOpen={props.mobileOpen}
       onMobileClose={props.onMobileClose}
@@ -246,8 +287,22 @@ beforeEach(() => {
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
-  root = createRoot(container);
+  root = createRoot(container.appendChild(document.createElement('div')));
+  archivedSessionsTarget = container.appendChild(document.createElement('div'));
+  connection.status = 'connected';
+  connection.loadingTranscript = false;
+  connection.error = undefined;
   connection.sessionId = null;
+  connection.sessionContext = undefined;
+  workspace.client.listWorkspaceSessionsPage
+    .mockReset()
+    .mockResolvedValue({ sessions: [] });
+  workspace.client.listStandaloneSessionsPage
+    .mockReset()
+    .mockResolvedValue({ sessions: [] });
+  workspace.client.archiveStandaloneSessions.mockReset();
+  workspaceActions.updateSessionOrganization.mockReset().mockResolvedValue({});
+  active.archiveSession.mockClear();
   connection.workspaceCwd = '/tmp/project';
   connection.capabilities = organizationCapabilities;
   workspace.capabilities = organizationCapabilities;
@@ -285,6 +340,29 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar collapsed session group persistence', () => {
+  it.each([220, 260, 400])(
+    'keeps at least 220px for the secondary column with saved total width %s',
+    async (savedWidth) => {
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-width',
+        String(savedWidth),
+      );
+      renderSidebar(false, { layout: 'rail' });
+      await flushSidebar();
+      const sidebar = container.querySelector<HTMLElement>('aside')!;
+      expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+        `${Math.max(savedWidth, 276)}px`,
+      );
+      expect(
+        sidebar.style.getPropertyValue('--web-shell-sidebar-min-width'),
+      ).toBe('276px');
+      renderSidebar(false, { layout: 'single' });
+      await flushSidebar();
+      expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+        `${savedWidth}px`,
+      );
+    },
+  );
   it('uses drawer constraints and closes mobile without persisting desktop collapse', async () => {
     const onCollapsedChange = vi.fn();
     const onMobileClose = vi.fn();
@@ -503,6 +581,357 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).not.toBeNull();
   });
 
+  it('includes secondary workspace attention on the rail Home button while a full page is open', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    useSessionCatalogQueries.mockImplementation((_client, queries) => {
+      const activeQueries = queries.filter(
+        (query: { options: { group?: string } }) =>
+          query.options.group === 'all',
+      );
+      if (activeQueries.length === 0) return [];
+      return [
+        {
+          page: {
+            sessions: [
+              makeSession('secondary-approval', {
+                workspaceCwd: '/tmp/other',
+                isWaitingForPermission: true,
+              }),
+            ],
+          },
+        },
+      ];
+    });
+
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+
+    // The Home column is hidden behind the Plugins page, so the rail Home
+    // button carries the attention dot and the secondary queries must load
+    // even though the sidebar is not collapsed.
+    const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
+      (call) =>
+        call[1].some(
+          (query: { options: { group?: string; archiveState?: string } }) =>
+            query.options.group === 'all' &&
+            query.options.archiveState === 'active',
+        ),
+    );
+    expect(activeQueryCalls.length).toBeGreaterThan(0);
+    for (const call of activeQueryCalls) {
+      expect(call[2]).toMatchObject({ autoLoad: true });
+    }
+    // Nothing is running, so polling must idle instead of pinning every
+    // secondary workspace to the active cadence.
+    expect(activeQueryCalls[activeQueryCalls.length - 1]![2]).toMatchObject({
+      pollIntervalMs: 30_000,
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('shows completion from a secondary workspace on the rail Home button while a full page is open', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    let running = true;
+    useSessionCatalogQueries.mockImplementation(() => [
+      {
+        page: {
+          sessions: [
+            makeSession('secondary-session', {
+              workspaceCwd: '/tmp/other',
+              hasActivePrompt: running,
+            }),
+          ],
+        },
+        loading: false,
+      },
+    ]);
+
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    const lastActiveCall = () =>
+      useSessionCatalogQueries.mock.calls
+        .filter((call) =>
+          call[1].some(
+            (query: { options: { group?: string; archiveState?: string } }) =>
+              query.options.group === 'all' &&
+              query.options.archiveState === 'active',
+          ),
+        )
+        .at(-1);
+    expect(lastActiveCall()?.[2]).toMatchObject({ pollIntervalMs: 2_000 });
+    running = false;
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('does not badge a completion the user watched while the Home column was visible', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    let pageState: 'freshRunning' | 'retainedRunning' | 'freshIdle' =
+      'freshRunning';
+    useSessionCatalogQueries.mockImplementation(() => [
+      {
+        page: {
+          sessions: [
+            makeSession('secondary-session', {
+              workspaceCwd: '/tmp/other',
+              hasActivePrompt: pageState !== 'freshIdle',
+            }),
+          ],
+        },
+        loading: false,
+        ...(pageState !== 'retainedRunning' ? { updatedAt: Date.now() } : {}),
+      },
+    ]);
+
+    // A full page records the secondary session as running in the
+    // baseline.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+
+    // Back Home the queries stop, and the session finishes while visible.
+    renderSidebar(false, { layout: 'rail', activePage: 'home' });
+    await flushSidebar();
+    pageState = 'retainedRunning';
+
+    // Returning to a full page re-subscribes against the store's retained
+    // page: frozen at runnin during the visible window, with no stamp to
+    // prove otherwise. Installing it as the baseline would make the next
+    // poll diff against pre-visible rows.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+
+    // The armed poll then lands the first truly fresh page (idle): the
+    // completion happened on screen, so nothing unread may be painted —
+    // not the badge, not the accessible name.
+    pageState = 'freshIdle';
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+    const homeTrigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    expect(homeTrigger.getAttribute('aria-label')).not.toContain('Finished');
+  });
+
+  it('does not certify secondary workspace status while it is not being refreshed', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    useSessionCatalogQueries.mockImplementation(() => [
+      {
+        page: {
+          sessions: [
+            makeSession('secondary-approval', {
+              workspaceCwd: '/tmp/other',
+              isWaitingForPermission: true,
+            }),
+          ],
+        },
+        loading: false,
+      },
+    ]);
+    const homeTrigger = () =>
+      container.querySelector<HTMLElement>('[data-web-shell-home-trigger]')!;
+
+    // While a full page hides the Home column, the secondary catalog is
+    // refreshed and the dot plus accessible name carry the waiting state.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      homeTrigger().querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+    expect(homeTrigger().getAttribute('aria-label')).toContain(
+      'Waiting for approval',
+    );
+
+    // With the Home column visible the secondary catalog is unloaded and
+    // unpolled: the retained page may resolve elsewhere, so neither the dot
+    // nor the accessible name may keep certifying it.
+    renderSidebar(false, { layout: 'rail', activePage: 'home' });
+    await flushSidebar();
+    expect(
+      homeTrigger().querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+    expect(homeTrigger().getAttribute('aria-label')).not.toContain(
+      'Waiting for approval',
+    );
+
+    // Hiding the Home column re-arms the queries: the still-waiting
+    // session must come back — supplementing it would over-gate.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      homeTrigger().querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('includes secondary workspace attention on the rail Home button while the Live section is open', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    useSessionCatalogQueries.mockImplementation((_client, queries) => {
+      const activeQueries = queries.filter(
+        (query: { options: { group?: string } }) =>
+          query.options.group === 'all',
+      );
+      if (activeQueries.length === 0) return [];
+      return [
+        {
+          page: {
+            sessions: [
+              makeSession('secondary-approval', {
+                workspaceCwd: '/tmp/other',
+                isWaitingForPermission: true,
+              }),
+            ],
+          },
+        },
+      ];
+    });
+
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'live',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+
+    // The Live section lists no project sessions, so the rail Home button
+    // carries the attention dot and the secondary queries must load even
+    // though the sidebar is neither collapsed nor behind a full page.
+    const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
+      (call) =>
+        call[1].some(
+          (query: { options: { group?: string; archiveState?: string } }) =>
+            query.options.group === 'all' &&
+            query.options.archiveState === 'active',
+        ),
+    );
+    expect(activeQueryCalls.length).toBeGreaterThan(0);
+    for (const call of activeQueryCalls) {
+      expect(call[2]).toMatchObject({ autoLoad: true });
+    }
+    // Nothing is running, so polling must idle instead of pinning the
+    // section view to the active cadence.
+    expect(activeQueryCalls[activeQueryCalls.length - 1]![2]).toMatchObject({
+      pollIntervalMs: 30_000,
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it('shows the highest-priority session status on the collapsed project icon', async () => {
     active.sessions = [
       makeSession('session-status', {
@@ -654,18 +1083,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     );
     expect(switcher?.textContent).toContain('API review');
     expect(switcher?.textContent).toContain('Pinned task');
-    expect(switcher?.textContent).toContain('Archived');
+    expect(switcher?.textContent).not.toContain('Archived');
     expect(
       switcher?.querySelector('button[aria-label="Search sessions"]'),
     ).not.toBeNull();
-
-    const archivedHeader = Array.from(
-      switcher?.querySelectorAll<HTMLButtonElement>('button') ?? [],
-    ).find((button) => button.textContent?.includes('Archived'));
-    expect(archivedHeader).not.toBeNull();
-    act(() => click(archivedHeader!));
-    await flushSidebar();
-    expect(switcher?.textContent).toContain('Archived task');
 
     act(() => click(trigger!));
     await flushSidebar();
@@ -857,14 +1278,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ];
     archived.data = archived.sessions;
 
-    renderSidebar();
-    await flushSidebar();
-
-    const archivedHeader = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((btn) => btn.textContent?.includes('Archived'));
-    expect(archivedHeader).not.toBeNull();
-    act(() => click(archivedHeader!));
+    renderSidebar(false, { archivedSessionsTarget });
     await flushSidebar();
 
     const sessionName = Array.from(container.querySelectorAll('span')).find(
@@ -881,7 +1295,37 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(archivedRow!.tabIndex).toBe(-1);
   });
 
-  it('refreshes archived sessions each time the section expands', async () => {
+  it('renders archived settings while the sidebar is collapsed', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+    archived.sessions = [
+      makeSession('collapsed-archive', {
+        displayName: 'Collapsed archive',
+        isArchived: true,
+      }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar(true, { archivedSessionsTarget });
+    await flushSidebar();
+    expect(archivedSessionsTarget.textContent).toContain('Collapsed archive');
+    expect(container.querySelector('aside')?.textContent).not.toContain(
+      'Collapsed archive',
+    );
+  });
+
+  it('does not refresh workspace archives without the archive capability', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
+  });
+
+  it('loads archived sessions only in settings and refreshes on re-entry', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
       features: ['session_organization', 'session_archive'],
@@ -889,13 +1333,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
 
     renderSidebar();
     await flushSidebar();
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
+    expect(container.querySelector('aside')?.textContent).not.toContain(
+      'Archived',
+    );
 
-    const archivedHeader = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((btn) => btn.textContent?.includes('Archived'));
-    expect(archivedHeader).not.toBeNull();
-
-    act(() => click(archivedHeader!));
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
     expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(1);
     expect(refreshSessionCatalogQueries).toHaveBeenLastCalledWith([
       expect.objectContaining({
@@ -905,8 +1349,11 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       }),
     ]);
 
-    act(() => click(archivedHeader!));
-    act(() => click(archivedHeader!));
+    renderSidebar();
+    await flushSidebar();
+    expect(archivedSessionsTarget.textContent).toBe('');
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
     expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(2);
   });
 
@@ -964,7 +1411,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     container.remove();
     container = document.createElement('div');
     document.body.appendChild(container);
-    root = createRoot(container);
+    root = createRoot(container.appendChild(document.createElement('div')));
+    archivedSessionsTarget = container.appendChild(
+      document.createElement('div'),
+    );
     renderSidebar();
     await flushSidebar();
 
@@ -1649,5 +2099,1044 @@ describe('WebShellSidebar collapsed session group persistence', () => {
         'input[aria-label="Rename: API review"]',
       ),
     ).not.toBeNull();
+  });
+  it('previews the complete Home column without expanding or navigating', async () => {
+    const onCollapsedChange = vi.fn();
+    const onOpenHome = vi.fn();
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    const column = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-column]',
+    )!;
+    const section = groupHeader('Backend');
+    act(() => click(section));
+    expect(section.getAttribute('aria-expanded')).toBe('false');
+    renderSidebar(true, { layout: 'rail', onCollapsedChange, onOpenHome });
+    await flushSidebar();
+    expect(column.hidden).toBe(true);
+    expect(groupHeader('Backend')).toBe(section);
+    const home = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    const hover = new PointerEvent('pointerover', { bubbles: true });
+    Object.defineProperty(hover, 'pointerType', { value: 'mouse' });
+    act(() => home.dispatchEvent(hover));
+    await flushSidebar();
+    const preview = document.querySelector('[data-web-shell-home-popover]');
+    expect(preview).not.toBeNull();
+    expect(preview!.textContent).toContain('Qwen Code');
+    expect(preview!.textContent).toContain('New session');
+    expect(preview!.textContent).toContain('Release notes');
+    expect(
+      document.querySelectorAll('[data-web-shell-home-column]'),
+    ).toHaveLength(1);
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    expect(onOpenHome).not.toHaveBeenCalled();
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+    act(() => click(home));
+    expect(onCollapsedChange).toHaveBeenCalledWith(false);
+    expect(onOpenHome).toHaveBeenCalledOnce();
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    expect(
+      container.querySelector<HTMLElement>('[data-web-shell-home-column]')!
+        .hidden,
+    ).toBe(false);
+    expect(document.querySelector('[data-web-shell-home-popover]')).toBeNull();
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it.each(['channels', 'live'])(
+    'previews Home while %s stays selected',
+    async (activePage) => {
+      const onOpenHome = vi.fn();
+      const capabilities = {
+        ...organizationCapabilities,
+        features: [
+          ...organizationCapabilities.features,
+          'session_source_metadata',
+        ],
+      };
+      connection.capabilities = capabilities;
+      workspace.capabilities = capabilities;
+      renderSidebar(true, {
+        layout: 'rail',
+        activePage,
+        showLive: true,
+        onOpenLive: vi.fn(),
+        onOpenHome,
+      });
+      await flushSidebar();
+      expect(
+        container
+          .querySelector('[data-web-shell-sidebar-section]')
+          ?.getAttribute('data-web-shell-sidebar-section'),
+      ).toBe(activePage);
+      const home = container.querySelector('[data-web-shell-home-trigger]')!;
+      const hover = new PointerEvent('pointerover', { bubbles: true });
+      Object.defineProperty(hover, 'pointerType', { value: 'mouse' });
+      act(() => home.dispatchEvent(hover));
+      await flushSidebar();
+      expect(
+        document.querySelector(
+          '[data-web-shell-home-popover] [data-web-shell-sidebar-section="home"]',
+        ),
+      ).not.toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-home-popover]')!.textContent,
+      ).toContain('New session');
+      expect(
+        container
+          .querySelector('button[aria-current="page"]')
+          ?.getAttribute('aria-label'),
+      ).toBe(activePage === 'live' ? 'Live' : 'Channels');
+      expect(onOpenHome).not.toHaveBeenCalled();
+      renderSidebar(false, { layout: 'single' });
+      await flushSidebar();
+      expect(
+        document.querySelector('[data-web-shell-home-popover]'),
+      ).toBeNull();
+    },
+  );
+
+  it('keeps functional navigation selected while Home is hidden', async () => {
+    const onCollapsedChange = vi.fn();
+    renderSidebar(true, {
+      layout: 'rail',
+      activePage: 'settings',
+      onCollapsedChange,
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector<HTMLElement>('[data-web-shell-home-column]')!
+        .hidden,
+    ).toBe(true);
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="More"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    expect(
+      document
+        .querySelector('button[aria-label="Settings"]')
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
+    click(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Expand"]',
+      )!,
+    );
+    expect(onCollapsedChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('WebShellSidebar rail navigation', () => {
+  it('keeps the persisted collapse when opening a functional page from the rail', async () => {
+    const onCollapsedChange = vi.fn();
+    renderSidebar(true, { layout: 'rail', onCollapsedChange });
+    await flushSidebar();
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="More"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const settings = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Settings"]',
+    );
+    expect(settings).not.toBeNull();
+    act(() => click(settings!));
+    await flushSidebar();
+
+    // A functional page keeps the column hidden regardless, so the user's
+    // persisted collapse preference must survive the navigation.
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+  });
+
+  it('resets the project search when the Live section unmounts the field', async () => {
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'home',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+
+    const searchToggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchToggle).not.toBeNull();
+    act(() => click(searchToggle!));
+    await flushSidebar();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(input).not.toBeNull();
+
+    // The Live section unmounts the search field. The search state must be
+    // reset with it, or the Home round-trip below remounts an autoFocus
+    // input holding the stale query.
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'live',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'home',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    expect(document.activeElement).not.toBe(input);
+  });
+
+  it('restores the column from the Channels rail entry', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_source_metadata'],
+    };
+    const onCollapsedChange = vi.fn();
+    renderSidebar(true, { layout: 'rail', onCollapsedChange });
+    await flushSidebar();
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Channels"]',
+        )!,
+      ),
+    );
+    expect(onCollapsedChange).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the persisted collapse when Channels has no column to restore', async () => {
+    // Without the session_source_metadata capability the Channels rail entry
+    // opens a full page, not a column, so its click must leave the persisted
+    // collapse preference untouched.
+    const onCollapsedChange = vi.fn();
+    renderSidebar(true, { layout: 'rail', onCollapsedChange });
+    await flushSidebar();
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Channels"]',
+        )!,
+      ),
+    );
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+  });
+
+  it('does not persist the expansion when the rail entry is tapped in the mobile drawer', async () => {
+    // The drawer forces the effective collapsed state false, so a tap that
+    // only navigates must not write the desktop collapse preference.
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_source_metadata'],
+    };
+    const onCollapsedChange = vi.fn();
+    renderSidebar(false, {
+      layout: 'rail',
+      mobileOpen: true,
+      onCollapsedChange,
+    });
+    await flushSidebar();
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Channels"]',
+        )!,
+      ),
+    );
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+  });
+
+  it('closes the rail More popover when the rail unmounts under it', async () => {
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="More"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    expect(
+      document.querySelector('[data-web-shell-sidebar-more]'),
+    ).not.toBeNull();
+
+    // The rail subtree owns the popover; a layout change unmounts its
+    // owner, so the round trip must not leave a phantom menu behind.
+    renderSidebar(false, { layout: 'single' });
+    await flushSidebar();
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    expect(document.querySelector('[data-web-shell-sidebar-more]')).toBeNull();
+  });
+
+  it('restores the persisted width from state when a drag collapses the sidebar', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    const onCollapsedChange = vi.fn();
+    renderSidebar(false, { layout: 'rail', onCollapsedChange });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    // A mid-animation or container-capped measurement: the rect is narrower
+    // than the stored preference.
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 350,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 50, pointerId: 1 }),
+      );
+    });
+
+    expect(onCollapsedChange).toHaveBeenCalledWith(true);
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+  });
+
+  it('never persists a drag width beyond half the container', async () => {
+    renderSidebar(false, { layout: 'rail', containerWidth: 800 });
+    await flushSidebar();
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 700, pointerId: 1 }),
+      );
+    });
+
+    // The CSS caps the rendered width at container/2, so the persisted value
+    // must not record a width the user never saw.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('400');
+  });
+
+  it('keeps the wider stored width when a capped drag cannot move the edge', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    // The CSS caps the rendered width at half the container, so the measured
+    // rect is narrower than the stored preference.
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 302, pointerId: 1 }),
+      );
+    });
+
+    // The 2px displacement lands past the container cap, so the edge never
+    // moved: persisting the capped width here would let a temporarily narrow
+    // host shrink the user's wider preference.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
+  });
+
+  it('maps a capped leftward jitter onto the stored width', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 298, pointerId: 1 }),
+      );
+    });
+
+    // The cap binds at drag start, so the rendered edge cannot follow the
+    // pointer and a rect-based delta is container-scoped: a 2px leftward
+    // jitter must store 420 - 2, not the capped 298.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('418');
+  });
+
+  it('drops the rail tooltip when the rail unmounts under it', async () => {
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    const home = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    // The nav's hover handler ignores synthetic mouse events, so this must
+    // carry pointerType 'mouse' or the hint is never set — and the harness
+    // aliases PointerEvent to MouseEvent, which drops that property.
+    const hover = new PointerEvent('pointerover', { bubbles: true });
+    Object.defineProperty(hover, 'pointerType', { value: 'mouse' });
+    act(() => {
+      home.dispatchEvent(hover);
+    });
+    await flushSidebar();
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
+      'Home',
+    );
+    expect(document.querySelector('[data-web-shell-home-popover]')).toBeNull();
+
+    renderSidebar(false, { layout: 'single' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-navigation-rail]'),
+    ).toBeNull();
+
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    // A removed element fires neither pointerout nor blur, so without an
+    // explicit clear the Popover remounts already-open against the detached
+    // button and paints the previous icon's label at the viewport origin.
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+  });
+
+  it('restores the state width when a drag returns to its start', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 400, pointerId: 1 }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 300, pointerId: 1 }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 300, pointerId: 1 }),
+      );
+    });
+
+    // Starting a drag and letting go where it began changes nothing: the
+    // state width returns to the stored preference, which stays untouched.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
+  });
+
+  it('keeps the rendered width at the rail minimum while dragging below it', async () => {
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '356px',
+    );
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 200, pointerId: 1 }),
+      );
+    });
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '276px',
+    );
+    act(() => {
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 200, pointerId: 1 }),
+      );
+    });
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('276');
+  });
+
+  it('keeps the stored width when the resize handle is only clicked', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
+    // The CSS caps the rendered width at half the container, so the measured
+    // rect is narrower than the stored preference.
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 300, pointerId: 1 }),
+      );
+    });
+
+    // A zero-displacement press is a click, not a drag: nothing persists.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
+  });
+});
+
+describe('Recent sessions shared rows', () => {
+  function enableRecentSessions() {
+    const capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [
+        'session_organization',
+        'session_archive',
+        'workspace_qualified_rest_core',
+        'standalone_sessions_v1',
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+  }
+
+  it('renders after Project using the same row structure, with pin and archive only', async () => {
+    enableRecentSessions();
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const originalRow = [
+      ...container.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find(
+      (row) => !recent.contains(row) && row.textContent?.includes('API review'),
+    )!;
+    const row = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    expect(originalRow).toBeDefined();
+    expect(
+      row.querySelector(`.${sidebarStyles.sessionTextInner}`)?.textContent,
+    ).toBe('API review');
+    expect(
+      row.querySelector(`.${sidebarStyles.sessionMetaSlot}`),
+    ).not.toBeNull();
+    expect(
+      [...row.querySelectorAll('button')].map((button) =>
+        button.getAttribute('aria-label'),
+      ),
+    ).toEqual(['Pin', 'Archive']);
+    expect(row.textContent).not.toContain('project');
+    expect(
+      originalRow.compareDocumentPosition(recent) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    click(row.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!);
+    await flushSidebar();
+    expect(active.archiveSession).toHaveBeenCalledWith('session-a');
+    workspaceActions.updateSessionOrganization.mockImplementationOnce(
+      async () => {
+        workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+          sessions: [{ ...active.sessions[0], isPinned: true }],
+        });
+      },
+    );
+    click(recent.querySelector<HTMLButtonElement>('[aria-label="Pin"]')!);
+    await flushSidebar();
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'session-a',
+      { isPinned: true },
+    );
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(recent.textContent).not.toContain('API review');
+  });
+
+  it('hides a stale recent row when the pinned catalog already contains it', async () => {
+    enableRecentSessions();
+    pinned.sessions = [{ ...active.sessions[0], isPinned: true }];
+    pinned.data = pinned.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-testid="recent-sessions"]')?.textContent,
+    ).not.toContain('API review');
+  });
+
+  it('refreshes Recent immediately after unpinning without waiting for polling', async () => {
+    enableRecentSessions();
+    active.sessions = [
+      makeSession('session-a', { displayName: 'Pinned chat', isPinned: true }),
+    ];
+    active.data = active.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: active.sessions,
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    expect(recent.textContent).not.toContain('Pinned chat');
+    workspaceActions.updateSessionOrganization.mockImplementationOnce(
+      async () => {
+        active.sessions = [{ ...active.sessions[0], isPinned: false }];
+        active.data = active.sessions;
+        workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+          sessions: active.sessions,
+        });
+      },
+    );
+    click(container.querySelector<HTMLButtonElement>('[aria-label="Unpin"]')!);
+    await flushSidebar();
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'session-a',
+      { isPinned: false },
+    );
+    expect(recent.textContent).toContain('Pinned chat');
+  });
+
+  it.each(['/tmp/project', undefined])(
+    'highlights only the clicked list copy with workspace %s while protecting the actual current session',
+    async (workspaceCwd) => {
+      enableRecentSessions();
+      active.sessions = [{ ...active.sessions[0], workspaceCwd }];
+      active.data = active.sessions;
+      connection.sessionId = 'session-a';
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const rows = [
+        ...container.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ];
+      const original = rows.find(
+        (row) =>
+          !recent.contains(row) && row.textContent?.includes('API review'),
+      )!;
+      const copy = recent.querySelector<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      )!;
+      click(copy);
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      renderSidebar(false, { currentSessionActive: false });
+      await flushSidebar();
+      expect(copy.hasAttribute('aria-current')).toBe(false);
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      expect(
+        copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+          .disabled,
+      ).toBe(true);
+      renderSidebar(false, { currentSessionActive: true });
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      expect(original.hasAttribute('aria-current')).toBe(false);
+      click(original);
+      await flushSidebar();
+      expect(original.getAttribute('aria-current')).toBe('page');
+      expect(copy.hasAttribute('aria-current')).toBe(false);
+      expect(
+        copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!
+          .disabled,
+      ).toBe(true);
+      expect(loadSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('moves standalone selection across copies without restoring the current session again', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'standalone-chat';
+    connection.sessionContext = { kind: 'standalone' };
+    const summary = makeSession('standalone-chat', {
+      workspaceCwd: '/conversations',
+      sourceType: 'standalone',
+      displayName: 'Standalone title',
+    });
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [summary],
+    });
+    const onLoadStandaloneSession = vi.fn();
+    const onSelectCurrentSession = vi.fn();
+    renderSidebar(false, {
+      onLoadStandaloneSession,
+      onSelectCurrentSession,
+      onStandaloneNotice: vi.fn(),
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const copy = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    click(copy);
+    await flushSidebar();
+    expect(copy.getAttribute('aria-current')).toBe('page');
+    const original = container
+      .querySelector('[data-testid="standalone-active-group"]')!
+      .querySelector<HTMLElement>(`div.${sidebarStyles.sessionRow}`)!;
+    click(original);
+    await flushSidebar();
+    expect(original.getAttribute('aria-current')).toBe('page');
+    expect(copy.hasAttribute('aria-current')).toBe(false);
+    expect(onLoadStandaloneSession).not.toHaveBeenCalled();
+    expect(onSelectCurrentSession).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])(
+    'selects the newly created Recent row (standalone=%s)',
+    async (standalone) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      connection.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      const createdSession = makeSession('created-chat', {
+        displayName: 'Created chat',
+        workspaceCwd: standalone ? '/conversations' : '/tmp/project',
+        sourceType: standalone ? 'standalone' : 'default',
+      });
+      const onNewSession = vi.fn(() => {
+        connection.sessionId = null;
+        return true;
+      });
+      renderSidebar(false, {
+        onNewSession,
+        onLoadStandaloneSession: vi.fn(),
+        onStandaloneNotice: vi.fn(),
+      });
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const create = recent.querySelector<HTMLButtonElement>(
+        '[aria-label="New session"]',
+      )!;
+      click(create);
+      await flushSidebar();
+      expect(onNewSession).toHaveBeenCalledWith(undefined);
+      connection.sessionId = 'created-chat';
+      (standalone
+        ? workspace.client.listStandaloneSessionsPage
+        : workspace.client.listWorkspaceSessionsPage
+      ).mockResolvedValue({
+        sessions: [createdSession],
+      });
+      renderSidebar(false, {
+        onNewSession,
+        onLoadStandaloneSession: vi.fn(),
+        onStandaloneNotice: vi.fn(),
+      });
+      await flushSidebar();
+      const row = recent.querySelector('[aria-current="page"]');
+      expect(row?.textContent).toContain('Created chat');
+    },
+  );
+
+  it('resumes the catalog when session loading fails while still connecting', async () => {
+    enableRecentSessions();
+    connection.status = 'connecting';
+    connection.sessionId = 'session-a';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    expect(workspace.client.listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    connection.error = new Error('restore failed');
+    renderSidebar();
+    await flushSidebar();
+    expect(workspace.client.listWorkspaceSessionsPage).toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="recent-sessions"]')?.textContent,
+    ).toContain('API review');
+  });
+
+  it.each(['restore', 'managed'])(
+    'clears pending Recent creation when leaving the draft through %s',
+    async (navigation) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      const onNewSession = vi.fn(() => {
+        connection.sessionId = null;
+        return true;
+      });
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      click(
+        recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
+      );
+      await flushSidebar();
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      if (navigation === 'restore') {
+        connection.sessionId = 'session-b';
+        connection.loadingTranscript = true;
+      }
+      renderSidebar(false, {
+        onNewSession,
+        currentSessionActive: navigation !== 'managed',
+      });
+      await flushSidebar();
+      connection.sessionId = 'session-b';
+      connection.loadingTranscript = false;
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [makeSession('session-b', { displayName: 'Restored chat' })],
+      });
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      expect(recent.textContent).toContain('Restored chat');
+      expect(recent.querySelector('[aria-current="page"]')).toBeNull();
+    },
+  );
+
+  it.each(['collapse', 'pin'])(
+    'restores a visible selection after Recent %s',
+    async (action) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [active.sessions[0]],
+      });
+      renderSidebar();
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      const copy = recent.querySelector<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      )!;
+      click(copy);
+      await flushSidebar();
+      expect(copy.getAttribute('aria-current')).toBe('page');
+      if (action === 'collapse') {
+        click(
+          recent.querySelector<HTMLButtonElement>('button[aria-expanded]')!,
+        );
+      } else {
+        pinned.sessions = [{ ...active.sessions[0], isPinned: true }];
+        pinned.data = pinned.sessions;
+        renderSidebar();
+      }
+      await flushSidebar();
+      expect(
+        recent.querySelector(`div.${sidebarStyles.sessionRow}`),
+      ).toBeNull();
+      const originals = [
+        ...container.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ].filter(
+        (row) =>
+          !recent.contains(row) && row.textContent?.includes('API review'),
+      );
+      expect(originals.length).toBeGreaterThan(0);
+      expect(
+        originals.some((row) => row.getAttribute('aria-current') === 'page'),
+      ).toBe(true);
+    },
+  );
+
+  it('prevents standalone Recent archive when items excludes archive', async () => {
+    enableRecentSessions();
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        makeSession('standalone-chat', {
+          sourceType: 'standalone',
+          displayName: 'Independent chat',
+        }),
+      ],
+    });
+    workspace.client.archiveStandaloneSessions.mockResolvedValue({
+      archived: ['standalone-chat'],
+      alreadyArchived: [],
+      errors: [],
+    });
+    renderSidebar(false, {
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['details'] },
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    expect(recent.textContent).toContain('Independent chat');
+    const archive = recent.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive"]',
+    );
+    if (archive && !archive.disabled) click(archive);
+    await flushSidebar();
+    expect(workspace.client.archiveStandaloneSessions).not.toHaveBeenCalled();
+  });
+  it('does not leave a pending Recent selection when creation is cancelled', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'session-a';
+    const onNewSession = vi.fn(() => false);
+    renderSidebar(false, { onNewSession });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    click(
+      recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
+    );
+    await flushSidebar();
+    connection.sessionId = 'session-b';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [makeSession('session-b')],
+    });
+    renderSidebar(false, { onNewSession });
+    await flushSidebar();
+    expect(recent.querySelector('[aria-current="page"]')).toBeNull();
+  });
+
+  it('archives no-workspace sessions through their own endpoint and refreshes both lists', async () => {
+    enableRecentSessions();
+    const standalone = makeSession('standalone-chat', {
+      sourceType: 'standalone',
+      displayName: 'Independent chat',
+    });
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [standalone],
+    });
+    workspace.client.archiveStandaloneSessions.mockImplementation(async () => {
+      workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+        sessions: [],
+      });
+      return { archived: ['standalone-chat'], alreadyArchived: [], errors: [] };
+    });
+    renderSidebar(false, {
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const pin = recent.querySelector<HTMLButtonElement>('[aria-label="Pin"]')!;
+    expect(pin.disabled).toBe(true);
+    expect(pin.title).toContain('not supported');
+    click(recent.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!);
+    await flushSidebar();
+    expect(workspace.client.archiveStandaloneSessions).toHaveBeenCalledWith([
+      'standalone-chat',
+    ]);
+    expect(recent.textContent).not.toContain('Independent chat');
+    expect(
+      container.querySelector('[data-testid="standalone-active-group"]')
+        ?.textContent,
+    ).not.toContain('Independent chat');
+    expect(active.archiveSession).not.toHaveBeenCalled();
+  });
+
+  it('disables archive for current and running sessions and provides the standard hover details', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'session-a';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        active.sessions[0],
+        makeSession('running-chat', { hasActivePrompt: true }),
+      ],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const archiveButtons = [
+      ...recent.querySelectorAll<HTMLButtonElement>('[aria-label="Archive"]'),
+    ];
+    expect(archiveButtons).toHaveLength(2);
+    expect(archiveButtons.every((button) => button.disabled)).toBe(true);
+    const row = [
+      ...recent.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find((element) => element.textContent?.includes('API review'))!;
+    await act(async () => {
+      row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'session-a',
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'API review',
+    );
   });
 });

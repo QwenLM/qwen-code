@@ -272,6 +272,15 @@ export async function reconcileDanglingPromptTerminals(
     // family. The verdict's tail is deliberately NOT trimmed here — the
     // classifier owns that trim (`effectiveHistoryEnd` below).
     if (record.provenance === 'system') continue;
+    // Session multi-agent records are written by the daemon on an agent's
+    // behalf (an `agent_mention` keeps `real_user` provenance), never by the
+    // target prompt's own turn, so they are no evidence either.
+    if (
+      record.subtype === 'agent_mention' ||
+      record.subtype === 'agent_message'
+    ) {
+      continue;
+    }
     if (Number.isFinite(writeMs)) lastVisibleWriteMs = writeMs;
     lastVisibleNonSystem = record;
   }

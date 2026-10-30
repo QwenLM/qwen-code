@@ -2,6 +2,12 @@ package com.alibaba.qwen.code.daemon;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** One generation- and epoch-fenced Hosted Harness SSE stream. */
 public final class HarnessEventStream implements AutoCloseable {
@@ -10,8 +16,20 @@ public final class HarnessEventStream implements AutoCloseable {
     private final InputStream input;
     private final SseReader reader;
     private final String eventEpoch;
-    private long lastEventId;
-    private boolean closed;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean idleTimedOut = new AtomicBoolean();
+    // The park stamp IS the waiting flag: 0 while no consumer is parked,
+    // otherwise the nanoTime of the park, refreshed by every frame the
+    // reader pulls while parked. One volatile write publishes both facts,
+    // so a watchdog tick can never pair a fresh flag with a stale stamp.
+    private final AtomicLong waitingSince = new AtomicLong();
+    // Serializes concurrent next() callers so frames cannot interleave;
+    // close() never takes this lock, so a blocked read stays abortable. A
+    // monitor held across the blocking SSE read would pin a virtual thread
+    // to its carrier on JDK 21; a ReentrantLock lets the reader unmount.
+    private final ReentrantLock cursorLock = new ReentrantLock();
+    private volatile ScheduledFuture<?> idleWatchdog;
+    private volatile long lastEventId;
 
     HarnessEventStream(HostedHarnessClient client, HarnessSessionRef session,
             InputStream input, int maximumFrameBytes, long lastEventId,
@@ -19,9 +37,9 @@ public final class HarnessEventStream implements AutoCloseable {
         this.client = client;
         this.session = session;
         this.input = input;
-        this.reader = new SseReader(input, maximumFrameBytes, () -> {
-            // This transport does not own an idle watchdog.
-        });
+        this.reader = new SseReader(input, maximumFrameBytes,
+                () -> waitingSince.updateAndGet(
+                        v -> v == 0 ? 0 : System.nanoTime()));
         this.lastEventId = lastEventId;
         this.eventEpoch = eventEpoch;
     }
@@ -30,57 +48,112 @@ public final class HarnessEventStream implements AutoCloseable {
         return eventEpoch;
     }
 
-    public synchronized long getLastEventId() {
+    public long getLastEventId() {
         return lastEventId;
     }
 
-    public synchronized DaemonEvent next() {
-        ensureOpen();
+    public DaemonEvent next() {
+        if (closed.get()) {
+            throw closedFailure();
+        }
+        cursorLock.lock();
         try {
-            SseReader.Frame frame = reader.next();
-            if (frame == null) {
-                close();
-                return null;
+            // A queued caller re-checks inside the lock: the stream may
+            // have been closed (or idle-aborted) while it waited.
+            if (closed.get()) {
+                throw closedFailure();
             }
-            DaemonEvent event = DaemonSessionClient.parseEvent(frame);
-            Long eventId = event.getId();
-            if (eventId != null) {
-                if (eventId <= lastEventId) {
-                    throw new DaemonProtocolException(
-                            "Hosted Harness SSE event ID moved backward or repeated");
+            // The idle budget measures peer silence while a consumer is
+            // parked here; time between next() calls is not charged. The
+            // single waitingSince write publishes the park and its stamp
+            // together, so a watchdog tick either skips (0) or sees this
+            // fresh stamp — never one stale by the whole pause since the
+            // previous next().
+            waitingSince.set(System.nanoTime());
+            try {
+                SseReader.Frame frame = reader.next();
+                // A close() that raced this read (a buffered frame, or the
+                // end of the body) reports the same signal the interrupted
+                // read would have raised — one cause, one exception type
+                // however it raced — never as an event or the server
+                // ending the stream. The closed guard's programming-error
+                // type stays reserved for a caller that arrives after the
+                // close (the pre-park guards above).
+                if (closed.get()) {
+                    if (idleTimedOut.get()) {
+                        throw new HostedHarnessStreamIdleException(
+                                client.sseIdleTimeout());
+                    }
+                    throw new DaemonTransportException(
+                            "HarnessEventStream is closed");
                 }
-                if (eventId != lastEventId + 1) {
-                    throw new DaemonProtocolException(
-                            "Hosted Harness SSE event ID gap: expected "
-                                    + (lastEventId + 1) + " but received "
-                                    + eventId);
+                if (frame == null) {
+                    close();
+                    return null;
                 }
-                lastEventId = eventId;
+                DaemonEvent event = DaemonSessionClient.parseEvent(frame);
+                Long eventId = event.getId();
+                if (eventId != null) {
+                    if (eventId <= lastEventId) {
+                        throw new DaemonProtocolException(
+                                "Hosted Harness SSE event ID moved backward or repeated");
+                    }
+                    if (eventId != lastEventId + 1) {
+                        throw new DaemonProtocolException(
+                                "Hosted Harness SSE event ID gap: expected "
+                                        + (lastEventId + 1) + " but received "
+                                        + eventId);
+                    }
+                    lastEventId = eventId;
+                }
+                client.observeEvent(session, event);
+                return event;
+            } catch (IOException e) {
+                if (idleTimedOut.get()) {
+                    // The watchdog aborted the stream: the parked consumer
+                    // gets the idle-timeout signal whether or not the
+                    // watchdog's close() has landed yet.
+                    throw new HostedHarnessStreamIdleException(
+                            client.sseIdleTimeout(), e);
+                }
+                if (closed.get()) {
+                    // A caller-initiated close() ended the blocked read.
+                    // The parked consumer gets a transport failure; a
+                    // caller arriving after the close gets the closed
+                    // guard's signal instead.
+                    throw new DaemonTransportException(
+                            "HarnessEventStream is closed", e);
+                }
+                closeQuietly();
+                throw new DaemonTransportException(
+                        "Hosted Harness SSE stream failed", e);
+            } catch (RuntimeException e) {
+                closeQuietly();
+                throw e;
+            } finally {
+                waitingSince.set(0);
             }
-            client.observeEvent(session, event);
-            return event;
-        } catch (IOException e) {
-            closeQuietly();
-            throw new DaemonTransportException(
-                    "Hosted Harness SSE stream failed", e);
-        } catch (RuntimeException e) {
-            closeQuietly();
-            throw e;
+        } finally {
+            cursorLock.unlock();
         }
     }
 
     @Override
-    public synchronized void close() {
-        if (closed) {
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
             return;
         }
-        closed = true;
-        client.unregisterStream(this);
+        ScheduledFuture<?> watchdog = idleWatchdog;
+        if (watchdog != null) {
+            watchdog.cancel(false);
+        }
         try {
             input.close();
         } catch (IOException e) {
             throw new DaemonTransportException(
                     "Hosted Harness SSE stream could not be closed", e);
+        } finally {
+            client.unregisterStream(this);
         }
     }
 
@@ -92,10 +165,71 @@ public final class HarnessEventStream implements AutoCloseable {
         }
     }
 
-    private void ensureOpen() {
-        if (closed) {
-            throw new IllegalStateException(
-                    "HarnessEventStream is closed");
+    private RuntimeException closedFailure() {
+        if (idleTimedOut.get()) {
+            return new HostedHarnessStreamIdleException(
+                    client.sseIdleTimeout());
+        }
+        return new IllegalStateException(
+                "HarnessEventStream is closed");
+    }
+
+    // A tenth of the budget keeps the abort within 10% of the bound, so a
+    // supervisor can sit just above it; the floor bounds the single
+    // scheduler thread's wake rate when the budget is short.
+    static long idleWatchdogIntervalMillis(long idleMillis) {
+        return Math.max(100L, idleMillis / 10L);
+    }
+
+    void startIdleWatchdog() {
+        if (client.sseIdleTimeout().isZero()) {
+            // Builder.sseIdleTimeout(Duration.ZERO): the caller owns the
+            // deadline, so no watchdog is scheduled.
+            return;
+        }
+        if (!client.advertisesEventKeepalive()) {
+            // A Harness without keepalive comments stays silent through
+            // every quiet phase of a healthy Turn, so a bound would abort
+            // those streams: the read stays unbounded, and only a close
+            // ends it, as before the keepalive.
+            return;
+        }
+        long idleMillis = HostedHarnessClient.saturatedMillis(
+                client.sseIdleTimeout());
+        long intervalMillis = idleWatchdogIntervalMillis(idleMillis);
+        long idleNanos = TimeUnit.MILLISECONDS.toNanos(idleMillis);
+        try {
+            idleWatchdog = client.scheduler().scheduleAtFixedRate(() -> {
+                if (closed.get()) {
+                    ScheduledFuture<?> watchdog = idleWatchdog;
+                    if (watchdog != null) {
+                        watchdog.cancel(false);
+                    }
+                    return;
+                }
+                // Only a consumer parked in next() is waiting on the peer;
+                // a stream nobody is pulling stays open until close().
+                long since = waitingSince.get();
+                if (since == 0) {
+                    return;
+                }
+                if (System.nanoTime() - since >= idleNanos
+                        && idleTimedOut.compareAndSet(false, true)) {
+                    // Closes the raw input without any stream monitor, so
+                    // the single-thread scheduler never blocks behind the
+                    // reader.
+                    closeQuietly();
+                }
+            }, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            // A racing client.close() already shut the scheduler down: map
+            // the local rejection the way send() does, and drop the
+            // registration streamEvents just added so the unarmed stream
+            // is not stranded in the client's set.
+            client.unregisterStream(this);
+            throw new DaemonTransportException(
+                    "Hosted Harness SSE idle watchdog could not be scheduled",
+                    e);
         }
     }
 }

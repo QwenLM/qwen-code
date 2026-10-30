@@ -57,6 +57,13 @@ public final class DaemonEvent {
         if (!("turn_complete".equals(type) || "turn_error".equals(type))) {
             return expectedPromptId.equals(promptId);
         }
+        return expectedPromptId.equals(terminalPromptId());
+    }
+
+    // The promptId a terminal event settles: the envelope field when
+    // present, else the data object's — null when the event carries
+    // neither.
+    String terminalPromptId() {
         Map<String, Object> object = dataObject();
         String dataPromptId = object == null ? null
                 : JsonSupport.optionalString(object, "promptId");
@@ -65,8 +72,7 @@ public final class DaemonEvent {
             throw new DaemonProtocolException(
                     "SSE envelope promptId conflicts with data.promptId");
         }
-        String canonicalPromptId = promptId == null ? dataPromptId : promptId;
-        return expectedPromptId.equals(canonicalPromptId);
+        return promptId == null ? dataPromptId : promptId;
     }
 
     String updateKind() {

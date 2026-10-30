@@ -14,6 +14,7 @@ import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellCustomizationProvider } from '../../customization';
+import styles from './ToolApproval.module.css';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -595,6 +596,161 @@ describe('ToolApproval accessibility', () => {
     expect(command?.textContent).toBe('ls -la');
   });
 
+  it('neutralises bidi and C0 controls in the rendered command block', () => {
+    // Mirrors what `toManagedPermissionRequest` produces for an exec tool
+    // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
+    // #13517: the card takes the `isExec && command` branch and renders
+    // `rawInput.command`, so escaping the `content` producer is not enough.
+    const craftedCommand = [
+      'rm -rf /tmp/\u202eppa', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'git push \u2066--force\u2069', // bidi isolates
+      'ls \u001b[31m--all\u001b[0m', // C0 ANSI escape
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: JSON.stringify({ craftedCommand }) }],
+      contentIsInput: true,
+      rawInput: { command: craftedCommand },
+    });
+    const pre = container!.querySelector('pre')!;
+    const rendered = pre.textContent!;
+    // The invisible code points must not survive into the DOM, while the
+    // command stays legible and multi-line (`\n` is preserved on purpose).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).toBe(
+      [
+        'rm -rf /tmp/\\u202eppa',
+        'git push \\u2066--force\\u2069',
+        'ls \\u001b[31m--all\\u001b[0m',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(pre.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the model-supplied description text', () => {
+    // `.desc` renders `getDescriptionText`, which returns `rawInput.description`
+    // verbatim and otherwise falls back to `request.title` — on the daemon/ACP
+    // path that title is built from `ShellTool.getDescription()`, i.e. the raw
+    // command. #13566: this sibling of the sanitised command block was still
+    // rendered raw, in its body, in its tooltip and in the `aria-describedby`
+    // target a screen reader reads.
+    const craftedDescription = [
+      'Delete temporary data\u202e', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'ls \u001b[31m--all\u001b[0m\t--color', // C0 ANSI escape, tab kept
+      'rm -rf /tmp/data\u0007', // BEL
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      rawInput: {
+        command: 'rm -rf /tmp/data',
+        description: craftedDescription,
+      },
+    });
+    // `.desc` is a <div>, not a <pre>: reach it through the `aria-describedby`
+    // IDREF that references it, which also asserts the IDREF still resolves.
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descEl = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id))
+      .find(
+        (el): el is HTMLElement =>
+          el?.tagName === 'DIV' && el.hasAttribute('title'),
+      )!;
+    expect(descEl).toBeTruthy();
+    const rendered = descEl.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    // `\n` and `\t` stay unescaped (the helper's own pin lives at
+    // toolFormatting.test.ts:51) so a multi-line description stays legible.
+    expect(rendered).toBe(
+      [
+        'Delete temporary data\\u202e',
+        'ls \\u001b[31m--all\\u001b[0m\t--color',
+        'rm -rf /tmp/data\\u0007',
+      ].join('\n'),
+    );
+    expect(descEl.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the exec warnings block', () => {
+    // The warnings text is model-influenced: `buildOutsideWorkspaceWarning`
+    // (packages/core/src/utils/shell-utils.ts:2093) interpolates the raw
+    // `directory` argument verbatim, and real text content blocks reach
+    // `contentText` unescaped. #13566: this sibling <pre>, inside the same
+    // `isExec && command` fragment as the sanitised command block, was raw.
+    const craftedDirectory = '/tmp/\u202eevil\u001b[31m\u0007';
+    const warnings = `Runs outside the workspace in ${craftedDirectory}`;
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: warnings }],
+      rawInput: { command: 'ls -la', description: 'List files' },
+    });
+    const warningPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Runs outside the workspace'),
+    )!;
+    expect(warningPre).toBeTruthy();
+    const rendered = warningPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    expect(rendered).toBe(
+      'Runs outside the workspace in /tmp/\\u202eevil\\u001b[31m\\u0007',
+    );
+    expect(warningPre.getAttribute('title')).toBe(rendered);
+    // The command block next to it keeps its own, separate payload intact.
+    const commandPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent === 'ls -la',
+    )!;
+    expect(commandPre).toBeTruthy();
+  });
+
+  it('neutralises bidi and C0 controls in the generic content block', () => {
+    // #13566 named three sites. The command block, the exec warnings and the
+    // description were sanitised by #13578; this `<pre>` — rendered for any
+    // approval that shows content without being an exec one, and reused as the
+    // body, the tooltip and the `aria-describedby` target — was still raw.
+    const craftedContent = [
+      'Writes to notes\u202e.txt', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'then \u2066--force\u2069', // bidi isolates
+      'and \u001b[31mstops\u001b[0m\tthere', // C0 ANSI escape, tab kept
+    ].join('\n');
+    render(undefined, {
+      id: 'req-13566-content',
+      toolName: 'write_file',
+      title: 'write_file',
+      content: [{ type: 'text', text: craftedContent }],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const contentPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Writes to notes'),
+    )!;
+    expect(contentPre).toBeTruthy();
+    const rendered = contentPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    // `\n` and `\t` stay unescaped so the block stays legible.
+    expect(rendered).toBe(
+      [
+        'Writes to notes\\u202e.txt',
+        'then \\u2066--force\\u2069',
+        'and \\u001b[31mstops\\u001b[0m\tthere',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(contentPre.getAttribute('title')).toBe(rendered);
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {
@@ -854,6 +1010,23 @@ describe('ToolApproval accessibility', () => {
     ]);
     act(() => optionButtons()[0].click());
     expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+  it('labels the Managed allow/deny plan options with the frozen execution policy', () => {
+    const req = {
+      ...planRequest,
+      options: [
+        { id: 'allow', label: 'Allow', kind: 'allow_once' as const },
+        { id: 'deny', label: 'Deny', kind: 'reject_once' as const },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'deny',
+      'allow',
+    ]);
+    expect(container!.textContent).toContain('Full Access');
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'allow');
   });
 
   it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {
@@ -1731,5 +1904,144 @@ describe('goal approval objective whitespace', () => {
       container!.querySelector('[role="tabpanel"][data-state="active"]')!
         .textContent,
     ).toBe(`${goalNotice}\n\n${goalObjective}`);
+  });
+});
+
+describe('floating variant scroll layout', () => {
+  // Regression guard for the nested-scrollbar bug: in the floating card the
+  // diff line list must defer its scroll to the card's content region (one
+  // scroll container, decision buttons pinned) instead of capping itself at
+  // 400px with a second scrollbar.
+  function renderVariant(
+    variant: 'inline' | 'floating',
+    leadingContent: unknown[] = [],
+  ): void {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-float',
+        kind: 'permission',
+        requestId: 'request-edit-float',
+        sessionId: 'session-edit-float',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            ...leadingContent,
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+              variant={variant}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+  }
+
+  it('lets the diff lines fill the card content region', () => {
+    renderVariant('floating');
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const diffRegion = dialog.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    // The keyboard-inspect path stays intact: the line list is still the
+    // focusable diff region.
+    expect(diffRegion.tabIndex).toBe(0);
+    // ...and it defers its scroll to the region instead of adding a nested
+    // scrollbar of its own.
+    expect(diffRegion.className).toContain('linesFill');
+    // The content region wrapping the diff is a direct child of the card, so
+    // the sheet's flex budget — not a sheet-level scrollbar — absorbs the
+    // diff.
+    const wrapper = diffRegion.closest<HTMLElement>('[data-plan-interactive]')!;
+    expect(wrapper.parentElement).toBe(dialog);
+  });
+
+  it('keeps the exec command region a direct child of the floating sheet', () => {
+    // The `.floating > .code` half of the scroll-region rule (pinned as CSS
+    // text in ToolApproval.css.test.ts) rests on a DOM premise: the command
+    // wrapper is a direct child of the panel that carries .floating. Shell
+    // command approvals are the common floating case, so guard the premise
+    // with a render: wrap the region in one more element and the child
+    // combinator stops matching, the command no longer absorbs the sheet's
+    // overflow, and the decision buttons are clipped again.
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <ToolApproval
+            request={execRequest}
+            onConfirm={onConfirm}
+            variant="floating"
+          />
+        </I18nProvider>,
+      ),
+    );
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    expect(dialog.classList.contains(styles.floating)).toBe(true);
+    expect(
+      Array.from(dialog.children).some((el) =>
+        el.classList.contains(styles.code),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps every region of a compound card a floored direct child of the sheet', () => {
+    // The issue's own reproduction: an outside-workspace write emits a warning
+    // text block before the diff block, so the card renders two sibling
+    // regions. Both must be direct children of the sheet, outside the
+    // .planContent exemption, so `.floating > .content:not(.planContent)`
+    // gives each one the 3.5em floor (pinned in ToolApproval.css.test.ts) and
+    // the warning cannot be squeezed below a readable height by the diff.
+    renderVariant('floating', [
+      {
+        type: 'content',
+        content: { type: 'text', text: 'Path is outside the workspace' },
+      },
+    ]);
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const regions = Array.from(dialog.children).filter((el) =>
+      el.classList.contains(styles.content),
+    );
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.classList.contains(styles.planContent)).toBe(false);
+    }
+    expect(regions[0]!.textContent).toBe('Path is outside the workspace');
+    expect(regions[1]!.hasAttribute('data-plan-interactive')).toBe(true);
+  });
+
+  it('keeps the inline card self-scrolling', () => {
+    renderVariant('inline');
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    expect(diffRegion.className).not.toContain('linesFill');
   });
 });

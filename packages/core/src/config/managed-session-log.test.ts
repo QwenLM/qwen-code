@@ -9,6 +9,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -18,18 +19,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from './approval-mode.js';
-import { Config, type ConfigParameters } from './config.js';
+import { Config, deriveConfig, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import { MCPServerConfig } from './mcp-server-config.js';
 import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
 import { McpClientManager } from '../tools/mcp-client-manager.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../services/execution-environment.js';
+import {
   ManagedSessionRecordRefusedError,
   type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { SessionService } from '../services/sessionService.js';
+import { SessionTranscriptReader } from '../services/session-transcript-reader.js';
 import {
   getSessionWriterLockPath,
   SessionWriterLease,
@@ -42,7 +49,10 @@ import {
 } from '../managed-runtime/managed-session-records.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
-import { ManagedSessionConflictError } from '../managed-runtime/managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  ManagedSessionConflictError,
+} from '../managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import { ManagedSessionRecordSink } from '../managed-runtime/managed-session-record-sink.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
@@ -51,11 +61,19 @@ import {
   localManagedSessionKey,
   managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
 // Mirrors METADATA_REANCHOR_BYTES in chatRecordingService.ts.
 const REANCHOR_GROWTH_BYTES = 32 * 1024 + 2 * 1024;
+
+// Each renewal loop below runs until the log grows by tens of KiB, so its
+// duration is set by per-renewal cost under host contention; the 70 KiB copy
+// has overrun the 60 s ecs-qwen lane ceiling (#14581). Slow hosts get double
+// it; fast hosts keep the lane default.
+const renewalLoopTimeoutMs = isSlowTestHost() ? 120_000 : undefined;
 
 let root: string;
 let projectDir: string;
@@ -213,10 +231,11 @@ describe('Managed Session log recording', () => {
         MANAGED_SESSION_COMMIT_SUBTYPE,
       ]).toContain(record['subtype']);
     }
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
+    const scan = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
     expect(scan.uncommitted).toBe(0);
     // The session is the activation's worker, with a five-minute horizon.
     expect(scan.activation?.workerId).toBe(SESSION_ID);
@@ -272,10 +291,11 @@ describe('Managed Session log recording', () => {
     const sealed = await lockRecord();
     expect(sealed).toMatchObject({ state: 'sealed', schema_version: 3 });
     // The log records that the session stopped advancing before the seal.
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
+    const scan = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
     expect(scan.activation?.phase).toBe('released');
     expect(scan.uncommitted).toBe(0);
     const bytesAtClose = (
@@ -450,42 +470,46 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
-  it('re-anchors its title on finalize after renewals alone moved the log on', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    for (let index = 0; index < 40; index++) {
-      recordUser(config, `prompt ${index}`);
-    }
-    await recorder.flush();
-    await expect(
-      recorder.recordCustomTitle('Idle title', 'manual'),
-    ).resolves.toBe(true);
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const titledAt = (await stat(transcriptPath)).size;
-    // While the session is idle, the renewal timer is the only writer.
-    const { authority } = (
-      config as unknown as { managedSession: ManagedSession }
-    ).managedSession;
-    while ((await stat(transcriptPath)).size - titledAt < 70 * 1024) {
-      await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-    }
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)?.title).not.toBe(
-      'Idle title',
-    );
+  it(
+    're-anchors its title on finalize after renewals alone moved the log on',
+    async () => {
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      for (let index = 0; index < 40; index++) {
+        recordUser(config, `prompt ${index}`);
+      }
+      await recorder.flush();
+      await expect(
+        recorder.recordCustomTitle('Idle title', 'manual'),
+      ).resolves.toBe(true);
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const titledAt = (await stat(transcriptPath)).size;
+      // While the session is idle, the renewal timer is the only writer.
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      while ((await stat(transcriptPath)).size - titledAt < 70 * 1024) {
+        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+      }
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)?.title).not.toBe(
+        'Idle title',
+      );
 
-    recorder.finalize();
-    await recorder.flush();
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
-      title: 'Idle title',
-    });
-    // The title it wrote is not on the chain the next record continues.
-    recordUser(config, 'after finalize');
-    const texts = await activeChatTexts(config);
-    expect(texts[0]).toBe('prompt 0');
-    expect(texts.at(-1)).toBe('after finalize');
-    await config.closeSessionWriter();
-  });
+      recorder.finalize();
+      await recorder.flush();
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'Idle title',
+      });
+      // The title it wrote is not on the chain the next record continues.
+      recordUser(config, 'after finalize');
+      const texts = await activeChatTexts(config);
+      expect(texts[0]).toBe('prompt 0');
+      expect(texts.at(-1)).toBe('after finalize');
+      await config.closeSessionWriter();
+    },
+    renewalLoopTimeoutMs,
+  );
 
   it.each([
     'a handoff close',
@@ -564,6 +588,7 @@ describe('Managed Session log recording', () => {
         title: 'Renamed title',
       });
     },
+    renewalLoopTimeoutMs,
   );
 
   it('adds no title on finalize right behind an anchor', async () => {
@@ -620,17 +645,24 @@ describe('Managed Session log recording', () => {
       false,
     );
     await recorder.flush();
-    const raw = await readFile(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      'utf8',
-    );
-    expect(raw.split('"domain":"session_source"')).toHaveLength(2);
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
+    expect(
+      journal.events.filter(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          event.payload['domain'] === 'session_source',
+      ),
+    ).toHaveLength(1);
     await restored.closeSessionWriter();
   });
 
   // An unreadable file is made with chmod, which neither Windows nor root
-  // honours.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // with its DAC capabilities honours.
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps a reclaimed lock when it cannot read the log',
     async () => {
       const first = await start(managedConfig());
@@ -694,93 +726,102 @@ describe('Managed Session log recording', () => {
     await config.closeSessionWriter();
   });
 
-  it('does not anchor the title that a rename in flight replaces', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    await recorder.recordCustomTitle('Old title', 'manual');
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const { authority } = (
-      config as unknown as { managedSession: ManagedSession }
-    ).managedSession;
-    // The log moves past the re-anchor threshold while the rename is written,
-    // so the anchor falls due as the rename lands.
-    const write = ManagedSessionRecordSink.prototype.write;
-    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
-      async function (this: ManagedSessionRecordSink, record: ChatRecord) {
-        const payload = record.systemPayload as
-          | { customTitle?: unknown }
-          | undefined;
-        if (payload?.customTitle === 'New title') {
-          const from = (await stat(transcriptPath)).size;
-          while ((await stat(transcriptPath)).size - from < 34 * 1024) {
-            await authority.renewActivation({
-              leaseDurationMs: 5 * 60 * 1000,
-            });
+  it(
+    'does not anchor the title that a rename in flight replaces',
+    async () => {
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      await recorder.recordCustomTitle('Old title', 'manual');
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      // The log moves past the re-anchor threshold while the rename is written,
+      // so the anchor falls due as the rename lands.
+      const write = ManagedSessionRecordSink.prototype.write;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, record: ChatRecord) {
+          const payload = record.systemPayload as
+            | { customTitle?: unknown }
+            | undefined;
+          if (payload?.customTitle === 'New title') {
+            const from = (await stat(transcriptPath)).size;
+            while ((await stat(transcriptPath)).size - from < 34 * 1024) {
+              await authority.renewActivation({
+                leaseDurationMs: 5 * 60 * 1000,
+              });
+            }
           }
-        }
-        return write.call(this, record);
-      },
-    );
+          return write.call(this, record);
+        },
+      );
 
-    await expect(
-      recorder.recordCustomTitle('New title', 'manual'),
-    ).resolves.toBe(true);
-    await recorder.flush();
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
-      title: 'New title',
-    });
-    vi.restoreAllMocks();
-    await config.closeSessionWriter();
-  });
-
-  it('seals the log when the title anchor written on close fails', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    await recorder.recordCustomTitle('Managed title', 'manual');
-    recordUser(config, 'committed prompt');
-    await recorder.flush();
-    // Renewals alone make the title due, so its anchor is written on close.
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const from = (await stat(transcriptPath)).size;
-    const { authority } = (
-      config as unknown as { managedSession: ManagedSession }
-    ).managedSession;
-    while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
-      await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-    }
-    const write = ManagedSessionRecordSink.prototype.write;
-    const failing = vi
-      .spyOn(ManagedSessionRecordSink.prototype, 'write')
-      .mockImplementation(async function (
-        this: ManagedSessionRecordSink,
-        record: ChatRecord,
-      ) {
-        if (record.subtype === 'custom_title') throw new Error('disk full');
-        return write.call(this, record);
+      await expect(
+        recorder.recordCustomTitle('New title', 'manual'),
+      ).resolves.toBe(true);
+      await recorder.flush();
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'New title',
       });
+      vi.restoreAllMocks();
+      await config.closeSessionWriter();
+    },
+    renewalLoopTimeoutMs,
+  );
 
-    await config.closeSessionWriter();
-    expect(failing).toHaveBeenCalledWith(
-      expect.objectContaining({ subtype: 'custom_title' }),
-    );
-    failing.mockRestore();
-    expect(await lockRecord()).toMatchObject({
-      state: 'sealed',
-      schema_version: 3,
-    });
-    // The failed anchor does not skip the stop: the log records that the
-    // session stopped advancing before the seal.
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
-    expect(scan.activation?.phase).toBe('released');
-    const restored = await start(restoringConfig());
-    expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
-    await restored.closeSessionWriter();
-  });
+  it(
+    'seals the log when the title anchor written on close fails',
+    async () => {
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      await recorder.recordCustomTitle('Managed title', 'manual');
+      recordUser(config, 'committed prompt');
+      await recorder.flush();
+      // Renewals alone make the title due, so its anchor is written on close.
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const from = (await stat(transcriptPath)).size;
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
+        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+      }
+      const write = ManagedSessionRecordSink.prototype.write;
+      const failing = vi
+        .spyOn(ManagedSessionRecordSink.prototype, 'write')
+        .mockImplementation(async function (
+          this: ManagedSessionRecordSink,
+          record: ChatRecord,
+        ) {
+          if (record.subtype === 'custom_title') throw new Error('disk full');
+          return write.call(this, record);
+        });
+
+      await config.closeSessionWriter();
+      expect(failing).toHaveBeenCalledWith(
+        expect.objectContaining({ subtype: 'custom_title' }),
+      );
+      failing.mockRestore();
+      expect(await lockRecord()).toMatchObject({
+        state: 'sealed',
+        schema_version: 3,
+      });
+      // The failed anchor does not skip the stop: the log records that the
+      // session stopped advancing before the seal.
+      const scan = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+        runtimeBaseDir: runtimeDir,
+        sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+      });
+      expect(scan.activation?.phase).toBe('released');
+      const restored = await start(restoringConfig());
+      expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
+      await restored.closeSessionWriter();
+    },
+    renewalLoopTimeoutMs,
+  );
 
   it('keeps a record committed when the anchor behind it fails', async () => {
     const first = await start(managedConfig());
@@ -950,6 +991,187 @@ describe('Managed Session log recording', () => {
     const restored = await start(restoringConfig());
     expect(await activeChatTexts(restored)).toEqual(['first prompt']);
     await restored.closeSessionWriter();
+  });
+
+  it('derives navigation turns from the Managed log with the physical builder semantics', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    recorder.recordUserMessage(
+      [{ text: 'first prompt' }],
+      undefined,
+      undefined,
+      undefined,
+      'daemon-prompt-1',
+    );
+    recorder.recordTurnResult({
+      promptId: 'turn-result-prompt-1',
+      state: 'completed',
+      endedAt: Date.now(),
+    });
+    recordUser(config, 'second prompt');
+    recorder.recordTurnResult({
+      promptId: 'prompt-2',
+      state: 'completed',
+      endedAt: Date.now(),
+    });
+    await recorder.flush();
+    await config.closeSessionWriter();
+
+    // Same rules as the physical index builder: a daemon prompt id is
+    // filled at the turn record, and a later turn result is first-wins.
+    const page = await new SessionTranscriptReader(
+      projectDir,
+    ).readTurnIndexPage(SESSION_ID);
+    expect(page.turns).toEqual([
+      expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
+      expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
+    ]);
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording.turnDaemonPromptIds).toEqual([
+      'daemon-prompt-1',
+      undefined,
+    ]);
+  });
+
+  it('skips a malformed file-history record instead of failing the managed restore', async () => {
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    const sessionKey = localManagedSessionKey(projectDir, SESSION_ID);
+    const store = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const lease = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: runtimeDir,
+      sessionId: SESSION_ID,
+      transcriptPath,
+    });
+    try {
+      const authority = await LocalManagedSessionAuthority.open({
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
+        sessionKey,
+        cwd: projectDir,
+        version: 'test',
+        resources: store,
+        create: {
+          definitionRef: await store.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await store.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      await authority.installActivation({
+        activationId: 'act-1',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      const sink = new ManagedSessionRecordSink(authority, store, () => ({
+        class: 'harness',
+        activation: { activationId: 'act-1', epoch: 1 },
+      }));
+      await sink.write({
+        uuid: 'rec-user-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'before the damage' }] },
+      } as ChatRecord);
+      await sink.write({
+        uuid: 'rec-history-1',
+        parentUuid: 'rec-user-1',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        cwd: projectDir,
+        version: 'test',
+        // A mixed batch pins the skip granularity: the guard is per record,
+        // so the healthy sibling entry is dropped with the torn one rather
+        // than restored on its own.
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'prompt-torn-sibling',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+            null,
+          ],
+        },
+      } as unknown as ChatRecord);
+      // A healthy record after the damaged one: a whole-loop catch would
+      // truncate the projection to the prefix before the damage.
+      await sink.write({
+        uuid: 'rec-user-2',
+        parentUuid: 'rec-user-1',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'after the damage' }] },
+      } as ChatRecord);
+      // A valid snapshot after the damaged one: the catch must skip the
+      // damaged record and keep accumulating, so this one survives.
+      await sink.write({
+        uuid: 'rec-history-2',
+        parentUuid: 'rec-user-2',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        cwd: projectDir,
+        version: 'test',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'prompt-survivor',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        },
+      } as unknown as ChatRecord);
+
+      const projection = await sessionService().readRestoreProjection(
+        SESSION_ID,
+        { replay: { kind: 'none' } },
+      );
+      expect(projection).toBeDefined();
+      expect(projection?.runtime.apiHistory).toMatchObject([
+        { role: 'user', parts: [{ text: 'before the damage' }] },
+        { role: 'user', parts: [{ text: 'after the damage' }] },
+      ]);
+      expect(
+        projection?.runtime.fileHistorySnapshots?.map(
+          (snapshot) => snapshot.promptId,
+        ),
+      ).toEqual(['prompt-survivor']);
+      const page = await new SessionTranscriptReader(
+        projectDir,
+      ).readTurnIndexPage(SESSION_ID);
+      expect(page.turns).toEqual([
+        expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-1' }),
+        expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-2' }),
+      ]);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
   });
 
   it.each<[string, () => Config]>([
@@ -1200,7 +1422,7 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
-  it('restores a session whose title body is missing', async () => {
+  it('refuses snapshot conversion when the title dependency is missing', async () => {
     const first = await start(managedConfig());
     await first
       .getChatRecordingService()!
@@ -1221,12 +1443,11 @@ describe('Managed Session log recording', () => {
         replay: { kind: 'none' },
       }),
     ).resolves.toBeDefined();
-    const restored = await start(restoringConfig());
-    expect(
-      restored.getChatRecordingService()!.getCurrentCustomTitle(),
-    ).toBeUndefined();
-    expect(await activeChatTexts(restored)).toEqual(['first prompt']);
-    await restored.closeSessionWriter();
+    await expect(start(restoringConfig())).rejects.toThrow(/not present/);
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      format_version: 2,
+    });
   });
 
   it('gives back the seal it took over when the log does not match it', async () => {
@@ -1332,6 +1553,210 @@ describe('Managed Session log recording', () => {
       SessionWriterUnavailableError,
     );
   });
+
+  it('blocks a restore whose log shows Runtime work that never settled', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('never settled');
+    await restored.closeSessionWriter();
+  });
+
+  it('blocks a restore whose newest checkpoint state cannot be read', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    // A crash-damaged store: the checkpoint's state body no longer reads.
+    const stateRoot = path.join(runtimeDir, 'resources', SESSION_ID);
+    let zeroed = 0;
+    for (const kind of await readdir(stateRoot)) {
+      const dir = path.join(stateRoot, kind);
+      for (const file of await readdir(dir)) {
+        if (file.startsWith('.')) continue;
+        const candidate = path.join(dir, file);
+        if ((await readFile(candidate)).includes('ckpt-')) {
+          await writeFile(candidate, Buffer.alloc(0));
+          zeroed += 1;
+        }
+      }
+    }
+    expect(zeroed).toBeGreaterThan(0);
+
+    // Conversion refuses an incomplete resource closure before admitting work.
+    await expect(start(restoringConfig())).rejects.toThrow(
+      /on disk where|digest|not present/,
+    );
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      format_version: 2,
+    });
+  });
+
+  it('restores a log whose Runtime calls settled, without blocking', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await outcomes.settle({
+      functionCallId: 'call-a',
+      executionStatus: 'success',
+      payload: { executionStatus: 'success', responseParts: [] },
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
+
+  it('proves a call whose settle failed after its receipt committed, on both opens', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    // The crash window: the outcome and the receipt commit, then the
+    // checkpoint's resolve fails.
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [] },
+      }),
+    ).rejects.toThrow('crashed between');
+    // The receipt the failure left behind is the durable proof the call took
+    // effect — and what proves a call may never block.
+    expect(outcomes.hasCommittedReceipt('call-a')).toBe(true);
+    expect(outcomes.hasCommittedReceipt('call-b')).toBe(false);
+    await created.closeSessionWriter();
+
+    // The same durable bytes open unblocked: the restore repair settles the
+    // item the failed resolve left in progress.
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
+
+  it('hands the reopen the history its own repair writes', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    recordUser(created, 'read the file');
+    // The model's call is on the log; its result never lands — the crash
+    // window the restore repair exists for.
+    created.getChatRecordingService()!.recordAssistantTurn({
+      model: 'test-model',
+      message: [
+        {
+          functionCall: {
+            id: 'call-a',
+            name: 'read_file',
+            args: { file_path: path.join(projectDir, 'a.txt') },
+          },
+        },
+      ],
+    });
+    await created.getChatRecordingService()!.flush();
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'the recovered answer' }],
+        },
+      }),
+    ).rejects.toThrow('crashed between');
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    // The repair re-records the settled result, and the projection this open
+    // seeds the chat from must carry it: otherwise the first request after a
+    // crash hands the model a functionCall that nothing answers.
+    const apiHistory = restored.getSessionRestoreRuntime()?.apiHistory ?? [];
+    const functionResponses = apiHistory
+      .flatMap((content) => content.parts ?? [])
+      .map((part) => part?.functionResponse)
+      .filter((response) => response !== undefined);
+    expect(functionResponses).toContainEqual(
+      expect.objectContaining({
+        id: 'call-a',
+        name: 'read_file',
+        response: { output: 'the recovered answer' },
+      }),
+    );
+    await restored.closeSessionWriter();
+  });
 });
 
 describe('Managed host tools', () => {
@@ -1435,5 +1860,259 @@ describe('Managed host tools', () => {
     await config.reinitializeMcpServers(mcpServers);
     expect(getToolRegistry).not.toHaveBeenCalled();
     await config.closeSessionWriter();
+  });
+});
+
+describe('Managed Runtime tools', () => {
+  function runtimeEnvironment(): ExecutionEnvironment {
+    return {
+      toolNames: MANAGED_RUNTIME_TOOL_NAMES,
+      prepare: vi.fn(),
+      permission: vi.fn(),
+      confirmation: vi.fn(),
+      confirm: vi.fn(),
+      execute: vi.fn(),
+      modificationContent: vi.fn(),
+      release: vi.fn(),
+      invalidateReadCache: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+    };
+  }
+
+  it('registers the first-phase tools to execute in its environment', async () => {
+    const environment = runtimeEnvironment();
+    const factory = vi.fn(() => environment);
+    const config = managedConfig({ managedRuntimeEnvironment: factory });
+
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    await registry.warmAll({ strict: true });
+    expect(registry.getAllToolNames().sort()).toEqual([
+      'edit',
+      'read_file',
+      'run_shell_command',
+      'write_file',
+    ]);
+    for (const tool of registry.getAllTools()) {
+      expect((tool as { environment?: unknown }).environment).toBe(environment);
+    }
+    // One environment per session, built for this Config.
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    expect(factory).toHaveBeenCalledExactlyOnceWith(config);
+  });
+
+  it('keeps the permission decisions on registration', async () => {
+    const config = managedConfig({
+      managedRuntimeEnvironment: runtimeEnvironment,
+      disabledTools: ['read_file'],
+    });
+    vi.spyOn(config, 'getPermissionManager').mockReturnValue({
+      getToolRegistrationStatus: async (name: string) =>
+        name === 'write_file'
+          ? 'disabled'
+          : name === 'edit'
+            ? 'deferred'
+            : 'registered',
+    } as unknown as ReturnType<Config['getPermissionManager']>);
+
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames().sort()).toEqual([
+      'edit',
+      'run_shell_command',
+    ]);
+    expect(registry.isPermissionDeferred('edit')).toBe(true);
+    expect(registry.isPermissionDeferred('run_shell_command')).toBe(false);
+  });
+
+  it('admits no other tool through the Runtime-backed path', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    config.getManagedRuntimeEnvironment();
+    const registry = new ToolRegistry(config);
+    const hostTool = { name: 'read_file' } as unknown as AnyDeclarativeTool;
+    // Another name, or another session's environment.
+    registry.registerRuntimeBackedFactory(
+      'image_gen',
+      async () => hostTool,
+      environment,
+      false,
+    );
+    registry.registerRuntimeBackedFactory(
+      'edit',
+      async () => hostTool,
+      runtimeEnvironment(),
+      false,
+    );
+    expect(registry.getAllToolNames()).toEqual([]);
+    // A tool under an admitted name that does not run in the environment.
+    registry.registerRuntimeBackedFactory(
+      'read_file',
+      async () => hostTool,
+      environment,
+      false,
+    );
+    await expect(registry.ensureTool('read_file')).rejects.toThrow(
+      'not Runtime-backed',
+    );
+
+    const legacy = new ToolRegistry(
+      managedConfig({ sessionExecutionEngine: 'legacy' }),
+    );
+    legacy.registerRuntimeBackedFactory(
+      'read_file',
+      async () => hostTool,
+      environment,
+      false,
+    );
+    expect(legacy.getAllToolNames()).toEqual([]);
+  });
+
+  it('builds no environment for another engine or a derived Config', async () => {
+    const factory = vi.fn(runtimeEnvironment);
+    const legacy = managedConfig({
+      sessionExecutionEngine: 'legacy',
+      managedRuntimeEnvironment: factory,
+    });
+    const registry = await legacy.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(legacy.getManagedRuntimeEnvironment()).toBeUndefined();
+    expect(
+      registry
+        .getAllTools()
+        .some((tool) => (tool as { environment?: unknown }).environment),
+    ).toBe(false);
+    expect(factory).not.toHaveBeenCalled();
+
+    const config = managedConfig({ managedRuntimeEnvironment: factory });
+    expect(deriveConfig(config).getManagedRuntimeEnvironment()).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing it could cache', () => {
+    expect(managedConfig().getFileReadCacheDisabled()).toBe(true);
+    expect(
+      managedConfig({
+        sessionExecutionEngine: 'legacy',
+      }).getFileReadCacheDisabled(),
+    ).toBe(false);
+  });
+
+  it('stops its environment before the session writer closes', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    config.getManagedRuntimeEnvironment();
+    const order: string[] = [];
+    vi.mocked(environment.dispose).mockImplementation(async () => {
+      // A slow stop: the writer must wait for it.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      order.push('dispose');
+    });
+    const closeSessionWriter = config.closeSessionWriter.bind(config);
+    vi.spyOn(config, 'closeSessionWriter').mockImplementation(async () => {
+      order.push('closeSessionWriter');
+      await closeSessionWriter();
+    });
+    await config.shutdown({ shutdownTelemetry: false });
+    expect(order).toEqual(['dispose', 'closeSessionWriter']);
+  });
+
+  it('stays in the directory its Runtime worker is bound to', async () => {
+    const below = path.join(projectDir, 'below');
+    await mkdir(below);
+    const config = managedConfig();
+    await expect(
+      config.relocateWorkingDirectory(below, undefined, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).rejects.toThrow('A Managed session cannot change its directory.');
+    expect(config.getTargetDir()).toBe(projectDir);
+  });
+
+  it('builds no environment once its Runtime is closed or it shuts down', async () => {
+    const factory = vi.fn(runtimeEnvironment);
+    const closed = managedConfig({ managedRuntimeEnvironment: factory });
+    await closed.closeManagedRuntime();
+    expect(closed.getManagedRuntimeEnvironment()).toBeUndefined();
+
+    const shutDown = managedConfig({ managedRuntimeEnvironment: factory });
+    await shutDown.shutdown({ shutdownTelemetry: false });
+    expect(shutDown.getManagedRuntimeEnvironment()).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('hands out no environment after closing the one it built', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    expect(config.getManagedRuntimeEnvironment()).toBe(environment);
+    await config.closeManagedRuntime();
+    expect(environment.dispose).toHaveBeenCalledOnce();
+    // A stopped worker serves no later registry.
+    expect(config.getManagedRuntimeEnvironment()).toBeUndefined();
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames()).toEqual([]);
+  });
+
+  it('stops its environment once, and still finishes the log when it cannot', async () => {
+    const environment = runtimeEnvironment();
+    const failure = new Error('process groups survived');
+    vi.mocked(environment.dispose).mockRejectedValue(failure);
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    config.getManagedRuntimeEnvironment();
+    const closeSessionWriter = vi.spyOn(config, 'closeSessionWriter');
+
+    await expect(config.closeManagedRuntime()).rejects.toBe(failure);
+    await config.shutdown({
+      shutdownTelemetry: false,
+      strictResourceCleanup: true,
+    });
+    expect(environment.dispose).toHaveBeenCalledOnce();
+    expect(closeSessionWriter).toHaveBeenCalled();
+  });
+
+  it('keeps the first reason it was blocked for, from any derived Config', () => {
+    const config = managedConfig();
+    expect(config.getManagedSessionBlock()).toBeUndefined();
+    const first = new Error('first');
+    deriveConfig(config).blockManagedSession(first);
+    config.blockManagedSession(new Error('second'));
+    expect(config.getManagedSessionBlock()).toBe(first);
+    expect(deriveConfig(config).getManagedSessionBlock()).toBe(first);
+  });
+
+  it('reports and clears an engine quarantine, also through a derived Config', () => {
+    const onManagedEngineQuarantine = vi.fn();
+    const config = managedConfig({ onManagedEngineQuarantine });
+    const reason = new Error('the stop could not be proven');
+    config.reportManagedEngineQuarantine(reason);
+    expect(onManagedEngineQuarantine).toHaveBeenNthCalledWith(1, true, reason);
+    deriveConfig(config).clearManagedEngineQuarantine(reason);
+    expect(onManagedEngineQuarantine).toHaveBeenNthCalledWith(2, false, reason);
+    expect(onManagedEngineQuarantine).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a quarantine callback for an engine that is not managed', () => {
+    const onManagedEngineQuarantine = vi.fn();
+    const config = managedConfig({
+      sessionExecutionEngine: 'legacy',
+      onManagedEngineQuarantine,
+    });
+    config.reportManagedEngineQuarantine(new Error('irrelevant'));
+    config.clearManagedEngineQuarantine(new Error('irrelevant'));
+    expect(onManagedEngineQuarantine).not.toHaveBeenCalled();
   });
 });

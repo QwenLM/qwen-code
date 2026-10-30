@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_FAST_RECALL_DOCS,
+  RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
   resolveRelevantAutoMemoryPromptForQuery,
   selectRelevantAutoMemoryDocuments,
 } from './recall.js';
@@ -949,6 +950,656 @@ describe('auto-memory relevant recall', () => {
     );
   });
 
+  describe('selector skip on a unique strong hit (#13003)', () => {
+    const exact = { ...docs[0]!, keywords: ['provider fallback'] };
+    const query = 'We hit provider fallback again.';
+
+    beforeEach(() => {
+      process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = '1';
+      vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    });
+
+    afterEach(() => {
+      delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+    });
+
+    it.each([
+      ['1', 'keyword', 'provider fallback', query],
+      [' TRUE ', 'keyword', 'provider fallback', query],
+      ['1', 'title', 'provider fallback', query],
+      ['1', 'title', 'api+docs', 'api+docs'],
+      ['1', 'title', 'Git文档', '请解释Git文档的格式'],
+      ['1', 'keyword', '文档git', '请查看文档git的格式'],
+      ['1', 'title', '生产部署', '检查生产部署流程'],
+      ['1', 'title', '生产部署', 'abc生产部署xyz'],
+    ])(
+      'skips the selector with flag %s and a %s hit %s in %s',
+      async (flag, field, value, searchQuery) => {
+        process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        const hit =
+          field === 'title'
+            ? { ...exact, title: value, keywords: [] }
+            : { ...exact, keywords: [value] };
+        // docs[1] is a weaker candidate the selector could have added; the skip
+        // narrows proactive injection to the unique strong hit on purpose.
+        mockSnapshot([hit, docs[1]!]);
+        const onFastResult = vi.fn();
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          searchQuery,
+          { config, onFastResult },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([hit]);
+        expect(result.selectedDocs).toEqual([hit]);
+        expect(result.strategy).toBe('heuristic');
+        expect(result.selectorSkipped).toBe(true);
+        expect(result.treeSnapshot).toBe(
+          onFastResult.mock.calls[0]?.[0].treeSnapshot,
+        );
+        expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+          config,
+          expect.objectContaining({
+            strategy: 'heuristic',
+            selector_skipped: true,
+            selector_duration_ms: 0,
+          }),
+        );
+      },
+    );
+
+    it.each([undefined, '0'])(
+      'keeps the selector when the knob is %s',
+      async (flag) => {
+        if (flag === undefined) {
+          delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+        } else {
+          process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        }
+        mockSnapshot([exact, docs[1]!]);
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult: vi.fn() },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+        expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+          config,
+          expect.objectContaining({ selector_skipped: false }),
+        );
+      },
+    );
+
+    it('leaves selector_skipped unset for a legacy-mode recall even with the knob on', async () => {
+      // The skip guard does not exist in legacy mode, so the recall has no
+      // skip decision to report; a constant `false` would mix into the
+      // experiment's control series.
+      process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = '1';
+      vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult: vi.fn(),
+      });
+
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset when an empty corpus short-circuits the recall', async () => {
+      // The short circuit at the top of the entry point never reaches the
+      // selector, so the recall made no skip decision. `false` here would read
+      // as "the selector ran and was not skipped" and would put a trivially
+      // fast recall into the ablation's control arm, which the treatment arm
+      // structurally cannot contain — a skip requires exactly one candidate.
+      mockSnapshot([]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'We hit provider fallback again.',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('none');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset for a whitespace-only query', async () => {
+      mockSnapshot([exact]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        '   ',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('none');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('keeps the selector when the unique strong fast document has a stale body', async () => {
+      const stale = {
+        ...exact,
+        mtimeMs: 42,
+      };
+      mockSnapshot([stale]);
+      bodyPresentVersions.set('project:reference.md', 41);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([stale]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it.each(['changed', 'disappeared'])(
+      'keeps the selector when the unique strong document has %s',
+      async (state) => {
+        mockSnapshot([exact]);
+        const current =
+          state === 'changed' ? { ...exact, mtimeMs: exact.mtimeMs + 1 } : null;
+        vi.mocked(rereadAutoMemoryDocument).mockResolvedValue(current);
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+          exact,
+        ]);
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult: vi.fn() },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+        expect(result.selectedDocs).toEqual(current ? [current] : []);
+      },
+    );
+
+    it('keeps the selector when the strong body enters history during reread', async () => {
+      mockSnapshot([exact]);
+      vi.mocked(rereadAutoMemoryDocument).mockImplementationOnce(
+        async (doc) => {
+          bodyPresentVersions.set('project:reference.md', doc.mtimeMs);
+          return doc;
+        },
+      );
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector for a metadata-only substring match', async () => {
+      const weak = {
+        ...exact,
+        title: 'Runtime dashboard',
+        keywords: [],
+        description: 'provider fallback',
+        usageScenarios: [],
+      };
+      mockSnapshot([weak]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([weak]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a short title only matches inside a larger word', async () => {
+      // `ai` sits inside `explain` — the collision the design doc names for
+      // keywords. The keyword arm guards it; the skip gate must not accept it
+      // through the title arm, because the match then cancels the very model
+      // call that would have dropped the memory.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'ai',
+        keywords: [],
+        description: 'provider fallback',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'Explain provider fallback.',
+        { config, onFastResult },
+      );
+      // Ranking is untouched: the memory is still published as a fast
+      // candidate, it just no longer suppresses the selector.
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a longer title only matches inside a larger word', async () => {
+      // `log` sits inside `catalog` and inside `logging`. The keyword arm's
+      // boundary rule is gated on 1-2 characters, so the strict title arm has
+      // to carry its own: without it the strict and loose arms are byte-identical
+      // for every Latin title of three or more characters.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'log',
+        keywords: [],
+        description: 'logging conventions',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog of our logging setup',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a keyword only matches inside a larger word', async () => {
+      // `log` sits inside `catalog` — the collision the gate's own rationale
+      // names. The keyword arm reached the boundary rule only for one or two
+      // characters, so a three-character keyword kept the loose arm.
+      const innerSubstringKeyword = {
+        ...exact,
+        title: 'Build Notes',
+        keywords: ['log'],
+        description: 'the builds we ship',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringKeyword]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog of our builds',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringKeyword,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a multi-word title matches inside a larger word', async () => {
+      // `log conventions` sits inside `catalog conventions`, and a title with
+      // a space never reached the strict arm's single-word allowlist.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'log conventions',
+        keywords: [],
+        description: 'conventions we follow',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog conventions we use',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a non-Latin title matches inside a larger word', async () => {
+      // `ток` sits inside `поток`. The strict arm's allowlist was `[a-z0-9]`,
+      // so every single-word title outside Latin kept the loose arm.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'ток',
+        keywords: [],
+        description: 'поток памяти',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'объясни поток памяти',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it.each([
+      ['title', 'Git文档', '请解释 Legit文档 的格式'],
+      ['keyword', 'git文档', '请解释 Legit文档 的格式'],
+      ['title', '文档Git', '请解释 文档GitHub 的格式'],
+      ['keyword', '文档git', '请解释 文档gitHub 的格式'],
+    ])(
+      'keeps the selector when a mixed-script %s %s matches inside a larger word',
+      async (field, value, searchQuery) => {
+        const innerSubstring = {
+          ...exact,
+          title: field === 'title' ? value : 'Build Notes',
+          keywords: field === 'keyword' ? [value] : [],
+          description: '',
+          usageScenarios: [],
+        };
+        mockSnapshot([innerSubstring]);
+        const onFastResult = vi.fn();
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          searchQuery,
+          { config, onFastResult },
+        );
+
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+          innerSubstring,
+        ]);
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+      },
+    );
+
+    it('keeps the selector when the prompt budget trims a second fast candidate', async () => {
+      const usageScenarios = [0, 1, 2].map((n) => String(n) + 'x'.repeat(63));
+      const first = {
+        ...exact,
+        description: 'x'.repeat(512),
+        usageScenarios,
+      };
+      const longPath = Array(18).fill('中'.repeat(30)).join('/') + '/b.md';
+      const second = {
+        ...docs[1]!,
+        filePath: '/tmp/m/' + longPath,
+        relativePath: longPath,
+        filename: 'b.md',
+        title: 'Ops notes',
+        description: ('provider again ' + 'x'.repeat(512)).slice(0, 512),
+        keywords: ['alpha', 'beta'],
+        usageScenarios,
+        body: 'unrelated',
+      };
+      mockSnapshot([first, second]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([first]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when CJK-adjacent short keywords have a competing title', async () => {
+      const hit = {
+        ...memoryDoc(
+          'a-usage.md',
+          'reference',
+          'Usage notes',
+          '代码说明',
+          'unrelated text',
+        ),
+        keywords: ['ai', 'coding'],
+        mtimeMs: 1,
+      };
+      const competitor = {
+        ...memoryDoc(
+          'b-ai.md',
+          'reference',
+          'AI',
+          'general guidance',
+          'unrelated text',
+        ),
+        keywords: ['models', 'usage'],
+        mtimeMs: 2,
+      };
+      mockSnapshot([hit, competitor]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        '请用ai给出代码说明',
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([hit]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock.calls[0]?.[2],
+      ).toContainEqual(competitor);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a competing keyword match scores zero lexically', async () => {
+      // B's only strong-match evidence is a keyword that is a proper substring
+      // of a query token, so the whole-token scorer gives it 0 and it never
+      // enters the lexical ranking — yet it is eligible and recent, so it sits
+      // in the pool handed to the suppressed selector.
+      const unique = {
+        ...memoryDoc(
+          'a-runbook.md',
+          'reference',
+          'Deployment runbook',
+          'release steps',
+          'unrelated text',
+        ),
+        keywords: ['deployment'],
+        mtimeMs: 1,
+      };
+      const zeroScoreCompetitor = {
+        ...memoryDoc(
+          'b-deploy.md',
+          'reference',
+          'Ops notes',
+          'misc guidance',
+          'unrelated text',
+        ),
+        keywords: ['deploy'],
+        mtimeMs: 2,
+      };
+      mockSnapshot([unique, zeroScoreCompetitor]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'Check the deployment runbook.',
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([unique]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock
+          .calls[0]?.[2] ?? [],
+      ).toContainEqual(zeroScoreCompetitor);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset when the recall throws before the selector', async () => {
+      // `onFastResult` throws inside the same try that wraps the selector, so
+      // the recall reaches the heuristic fallback having made no skip decision.
+      // A constant `true` for `selectorDecided` would stamp `false` here and
+      // absorb pre-selector throws into the ablation's control series.
+      mockSnapshot([exact]);
+      const onFastResult = vi.fn().mockImplementation(() => {
+        throw new Error('fast delivery failed');
+      });
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('heuristic');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('keeps the selector when the matching body is already present', async () => {
+      mockSnapshot([exact, docs[1]!]);
+      bodyPresentVersions.set('project:reference.md', exact.mtimeMs);
+      vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+        docs[1]!,
+      ]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectedDocs).toContainEqual(docs[1]!);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when two strong matches compete', async () => {
+      const second = { ...docs[1]!, keywords: ['provider fallback'] };
+      mockSnapshot([exact, second]);
+      const onFastResult = vi.fn();
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult,
+      });
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toHaveLength(2);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when a second strong match sits below the published window', async () => {
+      // Uniqueness has to be judged against the pool the suppressed selector
+      // would have been handed, not just the published fast list. Doc B is a
+      // title match ranked 7th lexically, so `fallbackDocs` (top
+      // MAX_RELEVANT_DOCS) never contains it while `modelCandidates` does.
+      const ranked = 'deploy timeout provider fallback';
+      const strongTop = {
+        ...memoryDoc(
+          'a-deploy-timeout.md',
+          'reference',
+          'deploy timeout',
+          'runbook alpha',
+          'deploy timeout provider fallback',
+        ),
+        mtimeMs: 100,
+      };
+      // Each filler outscores B (one title token plus four body tokens) while
+      // carrying exactly one query token in its metadata, so no filler is a
+      // strong match and B stays below the published window.
+      const fillers = [1, 2, 3, 4, 5].map((n) => ({
+        ...memoryDoc(
+          `filler-${n}.md`,
+          'reference',
+          `deploy notes ${n}`,
+          'alpha group checklist',
+          'deploy timeout provider fallback',
+        ),
+        mtimeMs: 90 - n,
+      }));
+      const strongBelowWindow = {
+        ...memoryDoc(
+          'b-provider-glossary.md',
+          'reference',
+          'provider',
+          'glossary entry alpha',
+          'unrelated alpha text',
+        ),
+        mtimeMs: 1,
+      };
+      mockSnapshot([strongTop, ...fillers, strongBelowWindow]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        ranked,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([strongTop]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      // The suppressed selector would have seen B, so the recall was ambiguous.
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock
+          .calls[0]?.[2] ?? [],
+      ).toContainEqual(strongBelowWindow);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when nothing matches strongly', async () => {
+      mockSnapshot(docs);
+
+      await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'unrelated weather',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector on the legacy path', async () => {
+      vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([exact]);
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult: vi.fn(),
+      });
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when no fast result is delivered', async () => {
+      mockSnapshot([exact]);
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+      });
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+  });
+
   it('does not include selected document rereads in selector duration', async () => {
     vi.useFakeTimers();
     mockSnapshot(docs);
@@ -978,7 +1629,7 @@ describe('auto-memory relevant recall', () => {
     vi.useRealTimers();
   });
 
-  it('warns when a selected document disappears before injection', async () => {
+  it('warns when a selected document is unavailable or changes during reread', async () => {
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue(docs);
     vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) =>
       doc === docs[0] ? null : doc,
@@ -992,7 +1643,7 @@ describe('auto-memory relevant recall', () => {
 
     expect(result.selectedDocs).toEqual([docs[1]]);
     expect(debugLogger.warn).toHaveBeenCalledWith(
-      'Selected memory dropped before injection (deleted, unreadable, or untrusted): project:reference.md',
+      'Selected memory dropped before injection (unavailable or changed during the read): project:reference.md',
     );
   });
 
@@ -1125,6 +1776,12 @@ describe('auto-memory relevant recall', () => {
 
     expect(result.strategy).toBe('heuristic');
     expect(result.selectedDocs).toEqual([docs[0]]);
+    // The selector ran and then failed: a genuine control sample, so the field
+    // is reported as `false` rather than left off the series.
+    expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({ selector_skipped: false }),
+    );
   });
 
   it('excludes already surfaced bodies before legacy heuristic fallback', async () => {

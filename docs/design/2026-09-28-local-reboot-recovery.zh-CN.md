@@ -8,11 +8,11 @@
 
 Runtime journal 丢失可以结束未知执行，却不能证明写入者已停止。Workspace storage 必须保留占用，直到物理证据和精确 holder 清理均完成。actor 被撤权或产品 Session 删除后，恢复也必须能推进；现有先授权的 warm/acquire 路径不能提供独立维护入口。
 
-本切片仅支持显式启用的可信工作负载、Linux 单宿主及管理员管理的本地持久存储。不隔离恶意同 UID 工具、远程写入者、重新创建写入者的外部任务或快照恢复/克隆。machine 身份、本地记录、SQL 密钥和存储归属必须稳定。仅 worker 死亡始终不够，即使当前看不到进程。
+本切片仅支持可信工作负载、Linux 单宿主及管理员管理的本地持久存储。不隔离恶意同 UID 工具、远程写入者、重新创建写入者的外部任务或快照恢复/克隆。machine 身份、本地记录、SQL 密钥和存储归属必须稳定。仅 worker 死亡始终不够，即使当前看不到进程。
 
 ## 可信重启证明
 
-默认关闭。启用可信本地重启恢复必须同时启用本地持久 provisioning。生产读取 machine ID 和内核 boot ID；在上述本地存储契约内，同一保存宿主的 boot 改变证明原 boot 写入者不再存活。systemd soft reboot 不改变内核 boot ID，不能充当停止证据。原登记必须仍能验证完整 provision seed、placement 和保存 handle；缺失、损坏或旧格式记录不能重建。同 boot 的 PID/time namespace 变化仍是不确定状态。
+默认开启。启用可信本地重启恢复必须同时启用本地持久 provisioning。生产读取 machine ID 和内核 boot ID；在上述本地存储契约内，同一保存宿主的 boot 改变证明原 boot 写入者不再存活。systemd soft reboot 不改变内核 boot ID，不能充当停止证据。原登记必须仍能验证完整 provision seed、placement 和保存 handle；缺失、损坏或旧格式记录不能重建。同 boot 的 PID/time namespace 变化仍是不确定状态。
 
 产生证据前，provisioner 在永久 per-seed 锁内原子写入原记录墓碑，然后对同一原 host/boot/resource 域返回 JOURNAL_LOST 和 WRITERS_STOPPED。此前进程死亡的 loss 证据保持不变，后来的重启证据只解除物理不确定性。启动中断时，已保存 seed 和 handle 足够核验，无需编造缺失 endpoint 或 lease。观察永不重新启动原 seed。
 
@@ -34,7 +34,7 @@ Spring 仅在启用可信本地恢复时调度有界扫描。轮转的 Binding I
 
 ## 组件与兼容性
 
-本地 store/provisioner 增加显式 reboot policy 和无 lease 的 seed 证据匹配。Binding 仓库增加有界候选查询与独立最终释放步骤。Workspace execution store 增加 acquire 屏障及精确失联 holder 清理。嵌入配置连接 policy、wrapper 回调和后台 coordinator。复用已有 SQL 表和证据字段，无需迁移。默认临时行为与持久存活 worker 接管保持不变。公开 `workspace_context` 能力仍为 false。
+本地 store/provisioner 增加显式 reboot policy 和无 lease 的 seed 证据匹配。Binding 仓库增加有界候选查询与独立最终释放步骤。Workspace execution store 增加 acquire 屏障及精确失联 holder 清理。嵌入配置连接 policy、wrapper 回调和后台 coordinator。复用已有 SQL 表和证据字段，无需迁移。临时行为仍可在同时关闭 durable-local-process 与可信重启恢复时获得；持久存活 worker 接管保持不变。公开 `workspace_context` 能力仍为 false。
 
 ## 验证与验收
 
@@ -45,3 +45,5 @@ Spring 仅在启用可信本地恢复时调度有界扫描。轮转的 Binding I
 ## 验收证据与边界
 
 独立评审者已在专用 Debian 12 Linux 虚拟机上对 W0e-3 head `8c2b626c` 完成物理门禁，包括真实重启、断电对照、逃逸写入者、holder 清理和回执保留（[第三轮报告](https://github.com/QwenLM/qwen-code/pull/12869#issuecomment-5877187325)）。可移植 macOS 测试和模拟 boot 变化是独立证据。之后的改动仍需对应 head 的验证；此前的物理实测不能证明每个后续补丁也经历了重启测试。
+
+`durable-local-process` 与 `trusted-local-reboot-recovery` 的默认开启仅以可移植（合成身份）证据发布：按上述规则，翻转 head 的精确物理验收作为后续项欠付，本次翻默认不放低该门槛。

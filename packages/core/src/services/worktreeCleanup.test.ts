@@ -19,6 +19,7 @@ import {
   STALE_WORKTREE_CUTOFF_MS,
   __test__,
 } from './worktreeCleanup.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const { isEphemeralSlug } = __test__;
 
@@ -561,8 +562,9 @@ describe('cleanupStaleAgentWorktrees', () => {
   });
 
   // chmod-based denial needs POSIX semantics; Windows ACLs do not map, and
-  // root (CI containers) opens mode-000 directories without a warning.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // root with its DAC capabilities opens mode-000 directories without a
+  // warning.
+  it.skipIf(!arePermissionBitsEnforced())(
     'preserves a stale worktree when the probe cannot enumerate a directory',
     async () => {
       // `git status` answers a directory it cannot open with a stderr

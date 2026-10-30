@@ -30,6 +30,10 @@ import {
 } from './managed-context-envelope.js';
 import { createHash } from 'node:crypto';
 import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
+import {
   CONTEXT_BINDING_DOMAIN_TAG,
   computeManagedContextDigest,
   type ManagedContextBinding,
@@ -424,6 +428,95 @@ describe('Managed context envelope contract', () => {
     expect(Object.isFrozen((outcome as { body: object }).body)).toBe(true);
   });
 
+  it.each([
+    {
+      capabilityDigest: MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+      managedExtensions: {
+        enabled: true,
+        mode: 'linux-cgroup',
+        cacheDirectory: '/private/extension-cache',
+        cgroupRoot: '/sys/fs/cgroup/qwen',
+      },
+    },
+    {
+      capabilityDigest: MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+      managedExtensions: {
+        enabled: true,
+        mode: 'developer-process-group',
+        cacheDirectory: '/private/extension-cache',
+      },
+    },
+  ])(
+    'attests the exact extension boot configuration $managedExtensions.mode',
+    (profile) => {
+      const configured = parseManagedContextBoot({ ...boot, ...profile });
+      // Java ManagedContextProtocol derives both bodies by removing these boot fields.
+      const {
+        type: _type,
+        version: _version,
+        token: _token,
+        ...responseFields
+      } = configured;
+      const {
+        runtimeInstanceId: _runtimeInstanceId,
+        runtimeIncarnation: _runtimeIncarnation,
+        leaseId: _leaseId,
+        epoch: _epoch,
+        ...requestFields
+      } = responseFields;
+      const request = { ...requestFields, protocolVersion: 3 };
+      expect(checkManagedContextAttestation(request, configured)).toStrictEqual(
+        {
+          status: 200,
+          body: { ...responseFields, protocolVersion: 3 },
+        },
+      );
+      expect(createManagedContextAttestationResponse(configured)).toStrictEqual(
+        {
+          ...responseFields,
+          protocolVersion: 3,
+        },
+      );
+      const { managedExtensions: _extensions, ...missing } = request;
+      expect(checkManagedContextAttestation(missing, configured)).toStrictEqual(
+        INVALID,
+      );
+      expect(
+        checkManagedContextAttestation(
+          {
+            ...request,
+            managedExtensions: { ...profile.managedExtensions, unknown: true },
+          },
+          configured,
+        ),
+      ).toStrictEqual(INVALID);
+      expect(
+        checkManagedContextAttestation(
+          {
+            ...request,
+            managedExtensions: {
+              ...profile.managedExtensions,
+              cacheDirectory: '/another/cache',
+            },
+          },
+          configured,
+        ),
+      ).toStrictEqual({
+        status: 409,
+        code: 'managed_runtime_identity_conflict',
+      });
+      expect(
+        checkManagedContextAttestation(
+          {
+            ...(fixtures.attestationCases[0].body as object),
+            managedExtensions: profile.managedExtensions,
+          },
+          boot,
+        ),
+      ).toStrictEqual(INVALID);
+    },
+  );
+
   it.each(fixtures.attestationCases)(
     'answers the $id attestation case',
     (fixture) => {
@@ -589,6 +682,57 @@ describe('Managed context envelope contract', () => {
       installationRequest.binding,
     );
     expect(installations.installed('session-2')).toBeUndefined();
+  });
+
+  it('rechecks admission after verification and preserves original receipts after seal', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    let open = true;
+    const refused = await installations.install(
+      installationRequest,
+      async () => {
+        queueMicrotask(() => {
+          open = false;
+        });
+        return true;
+      },
+      () => open,
+    );
+    expect(refused).toEqual({
+      status: 409,
+      code: 'managed_context_unavailable',
+    });
+    expect(
+      installations.installed(installationRequest['sessionId'] as string),
+    ).toBeUndefined();
+    open = true;
+    const original = await installations.install(
+      installationRequest,
+      anyDirectory,
+      () => open,
+    );
+    open = false;
+    expect(
+      await installations.install(
+        installationRequest,
+        async () => {
+          throw new Error('Unexpected verify');
+        },
+        () => open,
+      ),
+    ).toEqual(original);
+    expect(
+      await installations.install(
+        {
+          ...installationRequest,
+          operationId: 'op-new',
+          sessionId: 'session-new',
+        },
+        async () => {
+          throw new Error('Unexpected verify');
+        },
+        () => open,
+      ),
+    ).toEqual({ status: 409, code: 'managed_context_unavailable' });
   });
 
   it('checks the operation and the Session again after the verification', async () => {

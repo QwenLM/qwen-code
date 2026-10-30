@@ -1506,6 +1506,139 @@ describe('extension tests', () => {
       }
     });
 
+    it('replaces ${CLAUDE_PLUGIN_ROOT} in markdown for a hooks-less Claude plugin', async () => {
+      const archivePath = archive('claude-no-hooks.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-no-hooks'),
+          'skills/hello/SKILL.md':
+            '---\nname: hello\ndescription: Synthetic skill\n---\nRun `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh`.\n',
+        });
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        // The gate used to require a hooks directory: assert this one has none.
+        expect(exists(prepared.destinationDirectory, 'hooks')).toBe(false);
+        await manager.commitPreparedExtension(prepared);
+
+        const skill = readText(
+          prepared.destinationDirectory,
+          'skills',
+          'hello',
+          'SKILL.md',
+        );
+        expect(skill).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+        // The "/" is part of the markdown text, not a path separator, so the
+        // expectation concatenates the real installed dir rather than path.join.
+        expect(skill).toContain(
+          `${prepared.destinationDirectory}/scripts/hello.sh`,
+        );
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
+    it.each([
+      { shape: 'inline hooks', hooks: {}, extra: {} },
+      {
+        shape: 'a hooks file path',
+        hooks: './config/hooks.json',
+        extra: { 'config/hooks.json': '{}' },
+      },
+    ])(
+      'replaces ${CLAUDE_PLUGIN_ROOT} in markdown for a Claude plugin with $shape',
+      async ({ hooks, extra }) => {
+        const archivePath = archive(
+          `claude-${hooks === './config/hooks.json' ? 'file' : 'inline'}-hooks.zip`,
+          (destination) => {
+            writeTree(destination, {
+              '.claude-plugin/plugin.json': {
+                name: 'claude-hooks-shape',
+                version: '1.0.0',
+                hooks,
+              },
+              'skills/hello/SKILL.md':
+                '---\nname: hello\ndescription: Synthetic skill\n---\nRun `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh`.\n',
+              ...extra,
+            });
+          },
+        );
+        const manager = createExtensionManager();
+        const prepared = await prepare(manager, archivePath);
+
+        try {
+          await manager.commitPreparedExtension(prepared);
+
+          const skill = readText(
+            prepared.destinationDirectory,
+            'skills',
+            'hello',
+            'SKILL.md',
+          );
+          expect(skill).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+          expect(skill).toContain(
+            `${prepared.destinationDirectory}/scripts/hello.sh`,
+          );
+        } finally {
+          await manager.disposePreparedExtension(prepared);
+        }
+      },
+    );
+
+    /** Markdown carrying the plugin-root token plus the hook-gated rewrites. */
+    const rewriteProbeMd =
+      '${CLAUDE_PLUGIN_ROOT}/run.sh\n```!\nnpm install\n```\nSee ~/.claude/settings.json\n';
+
+    it('leaves hook-gated markdown rewrites off for a hooks-less Claude plugin', async () => {
+      const archivePath = archive('claude-gated-off.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-gated-off'),
+          'README.md': rewriteProbeMd,
+        });
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        expect(exists(prepared.destinationDirectory, 'hooks')).toBe(false);
+        await manager.commitPreparedExtension(prepared);
+        const readme = readText(prepared.destinationDirectory, 'README.md');
+
+        // The plugin root resolves on every Claude install...
+        expect(readme).toContain(`${prepared.destinationDirectory}/run.sh`);
+        // ...but the rewrites that stay hook-gated must not run here.
+        expect(readme).toContain('```!\nnpm install\n```');
+        expect(readme).toContain('~/.claude/settings.json');
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
+    it('still applies hook-gated markdown rewrites when a hooks directory exists', async () => {
+      const archivePath = archive('claude-gated-on.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-gated-on'),
+          'README.md': rewriteProbeMd,
+        });
+        fs.mkdirSync(path.join(destination, 'hooks'));
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        await manager.commitPreparedExtension(prepared);
+        const readme = readText(prepared.destinationDirectory, 'README.md');
+
+        expect(readme).toContain(`${prepared.destinationDirectory}/run.sh`);
+        expect(readme).toContain('!{npm install}');
+        expect(readme).toContain('~/.qwen/settings.json');
+        expect(readme).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
     /** `ready()` then a prepared local-archive install of extension `name`. */
     async function readyPrepared(name: string) {
       const archivePath = archive(`${name}.zip`, name);
@@ -1557,20 +1690,28 @@ describe('extension tests', () => {
     it('signals the durable commit before deferred settings finish', async () => {
       const { manager, prepared } = await readyPrepared('settings-deferred');
       const settings = deferred();
+      const settingsStarted = deferred();
       const commitSettings = stubCommitSettings(
         prepared,
-        vi.fn(async () => await settings.promise),
+        vi.fn(async () => {
+          settingsStarted.resolve();
+          await settings.promise;
+        }),
       );
       const onCommitted = vi.fn();
 
       const committing = manager.commitPreparedExtension(prepared, onCommitted);
-      await vi.waitFor(() => expect(commitSettings).toHaveBeenCalledOnce());
-
-      expect(onCommitted).toHaveBeenCalledOnce();
-      expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
-        commitSettings.mock.invocationCallOrder[0]!,
-      );
-      settings.resolve();
+      try {
+        await Promise.race([settingsStarted.promise, committing]);
+        expect(commitSettings).toHaveBeenCalledOnce();
+        expect(onCommitted).toHaveBeenCalledOnce();
+        expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
+          commitSettings.mock.invocationCallOrder[0]!,
+        );
+      } finally {
+        settings.resolve();
+        await committing;
+      }
       await expect(committing).resolves.toMatchObject({
         identity: { name: 'settings-deferred' },
       });
@@ -2044,6 +2185,121 @@ describe('extension tests', () => {
     });
   });
 
+  describe('bounded directory loading', () => {
+    it('overlaps at most four loads and preserves directory order and skips', async () => {
+      for (let index = 0; index < 9; index++) {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: `ext-${index}`,
+          addContextFile: true,
+        });
+      }
+      writeTree(path.join(userExtensionsDir, 'ext-4'), {
+        'qwen-extension.json': '{',
+      });
+      const names = fs.readdirSync(userExtensionsDir);
+      const gates = names.map(() => deferred());
+      const completed: string[] = [];
+      let active = 0;
+      let peak = 0;
+      const manager = createExtensionManager();
+      const realLoad = manager.loadExtension.bind(manager);
+      const load = vi
+        .spyOn(manager, 'loadExtension')
+        .mockImplementation(async (context, options) => {
+          const name = path.basename(context.extensionDir);
+          active++;
+          peak = Math.max(peak, active);
+          await gates[names.indexOf(name)].promise;
+          const extension = await realLoad(context, options);
+          active--;
+          completed.push(name);
+          return extension;
+        });
+
+      const loading = manager.loadExtensionsFromDir(tempHomeDir);
+      try {
+        expect(load).toHaveBeenCalledTimes(4);
+        for (const index of [3, 2, 1]) {
+          gates[index].resolve();
+          await vi.waitFor(() => expect(completed).toContain(names[index]));
+        }
+        expect(load).toHaveBeenCalledTimes(4);
+        gates[0].resolve();
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(8));
+        for (const index of [7, 6, 5, 4]) gates[index].resolve();
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(9));
+        gates[8].resolve();
+
+        const extensions = await loading;
+        expect(peak).toBe(4);
+        expect(completed.slice(0, 4)).toEqual([
+          names[3],
+          names[2],
+          names[1],
+          names[0],
+        ]);
+        expect(extensions.map((extension) => extension.name)).toEqual(
+          names.filter((name) => name !== 'ext-4'),
+        );
+        for (const extension of extensions) {
+          expect(extension.contextFiles).toEqual([
+            path.join(userExtensionsDir, extension.name, 'QWEN.md'),
+          ]);
+        }
+      } finally {
+        for (const gate of gates) gate.resolve();
+        await loading;
+      }
+    });
+
+    it('drains a failed batch and throws its first directory-order error', async () => {
+      for (let index = 0; index < 6; index++) addExt({ name: `ext-${index}` });
+      const names = fs.readdirSync(userExtensionsDir);
+      const first = deferred();
+      const sibling = deferred();
+      const firstError = new Error('first entry failed');
+      const laterError = new Error('later entry failed earlier');
+      let firstRejected = false;
+      let settled = false;
+      const manager = createExtensionManager();
+      const load = vi
+        .spyOn(manager, 'loadExtension')
+        .mockImplementation(async ({ extensionDir }) => {
+          const index = names.indexOf(path.basename(extensionDir));
+          if (index === 0) {
+            await first.promise;
+            firstRejected = true;
+            throw firstError;
+          }
+          if (index === 1) throw laterError;
+          if (index === 2) await sibling.promise;
+          return null;
+        });
+      const outcome = manager.loadExtensionsFromDir(tempHomeDir).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      void outcome.then(() => {
+        settled = true;
+      });
+
+      try {
+        expect(load).toHaveBeenCalledTimes(4);
+        first.resolve();
+        await vi.waitFor(() => expect(firstRejected).toBe(true));
+        expect(settled).toBe(false);
+        sibling.resolve();
+        expect(await outcome).toBe(firstError);
+        expect(load).toHaveBeenCalledTimes(4);
+      } finally {
+        first.resolve();
+        sibling.resolve();
+        await outcome;
+      }
+    });
+  });
+
   describe('refreshCacheIfSourcesChanged', () => {
     // Sources have no watcher: read-only consumers rely on this to see outside
     // mutations (`qwen extensions install` in a terminal) without scanning on
@@ -2166,6 +2422,93 @@ describe('extension tests', () => {
       // The racing install is still visible to the next check.
       expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
       expect(loadedNames(manager).sort()).toEqual(['ext-a', 'ext-b']);
+    });
+  });
+
+  describe('refreshExtensionDetailsSnapshot', () => {
+    it('loads only the selected resources while preserving all snapshot identities', async () => {
+      for (const name of ['ext-a', 'ext-b', 'ext-c']) {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name,
+          addContextFile: true,
+        });
+      }
+      const manager = createExtensionManager();
+      const load = vi.spyOn(manager, 'loadExtension');
+      const { snapshot, extension } =
+        await manager.refreshExtensionDetailsSnapshot('EXT-B');
+
+      expect(extension?.name).toBe('ext-b');
+      expect(extension?.contextFiles).toHaveLength(1);
+      expect(
+        Object.values(snapshot.extensions)
+          .map((entry) => entry.name)
+          .sort(),
+      ).toEqual(['ext-a', 'ext-b', 'ext-c']);
+      const loaded = await Promise.all(
+        load.mock.results.map((result) => result.value),
+      );
+      expect(
+        loaded
+          .filter((entry) => entry?.contextFiles.length)
+          .map((entry) => entry.name),
+      ).toEqual(['ext-b']);
+      expect(manager.getLoadedExtensions()).toEqual([]);
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()).toHaveLength(3);
+      expect(
+        manager
+          .getLoadedExtensions()
+          .every((entry) => entry.contextFiles.length === 1),
+      ).toBe(true);
+    });
+
+    it('returns null for a missing extension without loading other resources', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+        addContextFile: true,
+      });
+      const manager = createExtensionManager();
+      const load = vi.spyOn(manager, 'loadExtension');
+      const { extension } =
+        await manager.refreshExtensionDetailsSnapshot('missing');
+      expect(extension).toBeNull();
+      const loaded = await Promise.all(
+        load.mock.results.map((result) => result.value),
+      );
+      expect(loaded.every((entry) => entry?.contextFiles.length === 0)).toBe(
+        true,
+      );
+    });
+
+    it('reads plugin details without creating its data directory', async () => {
+      createAgentPlugin(path.join(userExtensionsDir, 'plugin-ext'), {
+        name: 'plugin-ext',
+      });
+      const storeDir = path.join(tempHomeDir, 'detail-store');
+      const manager = createExtensionManager({
+        extensionStore: new ExtensionStore({
+          extensionsDir: userExtensionsDir,
+          storeDir,
+        }),
+      });
+      const { extension } =
+        await manager.refreshExtensionDetailsSnapshot('plugin-ext');
+      expect(extension?.name).toBe('plugin-ext');
+      expect(fs.existsSync(path.join(storeDir, 'plugin-data'))).toBe(false);
+    });
+
+    it('fails closed on an unreadable installed entry', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      fs.symlinkSync(
+        path.join(userExtensionsDir, 'missing-target'),
+        path.join(userExtensionsDir, 'broken'),
+      );
+      await expect(
+        createExtensionManager().refreshExtensionDetailsSnapshot('ext-a'),
+      ).rejects.toThrow();
     });
   });
 
@@ -2891,9 +3234,9 @@ describe('extension tests', () => {
 
       // Non-archive probe failures must keep the marketplace-specific
       // guidance rather than surfacing the raw install-source error.
-      await expect(
-        manager.addSource('invalid-format-no-slash'),
-      ).rejects.toThrow(/No marketplace found at/);
+      await expect(manager.addSource('invalid package name')).rejects.toThrow(
+        /No marketplace found at/,
+      );
 
       expect(events).toEqual([]);
     });
@@ -3789,6 +4132,117 @@ describe('extension tests', () => {
         'PreToolUse',
         `${dirOf('hooks-var-from-config-path')}/scripts/setup.sh`,
       );
+    });
+  });
+
+  describe('captured marketplace cwd', () => {
+    const writeMarket = (root: string, name: string) =>
+      writeTree(path.join(root, 'nested', 'same-market'), {
+        '.claude-plugin/marketplace.json': {
+          name,
+          owner: { name: 'Owned' },
+          plugins: [{ name: `${name}-plugin`, source: './plugin' }],
+        },
+      });
+
+    it('parses the explicit root and plugin suffix without borrowing the ambient root', async () => {
+      const rootA = path.join(tempWorkspaceDir, 'a');
+      const rootB = path.join(tempWorkspaceDir, 'b');
+      const marketA = writeMarket(rootA, 'from-a');
+      const marketB = writeMarket(rootB, 'from-b');
+      vi.mocked(process.cwd).mockReturnValue(rootA);
+      const manager = createExtensionManager({ workspaceDir: rootA });
+
+      const ambientControl = await manager.parseInstallSource(
+        `${marketA}:from-a-plugin`,
+      );
+      const captured = await manager.parseInstallSource(
+        './nested/same-market:from-b-plugin',
+        rootB,
+      );
+
+      expect(ambientControl.marketplaceConfig?.name).toBe('from-a');
+      expect(captured).toMatchObject({
+        source: marketB,
+        type: 'local',
+        pluginName: 'from-b-plugin',
+        originSource: 'Claude',
+        marketplaceConfig: { name: 'from-b' },
+      });
+      expect(captured.marketplaceConfig).not.toEqual(
+        ambientControl.marketplaceConfig,
+      );
+    });
+
+    it('persists a captured local source absolutely and reopens it from a different root', async () => {
+      const rootB = path.join(tempWorkspaceDir, 'b');
+      const rootC = path.join(tempWorkspaceDir, 'c');
+      const marketB = writeMarket(rootB, 'from-b');
+      writeMarket(rootC, 'from-c');
+      const manager = createExtensionManager();
+
+      const added = await manager.addSource('./nested/same-market', {
+        cwd: rootB,
+      });
+      expect(added.source).toBe(marketB);
+      expect(added.type).toBe('local');
+      const persisted = readText(userExtensionsDir, 'marketplaces.json');
+      const reopened = createExtensionManager({ workspaceDir: rootC });
+      expect(reopened.getSources()).toEqual([added]);
+      await expect(
+        reopened.loadSource(added.source, { cwd: rootC }),
+      ).resolves.toMatchObject({ name: 'from-b' });
+      await expect(
+        reopened.discoverPlugins({ cwd: rootC }),
+      ).resolves.toMatchObject([
+        { name: 'from-b-plugin', installSource: `${marketB}:from-b-plugin` },
+      ]);
+      expect(readText(userExtensionsDir, 'marketplaces.json')).toBe(persisted);
+    });
+
+    it('loads legacy relative sources per captured root and invalidates the discovery root key', async () => {
+      const rootA = path.join(tempWorkspaceDir, 'a');
+      const rootB = path.join(tempWorkspaceDir, 'b');
+      const marketA = writeMarket(rootA, 'from-a');
+      const marketB = writeMarket(rootB, 'from-b');
+      writeTree(userExtensionsDir, {
+        'marketplaces.json': [
+          { name: 'legacy', source: './nested/same-market', type: 'local' },
+        ],
+      });
+      const raw = readText(userExtensionsDir, 'marketplaces.json');
+      const manager = createExtensionManager();
+      await expect(
+        manager.loadSource('./nested/same-market', { cwd: rootB }),
+      ).resolves.toMatchObject({ name: 'from-b' });
+      for (const [cwd, name, source] of [
+        [rootA, 'from-a-plugin', marketA],
+        [rootB, 'from-b-plugin', marketB],
+        [rootA, 'from-a-plugin', marketA],
+      ]) {
+        const plugins = await manager.discoverPlugins({ cwd });
+        expect(plugins).toHaveLength(1);
+        expect(plugins[0].name).toBe(name);
+        expect(plugins[0].installSource).toBe(`${source}:${name}`);
+      }
+      expect(readText(userExtensionsDir, 'marketplaces.json')).toBe(raw);
+    });
+
+    it('keeps the manager policy on parsed metadata and leaves no-cwd remote syntax intact', async () => {
+      const source = 'git@owned.invalid:owner/repo.git:chosen';
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      const expected = {
+        source: 'git@owned.invalid:owner/repo.git',
+        type: 'git',
+        pluginName: 'chosen',
+        networkPolicy: 'public',
+      };
+      await expect(manager.parseInstallSource(source)).resolves.toEqual(
+        expected,
+      );
+      await expect(
+        manager.parseInstallSource(source, tempWorkspaceDir),
+      ).resolves.toEqual(expected);
     });
   });
 });
