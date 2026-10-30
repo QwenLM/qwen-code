@@ -286,7 +286,7 @@ function PermissionText({
   );
 }
 
-function ExtensionSettingInput({
+export function ExtensionSettingInput({
   permission,
   width,
   height,
