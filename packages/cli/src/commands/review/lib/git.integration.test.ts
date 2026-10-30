@@ -25,6 +25,7 @@ import {
   gitProbe,
   gitRawTolerateDiff,
   releaseWorktree,
+  repoRoot,
 } from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
@@ -675,5 +676,15 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+});
+
+describe('repoRoot', () => {
+  it('names the main worktree from a linked worktree', () => {
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const main = fwd(realpathSync(repo));
+    expect(fwd(realpathSync(repoRoot()))).toBe(main);
+    process.chdir(join(repo, 'wt'));
+    expect(fwd(realpathSync(repoRoot()))).toBe(main);
   });
 });

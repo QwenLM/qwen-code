@@ -168,8 +168,10 @@ leader, its process group, its descendants, and every process in its session
 while the leader is still unreaped. That list covers the foreground jobs an
 interactive shell runs in their own process groups. SIGTERM goes first; after
 a 500 ms grace, SIGKILL goes to a fresh listing, which keeps earlier members
-only while they are still the same process (same start time), so a recycled
-pid is never signalled. The backend then closes the master fd and ends every
+only while they are still the same process (same start time). Once the native
+exit callback marks the leader reaped, signals skip its numeric process-group
+ID and leader PID; identity-checked descendants still receive the cleanup
+signals. The backend then closes the master fd and ends every
 drain path (retry timer, pending exit, hold, write queue). After the failure, `write` and `resize` are no-ops (matching the
 registry guards above them), held bytes still in flight from an in-flight
 read are neither delivered nor re-charged, and a `resume()` replay stops at
@@ -199,6 +201,13 @@ produce byte-identical output on Node and Bun, and no corruption mechanism
 was located. The bounded hold reads at full speed and stays byte-exact
 below the cap, and parking at the cap bounds memory without dropping a
 byte.
+
+The per-pty parking byte test explicitly disables ONLCR in its child before
+the flood. It compares the complete LF stream and an explicit CRLF sentinel
+without normalizing received bytes. Default-mode macOS controls produced extra
+CR through both wrappers; their failures remain recorded. This isolates the
+adapter's byte-preservation contract from terminal output conversion, without
+claiming that the exact source of those extra CR has been established.
 
 ### Consumer wiring of the failure
 

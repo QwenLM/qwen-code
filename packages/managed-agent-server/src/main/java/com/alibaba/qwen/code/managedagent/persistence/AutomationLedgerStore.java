@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -53,7 +54,18 @@ public class AutomationLedgerStore {
             + " ma_schedule s WHERE s.tenant_id = ?"
             + " AND s.schedule_id = ? AND s.lease_owner = ? AND s.fence = ?)";
 
-    /** One definition as the scanner reads it. */
+    /** How a gate probe decided a fire, as the Harness answers it. */
+    public static final String GATE_DELIVERED = "delivered";
+    public static final String GATE_QUIET = "quiet";
+    public static final String GATE_FAILED = "failed";
+    public static final String GATE_BLOCKED = "blocked";
+    public static final String GATE_UNKNOWN = "unknown";
+
+    /**
+     * One definition as the scanner reads it. The gate columns mirror the
+     * definition's gate and its recent outcomes
+     * (docs/design/2026-10-22-managed-automation-gate.md).
+     */
     public record ScheduleRow(String tenantId, String scheduleId,
             String sessionId, String workspaceId, String actorId,
             long recordRevision, long definitionRevision,
@@ -62,7 +74,9 @@ public class AutomationLedgerStore {
             Long catchUpLimit, boolean enabled, String state,
             String blockedReason, long armedAt, Long watermarkSlot,
             String leaseOwner, Long leaseUntil, long fence, long createdAt,
-            long updatedAt) {
+            long updatedAt, String gate, String gateLastOutcome,
+            Long gateLastAt, int gateQuietSinceDelivery, int gateFailures,
+            String gateLastError) {
     }
 
     /** One occurrence decision. */
@@ -127,7 +141,12 @@ public class AutomationLedgerStore {
                     result.getString("lease_owner"),
                     result.getObject("lease_until", Long.class),
                     result.getLong("fence"), result.getLong("gmt_create"),
-                    result.getLong("gmt_modified"));
+                    result.getLong("gmt_modified"), result.getString("gate"),
+                    result.getString("gate_last_outcome"),
+                    result.getObject("gate_last_at", Long.class),
+                    result.getInt("gate_quiet_since_delivery"),
+                    result.getInt("gate_failures"),
+                    result.getString("gate_last_error"));
 
     private static final RowMapper<OccurrenceRow> OCCURRENCE = (result, row) ->
             new OccurrenceRow(result.getString("tenant_id"),
@@ -165,7 +184,7 @@ public class AutomationLedgerStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate commands;
 
-    public AutomationLedgerStore(JdbcTemplate jdbc) {
+    public AutomationLedgerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.commands =
                 new TransactionTemplate(
@@ -257,6 +276,8 @@ public class AutomationLedgerStore {
                     return actor == null ? "" : new String(actor, StandardCharsets.UTF_8);
                 }, tenantId, sessionId).stream().findFirst().orElse("");
         JsonNode limit = record.required("catchUpLimit");
+        JsonNode gate = record.required("gate");
+        String gateCommand = gate.isTextual() ? gate.textValue() : null;
         ScheduleRow next =
                 new ScheduleRow(
                         tenantId,
@@ -286,7 +307,13 @@ public class AutomationLedgerStore {
                         null,
                         0,
                         now,
-                        now);
+                        now,
+                        gateCommand,
+                        null,
+                        null,
+                        0,
+                        0,
+                        null);
         Optional<ScheduleRow> existing = jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule WHERE tenant_id = ? AND schedule_id = ? FOR UPDATE", SCHEDULE,
                 next.tenantId(), next.scheduleId()).stream().findFirst();
         if (existing.isEmpty()) {
@@ -297,16 +324,17 @@ public class AutomationLedgerStore {
                             + " cron, timezone, session_mode, overlap, catch_up,"
                             + " catch_up_limit, enabled, state, blocked_reason,"
                             + " armed_at, watermark_slot, lease_owner,"
-                            + " lease_until, fence, gmt_create, gmt_modified)"
+                            + " lease_until, fence, gmt_create, gmt_modified,"
+                            + " gate)"
                             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                            + " ?, ?, ?, NULL, ?, NULL, NULL, NULL, 0, ?, ?)",
+                            + " ?, ?, ?, NULL, ?, NULL, NULL, NULL, 0, ?, ?, ?)",
                     next.tenantId(), next.scheduleId(), next.sessionId(),
                     next.workspaceId(), next.actorId(), next.recordRevision(),
                     next.definitionRevision(), next.definitionDigest(),
                     next.goal(), next.cron(), next.timezone(),
                     next.sessionMode(), next.overlap(), next.catchUp(),
                     next.catchUpLimit(), next.enabled(), next.state(), now,
-                    now, now);
+                    now, now, next.gate());
             return;
         }
         ScheduleRow current = existing.get();
@@ -321,20 +349,68 @@ public class AutomationLedgerStore {
         }
         long armedAt = next.enabled() && !current.enabled() ? now
                 : current.armedAt();
+        // A changed or cleared gate starts its status over: the summary
+        // described another command.
+        boolean gateChanged = !Objects.equals(current.gate(), next.gate());
         jdbc.update("UPDATE ma_schedule SET"
                         + " record_revision = ?, definition_revision = ?,"
                         + " definition_digest = ?, goal = ?, cron = ?,"
                         + " timezone = ?, session_mode = ?, overlap = ?,"
                         + " catch_up = ?, catch_up_limit = ?, enabled = ?,"
                         + " state = ?, blocked_reason = NULL, armed_at = ?,"
-                        + " gmt_modified = ? WHERE tenant_id = ? AND schedule_id = ?"
+                        + " gmt_modified = ?, gate = ?, gate_last_outcome = ?,"
+                        + " gate_last_at = ?, gate_quiet_since_delivery = ?,"
+                        + " gate_failures = ?, gate_last_error = ?"
+                        + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND record_revision < ?",
                 next.recordRevision(), next.definitionRevision(),
                 next.definitionDigest(), next.goal(), next.cron(),
                 next.timezone(), next.sessionMode(), next.overlap(),
                 next.catchUp(), next.catchUpLimit(), next.enabled(),
-                next.state(), armedAt, now, next.tenantId(), next.scheduleId(),
-                next.recordRevision());
+                next.state(), armedAt, now, next.gate(),
+                gateChanged ? null : current.gateLastOutcome(),
+                gateChanged ? null : current.gateLastAt(),
+                gateChanged ? 0 : current.gateQuietSinceDelivery(),
+                gateChanged ? 0 : current.gateFailures(),
+                gateChanged ? null : current.gateLastError(),
+                next.tenantId(), next.scheduleId(), next.recordRevision());
+    }
+
+    /**
+     * Records how the gate decided one fire on the definition row, under
+     * the writer's lease: a delivery clears the counts, a quiet fire counts
+     * toward the next delivery, and a failed, blocked or unknown probe grows
+     * the failure streak and keeps its detail.
+     */
+    public boolean recordGateOutcome(ScheduleRow row, long definitionRevision,
+            String owner, long fence, String outcome, String detail, long now) {
+        boolean delivered = GATE_DELIVERED.equals(outcome);
+        boolean quiet = GATE_QUIET.equals(outcome);
+        // The counters move from the row as stored, not from `row`: one scan
+        // hands the same snapshot to every due slot, so counting from it
+        // would let each slot's update overwrite the one before.
+        String quietSinceDelivery = delivered ? "0"
+                : quiet ? "gate_quiet_since_delivery + 1"
+                : "gate_quiet_since_delivery";
+        String failures = delivered || quiet ? "0" : "gate_failures + 1";
+        String error = delivered || quiet ? null
+                : StringUtils.truncate(detail == null ? outcome : detail, 1024);
+        return jdbc.update("UPDATE ma_schedule"
+                        + " SET gate_last_outcome = ?, gate_last_at = ?,"
+                        + " gate_quiet_since_delivery = " + quietSinceDelivery
+                        + ", gate_failures = " + failures + ","
+                        + " gate_last_error = ?, gmt_modified = ?"
+                        + " WHERE tenant_id = ? AND schedule_id = ?"
+                        + " AND lease_owner = ? AND fence = ?"
+                        // Only under the revision the occurrence was pinned
+                        // to, whose gate is the one probed: a revision since
+                        // reset the status for its own command, and a
+                        // replayed answer of an earlier revision's run is
+                        // not this one's.
+                        + " AND definition_revision = ?",
+                outcome, now, error, now,
+                row.tenantId(), row.scheduleId(), owner, fence,
+                definitionRevision) == 1;
     }
 
     /**
@@ -515,6 +591,20 @@ public class AutomationLedgerStore {
                         + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
                 outcome, reason, now, tenantId, scheduleId, occurrenceKey,
                 OUTCOME_FIRING, tenantId, scheduleId, owner, fence) == 1;
+    }
+
+    /** A firing row settled with the detail that decided it, in `last_error`. */
+    public boolean settleOccurrence(String tenantId, String scheduleId,
+            String occurrenceKey, String outcome, String reason,
+            String lastError, String owner, long fence, long now) {
+        return jdbc.update("UPDATE ma_schedule_occurrence o"
+                        + " SET o.outcome = ?, o.reason = ?, o.last_error = ?,"
+                        + " o.gmt_modified = ?"
+                        + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
+                        + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
+                outcome, reason, StringUtils.truncate(lastError, 1024), now,
+                tenantId, scheduleId, occurrenceKey, OUTCOME_FIRING, tenantId,
+                scheduleId, owner, fence) == 1;
     }
 
     /** A firing claim re-pinned to the definition revision now live. */

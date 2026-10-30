@@ -29,5 +29,9 @@ export type UiWorkerRequest =
   | { type: 'event'; sequence: number; event: UiEvent; inputs: InputValues };
 
 export type UiWorkerResponse =
-  | { sequence: number; patches: UiPatch[] }
+  | {
+      sequence: number;
+      patches: UiPatch[];
+      execution: 'initialized' | 'handled' | 'unhandled';
+    }
   | { sequence: number; error: string };

@@ -54,6 +54,7 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  boundedRetries?: boolean;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -243,6 +244,9 @@ export async function runSideQuery<TResponse>(
       systemInstruction,
       promptId,
       config: requestConfig,
+      ...(options.boundedRetries !== undefined && {
+        boundedRetries: options.boundedRetries,
+      }),
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
       }),

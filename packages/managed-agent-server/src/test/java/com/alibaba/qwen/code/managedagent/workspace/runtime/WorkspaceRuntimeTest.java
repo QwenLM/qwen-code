@@ -34,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -83,7 +84,7 @@ class WorkspaceRuntimeTest {
     @Autowired
     private WorkspaceExecutionStore authority;
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired
     private DataSource dataSource;
     @TempDir

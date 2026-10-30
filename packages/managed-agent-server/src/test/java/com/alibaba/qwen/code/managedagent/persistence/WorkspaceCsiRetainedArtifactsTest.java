@@ -73,9 +73,9 @@ class WorkspaceCsiRetainedArtifactsTest {
     }
 
     @Test
-    void acceptsEmptySnapshotAndActualAgentResourcesIncludingEmptyAndLiteralText() throws Exception {
+    void acceptsEmptyMessagesAndActualAgentResourcesIncludingEmptyAndLiteralText() throws Exception {
         materialize();
-        assertThat(store.findSnapshot("foreign", session).orElseThrow().items()).isEmpty();
+        assertThat(tx.execute(status -> store.findMessagePage("foreign", session, null, 100, true)).items()).isEmpty();
         var resources = new ManagedSessionStore(jdbc);
         String literal = "Unicode 指令 {\"sessionId\":\"" + expected.table("ma_session").rows().getFirst().text("session_id") + "\"}";
         for (String text : List.of("", literal)) {
@@ -91,15 +91,21 @@ class WorkspaceCsiRetainedArtifactsTest {
     }
 
     @Test
-    void acceptsRealMultiplePagesAndAnOversizedSingleItem() throws Exception {
+    void acceptsMultipleMessagePagesAndAnOversizedSingleItem() throws Exception {
         for (int index = 0; index < 101; index++) {
             append("item.tool_call.updated", Map.of("callId", "call-" + index, "name", "read_file", "status", "completed"));
         }
         append("item.tool_call.updated", Map.of("callId", "large", "name", "read_file", "status", "completed", "arguments", "x".repeat(150_000)));
         materialize();
-        assertThat(store.findSnapshot("foreign", session).orElseThrow().items()).hasSize(102);
-        assertThat(jdbc.queryForObject("SELECT MAX(byte_length) FROM ma_resource WHERE kind=?", Long.class, "managed-snapshot-page")).isGreaterThan(128 * 1024);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE kind=?", Integer.class, "managed-snapshot-page")).isGreaterThan(1);
+        var first = tx.execute(status -> store.findMessagePage("foreign", session, null, 100, true));
+        var older = tx.execute(status -> store.findMessagePage("foreign", session, first.nextCursor(), 100, true));
+        assertThat(first.items()).hasSize(100);
+        assertThat(older.items()).hasSize(2);
+        assertThat(older.hasMore()).isFalse();
+        assertThat(java.util.stream.Stream.concat(first.items().stream(), older.items().stream())
+                .map(StoreModels.ItemRecord::itemId).distinct().count()).isEqualTo(102);
+        assertThat(jdbc.queryForObject("SELECT MAX(OCTET_LENGTH(attributes_json)) FROM ma_message WHERE tenant_id=?",
+                Long.class, "foreign")).isGreaterThan(128 * 1024);
         accepted();
     }
 
@@ -112,25 +118,26 @@ class WorkspaceCsiRetainedArtifactsTest {
         jdbc.update("UPDATE ma_message SET first_sequence=1 WHERE tenant_id=?", "foreign");
         append("session.metadata.updated", Map.of("title", "ties"));
         materialize();
-        var items = store.findSnapshot("foreign", session).orElseThrow().items();
+        var items = tx.execute(status -> store.findMessagePage("foreign", session, null, 100, true)).items();
         assertThat(items).extracting(StoreModels.ItemRecord::firstSequence).containsOnly(1L);
         accepted();
     }
 
     @Test
-    void acceptsOlderBodyRevisionAndSeveralSnapshotsAfterTheCurrentBodyChanges() throws Exception {
+    void acceptsOlderBodyRevisionAndReleasedBodiesWhileCollectionIsDisabled() throws Exception {
         largeBody(70_000);
         String oldBody = jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id=?", String.class, "foreign");
         append("turn.completed", Map.of());
         materialize();
         assertThat(jdbc.queryForObject("SELECT revision FROM ma_message WHERE tenant_id=?", Long.class, "foreign")).isGreaterThan(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key=?", Integer.class, oldBody)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key=?", Integer.class, oldBody)).isEqualTo(1);
         accepted();
         append("item.output_text.delta", Map.of("itemId", "large", "text", "later"));
         materialize();
         assertThat(jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id=?", String.class, "foreign")).isNotEqualTo(oldBody);
-        assertThat(jdbc.queryForList("SELECT owner_kind FROM ma_resource_ref WHERE resource_key=?", String.class, oldBody)).containsOnly("SNAPSHOT");
-        jdbc.update("UPDATE ma_snapshot SET retain_until=1 WHERE tenant_id=?", "foreign");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key=?", Integer.class, oldBody)).isZero();
+        assertThat(jdbc.queryForMap("SELECT state, retention_until FROM ma_resource WHERE resource_key=?", oldBody))
+                .containsEntry("state", "REFERENCED").doesNotContainValue(null);
         var before = artifactBytes();
         accepted();
         assertThat(artifactBytes()).containsExactlyElementsOf(before);
@@ -144,40 +151,73 @@ class WorkspaceCsiRetainedArtifactsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"missing-root", "missing-page", "missing-ref", "extra-ref", "wrong-ref-revision",
-            "wrong-ref-scope", "wrong-root-count", "wrong-root-version", "manifest-sequence", "manifest-type", "manifest-secret", "manifest-extra",
-            "page-ordinal", "page-last", "page-owner", "page-extra", "page-order", "page-original-reference", "body-inline-content", "page-utf8"})
-    void refusesIncompleteOrSubstitutedSnapshotGraphs(String fault) throws Exception {
+    @ValueSource(strings = {"missing-ref", "extra-ref", "wrong-ref-revision", "wrong-ref-scope", "body-owner",
+            "body-extra", "body-order", "body-original-reference", "body-inline-content", "body-utf8"})
+    void refusesIncompleteOrSubstitutedMessageBodies(String fault) throws Exception {
         largeBody(70_000);
         append("item.tool_call.updated", Map.of("callId", "second", "name", "read_file", "status", "completed"));
         materialize();
         accepted();
         switch (fault) {
-            case "missing-root" -> {
-                jdbc.update("UPDATE ma_event_stream SET current_snapshot_id=NULL WHERE tenant_id=?", "foreign");
-                jdbc.update("DELETE FROM ma_snapshot WHERE tenant_id=?", "foreign");
-            }
-            case "missing-page" -> removeResources("managed-snapshot-page");
-            case "missing-ref" -> jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind='SNAPSHOT'");
+            case "missing-ref" -> jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind='MESSAGE'");
             case "extra-ref" -> jdbc.update("UPDATE ma_resource_ref SET owner_kind='ARTIFACT' WHERE owner_kind='MESSAGE'");
-            case "wrong-ref-revision" -> jdbc.update("UPDATE ma_resource_ref SET owner_revision=owner_revision+10 WHERE owner_kind='SNAPSHOT'");
-            case "wrong-ref-scope" -> jdbc.update("UPDATE ma_resource_ref SET workspace_id='borrowed' WHERE owner_kind='SNAPSHOT'");
-            case "wrong-root-count" -> jdbc.update("UPDATE ma_snapshot SET item_count=item_count+1 WHERE tenant_id=?", "foreign");
-            case "wrong-root-version" -> jdbc.update("UPDATE ma_snapshot SET snapshot_version=snapshot_version+10 WHERE tenant_id=?", "foreign");
-            case "manifest-sequence" -> edit("managed-snapshot-manifest", value -> ((ObjectNode) value).put("sequence", 9999));
-            case "manifest-type" -> edit("managed-snapshot-manifest", value -> ((ObjectNode) value).put("version", "1"));
-            case "manifest-secret" -> edit("managed-snapshot-manifest", value -> ((ObjectNode) value).put("cursorSecret", "AA=="));
-            case "manifest-extra" -> edit("managed-snapshot-manifest", value -> ((ObjectNode) value).put("extra", true));
-            case "page-ordinal" -> jdbc.update("UPDATE ma_resource SET snapshot_page_ordinal=9 WHERE kind=?", "managed-snapshot-page");
-            case "page-last" -> jdbc.update("UPDATE ma_resource SET snapshot_page_last_sequence=9999 WHERE kind=?", "managed-snapshot-page");
-            case "page-owner" -> edit("managed-snapshot-page", value -> ((ObjectNode) value.get(0).get("item")).put("tenantId", "borrowed"));
-            case "page-extra" -> edit("managed-snapshot-page", value -> ((ObjectNode) value.get(0)).put("extra", true));
-            case "page-order" -> edit("managed-snapshot-page", value -> ((ObjectNode) value.get(0).get("item")).put("firstSequence", 9999));
-            case "page-original-reference" -> edit("managed-snapshot-page", value -> ((ObjectNode) value.get(0).get("item").get("attributes"))
-                    .put("bindingId", expected.table("ma_runtime_binding").rows().getFirst().text("binding_id")));
-            case "body-inline-content" -> edit("managed-snapshot-page", value -> ((ObjectNode) value.get(0).get("item")).set("content", JSON.valueToTree(
-                    List.of(new StoreModels.ItemPartRecord("borrowed", "text", "hidden", 1, 1, 0, 0, 1)))));
-            case "page-utf8" -> replace("managed-snapshot-page", new byte[] {(byte) 0xc3, 0x28});
+            case "wrong-ref-revision" -> jdbc.update("UPDATE ma_resource_ref SET owner_revision=owner_revision+10 WHERE owner_kind='MESSAGE'");
+            case "wrong-ref-scope" -> jdbc.update("UPDATE ma_resource_ref SET workspace_id='borrowed' WHERE owner_kind='MESSAGE'");
+            case "body-owner" -> jdbc.update("UPDATE ma_resource SET tenant_id='borrowed' WHERE kind=?", "managed-message-parts");
+            case "body-extra" -> editBody(value -> ((ObjectNode) value.get(0)).put("extra", true));
+            case "body-order" -> editBody(value -> ((ObjectNode) value.get(0))
+                    .put("firstSequence", 9999).put("lastSequence", 9999));
+            case "body-original-reference" -> jdbc.update("UPDATE ma_message SET attributes_json=? WHERE tenant_id=?",
+                    JSON.writeValueAsString(Map.of("bindingId", expected.table("ma_runtime_binding").rows().getFirst().text("binding_id"))), "foreign");
+            case "body-inline-content" -> jdbc.update("UPDATE ma_message SET parts_json='[{}]' WHERE body_resource_key IS NOT NULL");
+            case "body-utf8" -> {
+                byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE kind=?",
+                        byte[].class, "managed-message-parts");
+                String json = new String(bytes, StandardCharsets.UTF_8);
+                String prefix = "\"text\":\"";
+                int start = json.indexOf(prefix);
+                assertThat(start).isGreaterThanOrEqualTo(0);
+                int offset = json.substring(0, start + prefix.length()).getBytes(StandardCharsets.UTF_8).length;
+                bytes[offset] = (byte) 0xc3;
+                bytes[offset + 1] = 0x28;
+                replaceBody(bytes);
+            }
+            default -> throw new AssertionError(fault);
+        }
+        assertThat(fixture.readReferences(expected).blockers()).as(fault).isNotEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing-marker", "extra-owner", "wrong-id",
+            "wrong-body-scope", "zero-body-ordinal", "wrong-body-digest"})
+    void refusesUnprovenOrReferencedReleasedBodies(String fault) throws Exception {
+        largeBody(70_000);
+        String oldBody = jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id=?", String.class, "foreign");
+        append("item.output_text.delta", Map.of("itemId", "large", "text", "later"));
+        materialize();
+        accepted();
+        switch (fault) {
+            case "missing-marker" -> jdbc.update("UPDATE ma_resource SET retention_until=NULL WHERE resource_key=?", oldBody);
+            case "extra-owner" -> jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create)"
+                    + " SELECT session_scope_key,'ARTIFACT',?,1,resource_key,tenant_id,session_id,resource_id,0 FROM ma_resource WHERE resource_key=?",
+                    "a".repeat(64), oldBody);
+            case "wrong-id" -> jdbc.update("UPDATE ma_resource SET resource_id='unproven' WHERE resource_key=?", oldBody);
+            case "wrong-body-scope", "zero-body-ordinal", "wrong-body-digest" -> {
+                var original = jdbc.queryForMap("SELECT resource_id,session_scope_key FROM ma_resource WHERE resource_key=?", oldBody);
+                String[] identity = ((String) original.get("resource_id")).split(":", -1);
+                assertThat(identity).hasSize(4);
+                switch (fault) {
+                    case "wrong-body-scope" -> identity[1] = "g".repeat(64);
+                    case "zero-body-ordinal" -> identity[2] = "0";
+                    case "wrong-body-digest" -> identity[3] = (identity[3].startsWith("0") ? "1" : "0")
+                            + identity[3].substring(1);
+                    default -> throw new AssertionError(fault);
+                }
+                String id = String.join(":", identity);
+                String key = ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
+                assertThat(jdbc.update("UPDATE ma_resource SET resource_key=?,resource_id=? WHERE resource_key=?",
+                        key, id, oldBody)).isEqualTo(1);
+            }
             default -> throw new AssertionError(fault);
         }
         assertThat(fixture.readReferences(expected).blockers()).as(fault).isNotEmpty();
@@ -220,32 +260,42 @@ class WorkspaceCsiRetainedArtifactsTest {
     private void largeBody(int length) {
         append("item.output_text.delta", Map.of("itemId", "large", "text", "a".repeat(length)));
         materialize();
-        assertThat(store.findSnapshot("foreign", session).orElseThrow().items().getFirst().content().getFirst().text()).hasSize(length);
-    }
-
-    private void edit(String kind, Consumer<JsonNode> change) throws Exception {
-        var rows = jdbc.queryForList("SELECT inline_bytes FROM ma_resource WHERE kind=?", byte[].class, kind);
-        for (byte[] bytes : rows) {
-            JsonNode value = JSON.readTree(bytes);
-            change.accept(value);
-            byte[] updated = JSON.writeValueAsBytes(value);
-            String digest = WorkspaceEvidenceResources.digest(updated);
-            jdbc.update("UPDATE ma_resource SET inline_bytes=?,byte_length=?,sha256=? WHERE kind=? AND sha256=?", updated, updated.length, digest, kind, WorkspaceEvidenceResources.digest(bytes));
-            if (kind.equals("managed-snapshot-manifest")) {
-                jdbc.update("UPDATE ma_snapshot SET manifest_sha256=? WHERE manifest_sha256=?", digest, WorkspaceEvidenceResources.digest(bytes));
-            }
+        String key = jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id=? AND session_id=?",
+                String.class, "foreign", session);
+        byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key=?", byte[].class, key);
+        try {
+            assertThat(JSON.readTree(bytes).get(0).path("text").textValue()).hasSize(length);
+        } catch (java.io.IOException malformed) {
+            throw new AssertionError(malformed);
         }
     }
 
-    private void replace(String kind, byte[] bytes) {
-        jdbc.update("UPDATE ma_resource SET inline_bytes=?,byte_length=?,sha256=? WHERE kind=?", bytes, bytes.length, WorkspaceEvidenceResources.digest(bytes), kind);
+    private void editBody(Consumer<JsonNode> change) throws Exception {
+        byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE kind=?",
+                byte[].class, "managed-message-parts");
+        JsonNode value = JSON.readTree(bytes);
+        change.accept(value);
+        replaceBody(JSON.writeValueAsBytes(value));
     }
 
-    private void removeResources(String kind) {
-        for (String key : jdbc.queryForList("SELECT resource_key FROM ma_resource WHERE kind=?", String.class, kind)) {
-            jdbc.update("DELETE FROM ma_resource_ref WHERE resource_key=?", key);
-            jdbc.update("DELETE FROM ma_resource WHERE resource_key=?", key);
-        }
+    private void replaceBody(byte[] bytes) {
+        tx.executeWithoutResult(status -> {
+            var original = jdbc.queryForMap("SELECT resource_key,session_scope_key,resource_id FROM ma_resource WHERE kind=?",
+                    "managed-message-parts");
+            String oldKey = (String) original.get("resource_key");
+            String oldId = (String) original.get("resource_id");
+            String digest = WorkspaceEvidenceResources.digest(bytes);
+            String id = oldId.substring(0, oldId.lastIndexOf(':') + 1) + digest;
+            String key = ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
+            assertThat(jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+                    + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,last_verified_at,retention_until)"
+                    + " SELECT ?,session_scope_key,tenant_id,workspace_id,session_id,?,kind,schema_version,?,?,storage_kind,?,state,"
+                    + "gmt_create,last_verified_at,retention_until FROM ma_resource WHERE resource_key=?",
+                    key, id, bytes.length, digest, bytes, oldKey)).isEqualTo(1);
+            assertThat(jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE body_resource_key=?", key, oldKey)).isEqualTo(1);
+            assertThat(jdbc.update("UPDATE ma_resource_ref SET resource_key=?,resource_id=? WHERE resource_key=?", key, id, oldKey)).isEqualTo(1);
+            assertThat(jdbc.update("DELETE FROM ma_resource WHERE resource_key=?", oldKey)).isEqualTo(1);
+        });
     }
 
     private void replaceAgent(String kind, byte[] bytes) {

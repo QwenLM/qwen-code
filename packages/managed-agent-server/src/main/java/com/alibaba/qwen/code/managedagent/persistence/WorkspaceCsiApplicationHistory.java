@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
@@ -29,10 +30,12 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationJson.require;
@@ -141,8 +144,9 @@ final class WorkspaceCsiApplicationHistory {
                     && hash(raw).equals(row.text("record_digest")) && Objects.equals(row.number("writer_generation"), 1L));
             var records = CsiNativeActivationProof.records(raw);
             JsonNode saved = metadata(row);
-            java.util.function.Function<JsonNode, byte[]> reader = ref -> nativeResource(resources, references, revision, ref);
+            java.util.function.Function<JsonNode, byte[]> reader = nativeCheckpointReader(resources, references, revision);
             if (index == 0) {
+                require(row.number("activation_lease_until") == null && row.number("activation_renewal_seq") == null);
                 String command = "session.create:" + original.getIsolationKey();
                 require(command.equals(row.text("transaction_id")) && command.equals(row.text("command_id"))
                         && "session.create".equals(row.text("operation")) && hash(raw).equals(row.text("content_digest"))
@@ -165,7 +169,10 @@ final class WorkspaceCsiApplicationHistory {
                     require(activation != null || revision == 2);
                     activation = CsiNativeActivationProof.activation(transaction, saved, original,
                             row.text("writer_id"), genesis.definitionDigest(), activation, reader);
+                    activation = CsiNativeActivationProof.renewed(activation,
+                            row.number("activation_lease_until"), row.number("activation_renewal_seq"));
                 } else {
+                    require(row.number("activation_lease_until") == null && row.number("activation_renewal_seq") == null);
                     prefix = CsiNativeActivationProof.advance(transaction, saved, original, row.text("writer_id"),
                             genesis, activation, revision - 1, sequence, prefix, reader);
                 }
@@ -193,6 +200,13 @@ final class WorkspaceCsiApplicationHistory {
     private static NativeRows nativeRows(Snapshot baseline, RuntimeProvisionRequest original, long maximumRevision) {
         Map<String, Row> resources = new LinkedHashMap<>();
         Map<Long, Map<String, Row>> references = new LinkedHashMap<>();
+        Set<Long> committed = new HashSet<>();
+        for (Row row : baseline.table("ma_session_journal_tx").rows()) {
+            if (row.membership() == Membership.ORIGINAL) {
+                scope(row, original);
+                require(committed.add(row.number("journal_revision")));
+            }
+        }
         String sessionScope = ManagedSessionStore.sessionScopeKey(original.getScope().getTenantId(), original.getIsolationKey());
         Row modelContext = WorkspaceCsiApplicationInventory.modelContextReference(baseline.table("ma_session_journal_tx").rows(),
                 baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(), baseline.table("ma_resource_ref").rows(),
@@ -212,6 +226,9 @@ final class WorkspaceCsiApplicationHistory {
                 }
                 require(sessionScope.equals(row.text("session_scope_key")) && row.number("journal_revision") != null
                         && "JOURNAL".equals(row.text("owner_kind"))
+                        && sessionScope.equals(row.text("owner_key"))
+                        && Objects.equals(row.number("owner_revision"), row.number("journal_revision"))
+                        && committed.contains(row.number("journal_revision"))
                         && row.number("journal_revision") > 0 && row.number("journal_revision") <= maximumRevision
                         && resources.containsKey(row.text("resource_id"))
                         && references.computeIfAbsent(row.number("journal_revision"), ignored -> new LinkedHashMap<>())
@@ -219,6 +236,18 @@ final class WorkspaceCsiApplicationHistory {
             }
         }
         return new NativeRows(resources, references);
+    }
+
+    private static ManagedCheckpointHistory.Reader nativeCheckpointReader(Map<String, Row> resources,
+            Map<Long, Map<String, Row>> references, long revision) {
+        return ManagedCheckpointHistory.reader(ref -> nativeResource(resources, references, revision, ref),
+                (ref, maximum) -> {
+                    String id = text(ref, "resourceId");
+                    long origin = references.entrySet().stream()
+                            .filter(entry -> entry.getKey() <= Math.min(maximum, revision) && entry.getValue().containsKey(id))
+                            .mapToLong(Map.Entry::getKey).min().orElseThrow(() -> new IllegalArgumentException("Missing committed checkpoint page"));
+                    return new ManagedCheckpointHistory.PageBytes(nativeResource(resources, references, origin, ref), origin);
+                }, revision);
     }
 
     private static byte[] nativeResource(Map<String, Row> resources, Map<Long, Map<String, Row>> references,
@@ -322,7 +351,7 @@ final class WorkspaceCsiApplicationHistory {
                             && "checkpoint.committed".equals(value.path("managedSession").path("kind").textValue()))
                     .findFirst().orElseThrow(() -> new IllegalArgumentException("Missing original dispatch checkpoint"));
             JsonNode ref = record.path("managedSession").path("payload").path("stateRef");
-            var state = CsiNativeActivationProof.readObject(nativeResource(nativeRows.resources(), nativeRows.references(), revision, ref));
+            var state = CsiNativeActivationProof.readCheckpoint(ref, nativeCheckpointReader(nativeRows.resources(), nativeRows.references(), revision));
             Map<String, Boolean> inProgress = new LinkedHashMap<>();
             for (JsonNode item : state.path("tools").path("items")) {
                 String batch = item.path("modelMessageId").textValue();

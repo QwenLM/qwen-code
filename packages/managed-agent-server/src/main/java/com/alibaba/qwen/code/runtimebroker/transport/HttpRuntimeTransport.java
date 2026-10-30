@@ -24,6 +24,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 
+import java.io.EOFException;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -104,6 +105,70 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private final HttpClient client;
     private final Duration requestTimeout;
     private final Function<RuntimeLease, URI> endpointResolver;
+    private ExtensionPreparation extensionPreparation;
+    private String managedExtensionCacheDirectory;
+    private String managedExtensionCgroupRoot;
+
+    public HttpRuntimeTransport withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
+        if (directory == null || !java.nio.file.Path.of(directory).isAbsolute()) {
+            throw new IllegalArgumentException("Extension cache must be absolute");
+        }
+        this.managedExtensionCacheDirectory = directory;
+        this.managedExtensionCgroupRoot = cgroupRoot;
+        return this;
+    }
+
+    private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        String digest = request.getScope().getCapabilityDigest();
+        return ManagedContextProtocol.boot(request, seed,
+                com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(digest)
+                        ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(digest,
+                                managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null);
+    }
+
+    @FunctionalInterface
+    public interface ExtensionPreparation {
+        CompletionStage<Map<String, Object>> prepare(RuntimeBindingRecord runtime, String harnessSessionId,
+                Map<String, Object> operation);
+    }
+
+    public void configureExtensionPreparation(ExtensionPreparation preparation) {
+        this.extensionPreparation = java.util.Objects.requireNonNull(preparation, "preparation");
+    }
+
+    public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime, String harnessSessionId,
+            ContextBinding binding, Map<String, Object> operation) {
+        ManagedExtensionProtocol.validateOperation(operation);
+        Map<String, Object> immutable = BrokerValues.immutableMap(operation);
+        CompletionStage<Map<String, Object>> prepared;
+        if ("extension-prepare".equals(immutable.get("kind"))) {
+            if (extensionPreparation == null) {
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                        "managed_extension_unavailable", "Managed extension package preparation is unavailable.", false));
+            }
+            prepared = extensionPreparation.prepare(runtime, harnessSessionId, immutable);
+        } else {
+            prepared = CompletableFuture.completedFuture(immutable);
+        }
+        var scope = runtime.getRequest().getScope();
+        Map<String, Object> sessionKey = Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                "sessionId", harnessSessionId);
+        Map<String, Object> context = Map.of("tenantId", binding.getTenantId(), "workspaceId", binding.getWorkspaceId(),
+                "workspaceGeneration", Long.toString(binding.getWorkspaceGeneration()), "storageId", binding.getStorageId(),
+                "cwdRelative", binding.getCwdRelative(), "contextConfigRef", binding.getContextConfigRef(),
+                "contextRevision", Long.toString(binding.getContextRevision()));
+        return prepared.thenCompose(privateOperation -> post(runtime.getLease(), ManagedExtensionProtocol.PATH,
+                encodeToolRequest(Map.of("protocolVersion", 1, "sessionKey", sessionKey, "contextBinding", context,
+                        "operation", privateOperation), ManagedExtensionProtocol.REQUEST_LIMIT), ManagedExtensionProtocol.RESPONSE_LIMIT))
+                .thenApply(bytes -> ManagedExtensionProtocol.response(bytes, scope, harnessSessionId, immutable));
+    }
+
+    public CompletionStage<Map<String, Object>> extensionStop(RuntimeLease lease, String retirementId) {
+        BrokerValues.requireId(retirementId, "retirementId");
+        return post(lease, ManagedExtensionProtocol.PATH + "/retire",
+                encodeToolRequest(Map.of("protocolVersion", 1, "retirementId", retirementId), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenApply(ManagedContextProtocol::parse);
+    }
 
     public HttpRuntimeTransport() {
         this(HttpClient.newBuilder()
@@ -296,11 +361,23 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             if (files && client.followRedirects() != HttpClient.Redirect.NEVER) {
                 throw new IllegalArgumentException("CSI file attestation requires redirects disabled.");
             }
-            Map<String, Object> boot = ManagedContextProtocol.boot(request, seed);
+            Map<String, Object> boot = contextBoot(request, seed);
             Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot);
-            return post(lease, files ? ManagedCsiFilesProtocol.CONTEXT_ATTEST_PATH : ManagedContextProtocol.ATTEST_PATH,
-                    encodeToolRequest(files ? ManagedCsiFilesProtocol.wrapContext(request, body) : body,
-                            BODY_LIMIT_BYTES), BODY_LIMIT_BYTES, files ? seed.getGatewayIncarnation() : null)
+            String path = files ? ManagedCsiFilesProtocol.CONTEXT_ATTEST_PATH : ManagedContextProtocol.ATTEST_PATH;
+            byte[] encoded = encodeToolRequest(files ? ManagedCsiFilesProtocol.wrapContext(request, body) : body,
+                    BODY_LIMIT_BYTES);
+            String incarnation = files ? seed.getGatewayIncarnation() : null;
+            long started = System.nanoTime();
+            return post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation)
+                    .exceptionallyCompose(error -> {
+                        long remaining = requestTimeout.toNanos() - (System.nanoTime() - started);
+                        // Read-only confirmation can race an idle SSH connection closing.
+                        if (remaining > 0 && causedByEof(error)) {
+                            return post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation,
+                                    Duration.ofNanos(remaining));
+                        }
+                        return CompletableFuture.failedFuture(unwrap(error));
+                    })
                     .thenApply(bytes -> {
                         var actual = files ? ManagedCsiFilesProtocol.unwrapContext(request, ManagedCsiFilesProtocol.parse(bytes))
                                 : ManagedContextProtocol.parse(bytes);
@@ -403,7 +480,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 || client.followRedirects() != HttpClient.Redirect.NEVER)) {
             throw new IllegalArgumentException("CSI file context must belong to the original Session profile.");
         }
-        ManagedContextProtocol.boot(request, seed);
+        contextBoot(request, seed);
         Map<String, Object> body = ManagedContextProtocol.installation(request,
                 operationId, sessionId, binding);
         Map<String, Object> expected = ManagedContextProtocol.receipt(seed,
@@ -434,7 +511,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 || !(ResidentWorkspaceProfile.selects(request)
                         || (HarnessOwnership.sharesRuntimeSessions(request)
                                 || session.getHarnessSessionId().equals(request.getIsolationKey()))
-                            && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest()))
+                            && WorkspaceExecutionProfile.admitsCapabilityDigest(session.getScope().getCapabilityDigest()))
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
             throw new IllegalArgumentException("Workspace activation identity is invalid");
@@ -486,7 +563,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         body.put("protocolVersion", 2);
         body.put("reference", referenceIdentity(reference));
         body.put("toolName", referenceToolName(reference));
-        body.put("input", referenceInput(reference));
+        Object input = referenceInput(reference);
+        ManagedExtensionProtocol.requireBoundInput(session, input);
+        body.put("input", input);
         byte[] encoded = encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES);
         return post(lease, EXECUTE_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                 .thenApply(bytes -> {
@@ -615,7 +694,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         }
         Map<String, Object> body = v3Body(reference);
         body.put("toolName", referenceToolName(reference));
-        body.put("input", referenceInput(reference));
+        Object input = referenceInput(reference);
+        ManagedExtensionProtocol.requireBoundInput(session, input);
+        body.put("input", input);
         body.put("capture", capture);
         return post(lease, V3_EXECUTE_PATH,
                 encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES),
@@ -655,6 +736,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         requireClosed(capture, V3_CAPTURE_REQUEST_FIELDS, "capture");
         Map<String, Object> body = v3Body(reference);
         body.put("toolName", payload.get("toolName"));
+        ManagedExtensionProtocol.requireBoundInput(session, payload.get("input"));
         body.put("input", payload.get("input"));
         body.put("capture", capture);
         return post(lease, V3_EXECUTE_PATH,
@@ -854,6 +936,65 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return true;
     }
 
+    @Override
+    public CompletionStage<java.util.List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+        var scope = runtime.getRequest().getScope();
+        byte[] request = encodeToolRequest(Map.of("protocolVersion", 1,
+                "tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId()), TOOL_REQUEST_LIMIT_BYTES);
+        return post(runtime.getLease(), ManagedMcpProtocol.DEFINITIONS_PATH, request, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(ManagedMcpProtocol::definitions);
+    }
+
+    public CompletionStage<Map<String, Object>> installExtensionPackage(RuntimeBindingRecord runtime,
+            String digest, java.nio.file.Path archive) {
+        if (runtime == null || runtime.getLease() == null || digest == null || !digest.matches("[a-f0-9]{64}")) {
+            throw new IllegalArgumentException("An original Runtime and extension archive digest are required");
+        }
+        HttpRequest.BodyPublisher body;
+        try {
+            long length = java.nio.file.Files.size(archive);
+            if (length < 1 || length > 100L * 1024 * 1024
+                    || !java.nio.file.Files.isRegularFile(archive, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                throw new IllegalArgumentException("Extension archive exceeds its limit");
+            }
+            body = HttpRequest.BodyPublishers.ofFile(archive);
+        } catch (java.io.IOException error) {
+            return CompletableFuture.failedFuture(unavailable(error));
+        }
+        RuntimeLease lease = runtime.getLease();
+        HttpRequest request = HttpRequest.newBuilder(endpoint(lease).resolve(
+                        "/internal/managed-runtime/v3/extensions/packages/" + digest))
+                .timeout(Duration.ofMinutes(5))
+                .header("Authorization", "Bearer " + lease.getToken())
+                .header("Cache-Control", "no-store")
+                .header("Content-Type", "application/gzip")
+                .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
+                .header("X-Qwen-Managed-Lease-Epoch", Long.toString(lease.getEpoch()))
+                .PUT(body).build();
+        var exchange = client.sendAsync(request, info -> new BoundedBodySubscriber(BODY_LIMIT_BYTES));
+        var result = exchange.orTimeout(5, TimeUnit.MINUTES).thenApply(response -> {
+            if (response.statusCode() != 200 || response.body().overflow()
+                    || !"no-store".equals(response.headers().firstValue("Cache-Control").orElse(""))
+                    || !jsonContentType(response.headers().firstValue("Content-Type").orElse(""))
+                    || response.headers().firstValue("Content-Encoding").isPresent()) {
+                throw protocol("Extension package installation was not confirmed.");
+            }
+            Map<String, Object> receipt = JsonCodec.parseObject(response.body().bytes(), "extension package receipt");
+            if (!receipt.keySet().equals(Set.of("protocolVersion", "packageDigest"))
+                    || !Integer.valueOf(1).equals(receipt.get("protocolVersion"))
+                    || !digest.equals(receipt.get("packageDigest"))) {
+                throw protocol("Extension package installation digest conflicts.");
+            }
+            return receipt;
+        });
+        result.whenCompleteAsync((value, error) -> {
+            if (error != null || result.isCancelled()) {
+                exchange.cancel(true);
+            }
+        });
+        return result;
+    }
+
     /** Session acquisition is Broker-local until the provider is used. */
     @Override
     public CompletionStage<Void> acquire(RuntimeLease lease,
@@ -871,6 +1012,17 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException("lease and session are required");
         }
         Map<String, Object> immutable = BrokerValues.immutableMap(operation);
+        if (ManagedExtensionProtocol.isOperation(immutable)) {
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(400,
+                    "runtime_control_operation_invalid", "Extensions require the metadata control route.", false));
+        }
+        if (ManagedExtensionCommandProtocol.isOperation(immutable)) {
+            ManagedExtensionCommandProtocol.validateSession(session, immutable);
+            return post(lease, ManagedExtensionCommandProtocol.PATH,
+                    encodeToolRequest(Map.of("protocolVersion", 1, "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable),
+                            TOOL_REQUEST_LIMIT_BYTES), TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedExtensionCommandProtocol.response(bytes, session, immutable));
+        }
         if (ManagedMcpProtocol.isOperation(immutable)) {
             ManagedMcpProtocol.validateSession(session, immutable);
             Map<String, Object> body = Map.of("protocolVersion", 1,
@@ -1224,9 +1376,23 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             byte[] encoded, int responseLimit, String expectedIncarnation) {
+        return post(lease, path, encoded, responseLimit, expectedIncarnation, requestTimeout);
+    }
+
+    private static boolean causedByEof(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof EOFException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private CompletionStage<byte[]> post(RuntimeLease lease, String path,
+            byte[] encoded, int responseLimit, String expectedIncarnation, Duration timeout) {
         HttpRequest httpRequest = HttpRequest.newBuilder(
                 endpoint(lease).resolve(path))
-                .timeout(requestTimeout)
+                .timeout(timeout)
                 .header("Authorization", "Bearer " + lease.getToken())
                 .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
@@ -1288,7 +1454,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             result.complete(responseBody.bytes());
         });
         CompletableFuture<byte[]> returned = result
-                .orTimeout(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                .orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
                 .handle((value, error) -> {
                     if (error == null) {
                         return value;

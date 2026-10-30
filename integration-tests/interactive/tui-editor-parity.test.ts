@@ -41,7 +41,11 @@ const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 const keys = {
   left: '\x1b[D',
+  right: '\x1b[C',
+  up: '\x1b[A',
+  down: '\x1b[B',
   home: '\x1b[H',
+  end: '\x1b[F',
   undo: '\x1a',
   // modifyOtherKeys is decoded by both renderers without Kitty negotiation.
   redo: '\x1b[27;6;122~',
@@ -84,9 +88,11 @@ type Context = {
   session: InteractiveSession;
   server: FakeOpenAIServer;
   editorLog: string;
+  workspace: string;
   ownedTemp: string;
   sentinel: string;
   release: () => void;
+  restart: () => Promise<InteractiveSession>;
   control: (value: Record<string, unknown>) => void;
   frame: (name: string) => Promise<string>;
   press: (sequence: string, settle?: boolean) => Promise<void>;
@@ -148,6 +154,9 @@ async function scenario(
   let server: FakeOpenAIServer | undefined;
   let failure: string | undefined;
   let submittedCount = 0;
+  const closedSessions: Array<
+    { exitCode: number; signal?: number } | undefined
+  > = [];
   const cleanupErrors: string[] = [];
   const frame = async (label: string) => {
     const value = await session!.viewport();
@@ -272,9 +281,19 @@ async function scenario(
       session,
       server,
       editorLog,
+      workspace,
       ownedTemp: realpathSync(temp),
       sentinel,
       release,
+      restart: async () => {
+        await frame('before-restart');
+        await session!.close();
+        writeFileSync(join(evidence, 'before-restart.ansi'), session!.output());
+        closedSessions.push(session!.exitResult());
+        session = await launch();
+        await ready();
+        return session;
+      },
       control: (value) => json(controlFile, value),
       frame,
       press,
@@ -346,6 +365,7 @@ async function scenario(
       cols,
       terminalUnicodeVersion: '11',
       exitAfterCleanup: session?.exitResult(),
+      closedSessions,
     });
   }
   if (failure) throw new Error(failure);
@@ -436,6 +456,115 @@ for (const redo of [false, true]) {
   );
 }
 
+it('ordinary-history-restores-draft', () =>
+  scenario(
+    'ordinary-history-restores-draft',
+    async ({ type, press, submit }) => {
+      await type('HISTORY_ALPHA');
+      await submit('HISTORY_ALPHA');
+      await type('HISTORY_BETA');
+      await submit('HISTORY_BETA');
+      await type('DRAFT');
+      await press('\x01');
+      await press('\x10');
+      await submit('HISTORY_BETA');
+      await type('SUCCESSOR');
+      await press('\x01');
+      await press('\x10');
+      await press('\x05');
+      await press('\x0e');
+      await submit('SUCCESSOR');
+    },
+  ));
+
+it('search-tab-enter-and-escape', () =>
+  scenario(
+    'search-tab-enter-and-escape',
+    async ({ type, press, submit, server, frame }) => {
+      await type('SEARCH_ALPHA');
+      await submit('SEARCH_ALPHA');
+      await type('SEARCH_BETA');
+      await submit('SEARCH_BETA');
+      for (const sequence of ['\x10', '\x0e', '\x1b[1;2A', '\x1b[1;2B']) {
+        await press('\x12');
+        await until(
+          async () =>
+            (await frame('search-live-history'))
+              .split('(r:)')
+              .at(-1)!
+              .includes('SEARCH_BETA'),
+          'live prompt history must reach search',
+        );
+        await press(sequence);
+        await submit('SEARCH_BETA');
+      }
+      await type('ALPHA');
+      await press('\x12');
+      await sleep(300);
+      await frame('search-match');
+      await press('\t');
+      await type('_TAB_MARKER');
+      expect(server.requests).toHaveLength(6);
+      await submit('SEARCH_ALPHA_TAB_MARKER');
+      await type('BETA');
+      await press('\x12');
+      await sleep(300);
+      await press('\x1b[Z');
+      await type('_SHIFT_TAB');
+      expect(server.requests).toHaveLength(7);
+      await submit('SEARCH_BETA_SHIFT_TAB');
+      await type('SEARCH_ALPHA_TAB_MARKER');
+      await press('\x12');
+      await sleep(300);
+      await submit('SEARCH_ALPHA_TAB_MARKER', '\x1b\r');
+      await type('ORIGINAL');
+      await press(keys.left.repeat(4));
+      await press('\x12');
+      await type('no-match');
+      await press('\x1b');
+      await sleep(250);
+      await type('X');
+      await submit('ORIGXINAL');
+      const long = 'LONG_' + 'abcdef'.repeat(24) + '_TAIL_SENTINEL';
+      await type(long);
+      await submit(long);
+      for (const modifier of [5, 3]) {
+        await press('\x12');
+        const candidate = async (name: string) =>
+          (await frame(`search-${modifier}-${name}`)).split('(r:)').at(-1)!;
+        await until(
+          async () => (await candidate('ready')).includes('→'),
+          'long search candidate must expose expand arrow',
+        );
+        const label = (body: string) => {
+          const rows = body.split('\n').map((line) => line.trim());
+          const start = rows.findIndex((line) => line.startsWith('> LONG_'));
+          expect(start).toBeGreaterThanOrEqual(0);
+          return rows
+            .slice(start, start + 2)
+            .join('')
+            .replace(/^> /, '')
+            .replace(/ [←→]/, '');
+        };
+        let body = await candidate('collapsed');
+        expect(body).not.toContain('TAIL_SENTINEL');
+        expect(label(body)).toBe(long.slice(0, 150) + '...');
+        const requestCount = server.requests.length;
+        await press(`\x1b[1;${modifier}C`);
+        body = await candidate('expanded');
+        expect(body).toContain('←');
+        expect(label(body)).toBe(long);
+        await press(`\x1b[1;${modifier}D`);
+        body = await candidate('recollapsed');
+        expect(body).toContain('→');
+        expect(body).not.toContain('TAIL_SENTINEL');
+        expect(label(body)).toBe(long.slice(0, 150) + '...');
+        expect(server.requests).toHaveLength(requestCount);
+        await submit(long);
+      }
+    },
+  ));
+
 for (const behavior of ['changed', 'unchanged', 'nonzero', 'signal', 'delay']) {
   it(`external-editor-${behavior}`, () =>
     scenario(
@@ -489,6 +618,43 @@ for (const behavior of ['changed', 'unchanged', 'nonzero', 'signal', 'delay']) {
     ));
 }
 
+it('shell-history-domain-and-persistence', () =>
+  scenario(
+    'shell-history-domain-and-persistence',
+    async ({ type, press, server, workspace, restart, frame }) => {
+      const output = join(workspace, 'shell-history-owned.txt');
+      const first = `printf a >> '${output}'`;
+      const second = `printf b >> '${output}'`;
+      const contents = () =>
+        existsSync(output) ? readFileSync(output, 'utf8') : '';
+      await type('!');
+      await type(first);
+      await press('\r');
+      await until(() => contents() === 'a', 'first shell command executes');
+      await type(second);
+      await press('\r');
+      await until(() => contents() === 'ab', 'second shell command executes');
+      await press(keys.up);
+      await frame('shell-recalled');
+      await press('\r');
+      await until(
+        () => contents() === 'abb',
+        'Up recalls newest shell command',
+      );
+      await restart();
+      await type('!');
+      await press(keys.up);
+      await press(keys.up);
+      await frame('shell-persisted-oldest');
+      await press('\r');
+      await until(
+        () => contents() === 'abba',
+        'shell history survives restart and deduplicates',
+      );
+      expect(server.requests).toHaveLength(0);
+    },
+  ));
+
 it('ctrl-d-nonempty-does-not-exit', () =>
   scenario(
     'ctrl-d-nonempty-does-not-exit',
@@ -535,9 +701,7 @@ it('ctrl-c-clear-then-exit', () =>
         () => session.exitResult() !== undefined,
         'second Ctrl+C must exit',
       );
-      expect(session.exitResult()?.exitCode).toBe(
-        renderer === 'opentui' ? 130 : 0,
-      );
+      expect(session.exitResult()?.exitCode).toBe(0);
       expect(server.requests).toHaveLength(0);
     },
   ));
@@ -589,9 +753,7 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'second exit key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(server.requests).toHaveLength(1);
       },
       100,
@@ -637,12 +799,92 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'confirmation second key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(existsSync(sentinel)).toBe(false);
       },
       100,
       'confirmation',
     ));
 }
+
+async function enableVim(context: Context) {
+  await context.type('/vim');
+  await context.press('\r');
+  await context.session.waitFor('Entered Vim mode.', 12_000);
+  await context.session.waitForScreen(
+    (screen) => screen.includes('-- NORMAL --'),
+    '-- NORMAL --',
+    12_000,
+  );
+  await context.frame('vim-enabled');
+  expect(context.server.requests).toHaveLength(0);
+}
+
+for (const paced of [false, true]) {
+  const name = `vim-counted-delete-${paced ? 'paced' : 'single-write'}`;
+  it(name, () =>
+    scenario(name, async (context) => {
+      await enableVim(context);
+      await context.press('i');
+      await context.session.waitForScreen(
+        (screen) => screen.includes('-- INSERT --'),
+        '-- INSERT --',
+        12_000,
+      );
+      await context.type('one two three');
+      await context.press('\x1b');
+      await context.session.waitForScreen(
+        (screen) => screen.includes('-- NORMAL --'),
+        '-- NORMAL --',
+        12_000,
+      );
+      await context.press('0');
+      if (paced) for (const key of '2dw') await context.press(key);
+      else await context.press('2dw');
+      expect(await context.frame('after-counted-delete')).toMatch(/>\s*three/);
+      await context.submit('three');
+      expect(context.server.requests).toHaveLength(1);
+    }),
+  );
+}
+
+it('vim-pending-character-keeps-enter-and-draft', () =>
+  scenario('vim-pending-character-keeps-enter-and-draft', async (context) => {
+    await enableVim(context);
+    await context.press('i');
+    await context.type('pending draft');
+    await context.press('\x1b');
+    await context.session.waitForScreen(
+      (screen) => screen.includes('-- NORMAL --'),
+      '-- NORMAL --',
+      12_000,
+    );
+    for (const command of ['r', 'f', 'F', 't', 'T']) {
+      await context.press(command + '\r');
+      expect(await context.frame(`pending-${command}`)).toContain(
+        'pending draft',
+      );
+      expect(context.server.requests).toHaveLength(0);
+      await context.press('\x1b');
+    }
+    await context.submit('pending draft');
+    expect(context.server.requests).toHaveLength(1);
+  }));
+
+it('vim-insert-controls-and-disable', () =>
+  scenario('vim-insert-controls-and-disable', async (context) => {
+    await enableVim(context);
+    await context.press('i');
+    await context.type('甲🙂tail');
+    // Ink's Vim INSERT dispatcher consumes these without readline kill/editor actions.
+    await context.press('\x0b\x15\x18');
+    expect(await context.frame('insert-controls')).toContain('甲🙂tail');
+    expect(existsSync(context.editorLog)).toBe(false);
+    await context.submit('甲🙂tail');
+    await context.type('/vim');
+    await context.press('\r');
+    await context.session.waitFor('Exited Vim mode.', 12_000);
+    await context.type('ordinary again');
+    await context.submit('ordinary again');
+    expect(context.server.requests).toHaveLength(2);
+  }));

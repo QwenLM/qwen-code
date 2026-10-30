@@ -24,10 +24,31 @@ class BrokerSecurityTest {
         assertThatCode(() -> security(properties, "127.0.0.1")).doesNotThrowAnyException();
         properties.getAuth().setAllowInsecureBind(true);
         assertThatThrownBy(() -> security(properties, "0.0.0.0")).hasMessageContaining("single-user");
+    }
+
+    @Test
+    void localDirectoryImportAcceptsSignedLoopbackAuthority() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
         properties.getAuth().setMode("signed");
-        properties.getAuth().setSigningKey("test-signing-key-at-least-32-characters");
-        properties.setTrustedActorHeader("");
-        assertThatThrownBy(() -> security(properties, "127.0.0.1")).hasMessageContaining("single-user");
+        properties.getAuth().setSigningKey(KEY);
+        for (String address : new String[] {"127.0.0.1", "::1"}) {
+            assertThat(security(properties, address).getMode())
+                    .as(address).isEqualTo(BrokerSecurity.Mode.SIGNED);
+        }
+    }
+
+    @Test
+    void localDirectoryImportRefusesSignedRemoteListenersEvenWithInsecureOverride() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setAllowInsecureBind(true);
+        for (String address : new String[] {"0.0.0.0", "10.0.0.8", null}) {
+            assertThatThrownBy(() -> security(properties, address))
+                    .as(address).hasMessageContaining("single-user");
+        }
     }
 
     @Test

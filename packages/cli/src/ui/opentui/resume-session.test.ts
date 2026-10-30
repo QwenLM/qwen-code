@@ -15,15 +15,42 @@
 import { describe, it, expect } from 'vitest';
 import {
   resumeEventsFromConfig,
-  resumeEventsFromSession,
+  resumeEventsFromSession as replaySession,
 } from './resume-session.js';
-import { foldLiveEvent } from './live-session-model.js';
+import { foldLiveEvent, rewindBoundaryHistory } from './live-session-model.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 
 const CALL_ID = 'call_1bd0c3272fc749f6a25cd2c8';
 
-function sampleMessages(): unknown[] {
+function resumeEventsFromSession(
+  input: { conversation: { messages: Array<Partial<ChatRecord>> } },
+  config?: Config,
+) {
+  return replaySession(
+    {
+      conversation: {
+        sessionId: 's1',
+        projectHash: 'project',
+        startTime: '2026-10-21T00:00:00Z',
+        lastUpdated: '2026-10-21T00:00:00Z',
+        messages: input.conversation.messages.map((record, index) => ({
+          uuid: String(index),
+          parentUuid: index ? String(index - 1) : null,
+          sessionId: 's1',
+          timestamp: '2026-10-21T00:00:00Z',
+          cwd: '/owned',
+          version: 'test',
+          type: 'user',
+          ...record,
+        })),
+      },
+    },
+    config,
+  );
+}
+
+function sampleMessages(): Array<Partial<ChatRecord>> {
   return [
     {
       type: 'user',
@@ -59,26 +86,173 @@ function sampleMessages(): unknown[] {
 }
 
 describe('opentui resume mapping', () => {
+  it('retains canonical prompt identity and skips synthetic user records', () => {
+    const events = resumeEventsFromSession({
+      conversation: {
+        messages: [
+          {
+            type: 'user',
+            promptId: 'p1',
+            message: { role: 'user', parts: [{ text: 'same' }] },
+          },
+          {
+            type: 'system',
+            subtype: 'slash_command',
+            promptId: 'p2',
+            systemPayload: {
+              phase: 'invocation',
+              rawCommand: '/skill',
+              sentToModel: true,
+            },
+          },
+          {
+            type: 'system',
+            subtype: 'slash_command',
+            systemPayload: {
+              phase: 'invocation',
+              rawCommand: '/about',
+              sentToModel: false,
+            },
+          },
+          {
+            type: 'user',
+            subtype: 'goal_runtime',
+            message: { role: 'user', parts: [{ text: 'hidden' }] },
+          },
+          {
+            type: 'user',
+            promptId: 'p3',
+            message: { role: 'user', parts: [{ text: 'same' }] },
+          },
+        ],
+      },
+    });
+    const users = events.filter((event) => event.type === 'user');
+    expect(
+      users.map(({ text, promptId, sentToModel }) => ({
+        text,
+        promptId,
+        sentToModel,
+      })),
+    ).toEqual([
+      { text: 'same', promptId: 'p1', sentToModel: undefined },
+      { text: '/skill', promptId: 'p2', sentToModel: true },
+      { text: '/about', promptId: undefined, sentToModel: false },
+      { text: 'same', promptId: 'p3', sentToModel: undefined },
+    ]);
+    expect(new Set(users.map(({ historyId }) => historyId)).size).toBe(4);
+  });
+
   it('replays user / thought / tool-call / tool-result / assistant turns', () => {
     const events = resumeEventsFromSession({
       conversation: { messages: sampleMessages() },
     });
 
+    const toolGroup = {
+      id: expect.any(Number),
+      type: 'tool_group',
+      tools: [
+        {
+          callId: CALL_ID,
+          name: 'read_file',
+          args: {},
+          description: '',
+          confirmationDetails: undefined,
+          resultDisplay: '# README\nhello',
+          status: 'Success',
+        },
+      ],
+    };
     expect(events).toEqual([
-      { type: 'user', text: '读一下 README' },
-      { type: 'thinking', delta: '我先看看文件。' },
-      { type: 'thinking-end' },
+      {
+        type: 'user',
+        text: '读一下 README',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'user',
+          text: '读一下 README',
+          rewindId: 'legacy-record:0',
+        },
+        historyId: expect.any(Number),
+        promptId: undefined,
+        sentToModel: undefined,
+      },
+      {
+        type: 'thinking',
+        delta: '我先看看文件。',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'gemini_thought',
+          text: '我先看看文件。',
+        },
+        historyId: expect.any(Number),
+      },
+      {
+        type: 'thinking-end',
+        historyId: expect.any(Number),
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'gemini_thought',
+          text: '我先看看文件。',
+        },
+      },
       {
         type: 'tool-start',
+        historyId: expect.any(Number),
         id: CALL_ID,
         tool: 'read_file',
         title: 'read_file',
+        canonicalHistoryItem: toolGroup,
       },
-      { type: 'tool-output', id: CALL_ID, output: '# README\nhello' },
-      { type: 'tool-end', id: CALL_ID, success: true, summary: 'ok' },
-      { type: 'text', delta: 'README 内容已读取。' },
+      {
+        type: 'tool-result',
+        id: CALL_ID,
+        display: '# README\nhello',
+        canonicalHistoryItem: toolGroup,
+        historyId: expect.any(Number),
+      },
+      {
+        type: 'tool-end',
+        id: CALL_ID,
+        success: true,
+        summary: 'ok',
+        canonicalHistoryItem: toolGroup,
+        historyId: expect.any(Number),
+      },
+      { type: 'done' },
+      {
+        type: 'text',
+        delta: 'README 内容已读取。',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'gemini',
+          text: 'README 内容已读取。',
+          timestamp: Date.parse('2026-10-21T00:00:00Z'),
+        },
+        historyId: expect.any(Number),
+        timestamp: Date.parse('2026-10-21T00:00:00Z'),
+      },
       { type: 'done' },
     ]);
+  });
+
+  it('preserves recovered legacy identity through the displayed rewind boundary', () => {
+    const events = resumeEventsFromSession({
+      conversation: { messages: sampleMessages() },
+    });
+    const items = events.reduce(
+      (history, event) => foldLiveEvent(history, event),
+      [] as ReturnType<typeof foldLiveEvent>,
+    );
+    const boundary = rewindBoundaryHistory(items).find(
+      (item) => item.type === 'user',
+    );
+    expect(boundary).toMatchObject({
+      type: 'user',
+      text: '读一下 README',
+      rewindId: 'legacy-record:0',
+    });
+    expect(boundary).not.toHaveProperty('promptId', expect.any(String));
   });
 
   it('carries FileDiff tool results as structured diff events', () => {
@@ -102,7 +276,12 @@ describe('opentui resume mapping', () => {
             toolCallResult: {
               callId: 'c1',
               status: 'success',
-              resultDisplay: { fileDiff, fileName: 'a.txt' },
+              resultDisplay: {
+                fileDiff,
+                fileName: 'a.txt',
+                originalContent: 'old',
+                newContent: 'new',
+              },
             },
           },
         ],
@@ -111,20 +290,48 @@ describe('opentui resume mapping', () => {
     // Never the "[object Object]" the previous String() flattening produced.
     expect(events).toContainEqual({
       type: 'tool-result',
+      historyId: expect.any(Number),
       id: 'c1',
       display: '',
       diff: { fileDiff, fileName: 'a.txt' },
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'c1',
+            name: 'edit',
+            args: {},
+            description: '',
+            confirmationDetails: undefined,
+            status: 'Success',
+            resultDisplay: {
+              fileDiff,
+              fileName: 'a.txt',
+              originalContent: 'old',
+              newContent: 'new',
+            },
+          },
+        ],
+      },
     });
   });
 
   it('carries TodoWrite results as a todo list, not as raw JSON', () => {
     const todos = [
-      { id: '1', content: 'write the design', status: 'completed' },
-      { id: '2', content: 'run the matrix', status: 'in_progress' },
+      { id: '1', content: 'write the design', status: 'completed' as const },
+      { id: '2', content: 'run the matrix', status: 'in_progress' as const },
     ];
     const events: OpenTuiStreamEvent[] = resumeEventsFromSession({
       conversation: {
         messages: [
+          {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [{ functionCall: { id: 'c1', name: 'todo_write' } }],
+            },
+          },
           {
             type: 'tool_result',
             message: {
@@ -142,9 +349,25 @@ describe('opentui resume mapping', () => {
     });
     expect(events).toContainEqual({
       type: 'tool-result',
+      historyId: expect.any(Number),
       id: 'c1',
       display: '',
       todos,
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'c1',
+            name: 'todo_write',
+            args: {},
+            description: '',
+            confirmationDetails: undefined,
+            resultDisplay: { type: 'todo_list', todos },
+            status: 'Success',
+          },
+        ],
+      },
     });
   });
 
@@ -172,6 +395,11 @@ describe('opentui resume mapping', () => {
     expect(thought.done).toBe(true);
     // Replay must leave the composer ready, not "streaming".
     expect(events[events.length - 1]).toEqual({ type: 'done' });
+    for (const event of events) {
+      if ('canonicalHistoryItem' in event && event.canonicalHistoryItem) {
+        expect(event.canonicalHistoryItem.id).toBe(event.historyId);
+      }
+    }
   });
 
   it('marks errored tool results as failed', () => {
@@ -198,9 +426,25 @@ describe('opentui resume mapping', () => {
     });
     expect(events).toContainEqual({
       type: 'tool-end',
+      historyId: expect.any(Number),
       id: 'c1',
       success: false,
       summary: 'error',
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'c1',
+            name: 'run_shell',
+            args: {},
+            description: '',
+            confirmationDetails: undefined,
+            resultDisplay: undefined,
+            status: 'Error',
+          },
+        ],
+      },
     });
   });
 
@@ -222,7 +466,18 @@ describe('opentui resume mapping', () => {
       },
     });
     expect(events).toEqual([
-      { type: 'user', text: '/compact' },
+      {
+        type: 'user',
+        text: '/compact',
+        canonicalHistoryItem: {
+          id: expect.any(Number),
+          type: 'user',
+          text: '/compact',
+        },
+        historyId: expect.any(Number),
+        promptId: undefined,
+        sentToModel: undefined,
+      },
       { type: 'done' },
     ]);
   });
@@ -237,11 +492,30 @@ describe('opentui resume mapping', () => {
   it('reads the resumed conversation from the config when present', () => {
     const config = {
       getResumedSessionData: () => ({
-        conversation: { messages: sampleMessages() },
+        conversation: {
+          messages: sampleMessages().map((record, index) => ({
+            ...record,
+            uuid: String(index),
+            timestamp: '2026-10-21T00:00:00Z',
+          })),
+        },
       }),
+      getToolRegistry: () => ({ getTool: () => undefined }),
     } as unknown as Config;
     const events = resumeEventsFromConfig(config);
-    expect(events?.[0]).toEqual({ type: 'user', text: '读一下 README' });
+    expect(events?.[0]).toEqual({
+      type: 'user',
+      text: '读一下 README',
+      canonicalHistoryItem: {
+        id: expect.any(Number),
+        type: 'user',
+        text: '读一下 README',
+        rewindId: 'legacy-record:0',
+      },
+      historyId: expect.any(Number),
+      promptId: undefined,
+      sentToModel: undefined,
+    });
     expect(events?.at(-1)).toEqual({ type: 'done' });
   });
 });

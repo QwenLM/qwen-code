@@ -32,7 +32,7 @@ export interface UseReverseSearchCompletionReturn {
 }
 
 export function useReverseSearchCompletion(
-  buffer: TextBuffer,
+  buffer: Pick<TextBuffer, 'text' | 'setText'>,
   history: readonly string[],
   reverseSearchActive: boolean,
 ): UseReverseSearchCompletionReturn {
