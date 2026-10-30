@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -21,6 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(
         properties = {
@@ -43,7 +45,7 @@ class ReplayFloorRetractionTest {
     @Autowired private ObjectMapper mapper;
 
     @Test
-    void retractionPreservesSnapshotCursorsAndStreamBoundaries() throws Exception {
+    void retractionInvalidatesMessageCursorsAndPreservesStreamBoundaries() throws Exception {
         String tenant = "retraction-" + UUID.randomUUID();
         String session = session(tenant);
         var turn =
@@ -69,7 +71,7 @@ class ReplayFloorRetractionTest {
                     "boot:epoch:" + i);
         }
         store.materializeNextBatch(tenant, session, 100);
-        var page = store.findSnapshotPage(tenant, session, null, 0, 1);
+        var page = store.findMessagePage(tenant, session, null, 1, false);
         assertThat(page.nextCursor()).isNotNull();
         long covered = page.coveredSequence();
         long start =
@@ -101,13 +103,12 @@ class ReplayFloorRetractionTest {
                                 tenant,
                                 session))
                 .isEqualTo(projection + 1);
-        var old = store.findSnapshotPage(tenant, session, page.nextCursor(), 0, 10);
-        assertThat(old.items())
-                .extracting(item -> item.content().getFirst().text())
-                .containsExactly("text-0", "text-1");
-        assertThat(old.coveredSequence()).isEqualTo(covered);
+        assertThatThrownBy(() -> store.findMessagePage(tenant, session, page.nextCursor(), 10, false))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("message_projection_changed"));
+        store.materializeNextBatch(tenant, session, 100);
         assertThat(
-                        store.findSnapshot(tenant, session).orElseThrow().items().stream()
+                        store.findMessagePage(tenant, session, null, 100, false).items().stream()
                                 .flatMap(item -> item.content().stream())
                                 .map(part -> part.text())
                                 .toList())
@@ -171,7 +172,7 @@ class ReplayFloorRetractionTest {
     }
 
     @Test
-    void itemsAfterWithdrawnSequenceIncludesReissuedMessageAndKeepsOldCursor() throws Exception {
+    void itemsAfterWithdrawnSequenceIncludesReissuedMessageAndRejectsOldCursor() throws Exception {
         String tenant = "reissued-items-" + UUID.randomUUID();
         String session = session(tenant);
         String turn =
@@ -194,14 +195,15 @@ class ReplayFloorRetractionTest {
                 false,
                 "boot:old:1");
         store.materializeNextBatch(tenant, session, 100);
-        var frozen = store.findSnapshotPage(tenant, session, null, 0, 1);
+        var frozen = store.findMessagePage(tenant, session, null, 1, false);
         long oldSequence =
-                store.findSnapshot(tenant, session).orElseThrow().items().stream()
+                store.findMessagePage(tenant, session, null, 100, false).items().stream()
                         .filter(item -> "withdrawn".equals(item.itemId()))
                         .findFirst()
                         .orElseThrow()
                         .firstSequence();
         store.retractContinuationOutput(tenant, session, turn, "owner", "boot", "old");
+        store.materializeNextBatch(tenant, session, 100);
         var empty =
                 mvc.perform(
                                 org.springframework.test.web.servlet.request.MockMvcRequestBuilders
@@ -253,11 +255,55 @@ class ReplayFloorRetractionTest {
                                         .param("after", frozen.nextCursor()))
                         .andReturn()
                         .getResponse();
-        assertThat(old.getStatus()).isEqualTo(200);
-        JsonNode retained = EventStreams.json(mapper, old).get("data");
-        assertThat(retained).hasSize(1);
-        assertThat(retained.get(0).get("id").asText()).isEqualTo("withdrawn");
-        assertThat(retained.get(0).get("content").get(0).get("text").asText()).isEqualTo("old");
+        assertThat(old.getStatus()).isEqualTo(409);
+        assertThat(EventStreams.json(mapper, old).path("error").path("code").asText())
+                .isEqualTo("message_projection_changed");
+    }
+
+    @Test
+    void floorAdvanceAfterMessageReadResynchronizesThroughTheLiveTranscript() throws Exception {
+        String tenant = "message-replay-race-" + UUID.randomUUID();
+        String session = session(tenant);
+        for (int index = 0; index < 3; index++) {
+            store.appendPublicEventIfAbsent(tenant, session, "turn",
+                    "item.output_text.delta",
+                    Map.of("itemId", "message-" + index, "text", "text-" + index),
+                    false, "race-" + index);
+        }
+        store.materializeNextBatch(tenant, session, 100);
+        var initial = service.transcript(tenant, null, session, null, 2);
+        assertThat(initial.items()).hasSize(2);
+        assertThat(initial.hasMore()).isTrue();
+        store.appendPublicEventIfAbsent(tenant, session, "turn",
+                "item.output_text.delta", Map.of("itemId", "latest", "text", "latest"),
+                false, "race-latest");
+        store.materializeNextBatch(tenant, session, 100);
+        var window = store.advanceReplayFloor(tenant, session, Long.MAX_VALUE);
+        assertThat(window.floorSequence()).isGreaterThan(initial.lastSequence());
+        try (var executor = Executors.newCachedThreadPool()) {
+            var expired = new EventStreams.RecordingEmitter();
+            EventStreams.streams(service, hub, executor, expired)
+                    .publicStream(tenant, null, session, initial.lastSequence());
+            assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(expired.failed).isEmpty();
+            assertThat(expired.resync).containsExactly(new SessionResyncRequired(
+                    ManagedEventStreamService.RESYNC, session, window.floorSequence(),
+                    window.snapshotThroughSequence(), ManagedEventStreamService.RESYNC_ACTION));
+        }
+        var reloaded = service.transcript(tenant, null, session, null, 2);
+        assertThat(reloaded.lastSequence()).isEqualTo(window.snapshotThroughSequence());
+        assertThat(reloaded.coveredSequence()).isEqualTo(reloaded.lastSequence());
+        assertThat(reloaded.items()).extracting(item -> item.itemId()).contains("latest");
+        store.appendPublicEventIfAbsent(tenant, session, "turn",
+                "item.output_text.delta", Map.of("itemId", "newer", "text", "newer"),
+                false, "race-newer");
+        store.materializeNextBatch(tenant, session, 100);
+        long currentCoverage = store.findMessageCoveredSequences(tenant, List.of(session)).get(session);
+        var older = service.transcript(tenant, null, session, reloaded.olderCursor(), 2);
+        assertThat(currentCoverage).isGreaterThan(reloaded.coveredSequence());
+        assertThat(older.coveredSequence()).isEqualTo(currentCoverage);
+        assertThat(older.lastSequence()).isEqualTo(currentCoverage);
+        assertThat(older.items()).extracting(item -> item.itemId()).doesNotContain("newer");
     }
 
     private String session(String tenant) {
