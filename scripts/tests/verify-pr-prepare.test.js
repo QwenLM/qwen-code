@@ -63,6 +63,12 @@ function makeRepo() {
   const git = (...args) =>
     execFileSync('git', args, { cwd: dir, env: gitEnv, encoding: 'utf8' });
   git('init', '-q');
+  // The real repository ignores tmp/, so a second prepare into the same clone
+  // still sees a clean tree; mirror that or the artifact directory itself
+  // would read as an uncommitted change.
+  writeFileSync(join(dir, '.gitignore'), 'tmp/\n');
+  git('add', '.gitignore');
+  git('commit', '-qm', 'ignore tmp');
   writeFileSync(join(dir, 'base.txt'), 'base\n');
   git('add', 'base.txt');
   git('commit', '-qm', 'base');
@@ -76,8 +82,13 @@ function makeRepo() {
   };
 }
 
-/** A `gh` stand-in that returns the snapshot this test controls. */
-function installFakeGh(dir, snapshot) {
+/**
+ * A `gh` stand-in that returns the snapshot this test controls. It lives
+ * outside the clone: prepare refuses untracked files, and a harness planted
+ * inside the tree under test would trip the very check it exercises.
+ */
+function installFakeGh(snapshot) {
+  const dir = makeTmpDir();
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const snapshotPath = join(dir, 'snapshot.json');
@@ -266,7 +277,7 @@ describe('parseArgs', () => {
 describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   it('resolves the coordinates and reports a container boundary', () => {
     const { dir, base, head } = makeRepo();
-    const env = installFakeGh(dir, snapshotFor({ base, head }));
+    const env = installFakeGh(snapshotFor({ base, head }));
     env.SANDBOX = 'docker';
 
     const result = runPrepare(dir, ['42', '--repo', REPO], env);
@@ -275,6 +286,9 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(`repo       ${REPO}`);
     expect(result.stdout).toContain(`base       ${base}`);
     expect(result.stdout).toContain(`head       ${head}`);
+    expect(result.stdout).toContain(
+      'tree       at PR head, clean — reuse this tree and its build',
+    );
     expect(result.stdout).toContain('isolation  SANDBOX=docker');
     expect(result.stdout).toContain('--require-isolation');
 
@@ -286,14 +300,16 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
     expect(artifacts).toMatch(/pr42-verify-\d{8}-\d{6}$/);
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
+    // The round reads both OIDs from this one file instead of deriving them
+    // from HEAD, so the full coordinates are the contract.
     expect(
       JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
-    ).toEqual({ headRefOid: head });
+    ).toEqual({ repo: REPO, pr: 42, baseRefOid: base, headRefOid: head });
   });
 
   it('keeps an earlier report bound to its prepared head', async () => {
     const { dir, base, head } = makeRepo();
-    const env = installFakeGh(dir, snapshotFor({ base, head }));
+    const env = installFakeGh(snapshotFor({ base, head }));
     const first = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(first.status).toBe(0);
     const artifacts = first.stdout.match(/artifacts {2}(\S+)/)?.[1];
@@ -355,7 +371,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // mode, run where PR code actually executes.
   it('reports a seatbelt process without claiming it is a boundary', () => {
     const { dir, base, head } = makeRepo();
-    const env = installFakeGh(dir, snapshotFor({ base, head }));
+    const env = installFakeGh(snapshotFor({ base, head }));
     env.SANDBOX = 'sandbox-exec';
     if (detectIsolation().isolated) return;
 
@@ -433,7 +449,6 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   it('strips control characters from an untrusted title', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(
-      dir,
       snapshotFor({ base, head, title: `evil${ESC}[2Jtitle` }),
     );
     env.SANDBOX = 'docker';
@@ -446,7 +461,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
 
   it('names the fetch that brings a missing OID into the clone', () => {
     const { dir, base } = makeRepo();
-    const env = installFakeGh(dir, snapshotFor({ base, head: OID('f') }));
+    const env = installFakeGh(snapshotFor({ base, head: OID('f') }));
     env.SANDBOX = 'docker';
 
     const result = runPrepare(dir, ['42', '--repo', REPO], env);
@@ -457,6 +472,67 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stderr).toContain(
       `git fetch https://github.com/${REPO}.git pull/42/head`,
     );
+  });
+
+  // The round reuses the current tree as the head side of its A/B, so a tree
+  // at any other commit would measure code the report does not name.
+  it('refuses a tree that is not at the PR head, naming the checkout', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    execFileSync('git', ['checkout', '-q', '--detach', base], {
+      cwd: dir,
+      env: gitEnv,
+    });
+
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain(`current tree is at ${base}`);
+    expect(result.stderr).toContain(`not PR head ${head}`);
+    expect(result.stderr).toContain(`git checkout ${head}`);
+    // The check runs before the artifact directory exists: a refusal leaves
+    // nothing behind.
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+  });
+
+  it('refuses a dirty tree without stashing it', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+
+    // A tracked modification is refused, and the change is still there.
+    writeFileSync(join(dir, 'head.txt'), 'changed\n');
+    const modified = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(modified.status).toBe(3);
+    expect(modified.stderr).toContain('uncommitted changes');
+    expect(modified.stderr).toContain('never stashes for you');
+    expect(readFileSync(join(dir, 'head.txt'), 'utf8')).toBe('changed\n');
+
+    // An untracked file is refused too: it can be source the harness loads.
+    execFileSync('git', ['checkout', '-q', '--', 'head.txt'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    writeFileSync(join(dir, 'stray.txt'), 'stray\n');
+    const untracked = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(untracked.status).toBe(3);
+    expect(untracked.stderr).toContain('uncommitted changes');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+  });
+
+  // status.showUntrackedFiles=no is a real maintainer config on large repos;
+  // the gate must not inherit it, or an untracked source file walks through.
+  it('refuses untracked files even when git config hides them', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    writeFileSync(join(dir, 'stray.txt'), 'stray\n');
+
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('uncommitted changes');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
   });
 
   it('refuses to run without a repository', () => {

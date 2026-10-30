@@ -22,6 +22,10 @@ Two entry paths share the contract below.
 - **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
   `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` (the
   preflight requires the repository explicitly; `origin` is not a fallback).
+  It writes the round's coordinates (`repo`, `pr`, `baseRefOid`, `headRefOid`)
+  to `context.json` and refuses a tree that is not a clean checkout of the PR
+  head — when it passes, the current tree is the head side of the A/B and its
+  install and build are reused, so stay on the PR branch and keep it clean.
   This round executes untrusted PR code, so it needs an isolation boundary
   (see _Local invocation_).
 
@@ -140,8 +144,12 @@ trigger the sandboxed `@qwen-code /verify` lane instead.
 
 Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
 before anything else: it fetches the metadata snapshot, resolves and verifies
-both OIDs against this clone, creates `tmp/pr<n>-verify-<ts>/`, and reports the
-isolation signals it can see. It does not gate on them — resolving metadata
+both OIDs against this clone, refuses a tree that is not a clean checkout of
+the PR head (a wrong HEAD names the `git checkout` to run; a dirty tree asks
+you to commit or stash it yourself — the script never stashes for you),
+creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
+`baseRefOid` and `headRefOid`, and reports the isolation signals it can see.
+It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
 The boundary check belongs inside: run
 `node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
@@ -243,12 +251,17 @@ calls a day per PR — and the round is the expensive part. Repo-wide watching i
 a different probe (`qwen review watch-repo`, event `pr_pushed`); `--watch` stays
 per-PR because a round is per-PR.
 
-**Do not assume `HEAD^1`/`HEAD^2` locally.** Those hold only for a merge-ref
-checkout; on a plain PR-head checkout `HEAD^1` is just the head's parent and
-`HEAD^2` usually does not exist, so the A/B would silently compare the wrong
-base. Resolve `baseRefOid` and `headRefOid` explicitly from `gh pr view` and
-use those OIDs throughout; if either is not present locally, report
-`inconclusive` rather than substituting a parent.
+**Local coordinates come from `context.json`, never from `HEAD`.**
+`verify-pr-prepare.mjs` writes `repo`, `pr`, `baseRefOid` and `headRefOid`
+into the round's `tmp/pr<n>-verify-<ts>/context.json`, and only passes when
+the current tree is a clean checkout of `headRefOid` — so the current tree
+**is** the head side of the A/B: reuse its install and build instead of
+checking out a second head tree. Read both OIDs from that file throughout
+the round. `HEAD^1`/`HEAD^2` hold only on the CI merge-ref checkout; on a
+plain PR-head checkout `HEAD^1` is just the head's parent and `HEAD^2`
+usually does not exist, so deriving the base from them would silently
+compare the wrong commit. If an OID the round needs is not present locally,
+report `inconclusive` rather than substituting a parent.
 
 **Local follow-up rounds: check the prior round before scoping.**
 The CI follow-up trigger (`previous-report.md` next to the context file)
@@ -501,13 +514,13 @@ Run the identical scenario against the PR build and a control build that
 differs only by the change under test; the verdict is the pair of counts.
 
 - Base side: `git worktree add tmp/base-tree <base>` where `<base>` is
-  `HEAD^1` **only on the CI merge-ref checkout**; in local mode it is the
-  resolved `baseRefOid` from the metadata snapshot, because a plain PR-head
-  checkout's `HEAD^1` is the previous PR commit and would attribute earlier
-  commits of this PR to the change under test. (Keep scratch worktrees
-  under `tmp/` and `git worktree remove --force` them once the A/B cells are
-  captured — the workflow sweeps leftover `tmp/` worktrees as a backstop, but
-  never rely on it), then rebuild **only the
+  `HEAD^1` on the CI merge-ref checkout, else the `baseRefOid` from the
+  round's `context.json` — never a plain PR-head checkout's `HEAD^1`, which
+  is the previous PR commit and would attribute earlier commits of this PR
+  to the change under test (the local-coordinates rule above). (Keep scratch
+  worktrees under `tmp/` and `git worktree remove --force` them once the A/B
+  cells are captured — the workflow sweeps leftover `tmp/` worktrees as a
+  backstop, but never rely on it), then rebuild **only the
   affected workspace or file** — e.g. `npm run build -w packages/<ws>` inside
   the base tree wired to the already-installed root `node_modules`, or
   recompile the single changed module. A full base `pnpm install` rarely fits the
@@ -1566,7 +1579,9 @@ central claim from being tested — say why.
 ### report.md structure
 
 1. **Verdict line first**, with assertion totals and the verified head OID
-   (`git rev-parse HEAD^2` — not the snapshot's, which may have drifted).
+   (`git rev-parse HEAD^2` in the lane — not the metadata snapshot's, which
+   may have drifted; the `headRefOid` from `context.json` locally, which
+   prepare pinned to the clean tree the round verified).
 2. **中文摘要** in a collapsed `<details>` block, **immediately after the
    verdict**: verdict, A/B 结论, findings, 未覆盖范围. Collapsed, so it costs a
    reader who does not want it exactly one line; placed here rather than at

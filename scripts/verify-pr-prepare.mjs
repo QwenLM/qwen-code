@@ -17,12 +17,15 @@
  * or a directory named without the `-verify-` infix all produce a round whose
  * report is about another PR or is discarded outright.
  *
- * This script resolves those coordinates and nothing else. It does not checkout
- * a worktree, build, or execute PR code. It also cannot gate on isolation:
- * resolving the coordinates needs `gh`, and `gh` and the boundary are mutually
- * exclusive, so this path always runs on the host. The gate is the separate
- * `--require-isolation` mode, meant to run inside the boundary before the round
- * executes anything.
+ * This script resolves those coordinates and checks the tree the round will
+ * reuse; it does not checkout a worktree, build, or execute PR code. The tree
+ * check exists because the round runs the head side of its A/B in the current
+ * tree: prepare refuses a HEAD other than the PR head or any uncommitted
+ * change, and never stashes for the maintainer. It also cannot gate on
+ * isolation: resolving the coordinates needs `gh`, and `gh` and the boundary
+ * are mutually exclusive, so this path always runs on the host. The gate is
+ * the separate `--require-isolation` mode, meant to run inside the boundary
+ * before the round executes anything.
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
@@ -38,7 +41,7 @@
  * Exit codes:
  *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
- *   3  metadata, OID, or filesystem failure
+ *   3  metadata, OID, tree-state, or filesystem failure
  *   4  --require-isolation found no boundary — do not run PR code here
  */
 
@@ -69,7 +72,10 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
 
   - fetches the PR snapshot with gh, from the repository you name
   - verifies the base and head OIDs exist in this clone
+  - refuses a tree that is not a clean checkout of the PR head, so the round
+    can reuse the current tree and its build as the head side of the A/B
   - creates tmp/pr<n>-verify-<YYYYMMDD-HHMMSS>/ with an evidence/ subdirectory
+    and a context.json holding repo, pr, baseRefOid and headRefOid
   - reports the isolation signals this process can observe
 
 The coordinate path runs on the host by construction: it needs gh, and gh and
@@ -340,6 +346,39 @@ function main(argv) {
     }
   }
 
+  // The round runs the head side of its A/B in this tree, so a HEAD other
+  // than the PR head or an uncommitted change would measure code the report
+  // does not name. Checked before the artifact directory exists, so a refusal
+  // leaves nothing behind.
+  const treeHead = run('git', ['-C', root, 'rev-parse', 'HEAD']);
+  if (treeHead.status !== 0) {
+    return fail(3, 'could not read HEAD in this clone');
+  }
+  if (treeHead.stdout.trim() !== context.head) {
+    return fail(
+      3,
+      `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`,
+    );
+  }
+  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
+  // hide the untracked files this check exists to refuse.
+  const dirty = run('git', [
+    '-C',
+    root,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ]);
+  if (dirty.status !== 0) {
+    return fail(3, 'could not read the working tree status');
+  }
+  if (dirty.stdout.trim() !== '') {
+    return fail(
+      3,
+      'working tree has uncommitted changes — commit or stash them yourself, then re-run prepare; this script never stashes for you',
+    );
+  }
+
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
@@ -355,7 +394,12 @@ function main(argv) {
   writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
   writeFileSync(
     join(artifacts, 'context.json'),
-    `${JSON.stringify({ headRefOid: context.head })}\n`,
+    `${JSON.stringify({
+      repo: slug,
+      pr: context.pr,
+      baseRefOid: context.base,
+      headRefOid: context.head,
+    })}\n`,
   );
 
   const isolation = detectIsolation();
@@ -368,6 +412,7 @@ function main(argv) {
     `  pr         #${context.pr}${title ? ` ${title}` : ''}`,
     `  base       ${context.base}`,
     `  head       ${context.head}`,
+    '  tree       at PR head, clean — reuse this tree and its build',
     `  context    ${contextPath}`,
     `  artifacts  ${artifacts}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
