@@ -2470,7 +2470,6 @@ export const useLlmStream = (
         }
         let target: number;
         let fenceHandoff = false;
-        let fallbackSplitPoint = -1;
         const mathHandoff =
           carriedMath &&
           firstCodeHandoff > 0 &&
@@ -2490,17 +2489,14 @@ export const useLlmStream = (
           const fallbackIndex = capAllowsCodeSplit
             ? charIndexAfterLine(newLlmMessageBuffer, keptLines)
             : fencedBoundaryIndex;
-          fallbackSplitPoint =
-            capAllowsCodeSplit && capFenceStart > 0 && fallbackIndex > 0
-              ? findLastSafeSplitPoint(newLlmMessageBuffer, fallbackIndex)
-              : -1;
-          fenceHandoff =
-            capAllowsCodeSplit &&
-            capFenceStart > 0 &&
-            fallbackSplitPoint >= 0 &&
-            fallbackSplitPoint < capFenceStart;
+          if (capAllowsCodeSplit && capFenceStart === 0 && keptLines <= 1) {
+            break; // Reopening only the opener cannot consume a code line.
+          }
+          // Math literals can confuse fence-only helpers. Use the real opener
+          // from the scan first, then repair only the leading code buffer.
+          fenceHandoff = capAllowsCodeSplit && capFenceStart > 0;
           const fenceInfo =
-            fallbackIndex > 0
+            !fenceHandoff && fallbackIndex > 0
               ? getEnclosingFenceInfo(newLlmMessageBuffer, fallbackIndex)
               : null;
           // Only hard-split a real code block. Other tall blocks (tables/lists)
@@ -2519,9 +2515,7 @@ export const useLlmStream = (
         }
         const splitPoint =
           boundaryIndex < 0 && !mathHandoff && !fenceHandoff
-            ? fallbackSplitPoint >= 0
-              ? fallbackSplitPoint
-              : findLastSafeSplitPoint(newLlmMessageBuffer, target)
+            ? findLastSafeSplitPoint(newLlmMessageBuffer, target)
             : target;
         if (splitPoint <= 0 || splitPoint >= newLlmMessageBuffer.length) {
           break;

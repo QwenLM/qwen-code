@@ -15759,6 +15759,202 @@ describe('useLlmStream', () => {
       });
     });
 
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].flatMap((newline) =>
+          ['```', '````text'].map((literalFence) => ({
+            mode,
+            newline,
+            literalFence,
+          })),
+        ),
+      ),
+    )(
+      'hands off completed math containing $literalFence before tall code in $mode with %j',
+      async ({ mode, newline, literalFence }) => {
+        const math = ['$$', literalFence, '$$', ''].join(newline);
+        const codeLines = Array.from(
+          { length: 55 },
+          (_, index) => `const v${index} = ${index};`,
+        );
+        const content = `${math}\`\`\`js${newline}${codeLines.slice(0, 40).join(newline)}${newline}`;
+        const continuation = `${codeLines.slice(40).join(newline)}${newline}`;
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        let stream: Awaited<ReturnType<typeof streamStages>> | undefined;
+        const checkCode = (expectedLines: string[]) => {
+          const committed = llmContentItems();
+          expect(committed[0]?.text).toBe(math);
+          expect(
+            committed.filter((item) => item.text.includes('$$')),
+          ).toHaveLength(1);
+          const pending = result.current.pendingHistoryItems[0]?.text ?? '';
+          const chunks = [
+            ...committed.slice(1).map((item) => item.text),
+            pending,
+          ];
+          const actualLines: string[] = [];
+          for (const chunk of chunks) {
+            expect(chunk).toMatch(/^```js(?: qwen-code:start-line=\d+)?\r?\n/);
+            const startLine = Number(
+              /qwen-code:start-line=(\d+)/.exec(chunk)?.[1] ?? 1,
+            );
+            expect(startLine).toBe(actualLines.length + 1);
+            actualLines.push(
+              ...chunk
+                .split(/\r?\n/)
+                .filter((line) => /^const v\d+ = \d+;$/.test(line)),
+            );
+          }
+          for (const chunk of chunks.slice(0, -1)) {
+            expect(chunk).toMatch(/\n```\n$/);
+          }
+          expect(actualLines).toEqual(expectedLines);
+          expect(pending.split('\n').length).toBeLessThanOrEqual(24);
+        };
+        try {
+          stream = await streamStages(result, [
+            content,
+            continuation,
+            `\`\`\`${newline}${newline}Done.`,
+          ]);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(llmContentItems().length).toBeGreaterThanOrEqual(2);
+          checkCode(codeLines.slice(0, 40));
+          const firstCommitCount = llmContentItems().length;
+          await stream.advance();
+          expect(llmContentItems().length).toBeGreaterThan(firstCommitCount);
+          checkCode(codeLines);
+          await stream.advance();
+          expect(
+            llmContentItems().filter((item) => item.text.includes('$$')),
+          ).toHaveLength(1);
+          const finalChunks = [
+            ...llmContentItems().map((item) => item.text),
+            result.current.pendingHistoryItems[0]?.text ?? '',
+          ];
+          expect(
+            finalChunks.flatMap((chunk) =>
+              chunk
+                .split(/\r?\n/)
+                .filter((line) => /^const v\d+ = \d+;$/.test(line)),
+            ),
+          ).toEqual(codeLines);
+          expect(finalChunks.join('')).toContain(
+            `\`\`\`${newline}${newline}Done.`,
+          );
+        } finally {
+          await stream?.stop();
+        }
+      },
+    );
+
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].map((newline) => ({ mode, newline })),
+      ),
+    )(
+      'keeps mermaid whole after completed math containing a bare fence in $mode with %j',
+      async ({ mode, newline }) => {
+        const content = [
+          '$$',
+          '```',
+          '$$',
+          '```mermaid',
+          'graph TD',
+          ...Array.from(
+            { length: 40 },
+            (_, index) => `A${index} --> A${index + 1}`,
+          ),
+        ].join(newline);
+        const close = `${newline}\`\`\`${newline}${newline}`;
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        let stream: Awaited<ReturnType<typeof streamStages>> | undefined;
+        try {
+          stream = await streamStages(result, [content, `${close}Done.`]);
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+          await stream.advance();
+          const chunks = [
+            ...llmContentItems().map((item) => item.text),
+            result.current.pendingHistoryItems[0]?.text ?? '',
+          ];
+          expect(chunks.join('')).toBe(`${content}${close}Done.`);
+          const diagrams = chunks.filter((chunk) => chunk.includes('graph TD'));
+          expect(diagrams).toHaveLength(1);
+          expect(diagrams[0]).toContain(`\`\`\`mermaid${newline}graph TD`);
+          expect(diagrams[0]).toContain(`A39 --> A40${close}`);
+        } finally {
+          await stream?.stop();
+        }
+      },
+    );
+
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].map((newline) => ({ mode, newline })),
+      ),
+    )(
+      'does not repeat opener-only chunks after a math handoff in $mode with %j',
+      async ({ mode, newline }) => {
+        const math = ['$$', '```', '$$', ''].join(newline);
+        const code = ['```json', 'x'.repeat(5000), '```'].join(newline);
+        const committed: string[] = [];
+        let guardTriggered = false;
+        const originalAddItem = mockAddItem.getMockImplementation();
+        mockAddItem.mockImplementation((value) => {
+          const item = value as HistoryItem;
+          if (item.type === 'gemini' || item.type === 'gemini_content') {
+            committed.push(item.text);
+            if (committed.length > 12) {
+              guardTriggered = true;
+              throw new Error('opener-only commit loop exceeded test bound');
+            }
+          }
+          return 1;
+        });
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        let stream: Awaited<ReturnType<typeof streamStages>> | undefined;
+        try {
+          stream = await streamStages(result, [`${math}${code}`]);
+          expect(guardTriggered).toBe(false);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(committed).toEqual([math]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(code);
+        } finally {
+          mockAddItem.mockReset();
+          if (originalAddItem) mockAddItem.mockImplementation(originalAddItem);
+          await stream?.stop();
+        }
+      },
+    );
+
     it('keeps a tall mermaid block whole (never splits it mid-diagram)', async () => {
       vi.useFakeTimers();
       vi.mocked(findLastSafeSplitPoint).mockImplementation(
