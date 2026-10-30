@@ -37,6 +37,7 @@ interface ContextUsageProps {
   breakdown: ContextCategoryBreakdown;
   builtinTools: ContextToolDetail[];
   mcpTools: ContextToolDetail[];
+  instructionFiles?: ContextMemoryDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
   /** True when totalTokens is estimated (no API call yet) */
@@ -57,6 +58,10 @@ function truncateName(name: string, maxLen: number): string {
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function formatTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
@@ -281,11 +286,14 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   breakdown,
   builtinTools,
   mcpTools,
+  instructionFiles = [],
   memoryFiles,
   skills,
   isEstimated,
   showDetails = false,
 }) => {
+  const memoryLabel =
+    breakdown.instructionFiles === undefined ? 'Memory files' : 'Auto memory';
   const hasTokenCount = totalTokens > 0;
   const percentage =
     contextWindowSize > 0 ? (totalTokens / contextWindowSize) * 100 : 0;
@@ -458,9 +466,18 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           symbolColor={theme.text.accent}
         />
       )}
+      {breakdown.instructionFiles !== undefined && (
+        <CategoryRow
+          symbol={FILLED}
+          label={t('Instruction files')}
+          tokens={breakdown.instructionFiles}
+          contextWindowSize={contextWindowSize}
+          symbolColor={theme.text.accent}
+        />
+      )}
       <CategoryRow
         symbol={FILLED}
-        label={t('Memory files')}
+        label={t(memoryLabel)}
         tokens={breakdown.memoryFiles}
         contextWindowSize={contextWindowSize}
         symbolColor={theme.text.accent}
@@ -546,11 +563,27 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
             </Box>
           )}
 
+          {instructionFiles.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={theme.text.primary}>
+                {t('Instruction files')}
+              </Text>
+              {[...instructionFiles]
+                .sort((a, b) => b.tokens - a.tokens)
+                .map((file) => (
+                  <DetailRow
+                    key={file.path}
+                    name={file.path}
+                    tokens={file.tokens}
+                  />
+                ))}
+            </Box>
+          )}
           {/* Memory files detail */}
           {sortedMemoryFiles.length > 0 && (
             <Box flexDirection="column" marginTop={1}>
               <Text bold color={theme.text.primary}>
-                {t('Memory files')}
+                {t(memoryLabel)}
               </Text>
               {sortedMemoryFiles.map((file) => (
                 <DetailRow

@@ -52,7 +52,8 @@ const report = {
   postFailureLoads: [] as boolean[],
   postFailureCancellationLoads: 0,
   // Record non-resuming recovery modes separately from their wire origins.
-  // Both modes target the original prompt; cleanup alone cannot prove takeover.
+  // A targeted cancellation proves the replacement; a cleanup load only proves
+  // that no resume ran, so the two are counted apart.
   postFailureLoadOrigins: [] as string[],
   lateCancelReplays: 0,
   originalCancelBody: '',
@@ -169,9 +170,11 @@ const proxy = createServer(async (req, res) => {
           typeof fields.cancellationPromptId === 'string' &&
           fields.cancellationPromptId === report.promptId &&
           fields.recoveryCleanupPromptId === undefined;
+        // Cleanup does not carry the client prompt id, and both cleanup
+        // branches return before any resume, so a targeted cleanup load is
+        // non-resuming whatever prompt it names.
         const cleanupOnly =
           typeof fields.recoveryCleanupPromptId === 'string' &&
-          fields.recoveryCleanupPromptId === report.promptId &&
           fields.cancellationTakeover !== true &&
           fields.passiveManagedRuntimeRecovery !== true &&
           fields.cancellationPromptId === undefined;
