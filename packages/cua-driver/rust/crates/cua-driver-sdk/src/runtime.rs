@@ -189,7 +189,7 @@ pub(crate) struct DriverRuntime {
     /// Calls hold a read guard; shutdown takes the write guard after closing
     /// admission. Therefore shutdown is idempotent and does not return while a
     /// previously admitted operation is still executing.
-    lifecycle: tokio::sync::RwLock<()>,
+    lifecycle: Arc<tokio::sync::RwLock<()>>,
     activity_observer: Option<Arc<dyn DriverActivityObserver>>,
 }
 
@@ -234,7 +234,7 @@ impl DriverRuntime {
             #[cfg(target_os = "macos")]
             ui_active: AtomicBool::new(ui_active),
             last_activity: AtomicU64::new(now_unix_secs()),
-            lifecycle: tokio::sync::RwLock::new(()),
+            lifecycle: Arc::new(tokio::sync::RwLock::new(())),
             activity_observer: options.activity_observer.clone(),
         });
         spawn_lifecycle_maintenance(&runtime);
@@ -283,13 +283,17 @@ impl DriverRuntime {
         self.is_running().then(|| self.registry.tools_list())
     }
 
-    pub(crate) async fn invoke(&self, name: &str, args: Value) -> Option<CoreToolResult> {
+    pub(crate) async fn invoke(
+        self: &Arc<Self>,
+        name: &str,
+        args: Value,
+    ) -> Option<CoreToolResult> {
         self.invoke_with_context(name, args, self.compatibility_context.clone())
             .await
     }
 
     pub(crate) async fn invoke_from_trusted_adapter(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         mut args: Value,
     ) -> Option<CoreToolResult> {
@@ -305,7 +309,7 @@ impl DriverRuntime {
     }
 
     async fn invoke_with_context(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         args: Value,
         context: Arc<EffectiveAuthorizationContext>,
@@ -320,7 +324,7 @@ impl DriverRuntime {
     }
 
     async fn invoke_with_context_and_evidence(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         args: Value,
         context: Arc<EffectiveAuthorizationContext>,
@@ -330,7 +334,7 @@ impl DriverRuntime {
             return None;
         }
         self.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-        let _operation = self.lifecycle.read().await;
+        let operation = self.lifecycle.clone().read_owned().await;
         if !self.is_running() {
             return None;
         }
@@ -351,9 +355,10 @@ impl DriverRuntime {
             .into_iter()
             .map(|adapter| adapter.id.to_owned())
             .collect::<Vec<_>>();
+        let evidence = evidence.with_runtime_operation((self.clone(), operation));
         let result = self
             .registry
-            .invoke_with_context_and_evidence(name, args, context, evidence)
+            .invoke_with_context_and_evidence(name, args, context, evidence.clone())
             .await;
         if let Some(observer) = self.activity_observer.as_ref() {
             let refusal_code = result
@@ -964,5 +969,105 @@ mod tests {
         );
 
         runtime.shutdown().await.unwrap();
+    }
+
+    struct PendingNativeTool {
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        finished: std::sync::mpsc::Sender<()>,
+    }
+
+    static PENDING_NATIVE_TOOL: std::sync::Mutex<Option<PendingNativeTool>> =
+        std::sync::Mutex::new(None);
+
+    #[async_trait]
+    impl cua_driver_core::tool::Tool for PendingNativeTool {
+        fn def(&self) -> &cua_driver_core::tool::ToolDef {
+            static DEF: std::sync::OnceLock<cua_driver_core::tool::ToolDef> =
+                std::sync::OnceLock::new();
+            DEF.get_or_init(|| cua_driver_core::tool::ToolDef {
+                name: "get_screen_size".into(),
+                description: "test-only native operation with an early ACK".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            })
+        }
+
+        async fn invoke(&self, _args: Value) -> CoreToolResult {
+            let lifetime = cua_driver_core::tool::retain_dispatch_lifetime();
+            let release = self.release.lock().unwrap().take().unwrap();
+            let finished = self.finished.clone();
+            tokio::task::spawn_blocking(move || {
+                let _lifetime = lifetime;
+                release.recv().unwrap();
+                drop(_lifetime);
+                finished.send(()).unwrap();
+            });
+            CoreToolResult::text("pending native call; observe before retrying")
+        }
+    }
+
+    #[tokio::test]
+    async fn early_ack_retains_native_session_cleanup_and_runtime_drain() {
+        let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
+        let (release, receiver) = std::sync::mpsc::channel();
+        let (finished, completed) = std::sync::mpsc::channel();
+        *PENDING_NATIVE_TOOL.lock().unwrap() = Some(PendingNativeTool {
+            release: std::sync::Mutex::new(Some(receiver)),
+            finished,
+        });
+        let mut options = standard_options();
+        options.register_host_tools = Some(|registry| {
+            registry.register(Box::new(
+                PENDING_NATIVE_TOOL.lock().unwrap().take().unwrap(),
+            ));
+        });
+        let runtime = DriverRuntime::create(options).unwrap();
+        let public = "early-native-ack";
+        let internal = runtime.compatibility_context.runtime_session_key(public);
+        let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleanup_count_for_hook = cleanup_count.clone();
+        let _hook = cua_driver_core::session::register_scoped_session_end_hook(move |id| {
+            if id == internal {
+                cleanup_count_for_hook.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let result = runtime
+            .invoke("get_screen_size", serde_json::json!({"session": public}))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        runtime
+            .invoke("end_session", serde_json::json!({"session": public}))
+            .await
+            .unwrap();
+        let cleanup_before_native_return = cleanup_count.load(Ordering::SeqCst);
+        let mut shutdown = Box::pin(runtime.shutdown());
+        let shutdown_returned_early =
+            tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_ok();
+        release.send(()).unwrap();
+        tokio::task::spawn_blocking(move || {
+            completed.recv_timeout(Duration::from_secs(2)).unwrap()
+        })
+        .await
+        .unwrap();
+        if !shutdown_returned_early {
+            tokio::time::timeout(Duration::from_secs(2), shutdown)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            cleanup_before_native_return, 0,
+            "ACK must not finalize an in-flight native session"
+        );
+        assert!(
+            !shutdown_returned_early,
+            "shutdown must drain a native call that outlived its ACK"
+        );
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     }
 }
