@@ -846,6 +846,25 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void extendedApprovalPoliciesRequireTheirOwnFeaturesAndTheBaseProtocol() {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        var connector = connector(client);
+        when(capabilities.getFeatures()).thenReturn(List.of("auto-approval/1", "permission-rules/1"));
+        assertThat(connector.supportsAutoApproval()).isFalse();
+        assertThat(connector.supportsPermissionRules()).isFalse();
+        when(capabilities.getFeatures()).thenReturn(List.of("approval-selection/1", "auto-approval/1", "permission-rules/1"));
+        assertThat(connector.supportsAutoApproval()).isTrue();
+        assertThat(connector.supportsPermissionRules()).isTrue();
+        when(client.capabilities()).thenThrow(new IllegalStateException("unavailable"));
+        assertThat(connector.supportsAutoApproval()).isFalse();
+        assertThat(connector.supportsPermissionRules()).isFalse();
+        verify(client, never()).loadSession(any());
+        verify(client, never()).createSession(any());
+    }
+
+    @Test
     void titleCapabilityPreflightDoesNotAttachOrSendAMutation() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities unsupported = mock(HostedHarnessCapabilities.class);
@@ -1021,7 +1040,7 @@ class QwenHostedHarnessConnectorTest {
     @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
             "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
             "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
-            "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
+            "hosted-workspace-files/3,false", "hosted-workspace-files/3,true",
             "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
             "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {
@@ -1247,6 +1266,62 @@ class QwenHostedHarnessConnectorTest {
                 assertThat(wire).containsEntry("foregroundOnly", true).doesNotContainKeys("childWorkspaces", "childSnapshots");
             } else {
                 assertThat(wire).containsEntry("childWorkspaces", true).containsEntry("childSnapshots", true);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,0", "false,1", "true,0", "true,1"})
+    void sshPackageExecutionRequiresItsPersistedContractAndNeverEnablesRemoteWorktrees(boolean enabled, int contractVersion) {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of("public-child-agents/1", "approval-selection/1", "session-extension-packages/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of("hosted-workspace-shell/1"));
+        var attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.createSession(any())).thenReturn(attached);
+        when(client.loadSession(any())).thenReturn(attached);
+        var sessions = sessions();
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default", "hosted-workspace-shell/1", null, contractVersion);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var settings = properties();
+        settings.getExtensions().setEnabled(enabled);
+        settings.getManagedExtensions().setEnabled(enabled);
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        settings.getHarness().setWorkspaceShellEnabled(true);
+        settings.getHarness().setWorkspaceChildAgentsEnabled(true);
+        settings.getRuntimeBroker().setDurableLocalProcess(true);
+        settings.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        settings.getRuntimeBroker().setChildSnapshotsEnabled(true);
+        var actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var ssh = mock(SshWorkspaceStore.class);
+        when(ssh.runtimeStorage("tenant-a", "storage")).thenReturn(new SshRuntimeStorage("node", "storage", "/remote",
+                Map.of("identity", Map.of("root", "/remote"), "marker", Map.of("root", "/remote", "storageId", "storage"),
+                        "qwenVersion", "0.25.1")));
+        for (boolean loadExisting : List.of(false, true)) {
+            var connector = new QwenHostedHarnessConnector(settings, sessions, mock(WorkspaceExecutionStore.class), actions, null, null, ssh);
+            ReflectionTestUtils.setField(connector, "client", client);
+            connector.createOrLoad("tenant-a", SESSION_ID, loadExisting);
+        }
+        var create = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        var load = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).createSession(create.capture());
+        verify(client).loadSession(load.capture());
+        Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
+        Map<String, Object> loaded = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
+        for (var wire : List.of(created, loaded)) {
+            assertThat(wire).doesNotContainKeys("childWorkspaces", "childSnapshots");
+            if (enabled && contractVersion == 1) {
+                assertThat(wire).containsEntry("publicChildAgentsVersion", 1).doesNotContainKey("foregroundOnly");
+            } else {
+                assertThat(wire).containsEntry("foregroundOnly", true);
             }
         }
     }

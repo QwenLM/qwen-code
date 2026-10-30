@@ -63,6 +63,8 @@ for (const width of [1280, 390]) {
     await page.route('**/api/agent/web-shell/v1/**', async (route) => {
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -75,7 +77,7 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: workspace });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 10, hasMore: false },
+          json: { items: [], events: [], lastSequence: 10, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });

@@ -14,10 +14,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.MessagePage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
@@ -30,6 +30,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -113,12 +114,14 @@ class ManagedAgentServerIntegrationTest {
     private ManagedAgentStore store;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
     private SessionEventHub eventHub;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @AfterEach
@@ -831,9 +834,6 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.environment.errorCode")
                         .value("runtime_warm_failed"));
 
-        // The snapshot gate defers a caught-up rewrite until 5s after the
-        // last one, so the trailing non-terminal event takes that long to
-        // be covered.
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             MvcResult transcript = mvc.perform(post(
                             "/api/agent/web-shell/v1/transcript/query")
@@ -1060,7 +1060,7 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
                 .extracting(event -> event.sequence())
                 .containsExactly(before + 1, before + 2, before + 3);
-        assertThat(awaitSnapshotCovering(tenant, session.sessionId(),
+        assertThat(awaitMessageCoverage(tenant, session.sessionId(),
                 before + 3))
                 .satisfies(snapshot -> {
                     assertThat(snapshot.coveredSequence())
@@ -1078,7 +1078,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void preservesTextOrderAcrossToolsAndReasoningInSnapshots() {
+    void preservesTextOrderAcrossToolsAndReasoningInMessages() {
         String tenant = "tenant-order-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "order-create", "digest-create",
@@ -1096,16 +1096,12 @@ class ManagedAgentServerIntegrationTest {
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.reasoning.delta", Map.of("text", "thought"),
                 false, "thought");
-        // The trailing event is terminal so the explicit drain below always
-        // rewrites the snapshot: the 10ms materializer may otherwise create
-        // the snapshot mid-sequence, and a non-terminal catch-up inside the
-        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.output_text.delta", Map.of("text", "final"),
                 true, "final");
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> assertThat(snapshot.items())
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true))
+                .satisfies(snapshot -> assertThat(snapshot.items())
                         .filteredOn(item -> "message".equals(item.type()))
                         .singleElement().satisfies(item ->
                                 assertThat(item.content())
@@ -1142,8 +1138,8 @@ class ManagedAgentServerIntegrationTest {
                 "item.output_text.delta", Map.of("text", "done"), true,
                 "final");
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> assertThat(snapshot.items())
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true))
+                .satisfies(snapshot -> assertThat(snapshot.items())
                         .filteredOn(item -> "user".equals(item.role()))
                         .singleElement().satisfies(item ->
                                 assertThat(item.content()).singleElement()
@@ -1157,7 +1153,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void eventsNameTheSnapshotItemsAndPartsTheyChange() {
+    void eventsNameTheProjectedItemsAndPartsTheyChange() {
         String tenant = "tenant-identity-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "identity-create",
@@ -1195,7 +1191,7 @@ class ManagedAgentServerIntegrationTest {
                                         true, "COMPLETED", null, null))));
         store.materializeNextBatch(tenant, sessionId, 200);
 
-        List<EventRecord> events = assertEventsNameTheSnapshot(tenant,
+        List<EventRecord> events = assertEventsNameTheMessages(tenant,
                 sessionId);
         List<EventRecord> deltas = events.stream()
                 .filter(event -> event.type().endsWith(".delta")).toList();
@@ -1226,16 +1222,12 @@ class ManagedAgentServerIntegrationTest {
                     "item.output_text.delta", Map.of("text", text), false,
                     "single:" + text);
         }
-        // The trailing event is terminal so the explicit drain below always
-        // rewrites the snapshot: the 10ms materializer may otherwise create
-        // the snapshot mid-sequence, and a non-terminal catch-up inside the
-        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
                 "item.reasoning.delta", Map.of("text", "c"), true,
                 "single:c");
         store.materializeNextBatch(tenant, sessionId, 100);
 
-        List<EventRecord> deltas = assertEventsNameTheSnapshot(tenant,
+        List<EventRecord> deltas = assertEventsNameTheMessages(tenant,
                 sessionId).stream()
                 .filter(event -> event.type().endsWith(".delta")).toList();
         assertThat(deltas).extracting(EventRecord::contentPartId)
@@ -1290,7 +1282,7 @@ class ManagedAgentServerIntegrationTest {
         store.retractContinuationOutput(tenant, sessionId, turn.turnId(),
                 owner, "boot_old", "epoch_old");
 
-        assertThat(assertEventsNameTheSnapshot(tenant, sessionId))
+        assertThat(assertEventsNameTheMessages(tenant, sessionId))
                 .filteredOn(event -> event.type().endsWith(".delta"))
                 .extracting(EventRecord::itemId, EventRecord::contentPartId)
                 .containsExactly(tuple(null, null), tuple(
@@ -1299,28 +1291,22 @@ class ManagedAgentServerIntegrationTest {
                                 + before.get(1).sequence()));
     }
 
-    // The Snapshot is published after the drain that produced it commits, and
-    // a rewrite the refresh gate deferred stays behind until that floor ages
-    // out, so a drain never leaves the published Snapshot current on its own.
-    // Draining inside the wait keeps this independent of whether the 10ms
-    // materializer or the caller's own drain consumed the batch.
-    private SnapshotRecord awaitSnapshotCovering(String tenant, String sessionId,
+    private MessagePage awaitMessageCoverage(String tenant, String sessionId,
             long sequence) {
         await().atMost(Duration.ofSeconds(30)).until(() -> {
             store.materializeNextBatch(tenant, sessionId, 200);
-            return store.findSnapshot(tenant, sessionId)
-                    .filter(snapshot -> snapshot.coveredSequence() >= sequence)
-                    .isPresent();
+            return store.findMessageCoveredSequences(tenant, List.of(sessionId))
+                    .getOrDefault(sessionId, 0L) >= sequence;
         });
-        return store.findSnapshot(tenant, sessionId).orElseThrow();
+        return store.findMessagePage(tenant, sessionId, null, 100, true);
     }
 
-    // Every event that names an Item or a Part names one of the Snapshot.
-    private List<EventRecord> assertEventsNameTheSnapshot(String tenant,
+    // Every event that names an Item or a Part names one of the projected messages.
+    private List<EventRecord> assertEventsNameTheMessages(String tenant,
             String sessionId) {
         List<EventRecord> events = store.findEvents(tenant, sessionId, 0,
                 100);
-        List<ItemRecord> items = awaitSnapshotCovering(tenant, sessionId,
+        List<ItemRecord> items = awaitMessageCoverage(tenant, sessionId,
                 events.isEmpty() ? 0
                         : events.get(events.size() - 1).sequence())
                 .items();
@@ -2051,8 +2037,8 @@ class ManagedAgentServerIntegrationTest {
                                         null, null))));
 
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .isPresent();
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true).items())
+                .isNotEmpty();
 
         store.retractContinuationOutput(tenant, session.sessionId(),
                 turn.turnId(), owner, "boot_old", "epoch_old");
@@ -2082,8 +2068,8 @@ class ManagedAgentServerIntegrationTest {
                 .filteredOn(event -> "stream.reconciled".equals(event.type()))
                 .hasSize(1);
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> assertThat(snapshot.items())
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true))
+                .satisfies(snapshot -> assertThat(snapshot.items())
                         .filteredOn(item -> "message".equals(item.type())
                                 && "assistant".equals(item.role()))
                         .singleElement().satisfies(item ->
@@ -2091,7 +2077,7 @@ class ManagedAgentServerIntegrationTest {
                                         .satisfies(part -> assertThat(
                                                 part.text())
                                                 .isEqualTo("kept"))));
-        assertEventsNameTheSnapshot(tenant, session.sessionId());
+        assertEventsNameTheMessages(tenant, session.sessionId());
     }
 
     // #13319: a restarted model attempt retracts the published prefix of the
@@ -2134,8 +2120,8 @@ class ManagedAgentServerIntegrationTest {
                                         Map.of("text", "prefix"), false,
                                         null, null, null))));
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .isPresent();
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true).items())
+                .isNotEmpty();
 
         store.retractHarnessTurnOutput(tenant, session.sessionId(),
                 turn.turnId(), owner, "epoch_1", 3, 5);
@@ -2168,15 +2154,15 @@ class ManagedAgentServerIntegrationTest {
                 .get().satisfies(record -> assertThat(
                         record.harnessLastEventId()).isEqualTo(5));
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> assertThat(snapshot.items())
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true))
+                .satisfies(snapshot -> assertThat(snapshot.items())
                         .filteredOn(item -> "message".equals(item.type())
                                 && "assistant".equals(item.role()))
                         .singleElement().satisfies(item ->
                                 assertThat(item.content()).singleElement()
                                         .satisfies(part -> assertThat(
                                                 part.text()).isEqualTo("kept"))));
-        assertEventsNameTheSnapshot(tenant, session.sessionId());
+        assertEventsNameTheMessages(tenant, session.sessionId());
 
         // A redelivered retraction does not retract again, but the cursor
         // still advances past it.
@@ -2278,7 +2264,7 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId())).get()
                 .satisfies(record -> assertThat(record.harnessLastEventId()).isEqualTo(7));
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId())).isPresent();
+        assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true).items()).isNotEmpty();
         store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new",
                 List.of(new HarnessEvent(8, "boot_new:epoch_new:8", new ProjectedEvent("turn.completed",
                         Map.of(), true, "COMPLETED", null, null))));
@@ -2286,9 +2272,9 @@ class ManagedAgentServerIntegrationTest {
                 .filteredOn(event -> "turn.completed".equals(event.type()) && turn.turnId().equals(event.turnId())).hasSize(1);
         store.materializeNextBatch(tenant, session.sessionId(), 100);
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
+                assertThat(store.findMessagePage(tenant, session.sessionId(), null, 100, true)).satisfies(snapshot ->
                         assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence())));
-        assertEventsNameTheSnapshot(tenant, session.sessionId());
+        assertEventsNameTheMessages(tenant, session.sessionId());
     }
 
     @Test
@@ -2899,40 +2885,6 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
 
-    // A row written while the create bound was 512 keeps its long title:
-    // the unified 256 policy rejects that title as new input, but echoing
-    // the stored title back is a no-op rewrite rather than a permanent 400
-    // — and the over-bound title is never forwarded to the Harness.
-    @Test
-    void aLegacyOverBoundTitleEchoesBackAsANoOpRewrite() throws Exception {
-        String tenant = "tenant-title-legacy-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
-                                .header(TenantContextFilter.HEADER, tenant)
-                                .header("Idempotency-Key", "legacy-title-create")
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
-                .andExpect(status().isAccepted()).andReturn()
-                .getResponse().getContentAsString()).get("id").asText();
-        String legacyTitle = "t".repeat(300);
-        jdbc.update("UPDATE ma_session SET title = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                legacyTitle, tenant, sessionId);
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + legacyTitle + "\"}"), tenant,
-                "legacy-title-echo")
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.metadata.title").value(legacyTitle));
-        // A different over-bound title is still new input, still refused.
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + "x".repeat(300) + "\"}"), tenant,
-                "legacy-title-other")
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code").value("invalid_title"));
-    }
-
     @Test
     void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
@@ -3199,7 +3151,7 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+        FixtureHarness fixtureHarness(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
             return new FixtureHarness(jdbc);
         }
     }

@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.managedagent.automation;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.daemon.DaemonException;
 import com.alibaba.qwen.code.managedagent.AutomationHarnessFake;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -19,14 +22,21 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -35,7 +45,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -81,7 +98,7 @@ class AutomationScannerTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ApplicationContext applicationContext;
@@ -148,9 +165,261 @@ class AutomationScannerTest {
                 clock::get);
     }
 
+    private PublicAutomation defineGated(String gate) {
+        return service.create(tenant, ACTOR, "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf(gate))).body();
+    }
+
+    private AutomationLedgerStore.OccurrenceRow occurrence(String automationId,
+            String key) {
+        return ledger.findOccurrence(tenant, automationId, key).orElseThrow();
+    }
+
+    @Test
+    void aGatedDefinitionFiresOnlyWhenItsProbePrints() {
+        PublicAutomation automation = defineGated("./probe.sh --gate");
+        assertThat(automation.gate()).isEqualTo("./probe.sh --gate");
+        assertThat(automation.gateStatus()).isNull();
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .gate()).isEqualTo("./probe.sh --gate");
+
+        // Quiet: the probe ran, nothing was claimed, the slot is skipped
+        // under its own reason and the status counts it.
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        String first = "schedule:2026-06-01T10:01:00Z";
+        assertThat(fake.probes).containsExactly(automation.id() + "|" + first);
+        assertThat(occurrence(automation.id(), first).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(occurrence(automation.id(), first).reason())
+                .isEqualTo(AutomationScanner.REASON_GATE_QUIET);
+        PublicAutomation quiet = service.get(tenant, ACTOR, automation.id());
+        assertThat(quiet.gateStatus().lastOutcome()).isEqualTo("quiet");
+        assertThat(quiet.gateStatus().lastAt()).isEqualTo(clock.get());
+        assertThat(quiet.gateStatus().quietSinceDelivery()).isEqualTo(1);
+        assertThat(quiet.gateStatus().consecutiveFailures()).isEqualTo(0);
+        assertThat(quiet.gateStatus().lastError()).isNull();
+
+        // Failed, unknown and blocked grow one streak and keep the detail.
+        fake.gateAnswers.add("failed:exited with code 1");
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        String second = "schedule:2026-06-01T10:02:00Z";
+        assertThat(occurrence(automation.id(), second).reason())
+                .isEqualTo(AutomationScanner.REASON_GATE_FAILED);
+        assertThat(occurrence(automation.id(), second).lastError())
+                .isEqualTo("exited with code 1");
+        fake.gateAnswers.add("unknown:the Runtime did not settle");
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:03:00Z")
+                .reason()).isEqualTo(AutomationScanner.REASON_GATE_UNKNOWN);
+        fake.gateAnswers.add("blocked:the Session's tool profile declares no Shell");
+        clock.set(T0 + 4 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:04:00Z")
+                .reason()).isEqualTo(AutomationScanner.REASON_GATE_BLOCKED);
+        PublicAutomation failing = service.get(tenant, ACTOR, automation.id());
+        assertThat(failing.gateStatus().lastOutcome()).isEqualTo("blocked");
+        assertThat(failing.gateStatus().consecutiveFailures()).isEqualTo(3);
+        assertThat(failing.gateStatus().quietSinceDelivery()).isEqualTo(1);
+        assertThat(failing.gateStatus().lastError())
+                .isEqualTo("the Session's tool profile declares no Shell");
+
+        // Delivered: the one fire, and the status starts over.
+        clock.set(T0 + 5 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(outcomes(automation.id()).get(AutomationLedgerStore
+                .OUTCOME_FIRED)).containsExactly("schedule:2026-06-01T10:05:00Z");
+        assertThat(outcomes(automation.id()).get(AutomationLedgerStore
+                .OUTCOME_SKIPPED)).hasSize(4);
+        PublicAutomation delivered = service.get(tenant, ACTOR, automation.id());
+        assertThat(delivered.gateStatus().lastOutcome()).isEqualTo("delivered");
+        assertThat(delivered.gateStatus().quietSinceDelivery()).isEqualTo(0);
+        assertThat(delivered.gateStatus().consecutiveFailures()).isEqualTo(0);
+        assertThat(delivered.gateStatus().lastError()).isNull();
+        // Every slot asked the Harness once; only the delivery got a run.
+        assertThat(fake.probes).hasSize(5);
+        assertThat(fake.fires()).isEqualTo(5);
+    }
+
+    @Test
+    void anOutcomeOfAReplacedGateDoesNotLandOnTheNewOne() {
+        // The gate is revised while its probe runs: the old command's answer
+        // must not count on the new command's freshly reset status.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("failed:exited with code 1");
+        fake.beforeGateAnswer = () -> service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh")));
+        clock.set(T0 + MINUTE + 1_000);
+        scanner.tick(clock.get());
+        PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+    }
+
+    @Test
+    void aReplayedDeliveryOfAnEarlierRevisionDoesNotCountForTheNewGate() {
+        // The probe delivered and the claim committed, but the answer was
+        // lost; the gate is revised before the re-drive, which replays the
+        // committed run: that delivery was the old command's.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.failAfterNextFireCommit = new DaemonException("connection lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        service.update(tenant, ACTOR, automation.id(),
+                "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh")));
+        clock.addAndGet(11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.probes).hasSize(1);
+        PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+    }
+
+    @Test
+    void everySlotOfOneScanCountsInTheGateStatus() {
+        // One scan hands every due slot the same schedule snapshot: the
+        // counters must still move once per probe.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        fake.gateAnswers.add("quiet");
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(fake.probes).hasSize(3);
+        assertThat(service.get(tenant, ACTOR, automation.id()).gateStatus()
+                .quietSinceDelivery()).isEqualTo(3);
+
+        fake.gateAnswers.add("failed:exited with code 1");
+        fake.gateAnswers.add("failed:exited with code 2");
+        clock.set(T0 + 5 * MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(fake.probes).hasSize(5);
+        PublicAutomation failing = service.get(tenant, ACTOR, automation.id());
+        assertThat(failing.gateStatus().consecutiveFailures()).isEqualTo(2);
+        assertThat(failing.gateStatus().quietSinceDelivery()).isEqualTo(3);
+        assertThat(failing.gateStatus().lastError())
+                .isEqualTo("exited with code 2");
+    }
+
+    @Test
+    void aGateRevisionStartsItsStatusOverAndNullClearsIt() {
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(service.get(tenant, ACTOR, automation.id()).gateStatus()
+                .quietSinceDelivery()).isEqualTo(1);
+        // Another command: the summary described the old one.
+        PublicAutomation revised = service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh"))).body();
+        assertThat(revised.definitionRevision()).isEqualTo(2);
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+        // A revision naming no gate keeps it; null clears it.
+        PublicAutomation kept = service.update(tenant, ACTOR, automation.id(),
+                "key-" + UUID.randomUUID(), new AutomationDefinitionRequest(null,
+                        "Goal 2", null, null, null, null, null, null, null,
+                        null)).body();
+        assertThat(kept.gate()).isEqualTo("./other.sh");
+        PublicAutomation cleared = service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null, NullNode.getInstance()))
+                .body();
+        assertThat(cleared.gate()).isNull();
+        assertThat(cleared.definitionRevision()).isEqualTo(4);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .gate()).isNull();
+        // An ungated fire never probes.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.probes).hasSize(1);
+        // The request's own bounds refuse before the relay.
+        for (JsonNode bad : List.of(TextNode.valueOf("x".repeat(2049)),
+                TextNode.valueOf("./probe.sh\u0007"), TextNode.valueOf("  "),
+                mapper.getNodeFactory().numberNode(7))) {
+            assertThatThrownBy(() -> service.update(tenant, ACTOR,
+                    automation.id(), "key-" + UUID.randomUUID(),
+                    new AutomationDefinitionRequest(null, null, null, null,
+                            null, null, null, null, null, null, bad)))
+                    .isInstanceOf(ManagedAgentException.class)
+                    .extracting(error -> ((ManagedAgentException) error).getCode())
+                    .isEqualTo("invalid_automation");
+        }
+    }
+
+    @Test
+    void aManualRunOfAQuietGateIsSkippedUnderItsReason() {
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, automation.id(),
+                "manual-quiet"))
+                .isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining(AutomationScanner.REASON_GATE_QUIET);
+        assertThat(occurrence(automation.id(), "manual:manual-quiet").outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(occurrence(automation.id(), "manual:manual-quiet").reason())
+                .isEqualTo(AutomationScanner.REASON_GATE_QUIET);
+        // A printing probe fires the manual run like any other.
+        PublicAutomationRun run = service.run(tenant, ACTOR, automation.id(),
+                "manual-print").body();
+        assertThat(run.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.probes).containsExactly(
+                automation.id() + "|manual:manual-quiet",
+                automation.id() + "|manual:manual-print");
+    }
+
     private AutomationScanner scanner(String owner) {
         return new AutomationScanner(ledger, connector, settings,
                 clock::get, owner);
+    }
+
+    private AutomationScanner scanner(String owner, ExecutorService pool) {
+        return new AutomationScanner(ledger, connector, settings,
+                clock::get, owner, pool);
+    }
+
+    /** A real bounded row pool, shut down by each test that opens one. */
+    private ThreadPoolTaskExecutor rowPool(int threads) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(threads);
+        executor.setMaxPoolSize(threads);
+        executor.setThreadNamePrefix("automation-scan-test-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.afterPropertiesSet();
+        return executor;
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(error);
+        }
+    }
+
+    private long leaseUntilOf(String automationId) {
+        Long until = jdbc.queryForObject("SELECT lease_until FROM ma_schedule"
+                        + " WHERE tenant_id = ? AND schedule_id = ?",
+                Long.class, tenant, automationId);
+        return until == null ? -1 : until;
     }
 
     private PublicAutomation define(String cron, String overlap,
@@ -1199,7 +1468,7 @@ class AutomationScannerTest {
         assertThat(applicationContext.containsBean("managedAutomationScheduler"))
                 .isTrue();
         assertThat(applicationContext.getBean("managedAutomationScheduler"))
-                .isNotSameAs(applicationContext.getBean("taskScheduler"));
+                .isNotSameAs(applicationContext.getBean("managedAgentScheduler"));
         var scheduled = AutomationScanner.class.getMethod("scan")
                 .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler())
@@ -1679,6 +1948,56 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aGateTheHarnessRefusesReleasesTheClaimSoAFixedRetrySucceeds() {
+        // The server's own checks accept `sleep 5 &`; the Harness's shell
+        // checks refuse it before committing, so the key goes back.
+        String key = "gate-" + UUID.randomUUID();
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf("sleep 5 &"))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("automation_gate_invalid");
+                });
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        PublicAutomation fixed = service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf("./probe.sh"))).body();
+        assertThat(fixed.gate()).isEqualTo("./probe.sh");
+    }
+
+    @Test
+    void aGateTheSessionCannotRunReleasesTheClaim() {
+        // No Shell, or a pinned Hook catalog: the Harness refuses before it
+        // commits, so the key goes back for a retry without the gate.
+        String key = "unsupported-" + UUID.randomUUID();
+        fake.gateUnsupported = true;
+        try {
+            assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal",
+                            "* * * * *", "UTC", "Run it.", null, "skip", "none",
+                            null, true, TextNode.valueOf("./probe.sh"))))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> {
+                                assertThat(error.getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT);
+                                assertThat(error.getCode()).isEqualTo(
+                                        "automation_gate_unsupported");
+                            });
+            assertThat(ledger.findCommand(tenant, key)).isEmpty();
+            PublicAutomation ungated = service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal",
+                            "* * * * *", "UTC", "Run it.", null, "skip", "none",
+                            null, true)).body();
+            assertThat(ungated.gate()).isNull();
+        } finally {
+            fake.gateUnsupported = false;
+        }
+    }
+
+    @Test
     void aDefinitiveRefusalReleasesTheClaimSoAFixedRetrySucceeds() {
         String key = "fix-" + UUID.randomUUID();
         // The mode gate refuses per_run: a definitive 4xx, nothing
@@ -1972,6 +2291,505 @@ class AutomationScannerTest {
                 .orElseThrow();
         assertThat(row.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.fires()).isEqualTo(2);
+    }
+
+    @Test
+    void firesDueTogetherSettleAcrossTheRowPool() {
+        // #15418: three slow fires due on the same minute must overlap each
+        // other on one node's scanner instead of queueing behind the tick's
+        // single thread. The latch only opens once every fire is in flight,
+        // so a pool that ever lets fewer than three probes run at once
+        // deadlocks this test until its timeout fails it.
+        PublicAutomation firstAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation secondAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation thirdAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        CountDownLatch arrived = new CountDownLatch(3);
+        AtomicInteger inFlight = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        HookedConnector hooked = new HookedConnector(fake);
+        hooked.onFire = body -> {
+            int now = inFlight.incrementAndGet();
+            peak.accumulateAndGet(now, Math::max);
+            try {
+                arrived.countDown();
+                awaitLatch(arrived);
+            } finally {
+                inFlight.decrementAndGet();
+            }
+        };
+        ThreadPoolTaskExecutor rows = rowPool(3);
+        try {
+            AutomationScanner pooled = new AutomationScanner(ledger, hooked,
+                    settings, clock::get, "scanner-pool",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThat(pooled.tick(clock.get())).isEqualTo(3);
+            assertThat(peak.get()).isEqualTo(3);
+        } finally {
+            rows.destroy();
+        }
+        String slot = "schedule:2026-06-01T10:01:00Z";
+        assertThat(occurrence(firstAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(secondAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(thirdAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+    }
+
+    @Test
+    void theLeaseRunsFromTheClaimNotTheTick() {
+        // #15418: with rows on a pool the first row's fire can run halfway
+        // through the lease before the second row starts. A lease anchored
+        // at the tick's start would already be (close to) expired when the
+        // second claim lands; anchoring at the claim keeps it whole. The row
+        // order inside the tick is the store's, so the slow fire is
+        // whichever runs first.
+        define("* * * * *", "allow", "none", null, true);
+        define("* * * * *", "allow", "none", null, true);
+        HookedConnector hooked = new HookedConnector(fake);
+        Map<String, Long> leased = new java.util.concurrent
+                .ConcurrentHashMap<>();
+        AtomicInteger inFire = new AtomicInteger();
+        hooked.onFire = body -> {
+            String id = String.valueOf(body.get("scheduleId"));
+            // The fire runs under the claim: the lease each definition
+            // holds by now is anchored at its own claim, never the tick.
+            leased.put(id, leaseUntilOf(id));
+            if (inFire.incrementAndGet() == 1) {
+                clock.addAndGet(30_000);
+            }
+        };
+        AutomationScanner serial = new AutomationScanner(ledger, hooked,
+                settings, clock::get, "scanner-slow-first");
+        long t1 = T0 + MINUTE + 1_000;
+        clock.set(t1);
+        assertThat(serial.tick(t1)).isEqualTo(2);
+        assertThat(leased.values()).containsExactlyInAnyOrder(t1 + 60_000,
+                t1 + 30_000 + 60_000);
+    }
+
+    @Test
+    void aHolderThatLostItsLeaseMidFireCannotSettleAndTheNewOwnerRedrives()
+            throws Exception {
+        // A fire's relay (up to 150 s with the Session load) can outlive
+        // the row's lease. The next owner must take the row over and the
+        // stale holder's settle must no-op, or one lost answer would
+        // produce two Harness-side runs.
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        settings.setLease(Duration.ofSeconds(5));
+        CountDownLatch inFire = new CountDownLatch(1);
+        CountDownLatch stillFiring = new CountDownLatch(1);
+        HookedConnector hooked = new HookedConnector(fake);
+        hooked.onFire = body -> {
+            if (automation.id().equals(body.get("scheduleId"))
+                    && inFire.getCount() > 0) {
+                inFire.countDown();
+                awaitLatch(stillFiring);
+            }
+        };
+        AutomationScanner stale = new AutomationScanner(ledger, hooked,
+                settings, clock::get, "scanner-stale");
+        long t1 = T0 + MINUTE + 1_000;
+        clock.set(t1);
+        Thread first = new Thread(() -> stale.tick(t1));
+        first.start();
+        awaitLatch(inFire);
+        clock.set(t1 + 6_000);
+        AutomationScanner next = new AutomationScanner(ledger, hooked,
+                settings, clock::get, "scanner-next");
+        assertThat(next.tick(clock.get())).isEqualTo(1);
+        stillFiring.countDown();
+        first.join(10_000);
+        assertThat(first.isAlive()).isFalse();
+        AutomationLedgerStore.OccurrenceRow row = occurrence(automation.id(),
+                "schedule:2026-06-01T10:01:00Z");
+        assertThat(row.outcome()).isEqualTo(AutomationLedgerStore
+                .OUTCOME_FIRED);
+        assertThat(row.attempts()).isEqualTo(0);
+        assertThat(fake.fires()).isEqualTo(2);
+        assertThat(fake.runCount(sessionId)).isEqualTo(1);
+    }
+
+    @Test
+    void aBacklogDeeperThanThePoolStillCompletesWithinTheTick() {
+        // More candidates than threads queue inside the executor (up to
+        // 2×SCAN_LIMIT by construction), and the join leaves none of them
+        // outstanding when the tick answers.
+        PublicAutomation firstAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation secondAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        PublicAutomation thirdAutomation = define("* * * * *", "allow",
+                "none", null, true);
+        ThreadPoolTaskExecutor rows = rowPool(2);
+        try {
+            AutomationScanner pooled = scanner("scanner-backlog",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            // The join is what drains the backlog: the tick answers with
+            // every submitted task's result, so a tick that returned after
+            // submitting would answer less than three. Pool gauges are not
+            // read here — the executor's counters move after a task's future
+            // unparks this joiner, so any of them can lag the answer.
+            assertThat(pooled.tick(clock.get())).isEqualTo(3);
+        } finally {
+            rows.destroy();
+        }
+        String slot = "schedule:2026-06-01T10:01:00Z";
+        assertThat(occurrence(firstAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(secondAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(thirdAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+    }
+
+    @Test
+    void twoDefinitionsSharingOneSessionBothFireWhenDueTogether() {
+        // #15442 verify finding 1, accepted behavior (design §Residual
+        // ceilings): two definitions on ONE Session are admitted
+        // concurrently and both fire. Across definitions the admission
+        // guards only on public Turns — automation fires never write
+        // ma_turn rows, so neither executor shape suppresses the second
+        // definition — and the runs still serialize in the Harness funnel.
+        PublicAutomation firstAutomation = define("* * * * *", "skip",
+                "none", null, true);
+        PublicAutomation secondAutomation = define("* * * * *", "skip",
+                "none", null, true);
+        ThreadPoolTaskExecutor rows = rowPool(2);
+        try {
+            AutomationScanner pooled = scanner("scanner-shared-session",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThat(pooled.tick(clock.get())).isEqualTo(2);
+        } finally {
+            rows.destroy();
+        }
+        String slot = "schedule:2026-06-01T10:01:00Z";
+        assertThat(occurrence(firstAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(occurrence(secondAutomation.id(), slot).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+    }
+
+    @Test
+    void aTickJoinsEveryRowBeforeItReportsOneFailure() {
+        // A row task that escapes claimed() — here, the claim write itself
+        // going down — must not abort the tick: the other row runs to
+        // completion BEFORE the tick reports the first failure. A direct
+        // executor cannot pin this (its tasks finish during submission, so
+        // a fail-fast break in the join survives), so on this real pool the
+        // second row's claim is still in flight when the first one throws.
+        define("* * * * *", "allow", "none", null, true);
+        define("* * * * *", "allow", "none", null, true);
+        CountDownLatch firstFailed = new CountDownLatch(1);
+        AtomicBoolean secondDone = new AtomicBoolean();
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore downAtFirstClaim =
+                new AutomationLedgerStore(jdbc) {
+                    @Override
+                    public long claim(String tenantId, String scheduleId,
+                            String owner, long leaseUntil, long now) {
+                        if (claims.incrementAndGet() == 1) {
+                            firstFailed.countDown();
+                            throw new IllegalStateException(
+                                    "claim store down");
+                        }
+                        try {
+                            assertThat(firstFailed.await(10,
+                                    TimeUnit.SECONDS)).isTrue();
+                            // Stay in flight well past the first failure:
+                            // a tick that stopped joining there reports
+                            // before this claim ever lands.
+                            Thread.sleep(300);
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(error);
+                        }
+                        long fence = super.claim(tenantId, scheduleId,
+                                owner, leaseUntil, now);
+                        if (fence >= 0) {
+                            secondDone.set(true);
+                        }
+                        return fence;
+                    }
+                };
+        ThreadPoolTaskExecutor rows = rowPool(1);
+        try {
+            AutomationScanner broken = new AutomationScanner(
+                    downAtFirstClaim, connector, settings, clock::get,
+                    "scanner-broken-store", rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            assertThatThrownBy(() -> broken.tick(clock.get()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("claim store down");
+            assertThat(secondDone).isTrue();
+            assertThat(claims.get()).isEqualTo(2);
+        } finally {
+            rows.destroy();
+        }
+    }
+
+    @Test
+    void commonClaimFailuresProduceOneBoundedSummary() {
+        for (int index = 0; index < 5; index++) {
+            define("* * * * *", "allow", "none", null, true);
+        }
+        clock.set(T0 + MINUTE + 1_000);
+        List<ScheduleRow> candidates = ledger.findArmed(clock.get(), 100);
+        IllegalStateException firstFailure = new IllegalStateException(
+                "claim store down");
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId,
+                    String owner, long leaseUntil, long now) {
+                if (claims.incrementAndGet() == 1) {
+                    throw firstFailure;
+                }
+                throw new IllegalStateException("claim store down "
+                        + scheduleId);
+            }
+        };
+        AutomationScanner broken = new AutomationScanner(downAtClaim,
+                connector, settings, clock::get, "scanner-down-store");
+        Logger log = (Logger) LoggerFactory.getLogger(AutomationScanner.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> broken.tick(clock.get()))
+                    .isSameAs(firstFailure);
+            assertThat(claims.get()).isEqualTo(5);
+            assertThat(logged.list).hasSize(1);
+            ILoggingEvent summary = logged.list.getFirst();
+            assertThat(summary.getThrowableProxy()).isNull();
+            assertThat(summary.getFormattedMessage())
+                    .contains("additionalObservedTaskFailures=4", "submitted=5");
+            for (ScheduleRow row : candidates.subList(0, 3)) {
+                assertThat(summary.getFormattedMessage())
+                        .contains("tenant=" + row.tenantId(),
+                                "schedule=" + row.scheduleId());
+            }
+            for (ScheduleRow row : candidates.subList(3, 5)) {
+                assertThat(summary.getFormattedMessage())
+                        .doesNotContain(row.scheduleId());
+            }
+        } finally {
+            log.detachAppender(logged);
+            logged.stop();
+        }
+    }
+
+    @Test
+    void aMessageLessRowFailureKeepsItsIdentityInTheSummary() {
+        // The summary is the only record of an additional failure, so an
+        // exception without a message must name its class rather than
+        // render as "failure=null".
+        define("* * * * *", "allow", "none", null, true);
+        define("* * * * *", "allow", "none", null, true);
+        clock.set(T0 + MINUTE + 1_000);
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId,
+                    String owner, long leaseUntil, long now) {
+                if (claims.incrementAndGet() == 1) {
+                    throw new IllegalStateException("claim store down");
+                }
+                throw new IllegalStateException();
+            }
+        };
+        AutomationScanner broken = new AutomationScanner(downAtClaim,
+                connector, settings, clock::get, "scanner-silent-store");
+        Logger log = (Logger) LoggerFactory.getLogger(AutomationScanner.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> broken.tick(clock.get()))
+                    .hasMessage("claim store down");
+            assertThat(logged.list).hasSize(1);
+            String summary = logged.list.getFirst().getFormattedMessage();
+            assertThat(summary).contains("failure="
+                    + IllegalStateException.class.getName());
+            assertThat(summary).doesNotContain("failure=null");
+        } finally {
+            log.detachAppender(logged);
+            logged.stop();
+        }
+    }
+
+    @Test
+    void theScannerWorksRowsOnItsOwnBoundedPool() {
+        ThreadPoolTaskExecutor executor = applicationContext.getBean(
+                "automationScannerExecutor", ThreadPoolTaskExecutor.class);
+        assertThat(executor).isNotSameAs(applicationContext.getBean(
+                "managedAutomationScheduler"));
+        assertThat(executor.getThreadNamePrefix())
+                .isEqualTo("automation-scan-");
+        ManagedAgentProperties properties = applicationContext
+                .getBean(ManagedAgentProperties.class);
+        int threads = properties.getAutomation().getScannerThreads();
+        assertThat(executor.getCorePoolSize()).isEqualTo(threads);
+        assertThat(executor.getMaxPoolSize()).isEqualTo(threads);
+        // The scan tick joins on the row pool, so the scheduler must stay a
+        // one-thread driver: scanning on its own pool would deadlock the
+        // tick on the pool's only thread.
+        ThreadPoolTaskScheduler scheduler = (ThreadPoolTaskScheduler)
+                applicationContext.getBean("managedAutomationScheduler");
+        assertThat(scheduler.getPoolSize()).isEqualTo(1);
+    }
+
+    @Test
+    void aRowBothQueriesReturnIsSubmittedOnce() {
+        // A row whose answer was lost comes back from the firing query, and
+        // the next due slot brings the same row back from the armed query.
+        // Deduping on (tenant, schedule) is the only thing keeping it one
+        // task: without it the second task races the first row's claim.
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        fake.failNextFire = new IllegalStateException("answer lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isZero();
+        // Past the lost answer's retry backoff, the same row answers both
+        // queries: the firing one for the stuck occurrence, the armed one
+        // for the slot that came due meanwhile.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(ledger.findFiringSchedules(clock.get(), 100))
+                .extracting(ScheduleRow::scheduleId)
+                .contains(automation.id());
+        assertThat(ledger.findArmed(clock.get(), 100))
+                .extracting(ScheduleRow::scheduleId)
+                .contains(automation.id());
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore counting = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId, String owner,
+                    long leaseUntil, long now) {
+                if (scheduleId.equals(automation.id())) {
+                    claims.incrementAndGet();
+                }
+                return super.claim(tenantId, scheduleId, owner, leaseUntil,
+                        now);
+            }
+        };
+        ThreadPoolTaskExecutor rows = rowPool(2);
+        try {
+            AutomationScanner pooled = new AutomationScanner(counting,
+                    connector, settings, clock::get, "scanner-dedupe",
+                    rows.getThreadPoolExecutor());
+            pooled.tick(clock.get());
+        } finally {
+            rows.destroy();
+        }
+        assertThat(claims.get()).isEqualTo(1);
+        // The armed task is the one that has to win: only it derives slots,
+        // so a tick that kept just the firing task would still claim once
+        // yet never record the slot that came due meanwhile.
+        assertThat(ledger.listOccurrences(tenant, automation.id(), null, 100)
+                .rows().stream()
+                .map(OccurrenceView::occurrence)
+                .map(AutomationLedgerStore.OccurrenceRow::occurrenceKey))
+                .contains("schedule:2026-06-01T10:02:00Z");
+    }
+
+    @Test
+    void anInterruptedJoinReportsTheInterruptAndLeavesTheRowItsClaim() {
+        // Context close interrupts the joining thread. The tick stops
+        // joining, re-asserts the interrupt and reports it as the tick's
+        // failure; the row task already running keeps its own durable claim
+        // instead of being shut down under it.
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        CountDownLatch claimEntered = new CountDownLatch(1);
+        CountDownLatch releaseClaim = new CountDownLatch(1);
+        CountDownLatch rowReleased = new CountDownLatch(1);
+        AtomicLong fence = new AtomicLong(-1);
+        AutomationLedgerStore slowClaim = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId, String owner,
+                    long leaseUntil, long now) {
+                claimEntered.countDown();
+                awaitLatch(releaseClaim);
+                long claimed = super.claim(tenantId, scheduleId, owner,
+                        leaseUntil, now);
+                fence.set(claimed);
+                return claimed;
+            }
+
+            @Override
+            public void release(String tenantId, String scheduleId,
+                    String owner, long released, long now) {
+                try {
+                    super.release(tenantId, scheduleId, owner, released, now);
+                } finally {
+                    rowReleased.countDown();
+                }
+            }
+        };
+        ThreadPoolTaskExecutor rows = rowPool(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicBoolean interrupted = new AtomicBoolean();
+        try {
+            AutomationScanner blocked = new AutomationScanner(slowClaim,
+                    connector, settings, clock::get, "scanner-interrupted",
+                    rows.getThreadPoolExecutor());
+            clock.set(T0 + MINUTE + 1_000);
+            Thread joining = new Thread(() -> {
+                try {
+                    blocked.tick(clock.get());
+                } catch (RuntimeException error) {
+                    failure.set(error);
+                    interrupted.set(Thread.currentThread().isInterrupted());
+                }
+            }, "automation-join-under-test");
+            joining.start();
+            awaitLatch(claimEntered);
+            joining.interrupt();
+            try {
+                joining.join(TimeUnit.SECONDS.toMillis(10));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(error);
+            }
+            assertThat(joining.isAlive()).isFalse();
+            assertThat(failure.get()).isInstanceOf(IllegalStateException.class)
+                    .hasCauseInstanceOf(InterruptedException.class);
+            assertThat(interrupted).isTrue();
+            releaseClaim.countDown();
+            awaitLatch(rowReleased);
+            assertThat(fence.get()).isGreaterThanOrEqualTo(0);
+            assertThat(occurrence(automation.id(),
+                    "schedule:2026-06-01T10:01:00Z").outcome())
+                    .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        } finally {
+            releaseClaim.countDown();
+            rows.destroy();
+        }
+    }
+
+    /** A fake connector whose fires run a test hook before answering. */
+    static final class HookedConnector extends FakeConnector {
+        private volatile Consumer<Map<String, Object>> onFire = body -> {};
+
+        HookedConnector(AutomationHarnessFake fake) {
+            super(fake);
+        }
+
+        @Override
+        public Map<String, Object> runAutomationOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            if ("fire_run".equals(body.get("kind"))) {
+                onFire.accept(body);
+            }
+            return super.runAutomationOperation(tenantId, sessionId, body);
+        }
     }
 
     /** The connector the control plane sees: only the automation verb answers. */

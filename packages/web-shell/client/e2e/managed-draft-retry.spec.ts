@@ -31,6 +31,8 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
         return route.fulfill({ json: { supported: false, data: [] } });
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/sessions/query'))
         return route.fulfill({ json: { data: sessions, hasMore: false } });
       if (path.endsWith('/sessions/get'))
@@ -49,7 +51,7 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
         });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 0, hasMore: false },
+          json: { items: [], events: [], lastSequence: 0, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -70,6 +72,9 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
               json: {
                 sessionId: body.sessionId,
                 turnId: 'accepted-turn',
+                operationId: 'submit-accepted-turn',
+                admissionStage: 'java_durable',
+                deliveryState: 'pending',
                 status: 'accepted',
                 replayed: true,
               },

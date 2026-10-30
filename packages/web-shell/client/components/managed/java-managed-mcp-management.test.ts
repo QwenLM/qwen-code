@@ -158,11 +158,10 @@ it('enables tab command persistence only for an explicit tenant and actor produc
   );
 });
 
-it('does not persist pending commands under a default or environment-only scope', () => {
+it('does not persist pending commands under a default scope', () => {
   for (const productScope of [undefined, '  ']) {
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
-      environmentId: 'production',
       productScope,
     });
     expect(provider.mcpManagement?.storageScope).toBeUndefined();

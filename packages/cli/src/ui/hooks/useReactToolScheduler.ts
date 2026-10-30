@@ -39,7 +39,7 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from '../utils/tool-group-summary.js';
 import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 import {

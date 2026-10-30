@@ -8,7 +8,7 @@ import {
 } from '../sidebar/workspaceExpansion';
 import sectionStyles from '../sidebar/WorkspaceSection.module.css';
 import sidebarStyles from '../sidebar/WebShellSidebar.module.css';
-import { isManagedSessionRunning } from './managed-agent-provider';
+import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -242,7 +242,7 @@ function ManagedWorkspaceGroup({
       className={sectionStyles.section}
       data-managed-workspace={workspaceId ?? ''}
     >
-      <div className={sectionStyles.headerRow}>
+      <div className={`${sectionStyles.headerRow} group/managed-workspace`}>
         <button
           type="button"
           className={sectionStyles.header}
@@ -257,77 +257,36 @@ function ManagedWorkspaceGroup({
           <span className={sectionStyles.name} title={workspaceId}>
             {label}
           </span>
-          <span className={sectionStyles.badge}>
-            {t('managed.managedMode')}
-          </span>
         </button>
         {workspaceId && onSelectWorkspace && (
-          <button
-            type="button"
-            className={sidebarStyles.workspaceHeaderAction}
-            disabled={!canCreate}
-            aria-label={`${t('sidebar.newTask')}: ${label}`}
-            title={t('sidebar.newTask')}
-            onClick={() => onSelectWorkspace(workspaceId)}
+          <div
+            className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover/managed-workspace:visible group-focus-within/managed-workspace:visible [@media(hover:none)]:visible`}
           >
-            <SquarePenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
-          </button>
+            <button
+              type="button"
+              className={sidebarStyles.workspaceHeaderAction}
+              disabled={!canCreate}
+              aria-label={`${t('sidebar.newTask')}: ${label}`}
+              title={t('sidebar.newTask')}
+              onClick={() => onSelectWorkspace(workspaceId)}
+            >
+              <SquarePenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
+            </button>
+          </div>
         )}
       </div>
       {open && (
         <div className={sectionStyles.sessions}>
-          {sessions.map((session) => {
-            const running = isManagedSessionRunning(session.phase);
-            return (
-              <div
-                key={session.sessionId}
-                className="flex min-w-0 items-center"
-              >
-                <button
-                  type="button"
-                  className={`${sidebarStyles.sessionRow} min-w-0 flex-1 text-left ${active && sessionId === session.sessionId ? sidebarStyles.currentSession : ''} ${running ? sidebarStyles.runningSession : ''}`}
-                  data-managed-session-id={session.sessionId}
-                  aria-current={
-                    active && sessionId === session.sessionId
-                      ? 'page'
-                      : undefined
-                  }
-                  title={t(
-                    session.lifecycleStatus &&
-                      session.lifecycleStatus !== 'active'
-                      ? `managed.sessionState.${session.lifecycleStatus}`
-                      : `managed.phase.${session.phase}`,
-                  )}
-                  onClick={() =>
-                    onSelectSession(session.sessionId, workspaceId)
-                  }
-                >
-                  <span
-                    className={sidebarStyles.sessionStatusSlot}
-                    aria-hidden="true"
-                  >
-                    {running && (
-                      <span
-                        className={`${sidebarStyles.sessionStatusDot} ${sidebarStyles.sessionStatusDotRunning}`}
-                        data-web-shell-session-running
-                      />
-                    )}
-                  </span>
-                  <span className={sectionStyles.sessionName}>
-                    {session.title || session.sessionId}
-                  </span>
-                  {running && (
-                    <span
-                      className={sidebarStyles.sessionLoading}
-                      role="status"
-                      aria-label={t('sidebar.running')}
-                    />
-                  )}
-                </button>
-                {renderSessionActions?.(session)}
-              </div>
-            );
-          })}
+          {sessions.map((session) => (
+            <ManagedSessionNavigationRow
+              key={session.sessionId}
+              session={session}
+              active={active && sessionId === session.sessionId}
+              workspaceLabel={label}
+              onSelect={() => onSelectSession(session.sessionId, workspaceId)}
+              actions={renderSessionActions?.(session)}
+            />
+          ))}
           {!sessions.length && (
             <p className={sectionStyles.empty}>{t('sidebar.noSessions')}</p>
           )}

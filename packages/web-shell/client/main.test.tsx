@@ -517,8 +517,6 @@ describe('StandaloneApp brand', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     const provider = testState.props?.webShellProps.managedAgentProvider;
-    expect(provider?.kind).toBe('java');
-    expect(provider?.acceptsWorkspaceCwd).toBe(false);
     expect(provider?.storageKey).toBe(
       `${window.location.origin}:managed:tenant-a`,
     );

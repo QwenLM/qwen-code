@@ -20,7 +20,7 @@ Making the control plane read the Harness's variable names from its own environm
 ## Non-goals
 
 - Changing how the Harness reads its credentials, or adding a file option to the CLI.
-- Changing the Runtime Broker token, which still has no environment source in the CLI.
+- Sharing the Runtime Broker token. The [Hosted Harness Broker environment design](2026-10-21-hosted-harness-broker-environment.md) builds that on this file.
 - Removing the existing direct settings, which remain valid on their own.
 
 ## Design
@@ -32,16 +32,20 @@ Making the control plane read the Harness's variable names from its own environm
 - `QWEN_SERVER_TOKEN` to `harness.token`;
 - `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` to `harness.capability-digest`.
 
-Other keys, such as `QWEN_HOSTED_HARNESS_BROKER_ARGS`, are ignored. The values are held only in the bound configuration and are never logged.
+An optional `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` supplies `runtime-broker.token`, and preflight compares an optional `QWEN_MANAGED_RUNTIME_BROKER_URL` with the Broker's address, as described in the [Hosted Harness Broker environment design](2026-10-21-hosted-harness-broker-environment.md). Other keys, such as an old `QWEN_HOSTED_HARNESS_BROKER_ARGS`, are ignored. The values are held only in the bound configuration and are never logged.
 
-Both systemd and a shell `source` read this file for the Harness, so the control plane accepts only the lines both readers take literally and refuses the rest instead of reading a different value. A line containing a carriage return is refused, comments included, because a shell keeps it in the value; a file saved with CRLF endings therefore fails at its first line. Each line is then trimmed. A line ending in `\` is refused, comments included, because both readers continue it on the next line. Lines starting with `#` or `;`, and lines without `=`, are otherwise skipped. A line is split at its first `=`. For the two keys, whitespace on either side of the `=` is refused, because a shell runs such a line as a command instead of an assignment; other keys are trimmed. A value may be enclosed in one matching pair of single or double quotes. An opening quote without its closing quote, text after the closing quote, and a backslash inside double quotes are refused. A value for one of the two keys may contain only letters, digits and `._:/+=-`, which both readers take literally. This rules out escapes, expansions, command substitution and the shell's other operators, such as `;`, `&` and `~`. A later assignment replaces an earlier one, as in systemd. A refusal names the file, the line number and the construct, never the line's content.
+Both systemd and a shell `source` read this file for the Harness, so the control plane accepts only the lines both readers take literally and refuses the rest instead of reading a different value. A line containing a carriage return is refused, comments included, because a shell keeps it in the value; a file saved with CRLF endings therefore fails at its first line. Each line is then trimmed. A line ending in `\` is refused, comments included, because both readers continue it on the next line. A line starting with `;` is refused wherever it falls: systemd skips it as a comment, but a shell refuses it and stops reading the file at that line. Lines starting with `#`, and lines without `=`, are otherwise skipped. A line is split at its first `=`. A key that still contains whitespace is refused for every key: systemd ignores `export KEY=value`, which a shell assigns, and a shell runs `NAME KEY=value` as a command. For the keys the Harness reads, the token and digest and the optional Broker URL and token, whitespace on either side of the `=` is refused, because a shell runs such a line as a command instead of an assignment; other keys are trimmed. A value may be enclosed in one matching pair of single or double quotes. An opening quote without its closing quote, text after the closing quote, and a backslash inside double quotes are refused. A value for one of these keys may contain only letters, digits and `._:/+=-`, which both readers take literally; the Broker URL may also use `[` and `]` to bracket an IPv6 literal. This rules out escapes, expansions, command substitution and the shell's other operators, such as `;`, `&` and `~`. A later assignment replaces an earlier one, as in systemd. A refusal names the file, the line number and the construct, never the line's content. The control plane does not read the other keys' lines as a shell would, so a shell may still lose one. A shell runs `KEY = value` as a command and drops that key. It stops at a line it cannot parse, such as an unquoted `(` in a value: bash keeps the assignments above that line and loses every line below it, while dash exits before starting the Harness. The `harness` row's probe sends the token, then negotiates with the configured `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST`, so `--check` also fails on a lost or altered digest; another lost key shows up only in the Harness's own behaviour. Write the other keys as `KEY=value` too, and quote values a shell would parse.
 
 ### Failure semantics
 
 - The file is set together with a non-blank `harness.token` or `harness.capability-digest`: startup fails and asks for one source.
+- The file sets `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` while `runtime-broker.token` is also set: startup fails and asks for one source.
+- The file sets only one of `QWEN_MANAGED_RUNTIME_BROKER_URL` and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`: startup fails, because the Harness takes them together or not at all.
+- The file sets either Broker key to an empty value: startup fails, naming the key, because the Harness takes an empty value as set and then refuses to start without the other half.
 - The file cannot be read: startup fails, naming the path and the exception type.
 - A line uses a refused construct: startup fails, naming the path and the line.
 - A required key is missing or blank: startup fails, naming the key and the path.
+- In each of these cases nothing from the file is bound.
 - The Harness is disabled: the file is not read.
 
 The resolution runs in the same startup validation that preflight calls, so `--check` reports these failures in its `validation` row before any listener starts. The existing `harness` row then checks the resolved token and digest as before. When startup refused the file, so its credentials were never bound, the `harness` row reports `SKIP` and points at the `validation` row instead of probing with whatever is left bound. It also fails a token that still carries the shipped templates' `replace-` placeholder, which the Harness would accept. A new `credentials` row reports `SKIP` while the Harness is disabled or no file is set. It reports `FAIL` with a `chown` fix when the service account cannot read the file, and `WARN` with a `chmod 600` fix when the file is group- or world-readable, the same policy and wording the `config` row applies to `application.yml`. Otherwise it reports `PASS`.
@@ -74,4 +78,4 @@ The resolution runs in the same startup validation that preflight calls, so `--c
 
 ## Follow-up work
 
-- Give the CLI's Runtime Broker URL and token an environment or file source, and make the Hosted Harness profile fail on an occupied port instead of moving.
+- Implemented by the [Hosted Harness Broker environment design](2026-10-21-hosted-harness-broker-environment.md): the Broker token shares this file, and the Hosted Harness profile fails on an occupied port instead of moving.

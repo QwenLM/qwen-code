@@ -40,7 +40,7 @@ class ManagedLocalConfigurationTest {
     Path temporary;
 
     @Test
-    void bindsTheLocalProfileAndMigratesItsFileDatabase() throws Exception {
+    void bindsTheLocalProfileAndInitializesItsFileDatabase() throws Exception {
         Path directory = temporary.toRealPath();
         String workspaceId = DigestUtils.sha256Hex(directory.resolve("legacy").toString()).substring(0, 16);
         new ApplicationContextRunner()
@@ -54,7 +54,7 @@ class ManagedLocalConfigurationTest {
                     assertThat(context).hasNotFailed().hasSingleBean(DruidDataSource.class);
                     assertThat(context.getBean(DruidDataSource.class).getUrl())
                             .isEqualTo(ManagedLocalConfiguration.jdbcUrl(directory));
-                    assertThat(ManagedSchema.schemaVersion(context.getBean(DruidDataSource.class))).isEqualTo(17);
+                    assertThat(ManagedSchema.schemaVersion(context.getBean(DruidDataSource.class))).isEqualTo(1);
                     var managed = context.getBean(ManagedAgentProperties.class);
                     assertThat(managed.getRuntimeBroker().getWorkspaceId()).isEqualTo(workspaceId);
                     assertThat(managed.getSessionStore().getWorkspaceId()).isEqualTo(workspaceId);

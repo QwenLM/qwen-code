@@ -210,7 +210,7 @@ public final class ExtensionRecordJournal {
                 editEvent, editRecords, extraEvents, domain, List.of());
     }
 
-    private CommitTransactionRequest request(String operation, String commandId,
+    CommitTransactionRequest request(String operation, String commandId,
             byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords, int extraEvents, String domain,
             List<CommitResource> resources) {

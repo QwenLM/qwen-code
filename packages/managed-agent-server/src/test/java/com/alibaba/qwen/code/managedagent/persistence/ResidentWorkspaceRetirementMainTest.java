@@ -57,7 +57,8 @@ class ResidentWorkspaceRetirementMainTest {
     @Test
     void invalidActionsRefuseBeforeBootstrappingOrReadingDeploymentConfiguration() {
         for (String[] args : new String[][] {{}, {"begin"}, {"release", "request"},
-                {"delete-pod", "request"}, {"inspect", "request", "extra"}}) {
+                {"delete-pod", "request"}, {"prepare-reclamation", "request"}, {"reclaim", "request", "extra"},
+                {"prepare-reclamation", "request", "rv", "extra"}, {"inspect", "request", "extra"}}) {
             assertThatThrownBy(() -> ResidentWorkspaceRetirementMain.run(args)).isInstanceOf(IllegalArgumentException.class);
         }
     }

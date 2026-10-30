@@ -62,10 +62,11 @@ public final class LocalProcessRuntimeProvisioner
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
     // Workers run model-directed tools. The control plane's own settings,
-    // its credentials among them, stay out of their environment; Spring also
-    // binds lower-case variable names.
-    private static final List<String> CONTROL_PLANE_ENV_PREFIXES =
-            List.of("QWEN_MANAGED_AGENT_", "QWEN_MANAGEDAGENT_", "SPRING_", "OSS_");
+    // its credentials among them, stay out of their environment, and so does
+    // the Hosted Harness's Broker URL and token; Spring also binds lower-case
+    // variable names.
+    private static final List<String> CONTROL_PLANE_ENV_PREFIXES = List.of("QWEN_MANAGED_AGENT_",
+            "QWEN_MANAGEDAGENT_", "QWEN_MANAGED_RUNTIME_BROKER_", "SPRING_", "OSS_");
 
     private final String ownerDomain = UUID.randomUUID().toString();
     private final List<String> command;
@@ -74,6 +75,8 @@ public final class LocalProcessRuntimeProvisioner
     private final Function<RuntimeScope, String> storageResolver;
     private final LocalRuntimeStore store;
     private final boolean trustedRebootRecovery;
+    private String managedExtensionCacheDirectory;
+    private String managedExtensionCgroupRoot;
     private final ExecutorService executor = Executors.newCachedThreadPool(
             task -> {
                 Thread thread = new Thread(task, "runtime-provisioner");
@@ -158,6 +161,16 @@ public final class LocalProcessRuntimeProvisioner
         // Non-durable workers have no recovery path, so a Broker exit must
         // not strand them.
         exitHook = store == null ? registerExitHook() : null;
+    }
+
+    public LocalProcessRuntimeProvisioner withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
+        if (directory == null || !Path.of(directory).isAbsolute()) {
+            throw new IllegalArgumentException("Extension cache must be absolute");
+        }
+        this.managedExtensionCacheDirectory = directory;
+        this.managedExtensionCgroupRoot = cgroupRoot;
+        transport.withManagedExtensionCacheDirectory(directory, cgroupRoot);
+        return this;
     }
 
     private Thread registerExitHook() {
@@ -347,7 +360,7 @@ public final class LocalProcessRuntimeProvisioner
         if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
                 || !(WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                         || HarnessOwnership.sharesRuntimeSessions(binding.getRequest()))
-                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
+                || !WorkspaceExecutionProfile.admitsCapabilityDigest(binding.getRequest().getScope().getCapabilityDigest())
                 || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);
         }
@@ -368,6 +381,24 @@ public final class LocalProcessRuntimeProvisioner
                 if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
                     throw LocalRuntimeStore.blocked();
                 }
+                boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
+                String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
+                String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
+                if (extended && !neverStarted && !originalBootStopped) {
+                    if (binding.getLease() == null || worker == null) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    String retirementId = UUID.nameUUIDFromBytes(("managed-extension-retire/1:" + binding.getBindingId() + ":" + binding.getGeneration()).getBytes(StandardCharsets.UTF_8)).toString();
+                    Map<String, Object> proof = transport.extensionStop(binding.getLease(), retirementId).toCompletableFuture().join();
+                    if (!proof.keySet().equals(Set.of("protocolVersion", "retirementId", "executionMode", "scope", "state", "runtimeInstanceId", "runtimeIncarnation", "leaseId", "epoch"))
+                            || BrokerValues.exactLong(proof.get("protocolVersion")) != 1
+                            || !retirementId.equals(proof.get("retirementId")) || !mode.equals(proof.get("executionMode")) || !proofScope.equals(proof.get("scope"))
+                            || !"stopped".equals(proof.get("state")) || !binding.getLease().getRuntimeInstanceId().equals(proof.get("runtimeInstanceId"))
+                            || !binding.getProvisionSeed().getGatewayIncarnation().equals(proof.get("runtimeIncarnation"))
+                            || !binding.getLease().getLeaseId().equals(proof.get("leaseId")) || BrokerValues.exactLong(proof.get("epoch")) != binding.getLease().getEpoch()) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                }
                 resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
                 if (worker != null) {
                     worker.destroy();
@@ -383,7 +414,7 @@ public final class LocalProcessRuntimeProvisioner
                             "Original worker has not stopped.", true);
                 }
                 return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
-                        binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now());
+                        binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now(), mode, proofScope);
             }), executor);
     }
 
@@ -578,7 +609,7 @@ public final class LocalProcessRuntimeProvisioner
         }
     }
 
-    private static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    private Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         String runtimeInstanceId = seed.getProvisionalRuntimeId();
         String runtimeIncarnation = seed.getGatewayIncarnation();
         String leaseId = seed.getLeaseId();
@@ -608,7 +639,7 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
         boot.put("workspaceId", scope.getWorkspaceId());
         Map<String, Object> document = request.isManagedContext()
-                ? ManagedContextProtocol.boot(request, seed) : boot;
+                ? ManagedContextProtocol.boot(request, seed, com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
         byte[] encoded = JsonCodec.encode(document);
         if (encoded.length > READY_RECORD_LIMIT) {
             throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");
@@ -727,12 +758,12 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeLease adoptDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> document, LocalRuntimeStore.Resource resource,
             LocalRuntimeStore.Registration registration) throws IOException {
+        if (registration.processAbsent()) {
+            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+            throw LocalRuntimeStore.blocked();
+        }
         ProcessHandle process = registration.process();
         if (process == null) {
-            if (registration.processAbsent()) {
-                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
-                throw LocalRuntimeStore.blocked();
-            }
             return null;
         }
         RuntimeLease lease;

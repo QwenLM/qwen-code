@@ -19,11 +19,13 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { CRON_TASKS_DISPLAY_PATH } from '../services/cronTasksFile.js';
-import { CRON_GATE_TIMEOUT_MS } from '../services/cron-gate.js';
+import {
+  CRON_GATE_TIMEOUT_MS,
+  gateCommandError,
+} from '../services/cron-gate.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  backgroundsAnyPart,
   buildShellExecWarnings,
   getCommandRoot,
   normalizeMonitorCommand,
@@ -229,11 +231,6 @@ class CronCreateInvocation extends BaseToolInvocation<
           'Current-session scheduling requires durable: true because session-only jobs cannot survive a daemon session switch.',
         );
       }
-      if (gate && useCurrentSession) {
-        throw new Error(
-          'A gate is not supported with sessionMode "current" yet; schedule the task unbound or session-only.',
-        );
-      }
       // A one-shot has no next slot: a quiet gate would consume it with
       // nothing delivered and no trace.
       if (gate && !recurring) {
@@ -257,7 +254,25 @@ class CronCreateInvocation extends BaseToolInvocation<
           prompt,
           recurring,
           promptId,
+          ...(gate ? { gate } : {}),
         });
+        // A daemon that predates gated tasks stored the task without its
+        // gate: left alone it would run the prompt at every slot.
+        if (gate && created.gate !== gate) {
+          try {
+            await scheduler.removeDurable(created.id);
+          } catch (error) {
+            throw new Error(
+              `current_session_gate_unsupported: The daemon stored task ${created.id} without its gate, and removing it failed (${getErrorMessage(error)}): it runs the prompt at every slot until deleted with cron_delete.`,
+            );
+          }
+          throw new Error(
+            'current_session_gate_unsupported: The daemon stored the task without its gate, so it was removed. Restart `qwen serve` on the current version, or schedule the gated task without sessionMode "current".',
+          );
+        }
+        // The daemon writes the task and this session's scheduler installs
+        // it on its next reload; carry the confirmation over to that job.
+        if (gate) scheduler.approveGate(created.id, gate);
         job = { id: created.id, cronExpr: created.cron };
       } else {
         const created = durable
@@ -286,7 +301,7 @@ class CronCreateInvocation extends BaseToolInvocation<
         ? `Auto-expires after ${formatDays(maxAgeDays)}. Use CronDelete to cancel sooner.`
         : 'Never auto-expires. Use CronDelete to cancel.';
       const gateNote = gate
-        ? ` Gate: \`${gate}\` runs at each fire; the prompt is delivered only when it prints output, a silent run costs no turn, and a failing run is reported once per streak.`
+        ? ` Gate: \`${gate}\` runs at each fire; the prompt is delivered only when it prints output, a silent run costs no turn, and a failing run is reported once, not at every fire.`
         : '';
       const llmContent =
         (recurring
@@ -346,8 +361,8 @@ export class CronCreateTool extends BaseDeclarativeTool<
         'Use sessionMode: "current" only when the user explicitly wants future runs to continue in this conversation. ' +
         'Current-session mode requires durable: true and an active daemon-backed prompt.\n\n' +
         '## Gate (optional)\n\n' +
-        'Pass gate: a shell command run at each fire, outside the model, from the project directory. It decides whether the fire reaches you: nothing on stdout and exit 0 = the fire is skipped (no turn, nothing recorded); output = the fire is delivered with the output appended after the prompt, marked as data; a non-zero exit or a timeout = reported once, then counted until the command succeeds again. ' +
-        'Use it for watches that are usually quiet ("every 2 minutes, check this PR"): the command keeps its own cursor and prints only what changed, and the prompt says what to do with the output. The command is confirmed like a Monitor command when the task is created and then runs unattended. Write the prompt as instructions, not as a slash command. A gate needs a recurring task (a one-shot whose gate is quiet would be consumed with nothing delivered) and is not yet available with sessionMode "current".\n\n' +
+        'Pass gate: a shell command run at each fire, outside the model, from the project directory. It decides whether the fire reaches you: nothing on stdout and exit 0 = the fire is skipped (no turn, nothing recorded); output = the fire is delivered with the output appended after the prompt, marked as data; a non-zero exit or a timeout = reported once, then counted until the command succeeds again or is blocked. ' +
+        'Use it for watches that are usually quiet ("every 2 minutes, check this PR"): the command keeps its own cursor and prints only what changed, and the prompt says what to do with the output. The command is confirmed like a Monitor command when the task is created and then runs unattended. Write the prompt as instructions, not as a slash command. A gate needs a recurring task (a one-shot whose gate is quiet would be consumed with nothing delivered).\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
         `${recurringExpiryBlurb(maxAgeDays)}\n\n` +
@@ -387,7 +402,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
           },
           gate: {
             type: 'string',
-            description: `Shell command run at each fire, outside the model. Prints nothing and exits 0 = the fire is skipped and no turn runs. Prints output = the fire is delivered with the output. Exits non-zero or runs longer than ${CRON_GATE_TIMEOUT_MS / 1000} s = reported once per streak.`,
+            description: `Shell command run at each fire, outside the model. Prints nothing and exits 0 = the fire is skipped and no turn runs. Prints output = the fire is delivered with the output. Exits non-zero or runs longer than ${CRON_GATE_TIMEOUT_MS / 1000} s = reported once, not at every fire.`,
           },
         },
         required: ['cron', 'prompt'],
@@ -414,22 +429,8 @@ export class CronCreateTool extends BaseDeclarativeTool<
       return 'Parameter "prompt" must be a non-empty string.';
     }
     if (params.gate !== undefined) {
-      if (
-        typeof params.gate !== 'string' ||
-        params.gate.trim() === '' ||
-        normalizeMonitorCommand(params.gate).safetyCommand.trim() === ''
-      ) {
-        return 'Parameter "gate" must be a non-empty shell command when present.';
-      }
-      // A backgrounded gate returns at once with nothing on stdout, so every
-      // fire would be quiet. `backgroundsAnyPart` also looks inside a
-      // wrapper's script, behind a prefix too (`nohup bash -c './probe.sh &'`).
-      if (
-        backgroundsAnyPart(params.gate) ||
-        /(^|[^&])&\s*$/.test(params.gate.trim())
-      ) {
-        return 'Parameter "gate" must not background any part of the command with "&".';
-      }
+      const gateError = gateCommandError(params.gate);
+      if (gateError) return `Parameter "gate" ${gateError}.`;
     }
     return null;
   }

@@ -37,9 +37,7 @@ public final class ManagedSessionStoreModels {
     public static final long MIN_LEASE_MILLIS = 1_000;
     public static final long MAX_LEASE_MILLIS = 300_000;
     public static final long MAX_SAFE_COUNTER = 9_007_199_254_740_990L;
-    /** Character widths of the head's activation columns (migration V36);
-     * a wider payload blanks the columns so authorization reads the journal.
-     * Character-based, matching the {@code .length()} checks on both writers. */
+    /** Commit-side character limits keep activation payloads representable in the head. */
     public static final int MAX_ACTIVATION_ID_CHARS = 512;
     public static final int MAX_ACTIVATION_PHASE_CHARS = 32;
     public static final String ERROR_WRITER_CONFLICT =
@@ -101,7 +99,20 @@ public final class ManagedSessionStoreModels {
             @NotBlank @Size(max = 512) String writerId,
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
-                    Long leaseMillis) {
+                    Long leaseMillis,
+            @jakarta.validation.Valid ActivationRenewal activation) {
+        public RenewWriterRequest(String workspaceId, String writerId, long writerGeneration, Long leaseMillis) {
+            this(workspaceId, writerId, writerGeneration, leaseMillis, null);
+        }
+    }
+
+    public record ActivationRenewal(@NotBlank @Size(max = 512) String activationId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long epoch,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long renewalSeq,
+            @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS) long leaseDurationMs) {
+    }
+
+    public record ActivationLease(String activationId, long epoch, long renewalSeq, long expiresAt) {
     }
 
     public record SealWriterRequest(
@@ -110,11 +121,42 @@ public final class ManagedSessionStoreModels {
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration) {
     }
 
+    public record OwnershipCommitProof(@Min(0) @Max(MAX_SAFE_COUNTER) long lastCommitSequence,
+            @NotBlank @Pattern(regexp = "[0-9a-f]{64}") String committedPrefixHash) {
+    }
+
+    public record QuiesceOwnershipRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
+            @NotBlank @Size(max = 144) String instanceId,
+            @NotBlank @Size(max = 144) String bootId) {
+    }
+
+    public record ReleaseOwnershipRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long journalRevision,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long placementEpoch,
+            @NotBlank @Size(max = 144) String instanceId,
+            @NotBlank @Size(max = 144) String bootId,
+            @NotBlank @Size(max = 512) String operationId,
+            @NotNull @jakarta.validation.Valid OwnershipCommitProof commitProof) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed, int supportedStorageVersion) {
+            boolean replayed, int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease) {
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
+                int supportedStorageVersion) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, supportedStorageVersion, true, null);
+        }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
@@ -209,7 +251,15 @@ public final class ManagedSessionStoreModels {
             long committedSequence, String lastCommitDigest,
             long activationEpoch, String latestCheckpointResourceId,
             long compactedThroughRevision, String recoveryStatus,
-            String recoveryDetailCode) {
+            String recoveryDetailCode, ActivationLease activationLease) {
+        public RestoreHead(String state, int storageVersion, long writerGeneration, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch,
+                String latestCheckpointResourceId, long compactedThroughRevision, String recoveryStatus,
+                String recoveryDetailCode) {
+            this(state, storageVersion, writerGeneration, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, latestCheckpointResourceId, compactedThroughRevision, recoveryStatus,
+                    recoveryDetailCode, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -226,6 +276,13 @@ public final class ManagedSessionStoreModels {
 
     public record TransactionPage(List<StoredTransaction> transactions,
             long nextRevision, boolean hasMore) {
+    }
+
+    public record RecentTransactionPage(List<StoredTransaction> transactions,
+            long throughRevision, Long nextBeforeRevision, boolean hasMore) {
+    }
+
+    public record CommandTransaction(long throughRevision, StoredTransaction transaction) {
     }
 
     public record StoredResource(String resourceId, String kind,

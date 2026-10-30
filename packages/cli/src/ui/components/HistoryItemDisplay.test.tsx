@@ -15,7 +15,7 @@ import type {
   ToolExecuteConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
@@ -487,6 +487,92 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).not.toContain('Inspecting the repository');
   });
 
+  it('renders a completed staged summary collapsed while later output is pending', () => {
+    const item: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought',
+      text: 'Completed summary',
+      durationMs: 1200,
+      isStreaming: false,
+      thoughtGroupId: -1,
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending />,
+    );
+    expect(lastFrame()).toContain('Thought for');
+    expect(lastFrame()).toContain(`${toggleKeyHint} to expand`);
+    expect(lastFrame()).not.toContain('Thinking…');
+    expect(lastFrame()).not.toContain('Completed summary');
+  });
+
+  it('keeps staged summary groups separate and expanded across their history commit', () => {
+    const head: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought',
+      text: 'Summary head',
+      durationMs: 1200,
+      isStreaming: false,
+      thoughtGroupId: -7,
+    };
+    const continuation: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought_content',
+      text: 'Summary continuation',
+      isStreaming: false,
+      thoughtGroupId: -7,
+    };
+    const other: HistoryItem = {
+      ...head,
+      text: 'Other summary',
+      thoughtGroupId: -8,
+    };
+    const renderItems = (committed: boolean) => (
+      <ThoughtExpandedProvider
+        value={{
+          allExpanded: false,
+          expandedHeadIds: new Set([-7]),
+          toggle: () => {},
+        }}
+      >
+        {[head, continuation, other].map((item, index) => (
+          <HistoryItemDisplay
+            key={index}
+            item={{ ...item, id: committed ? index + 101 : 0 }}
+            terminalWidth={100}
+            isPending={!committed}
+            thoughtHeadId={committed ? 101 : undefined}
+          />
+        ))}
+      </ThoughtExpandedProvider>
+    );
+    const { lastFrame, rerender } = renderWithProviders(renderItems(false));
+    expect(lastFrame()).toContain('Summary head');
+    expect(lastFrame()).toContain('Summary continuation');
+    expect(lastFrame()).not.toContain('Other summary');
+    rerender(withProviders(renderItems(true)));
+    expect(lastFrame()).toContain('Summary head');
+    expect(lastFrame()).toContain('Summary continuation');
+    expect(lastFrame()).not.toContain('Other summary');
+  });
+
+  it('keeps an active staged summary in its thinking state', () => {
+    const item: HistoryItem = {
+      id: 0,
+      type: 'gemini_thought',
+      text: 'Active summary',
+      isStreaming: true,
+      thoughtGroupId: -9,
+    };
+    vi.mocked(useMouseEvents).mockClear();
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending />,
+    );
+    expect(lastFrame()).toContain('Thinking…');
+    expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]?.isActive).toBe(
+      false,
+    );
+  });
+
   it('renders committed thinking continuations hidden by default', () => {
     const item: HistoryItem = {
       id: 1,
@@ -695,7 +781,11 @@ describe('<HistoryItemDisplay />', () => {
       button: 'left',
     });
 
-    const renderThoughtWithToggle = (toggle: (headId: number) => void) => {
+    const renderThoughtWithToggle = (
+      toggle: (headId: number) => void,
+      item: HistoryItem = thoughtItem,
+      isPending = false,
+    ) => {
       vi.mocked(measureElementPosition).mockReturnValue({
         x: 0,
         y: 0,
@@ -712,9 +802,9 @@ describe('<HistoryItemDisplay />', () => {
           }}
         >
           <HistoryItemDisplay
-            item={thoughtItem}
+            item={item}
             terminalWidth={100}
-            isPending={false}
+            isPending={isPending}
           />
         </ThoughtExpandedProvider>,
       );
@@ -775,6 +865,21 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).not.toHaveBeenCalled();
       handler?.(mouseEvent('left-release', 5));
       expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+    });
+
+    it('allows clicking a completed staged summary using its stable group id', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(
+        toggle,
+        { ...thoughtItem, id: 0, thoughtGroupId: -5, isStreaming: false },
+        true,
+      );
+      expect(vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1]?.isActive).toBe(
+        true,
+      );
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      expect(toggle).toHaveBeenCalledWith(-5);
     });
 
     it('does not toggle when selecting text by dragging', () => {

@@ -51,7 +51,7 @@ public final class PublicationProbeWiring {
             ToolExecutionRepository executions, RuntimeBindingRepository bindings) {
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
                 bindings, new ToolPublicationStore.Capacity(EXECUTION_BYTES,
-                        SESSION_BYTES, TENANT_BYTES, ACTIVE_CAPTURES), false);
+                        SESSION_BYTES, TENANT_BYTES, ACTIVE_CAPTURES));
     }
 
     @Bean

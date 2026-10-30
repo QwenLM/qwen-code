@@ -251,14 +251,31 @@ markdown.addRule('code', {
   },
 });
 
-export function getSelectedReplyContent(body: HTMLElement, range: Range) {
+function cloneReplyContent(
+  body: HTMLElement,
+  range: Range,
+): HTMLElement | null {
   if (
     !body.contains(range.startContainer) ||
     !body.contains(range.endContainer)
   ) {
     return null;
   }
-  const selected = cloneSelected(body, range) as HTMLElement | null;
+  return cloneSelected(body, range) as HTMLElement | null;
+}
+
+export function getSelectedReplyText(
+  body: HTMLElement,
+  range: Range,
+): string | null {
+  const selected = cloneReplyContent(body, range);
+  if (!selected) return null;
+  const text = plainText(selected).replace(/^\n+|\n+$/g, '');
+  return text.trim() ? text : null;
+}
+
+export function getSelectedReplyContent(body: HTMLElement, range: Range) {
+  const selected = cloneReplyContent(body, range);
   if (!selected) return null;
   const text = plainText(selected).replace(/^\n+|\n+$/g, '');
   const formatted = markdown.turndown(selected);
