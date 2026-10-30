@@ -287,10 +287,11 @@ describe('Hosted real-process gates', () => {
 
   it.each([
     {
-      name: 'test_macos',
+      name: 'test_macos_shards',
       step: 'Hosted portable process smoke',
       after: /Install dependencies/i,
-      condition: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
+      condition:
+        "${{ needs.classify_pr.outputs.skip_ci != 'true' && matrix.group == 'scripts' }}",
       run: `npm run ${focused} -- -t 'portable startup'`,
       minutes: 5,
     },
@@ -320,14 +321,17 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('gates the Windows Hosted suite on a successful install', () => {
-    const steps = ci.jobs.test_windows.steps;
-    // An unknown step id reads as '' and silently disables the condition
-    // above, so the suite would never run again.
-    expect(steps.find((step) => step.name === 'Install dependencies').id).toBe(
-      'install',
-    );
-  });
+  it.each(['test_windows', 'test_macos_shards'])(
+    'gates the %s suite on a successful install',
+    (name) => {
+      // An unknown step id reads as '' and silently disables the condition
+      // above, so the suite would never run again.
+      expect(
+        ci.jobs[name].steps.find((step) => step.name === 'Install dependencies')
+          .id,
+      ).toBe('install');
+    },
+  );
 
   it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
