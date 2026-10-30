@@ -68,8 +68,8 @@ unset AUDIT_VERDICT AUDIT_VERDICT_RECORDED
 # verified on a live runner). Lock the files for the lifetime of this
 # step. The $GITHUB_OUTPUT backing file is the ONE exception: the gate
 # must keep writing it, and forges against it lose to the every-exit
-# re-append below plus the conclusion gate Finalize verification applies
-# to outcome. The directory itself stays writable on purpose: the runner
+# re-append below plus the raw step-outcome check in Finalize verification.
+# The directory itself stays writable on purpose: the runner
 # creates the NEXT step's backing files there at step start, and a locked
 # directory would stall every later step of the job; the residual
 # rename-over (create + rename onto a locked file) is documented in the
