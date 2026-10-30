@@ -373,6 +373,7 @@ const cleanWorkflowCommand: CommandModule = {
   // Local only: no endpoint or credentials needed.
   handler: (argv) =>
     run(async () => {
+      loadSettings();
       await cleanTask(
         {
           env: process.env,
@@ -429,6 +430,7 @@ export const listWorkflowCommand: CommandModule = {
       // too, so a reader that leaves (`batch list | head -1`) must not turn a
       // completed listing into a crash-class exit.
       ignoreBrokenPipe();
+      loadSettings();
       await listTasks({
         env: process.env,
         out: writeStdoutLine,

@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import yargs from 'yargs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import {
@@ -17,10 +18,13 @@ import {
   listBatchJobs,
 } from './batch-client.js';
 import {
+  batchCommand,
   listWorkflowCommand,
   prepareEndpoint,
   resolveEndpoint,
 } from './batch.js';
+import { BatchTaskStore } from './batch-task.js';
+import { writeStdoutLine } from '../utils/stdioHelpers.js';
 
 const mockLoadSettings = vi.hoisted(() => vi.fn());
 const mockResolve = vi.hoisted(() => vi.fn());
@@ -289,4 +293,72 @@ describe('batch list command', () => {
 
     expect(mockIgnoreBrokenPipe).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('local batch command environment', () => {
+  let root: string;
+  let home: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-local-env-'));
+    home = path.join(root, 'configured-batch');
+    vi.stubEnv('QWEN_HOME', path.join(root, 'qwen-home'));
+    vi.stubEnv('QWEN_BATCH_HOME', '');
+    mockLoadSettings.mockReset();
+    mockResolve.mockClear();
+    mockResolveProxy.mockClear();
+    mockWriteStderrLine.mockClear();
+    vi.mocked(writeStdoutLine).mockClear();
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    mockLoadSettings.mockReset();
+    fs.rmSync(root, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  it.each(['list', 'clean'] as const)(
+    '%s uses the task home populated while loading settings',
+    async (command) => {
+      const store = new BatchTaskStore(home);
+      const task = store.create(
+        {
+          version: 1,
+          name: 'configured',
+          kind: 'document-transform',
+          shared: { instructions: 'Translate' },
+          items: [{ id: 'a', source: 'a.md', target: 'b.md' }],
+        },
+        root,
+        'qwen-plus',
+      );
+      mockLoadSettings.mockImplementation(() => {
+        process.env['QWEN_BATCH_HOME'] = home;
+        return { merged: {} };
+      });
+
+      await yargs(
+        command === 'list' ? ['batch', 'list'] : ['batch', 'clean', task.id],
+      )
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync();
+
+      expect(process.exitCode).toBeUndefined();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+      if (command === 'list') {
+        expect(writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining(task.id),
+        );
+        expect(fs.existsSync(store.fileOf(task.id))).toBe(true);
+      } else {
+        expect(fs.existsSync(store.fileOf(task.id))).toBe(false);
+      }
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(mockResolveProxy).not.toHaveBeenCalled();
+    },
+  );
 });
