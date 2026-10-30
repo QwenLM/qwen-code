@@ -4372,14 +4372,15 @@ export function createServeApp(
         .stopAgentHostRestore,
     );
     stopAppResource(() => webTerminalRegistry.dispose());
+    const drains = await Promise.allSettled(pendingDrains);
     // The catalogs' watchers belong to this daemon process, whichever service
-    // created them.
+    // created them. Sweeping after the drains keeps a read that races the
+    // shutdown from rebuilding a manager whose watcher nothing would stop.
     stopAppResource(() => {
       trustedSkillsConfigStatus.dispose?.();
       untrustedSkillsConfigStatus.dispose?.();
       disposeAllSkillsWatchers();
     });
-    const drains = await Promise.allSettled(pendingDrains);
     stopAppResource(() => acpHandleRef.current?.dispose());
     // A host that passes its own lifecycle drains these bridges in its close
     // (`runQwenServe` disposes every runtime, then the primary bridge), so only

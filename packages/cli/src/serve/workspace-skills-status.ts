@@ -522,7 +522,7 @@ async function startSkillsWatcher(
       // chokidar can report an attach failure after `startWatching()` resolves;
       // recording that as a live watcher would leave the failure invisible.
       writeStderrLine(
-        `qwen serve: daemon-local Skills watcher attached to no directory for ${workspaceCwd}`,
+        `qwen serve: daemon-local Skills watcher failed for ${workspaceCwd}: no directory attached`,
       );
       return false;
     }
@@ -542,7 +542,9 @@ async function startSkillsWatcher(
 /**
  * Covers the changes the watchers cannot observe — a Skills directory created
  * after they started, or a dropped event — by re-running discovery at most once
- * per interval. The read never waits for it: the retained cache answers, so the
+ * per interval. This is a bounded forced rescan over the watched levels,
+ * independent of watcher health, so it also covers a watcher that never
+ * attached. The read never waits for it: the retained cache answers, so the
  * catalog stays bounded to the runtime endpoint's freshness policy instead of
  * blocking a request on a full scan.
  */

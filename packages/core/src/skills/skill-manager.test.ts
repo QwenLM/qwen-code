@@ -1682,6 +1682,38 @@ describe('SkillManager', () => {
       }
     });
 
+    it('retries the watch after chokidar reports an attach error', async () => {
+      vi.mocked(fsSync.existsSync).mockImplementation(
+        (p) => String(p) === PROJECT_QWEN_DIR,
+      );
+      mockReaddir();
+      mockWatch.mockClear();
+      const firstWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(firstWatcher);
+
+      await manager.startWatching();
+      expect(manager.hasActiveWatcher()).toBe(true);
+
+      // chokidar reports attach failures through the watcher's `error` event,
+      // after `startWatching()` resolved. The start latch has to clear so a
+      // later call retries instead of short-circuiting on a start that never
+      // attached.
+      firstWatcher.emit('error', new Error('EMFILE: too many open files'));
+
+      expect(manager.hasActiveWatcher()).toBe(false);
+      const secondWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(secondWatcher);
+
+      await manager.startWatching();
+
+      expect(manager.hasActiveWatcher()).toBe(true);
+      expect(secondWatcher.listenerCount('all')).toBe(1);
+    });
+
     it('should pass ignored function and shallow depth to chokidar', async () => {
       vi.mocked(fsSync.existsSync).mockImplementation(
         (p) => String(p) === PROJECT_QWEN_DIR,

@@ -717,6 +717,12 @@ export class SkillManager {
     await this.ensureUserSkillsDir();
     await this.refreshCache();
     this.updateWatchersFromCache();
+    if (!this.hasActiveWatcher()) {
+      // Nothing attached (a directory vanished between the existence check and
+      // the watch, or the watcher failed synchronously). Clearing the latch lets
+      // the next caller retry instead of reading as started forever.
+      this.watchStarted = false;
+    }
     debugLogger.info('Skill directory watchers started');
   }
 
@@ -1424,6 +1430,10 @@ export class SkillManager {
             sharedSkillWatchers.delete(watchPath);
             for (const manager of managers) {
               manager.watchedPaths.delete(watchPath);
+              // chokidar reports attach failures here after `startWatching()`
+              // resolved. Clearing the latch is what lets a later call retry the
+              // watch instead of short-circuiting on a start that never attached.
+              manager.watchStarted = false;
             }
             openSkillWatcherCount--;
             void closeFileWatcher(watcher).catch(() => undefined);

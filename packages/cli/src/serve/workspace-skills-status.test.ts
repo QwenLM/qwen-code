@@ -31,6 +31,7 @@ import {
   disposeAllSkillsWatchers,
   disposeWorkspaceSkillsWatchers,
 } from './workspace-skills-status.js';
+import { WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS } from './workspace-service/index.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
@@ -1046,9 +1047,11 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       path.join(os.tmpdir(), 'qwen-skills-window-'),
     );
     try {
-      // Pinned numerically on purpose: it is the runtime Skills snapshot's
-      // revalidation interval, so a change to either must show up here.
-      expect(SKILLS_REVALIDATE_INTERVAL_MS).toBe(1_000);
+      // The catalog interval must stay the runtime Skills snapshot's interval,
+      // so retuning either constant has to show up here.
+      expect(SKILLS_REVALIDATE_INTERVAL_MS).toBe(
+        WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+      );
       const startedAt = 1_000_000;
       const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
       const originalRefreshCache = SkillManager.prototype.refreshCache;

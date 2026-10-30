@@ -59,7 +59,11 @@ every reconnect.
   set moved.
 - Once either the child or the daemon-local fallback has published an
   initialized snapshot, repeated HTTP status reads perform no filesystem work
-  beyond that bounded check.
+  beyond that bounded check. The daemon-local fallback additionally re-runs
+  discovery over the project and user Skill levels at most once per second,
+  independently of watcher health, so a change no watcher observed (a
+  directory created after start, a dropped event) still lands; bundled and
+  extension Skills are not rescanned.
 - Extension state stays eventually consistent with out-of-band mutations
   without a watcher, because the check is cheap enough to run on a read.
 - Revalidation can never fail a read: every part of it, including the mode
