@@ -1,5 +1,7 @@
 # E2E: build once, unpack on every leg
 
+[English](e2e-build-once.md) | [简体中文](e2e-build-once.zh-CN.md)
+
 Design note for the `build` job in `.github/workflows/e2e.yml`: one job
 builds and bundles the commit, and the eleven test legs download the
 result instead of each rebuilding it.
@@ -53,16 +55,15 @@ That premise inverted on 2026-10-28. Hosted ubuntu allocations for this
 repository degraded across one day from a 47-minute wait (run created 02:19
 UTC, build started 03:06) to 2 hours 16 minutes (build started 04:56) to 2
 hours 52 minutes (run created 05:26 UTC, build started 08:18), while the
-self-hosted pool — several hundred runners, mostly idle — went unused because
-`build` was the workflow's only hosted-pinned structural job. Every leg waits
-on `build`, so each push to `main` accumulated a queued run and the backlog
-could not drain. The build now shares the legs' pool-first routing (the
-ecs-qwen pool, falling back to hosted ubuntu only when the pool is disabled)
-and carries the pool's self-hosted contract: the workspace-ownership heal
-before checkout, the pre-installed Node preflight, the persistent npm cache,
-and the disk-floor gate. On a probe run of the change (40935790797), the
-build scheduled onto the pool 4 seconds after creation and finished in
-6m02s.
+self-hosted pool — several hundred runners, mostly idle — went unused. Every
+leg waits on `build`, and `build` sat on hosted ubuntu, so each push to `main`
+accumulated a queued run and the backlog could not drain. The build now shares
+the legs' pool-first routing (the ecs-qwen pool, falling back to hosted ubuntu
+only when the pool is disabled) and carries the pool's self-hosted contract:
+the workspace-ownership heal before checkout, the pre-installed Node preflight,
+the persistent npm cache, and the disk-floor gate. On a probe run of the change
+(40935790797), the build scheduled onto the pool 4 seconds after creation and
+finished in 6m02s.
 
 The OpenTUI interactive leg remains hosted-pinned, so a run can still end on
 a hosted wait for that leg; rerouting it is a separate decision.
