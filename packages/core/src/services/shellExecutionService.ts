@@ -221,7 +221,6 @@ export interface ShellExecutionResult {
    * clean-exit signal of 0 is normalized to null at the service boundary.
    */
   signal: number | null;
-  /** An error object if the process failed to spawn. */
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
@@ -245,7 +244,14 @@ export interface ShellExecutionResult {
   /** The process ID of the spawned shell. */
   pid: number | undefined;
   /** The method used to execute the shell command. */
-  executionMethod: 'lydell-node-pty' | 'node-pty' | 'child_process' | 'none';
+  executionMethod:
+    | 'lydell-node-pty'
+    | 'node-pty'
+    | 'qwen-bun-pty'
+    | 'child_process'
+    | 'none';
+  outputCaptureLimitExceeded?: boolean;
+  stdoutHeldAfterExit?: boolean;
 }
 
 /** A handle for an ongoing shell execution. */
@@ -1035,6 +1041,7 @@ export class ShellExecutionService {
         let drainTimer: NodeJS.Timeout | null = null;
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
+        let stdoutHeld = false;
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
@@ -1052,12 +1059,14 @@ export class ShellExecutionService {
             return;
           }
           if (remainingDrainMs <= 0) {
+            stdoutHeld = !stdoutEnded;
             void handleExit(recordedExit.code, recordedExit.signal);
             return;
           }
           drainStartedAt = performance.now();
           drainTimer = setTimeout(() => {
             drainTimer = null;
+            stdoutHeld = !stdoutEnded;
             const recorded = recordedExit;
             if (recorded) void handleExit(recorded.code, recorded.signal);
           }, remainingDrainMs);
@@ -1095,11 +1104,13 @@ export class ShellExecutionService {
           let escState: TailEscState = seed?.escState ?? 'ground';
           let utf8Remaining = seed?.utf8Remaining ?? 0;
 
-          const classify = (byte: number): 0 | 1 => {
+          const FLAG_ESCAPE = 1;
+          const FLAG_UTF8 = 2;
+          const classify = (byte: number): number => {
             if (utf8Remaining > 0) {
               if ((byte & 0xc0) === 0x80) {
                 utf8Remaining--;
-                return 1;
+                return FLAG_UTF8;
               }
               utf8Remaining = 0;
             }
@@ -1121,8 +1132,12 @@ export class ShellExecutionService {
                     ? 'esc'
                     : byte === 0x5b
                       ? 'csi' // ESC [
-                      : byte === 0x5d
-                        ? 'str' // ESC ] (OSC)
+                      : byte === 0x5d ||
+                          byte === 0x50 ||
+                          byte === 0x58 ||
+                          byte === 0x5e ||
+                          byte === 0x5f
+                        ? 'str' // ESC ]/P/X/^/_  (OSC/DCS/SOS/PM/APC)
                         : 'ground';
                 break;
               case 'csi':
@@ -1131,8 +1146,18 @@ export class ShellExecutionService {
                 break;
               case 'str':
                 if (byte === 0x07)
-                  escState = 'ground'; // BEL ends OSC
-                else if (byte === 0x1b) escState = 'strEsc'; // maybe ESC \
+                  escState = 'ground'; // BEL ends OSC/DCS/SOS/PM/APC
+                else if (byte === 0x1b)
+                  escState = 'strEsc'; // maybe ESC \
+                else if (byte === 0x9c)
+                  escState = 'ground'; // C1 ST (string terminator)
+                else if (
+                  byte === 0x18 ||
+                  byte === 0x1a ||
+                  byte === 0x0a ||
+                  byte === 0x0d
+                )
+                  escState = 'ground'; // CAN/SUB/LF/CR — never inside a string
                 break;
               case 'strEsc':
                 escState = byte === 0x5c ? 'ground' : 'str';
@@ -1142,7 +1167,7 @@ export class ShellExecutionService {
                 // escState is a closed union; nothing else to handle.
                 break;
             }
-            return 1; // this byte is inside the sequence opened earlier
+            return FLAG_ESCAPE; // this byte is inside the sequence opened earlier
           };
 
           // Restore bytes retained by the previous (larger) ring together with their
@@ -1211,10 +1236,29 @@ export class ShellExecutionService {
             },
             read(): Buffer {
               const { buf, flags } = this.ordered();
-              // Drop leading bytes that are the orphan half of a cut sequence.
+              if (buf.length === 0) return buf;
+              const encoding = getCachedEncodingForBuffer(buf);
+              const utf8Compatible =
+                encoding === 'utf8' || encoding === 'utf-8';
+              const MAX_ORPHAN_SKIP = 8;
               let skip = 0;
-              while (skip < flags.length && flags[skip] === 1) skip++;
+              while (skip < flags.length) {
+                const f = flags[skip];
+                const escapeOrphan = (f & FLAG_ESCAPE) !== 0;
+                const utf8Orphan = (f & FLAG_UTF8) !== 0;
+                if (escapeOrphan || (utf8Orphan && utf8Compatible)) {
+                  skip++;
+                } else {
+                  break;
+                }
+              }
+              if (skip > MAX_ORPHAN_SKIP || skip === flags.length) {
+                return buf;
+              }
               return skip > 0 ? buf.subarray(skip) : buf;
+            },
+            readRaw(): Buffer {
+              return this.ordered().buf;
             },
             snapshot() {
               const { buf, flags } = this.ordered();
@@ -1426,6 +1470,7 @@ export class ShellExecutionService {
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
           const stderrPreview = stderrTail?.read() ?? Buffer.alloc(0);
           const tailPreview = retainedTail();
+          const tailPreviewRaw = previewTail?.readRaw() ?? Buffer.alloc(0);
           const tailText = rawCapture
             ? stripAnsi(decodePreviewTail(tailPreview)).trim()
             : '';
@@ -1441,7 +1486,7 @@ export class ShellExecutionService {
                     decodeBufferedOutput(
                       Buffer.concat([
                         finalBuffer,
-                        tailPreview.subarray(
+                        tailPreviewRaw.subarray(
                           -(totalOutputBytes - capturedOutputBytes),
                         ),
                       ]),
@@ -1468,6 +1513,7 @@ export class ShellExecutionService {
           resolve({
             rawOutput: finalBuffer,
             output: boundedOutput,
+            outputCaptureLimitExceeded,
             exitCode: code,
             signal: signal ? os.constants.signals[signal] : null,
             error:
@@ -1475,6 +1521,7 @@ export class ShellExecutionService {
             aborted: abortSignal.aborted,
             pid: undefined,
             executionMethod: 'child_process',
+            ...(stdoutHeld ? { stdoutHeldAfterExit: true } : {}),
           });
         };
 
@@ -1548,7 +1595,7 @@ export class ShellExecutionService {
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
-        if (rawCapture) {
+        if (rawCapture || streamStdout) {
           child.stdout?.on('end', () => {
             stdoutEnded = true;
           });
@@ -1874,6 +1921,7 @@ export class ShellExecutionService {
             // process that's still running.
             aborted: false,
             promoted: true,
+            outputCaptureLimitExceeded,
             pid: child.pid,
             executionMethod: 'child_process',
           });
@@ -2156,7 +2204,6 @@ export class ShellExecutionService {
         let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
-        const error: Error | null = null;
         let exited = false;
         // Set the moment performCancelKill actually proceeds (a cancel reached
         // us before the shell exited). The finalizer reads THIS, not a late
@@ -2380,6 +2427,15 @@ export class ShellExecutionService {
                 }
               }),
           );
+          processingChain = processingChain.catch((error) => {
+            try {
+              debugLogger.warn(
+                `PTY output processing failed: ${getErrorMessage(error)}`,
+              );
+            } catch {
+              // Diagnostics must not reject the drain again.
+            }
+          });
         };
 
         // Capture the IDisposables that node-pty returns so the
@@ -2401,6 +2457,11 @@ export class ShellExecutionService {
         const ptyErrorHandler = (err: NodeJS.ErrnoException) => {
           if (isExpectedPtyReadExitError(err)) {
             // EIO is expected when the PTY process exits - ignore it
+            return;
+          }
+          const limitCode = getErrnoCode(err);
+          if (limitCode === 'QWEN_PTY_WRITE_LIMIT') {
+            settleResult(null, null, err);
             return;
           }
 
@@ -2495,90 +2556,108 @@ export class ShellExecutionService {
           this.activePtys.delete(ptyProcess.pid);
         };
 
+        let settled = false;
+        const finalizeResult = async (
+          exitCode: number | null,
+          signal: number | null,
+          failureError: Error | null,
+        ) => {
+          if (settled) return;
+          settled = true;
+          const finalBuffer = Buffer.concat(outputChunks);
+          let fullOutput = '';
+
+          try {
+            try {
+              render(true);
+            } catch (e) {
+              debugLogger.warn(
+                `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+
+            try {
+              if (isStreamingRawContent) {
+                const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                const decodedOutput = new TextDecoder(finalEncoding).decode(
+                  finalBuffer,
+                );
+                fullOutput = await replayTerminalOutput(
+                  decodedOutput,
+                  cols,
+                  rows,
+                  Terminal,
+                );
+              } else {
+                fullOutput = serializeTerminalToText(headlessTerminal);
+              }
+            } catch {
+              try {
+                fullOutput = decodeBufferedOutput(finalBuffer);
+              } catch {
+                // Ignore fallback rendering errors and resolve with empty text.
+              }
+            }
+            fullOutput = appendOutputCaptureLimitNotice(
+              fullOutput,
+              outputCaptureLimitExceeded,
+              totalBytesReceived,
+              maxBufferedOutputBytes,
+            );
+
+            resolve({
+              rawOutput: finalBuffer,
+              output: fullOutput,
+              outputCaptureLimitExceeded,
+              exitCode,
+              signal,
+              error: failureError,
+              aborted: abortSignal.aborted,
+              pid: ptyProcess.pid,
+              executionMethod: ptyInfo?.name ?? 'node-pty',
+            });
+          } finally {
+            disposeForegroundPtyResources();
+          }
+        };
+
+        // Give any last onData callbacks a chance to run before finalizing.
+        // onExit can arrive slightly before late PTY data is processed.
+        let settling = false;
+        const settleResult = (
+          exitCode: number | null,
+          signal: number | null,
+          failureError: Error | null,
+        ) => {
+          if (settling) return;
+          settling = true;
+          exited = true;
+          abortSignal.removeEventListener('abort', abortHandler);
+          const flushChain = () => processingChain.then(() => {});
+          const deadline = new Promise<void>((res) =>
+            setTimeout(res, SIGKILL_TIMEOUT_MS),
+          );
+          const drain = () =>
+            new Promise<void>((res) => setImmediate(res)).then(flushChain);
+
+          void Promise.race([
+            flushChain()
+              .then(drain)
+              .then(drain)
+              .catch(() => undefined),
+            deadline,
+          ]).then(() => {
+            void finalizeResult(exitCode, signal, failureError);
+          });
+        };
+
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
-            exited = true;
-            abortSignal.removeEventListener('abort', abortHandler);
-
-            const finalize = async () => {
-              const finalBuffer = Buffer.concat(outputChunks);
-              let fullOutput = '';
-
-              try {
-                try {
-                  render(true);
-                } catch (e) {
-                  debugLogger.warn(
-                    `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
-                  );
-                }
-
-                try {
-                  if (isStreamingRawContent) {
-                    // Re-decode the captured buffer with proper encoding detection.
-                    // The streaming decoder used the first-chunk heuristic which
-                    // can misdetect when early output is ASCII-only but later
-                    // output is in a different encoding (e.g. GBK).
-                    const finalEncoding =
-                      getCachedEncodingForBuffer(finalBuffer);
-                    const decodedOutput = new TextDecoder(finalEncoding).decode(
-                      finalBuffer,
-                    );
-                    fullOutput = await replayTerminalOutput(
-                      decodedOutput,
-                      cols,
-                      rows,
-                      Terminal,
-                    );
-                  } else {
-                    fullOutput = serializeTerminalToText(headlessTerminal);
-                  }
-                } catch {
-                  try {
-                    fullOutput = decodeBufferedOutput(finalBuffer);
-                  } catch {
-                    // Ignore fallback rendering errors and resolve with empty text.
-                  }
-                }
-                fullOutput = appendOutputCaptureLimitNotice(
-                  fullOutput,
-                  outputCaptureLimitExceeded,
-                  totalBytesReceived,
-                  maxBufferedOutputBytes,
-                );
-
-                resolve({
-                  rawOutput: finalBuffer,
-                  output: fullOutput,
-                  exitCode,
-                  signal: signal === 0 ? null : (signal ?? null),
-                  error,
-                  aborted: abortSignal.aborted,
-                  pid: ptyProcess.pid,
-                  executionMethod:
-                    (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
-                    'node-pty',
-                });
-              } finally {
-                disposeForegroundPtyResources();
-              }
-            };
-
-            // Give any last onData callbacks a chance to run before finalizing.
-            // onExit can arrive slightly before late PTY data is processed.
-            const flushChain = () => processingChain.then(() => {});
-            const deadline = new Promise<void>((res) =>
-              setTimeout(res, SIGKILL_TIMEOUT_MS),
+            settleResult(
+              exitCode,
+              signal === 0 ? null : (signal ?? null),
+              null,
             );
-            const drain = () =>
-              new Promise<void>((res) => setImmediate(res)).then(flushChain);
-
-            void Promise.race([
-              flushChain().then(drain).then(drain),
-              deadline,
-            ]).then(() => {
-              void finalize();
-            });
           },
         );
 
@@ -2954,15 +3033,15 @@ export class ShellExecutionService {
               output: snapshot,
               exitCode: null,
               signal: null,
-              error,
+              error: null,
               // See childProcessFallback for the full rationale — promoted
               // results are NOT user-cancellations, so callers' `if
               // (result.aborted)` branches must NOT trigger.
               aborted: false,
               promoted: true,
+              outputCaptureLimitExceeded,
               pid: ptyProcess.pid,
-              executionMethod:
-                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+              executionMethod: ptyInfo?.name ?? 'node-pty',
             });
           } finally {
             try {
@@ -3053,6 +3132,11 @@ export class ShellExecutionService {
             }
           } else {
             try {
+              ptyProcess.resume();
+            } catch {
+              // Best effort: the kill below must still run.
+            }
+            try {
               // Send SIGTERM first to allow graceful shutdown
               process.kill(-ptyProcess.pid, 'SIGTERM');
               await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
@@ -3120,6 +3204,21 @@ export class ShellExecutionService {
       };
     } catch (e) {
       const error = e as Error;
+      if (!ptySpawned && getErrnoCode(error) === 'QWEN_PTY_ACTIVE_LIMIT') {
+        return {
+          pid: undefined,
+          result: Promise.resolve({
+            error,
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            pid: undefined,
+            executionMethod: 'none',
+          }),
+        };
+      }
       if (!ptySpawned && useBundledConpty) {
         // The bundled ConPTY backend (useConptyDll above) adds throw sites
         // node-pty reaches synchronously out of spawn — the conpty.dll it

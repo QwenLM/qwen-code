@@ -244,6 +244,8 @@ const makePty = () =>
     onExit: vi.fn().mockReturnValue({ dispose: vi.fn() }),
     write: vi.fn(),
     resize: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
   });
 
 // Like a live Node ChildProcess, exitCode / signalCode are null: the promote
@@ -781,6 +783,7 @@ describe('ShellExecutionService', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -798,6 +801,7 @@ describe('ShellExecutionService', () => {
         { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
       );
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.toString()).toBe('12345678ab');
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -810,6 +814,7 @@ describe('ShellExecutionService', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
@@ -965,6 +970,62 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('converges a qwen-bun-pty resource-limit error into a failed result with no fabricated exit code', async () => {
+      const limitError = Object.assign(new Error('resource limit reached'), {
+        code: 'QWEN_PTY_WRITE_LIMIT',
+      });
+      const { result } = await simulateExecution(
+        'yes | head -c 100000000',
+        () => {
+          ptyData('1234567890discarded');
+          expect(() => mockPtyProcess.emit('error', limitError)).not.toThrow();
+        },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+
+      expect(result.outputCaptureLimitExceeded).toBe(true);
+      expect(result.rawOutput.toString()).toBe('1234567890');
+      expect(result.output).toContain(CAP_NOTICE);
+      expect(result.error).toBe(limitError);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.aborted).toBe(false);
+    });
+
+    it('settles a limit failure after an output consumer rejects', async () => {
+      mockIsBinary.mockReturnValueOnce(true);
+      onOutputEventMock.mockImplementation((event) => {
+        if (event.type === 'binary_detected') throw new Error('consumer boom');
+      });
+      const error = Object.assign(new Error('resource limit reached'), {
+        code: 'QWEN_PTY_WRITE_LIMIT',
+      });
+      const { result } = await simulateExecution('echo binary', async () => {
+        ptyData(Buffer.from([0, 1, 2]));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        mockPtyProcess.emit('error', error);
+        ptyExit({ exitCode: 7, signal: 0 });
+      });
+      expect(result.error).toBe(error);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+    });
+
+    it('reports pre-spawn capacity refusal without fallback or a native exit', async () => {
+      const error = Object.assign(new Error('capacity reached'), {
+        code: 'QWEN_PTY_ACTIVE_LIMIT',
+      });
+      mockPtySpawn.mockImplementationOnce(() => {
+        throw error;
+      });
+      const { result } = await simulateExecution('never-run', () => {});
+      expect(result.error).toBe(error);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.executionMethod).toBe('none');
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    });
+
     it('should ignore ioctl EBADF message-only resize race errors', async () => {
       mockPtyProcess.resize.mockImplementationOnce(() => {
         throw new Error('ioctl(2) failed, EBADF');
@@ -1033,6 +1094,19 @@ describe('ShellExecutionService', () => {
     it('should abort a running process and set the aborted flag', async () => {
       // cancelPty checks the aborted flag (the process kill is mocked).
       await cancelPty();
+    });
+
+    it('resumes a flow-control-paused pty before signalling its group', async () => {
+      await cancelPty();
+
+      expect(mockPtyProcess.resume).toHaveBeenCalledTimes(1);
+      const sigterm = mockProcessKill.mock.calls.findIndex(
+        ([pid, signal]) => pid === -mockPtyProcess.pid && signal === 'SIGTERM',
+      );
+      expect(sigterm).toBeGreaterThanOrEqual(0);
+      expect(mockPtyProcess.resume.mock.invocationCallOrder[0]).toBeLessThan(
+        mockProcessKill.mock.invocationCallOrder[sigterm]!,
+      );
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
@@ -2442,6 +2516,53 @@ describe('ShellExecutionService child_process fallback', () => {
     expect(tail).toMatch(/^\uFFFDA+$/);
   });
 
+  it('preserves non-UTF-8 CJK lead bytes when the ring opens on them (R2-3)', async () => {
+    mockGetCachedEncodingForBuffer.mockReturnValue('gbk');
+    const payload = Buffer.concat([
+      Buffer.alloc(30, 'A'),
+      Buffer.from([0xd6, 0xd0, 0xb4, 0xed, 0xce, 0xf3]),
+    ]);
+    const { result } = await runCaptured(
+      'printf output',
+      () => emitOut(payload),
+      0,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 8 },
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toBe('错误');
+    expect(tail).not.toContain('\uFFFD');
+  });
+
+  it('does not blank the tail when an unterminated OSC exceeds the ring (R1-1)', async () => {
+    const payload = Buffer.concat([
+      Buffer.from([0x1b, 0x5d, 0x30, 0x3b]),
+      Buffer.alloc(100, 'Z'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^Z+$/);
+  });
+
+  it('reconstructs the full stream in the fits-in-budget branch using the untrimmed ring (R4-1)', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(30, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]),
+      Buffer.alloc(29, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+
+    expect(result.output).toBe('A'.repeat(59));
+    expect(result.output).not.toContain('[Middle output omitted');
+  });
+
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
       setSecretEnv();
@@ -2508,6 +2629,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const result = await handle.result;
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -2523,6 +2645,7 @@ describe('ShellExecutionService child_process fallback', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
@@ -2644,6 +2767,7 @@ describe('ShellExecutionService child_process fallback', () => {
       const result = await handle.result;
       expect(settledEarly).toBe(true);
       expect(result.exitCode).toBe(0);
+      expect(result.stdoutHeldAfterExit).toBeUndefined();
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('after'));
     });
 
@@ -2663,7 +2787,22 @@ describe('ShellExecutionService child_process fallback', () => {
       );
       expect(result.exitCode).toBe(0);
       expect(result.aborted).toBe(false);
+      expect(result.stdoutHeldAfterExit).toBe(true);
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('before'));
+    });
+
+    it('does not report a held stdout when only stderr stays open past the drain', async () => {
+      const { result } = await simulateExecution(
+        'stderr-held',
+        (cp) => {
+          emitOut('before');
+          cp.stdout?.emit('end');
+          cp.emit('exit', 0, null);
+        },
+        { streamStdout: true },
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stdoutHeldAfterExit).toBeUndefined();
     });
 
     it('reports capture-limit notice for streaming child_process output', async () => {
