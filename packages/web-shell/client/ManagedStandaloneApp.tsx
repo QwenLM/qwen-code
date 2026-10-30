@@ -3,7 +3,11 @@ import type {
   ManagedAgentProvider,
   ManagedModelPreset,
 } from './components/managed/managed-agent-provider';
-import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import {
+  createJavaManagedAgentProvider,
+  type JavaManagedAgentProviderOptions,
+} from './components/managed/java-managed-agent-provider';
+import { ManagedAgentWebShell } from './ManagedAgentWebShell';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import type { WebShellLanguage } from './i18n';
 import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
@@ -28,6 +32,7 @@ export function ManagedStandaloneApp({
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{
     provider?: ManagedAgentProvider;
+    gatewayOptions?: JavaManagedAgentProviderOptions;
     error?: Error;
   }>({});
   useEffect(() => {
@@ -55,7 +60,8 @@ export function ManagedStandaloneApp({
           typeof boot.agentId !== 'string' ||
           !boot.agentId.trim() ||
           !('enableWorkspaceBinding' in boot) ||
-          boot.enableWorkspaceBinding !== true
+          boot.enableWorkspaceBinding !== true ||
+          ('managedOnly' in boot && typeof boot.managedOnly !== 'boolean')
         ) {
           throw new Error('Managed application returned invalid boot options.');
         }
@@ -87,7 +93,7 @@ export function ManagedStandaloneApp({
         }
         const modelPresets = rawPresets as ManagedModelPreset[];
         if (!controller.signal.aborted) {
-          const provider = createJavaManagedAgentProvider({
+          const options: JavaManagedAgentProviderOptions = {
             baseUrl: window.location.origin,
             productScope: boot.productScope,
             agentId: boot.agentId,
@@ -95,7 +101,7 @@ export function ManagedStandaloneApp({
             modelPresets,
             getHeaders: (): HeadersInit =>
               daemonToken ? { Authorization: `Bearer ${daemonToken}` } : {},
-          });
+          };
           const url = new URL(window.location.href);
           if (url.searchParams.get('managed') === '1') {
             // Managed restoration must not restore a stale Local route or history target.
@@ -106,7 +112,11 @@ export function ManagedStandaloneApp({
             url.searchParams.delete('context');
             window.history.replaceState(null, '', url);
           }
-          setState({ provider });
+          setState(
+            'managedOnly' in boot && boot.managedOnly
+              ? { gatewayOptions: options }
+              : { provider: createJavaManagedAgentProvider(options) },
+          );
         }
       })
       .catch((error: unknown) => {
@@ -128,6 +138,14 @@ export function ManagedStandaloneApp({
       />
     );
   }
+  if (state.gatewayOptions) {
+    return (
+      <ManagedGatewaySurface
+        options={state.gatewayOptions}
+        language={language}
+      />
+    );
+  }
   if (!state.provider) {
     return (
       <div role="status" style={{ padding: '2rem' }}>
@@ -136,4 +154,44 @@ export function ManagedStandaloneApp({
     );
   }
   return children(state.provider);
+}
+
+function selectedGatewaySession(): string | undefined {
+  return (
+    new URL(window.location.href).searchParams.get('managedSession') ??
+    undefined
+  );
+}
+
+function ManagedGatewaySurface({
+  options,
+  language,
+}: {
+  options: JavaManagedAgentProviderOptions;
+  language: WebShellLanguage;
+}) {
+  const [sessionId, setSessionId] = useState(selectedGatewaySession);
+  useEffect(() => {
+    const restore = () => setSessionId(selectedGatewaySession());
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
+  return (
+    <ManagedAgentWebShell
+      {...options}
+      language={language}
+      sessionId={sessionId}
+      onSessionChange={(next) => {
+        setSessionId(next);
+        const url = new URL(window.location.href);
+        url.searchParams.set('managed', '1');
+        if (next) url.searchParams.set('managedSession', next);
+        else url.searchParams.delete('managedSession');
+        if (url.href !== window.location.href) {
+          window.history.pushState(null, '', url);
+        }
+      }}
+      style={{ height: '100dvh' }}
+    />
+  );
 }
