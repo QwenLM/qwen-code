@@ -131,7 +131,9 @@ describe('contextLengthError', () => {
     expect(info.limitKind).toBe('total');
   });
 
-  it('parses the input token count from vLLM wording', () => {
+  it('reads the vLLM input token count as the prompt size only', () => {
+    // The reactive path reads `actualTokens` and falls back to the limit
+    // here; only the compression retry reads the prompt's size.
     const info = getContextLengthExceededInfo(
       new Error(
         "This model's maximum context length is 16384 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.",
@@ -139,7 +141,8 @@ describe('contextLengthError', () => {
     );
 
     expect(info.isExceeded).toBe(true);
-    expect(info.actualTokens).toBe(25000);
+    expect(info.promptTokens).toBe(25000);
+    expect(info.actualTokens).toBeUndefined();
     expect(info.limitTokens).toBe(16384);
     expect(info.limitKind).toBe('total');
   });

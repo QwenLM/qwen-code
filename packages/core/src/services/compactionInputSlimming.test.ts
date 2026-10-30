@@ -239,16 +239,6 @@ describe('compactionInputSlimming', () => {
       expect(estimatePartChars({ text: 'hello' }, 1600)).toBe(5);
     });
 
-    it('counts a thoughtSignature carried next to thought text (#9455)', () => {
-      const thoughtSignature = 's'.repeat(4_096);
-      expect(
-        estimatePartChars(
-          { text: 'reasoning', thought: true, thoughtSignature },
-          1600,
-        ),
-      ).toBe('reasoning'.length + thoughtSignature.length);
-    });
-
     it('uses fixed budget for inlineData regardless of size', () => {
       const huge = 'A'.repeat(1_000_000);
       const expected = 1600 * 4;
@@ -874,22 +864,24 @@ describe('compactionInputSlimming', () => {
         const parts = slim([reminder, prompt]);
 
         expect(parts[0]!.text!.length).toBeLessThanOrEqual(
-          4_000 + SLIM_TEXT_TRUNCATION_MARKER.length,
+          4_000 +
+            SLIM_TEXT_TRUNCATION_MARKER.length +
+            '\n</system-reminder>'.length,
         );
+        expect(parts[0]!.text!.endsWith('\n</system-reminder>')).toBe(true);
         expect(parts[1]).toBe(prompt);
       });
 
       it.each([500, 4_000])(
-        'replaces a long reminder whole at a %i-character cap, keeping it closed (R3-2)',
+        'cuts a long reminder at a %i-character cap and closes it again (R3-2)',
         (maxTextChars) => {
+          const original = `<system-reminder>\nproject notes ${'r'.repeat(8_000)}\n</system-reminder>`;
           const [reminder] = slimCompactionInput(
             [
               {
                 role: 'user',
                 parts: [
-                  {
-                    text: `<system-reminder>\n${'r'.repeat(8_000)}\n</system-reminder>`,
-                  },
+                  { text: original },
                   markTypedPrompt({ text: 'please fix the parser bug' }),
                 ],
               },
@@ -899,7 +891,9 @@ describe('compactionInputSlimming', () => {
           ).slimmedHistory[0]!.parts!;
 
           expect(reminder!.text).toBe(
-            '<system-reminder>\n[reminder omitted for compaction]\n</system-reminder>',
+            original.slice(0, maxTextChars) +
+              SLIM_TEXT_TRUNCATION_MARKER +
+              '\n</system-reminder>',
           );
         },
       );

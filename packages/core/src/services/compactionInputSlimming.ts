@@ -233,7 +233,7 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length + (part.thoughtSignature?.length ?? 0);
+    return part.text.length;
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
@@ -516,10 +516,14 @@ function transformPart(
     nextPart.text.length > maxTextChars
   ) {
     stats.textPartsTruncated++;
-    // Cut, a reminder would lose its closing tag and read as open over the
-    // text after it, so it is replaced whole.
+    // Cut like other text, a reminder would lose its closing tag and read as
+    // open over the text after it, so its body is cut and the tag closed
+    // again.
     if (isWrappedSystemReminderPart(nextPart)) {
-      return { ...nextPart, text: OMITTED_REMINDER_TEXT };
+      return {
+        ...nextPart,
+        text: truncateReminderForSlimming(nextPart.text, maxTextChars),
+      };
     }
     // Spread rather than rebuilding a bare `{ text }` so sibling properties
     // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
@@ -532,7 +536,13 @@ function transformPart(
   return nextPart;
 }
 
-const OMITTED_REMINDER_TEXT = `${SYSTEM_REMINDER_OPEN}\n[reminder omitted for compaction]\n${SYSTEM_REMINDER_CLOSE}`;
+function truncateReminderForSlimming(
+  value: string,
+  maxTextChars: number,
+): string {
+  const body = value.trimEnd().slice(0, -SYSTEM_REMINDER_CLOSE.length);
+  return `${truncateTextForSlimming(body, maxTextChars)}\n${SYSTEM_REMINDER_CLOSE}`;
+}
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {
   let end = maxTextChars;

@@ -972,6 +972,9 @@ export class ChatCompressionService {
     // Hoisted because the truncation guard below compares the reported
     // output count against it.
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
+    // The window that request was sized against, which the snapshot check
+    // below compares its reported usage with.
+    let coldWindow = budgetWindow;
     // Set once the cold request is reduced to fit: its usage then no longer
     // describes the history it replaces.
     let coldInputReduced = false;
@@ -1138,6 +1141,7 @@ export class ChatCompressionService {
       sizing: ColdRequestSizing,
     ) => {
       coldOutputBudget = coldBudgetFor(history, sizing);
+      coldWindow = sizing.window;
       if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
         config
           .getDebugLogger()
@@ -1540,16 +1544,27 @@ export class ChatCompressionService {
     // <state_snapshot> the directive asks for (the cache-sharing path gates
     // on the same check).
     // - A summary that opens <state_snapshot> and never closes it was cut
-    //   off, whatever capped it. A server that lowers max_tokens to the room
-    //   the prompt leaves instead of rejecting the request (vLLM does)
-    //   reports a count below the budget requested, out of the threshold's
-    //   reach. A summary without the tags is left alone here.
+    //   off when its request filled the window it was sized for. A server
+    //   can stop the output where its window ends instead of rejecting
+    //   `prompt + max_tokens > window` (llama.cpp's server does); the count
+    //   it reports then stays below the budget requested, out of the
+    //   threshold's reach, but its prompt and output counts reach the
+    //   window. Without that sign the summary is kept: a model can end
+    //   without closing the tag, and dropping each such summary would trip
+    //   the failure breaker. A summary without the tags is left alone here.
     // - When the budget was clamped and the count is a local estimate, output
     //   never exceeds the requested budget and the estimator tops out at
     //   ~1.5x actual tokens, so below ~2/3 of the ceiling the estimate can
     //   never reach the fixed threshold. That path also drops a summary
     //   without a closed snapshot.
-    const cutMidSnapshot = hasUnclosedStateSnapshot(summary);
+    const filledColdWindow =
+      !outputCountIsEstimated &&
+      typeof compressionInputTokenCount === 'number' &&
+      typeof compressionOutputTokenCount === 'number' &&
+      compressionInputTokenCount + compressionOutputTokenCount >=
+        coldWindow - COMPACTION_BUDGET_SAFETY_MARGIN;
+    const cutMidSnapshot =
+      filledColdWindow && hasUnclosedStateSnapshot(summary);
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&

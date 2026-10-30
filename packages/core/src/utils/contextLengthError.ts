@@ -118,21 +118,6 @@ function parseTokenCounts(text: string): {
     };
   }
 
-  // vLLM: "This model's maximum context length is 16384 tokens. However, your
-  // prompt contains 25000 input tokens, which exceeds this limit even without
-  // any output tokens." Its "contains at least N" form is where tokenization
-  // stopped, not the prompt's size, so that one stays limit-only below.
-  const vllmMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?[\s\S]*?your prompt contains\s+(\d[\d,]*)\s+input tokens?/i,
-  );
-  if (vllmMatch) {
-    return {
-      actualTokens: parseInteger(vllmMatch[2]!),
-      limitTokens: parseInteger(vllmMatch[1]!),
-      limitKind: 'total',
-    };
-  }
-
   const maxContextLimitMatch = text.match(
     /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
   );
