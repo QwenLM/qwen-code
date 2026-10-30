@@ -218,7 +218,11 @@ into a worktree watch.
   head starts tracking a path the checkout holds as an ignored file, git
   refuses and the answer is `synced: false` naming the collided paths —
   the dirty gate ignores ignored files on purpose, and the merge must not
-  destroy them.
+  destroy them. The same protection covers submodule alignment: before a
+  checked-out submodule is reset to the commit the PR head records, its
+  ignored files are intersected with the target commit's tracked paths; a
+  collision leaves the submodule untouched and answers `synced: false`
+  naming `submodule: path`.
 - The PR head is fetched into the watch's private ref
   (`refs/qwen-autofix/pr-<n>/head`, the same ref prepare uses) and read
   from there — never from the shared `FETCH_HEAD`, which a concurrent

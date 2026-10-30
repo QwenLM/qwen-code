@@ -1152,6 +1152,45 @@ describe('runSync (real git, bare remote)', () => {
       expect(known()).toBe(featSha);
     });
 
+    it('refuses to overwrite an ignored file inside a submodule the PR head bumps', () => {
+      const { s1, inSub } = withSubmodule();
+      // The user's ignored file inside the checked-out submodule. A
+      // submodule's .git is a gitfile: its exclude lives in the git
+      // directory it names.
+      writeFileSync(
+        join(inSub, 'secret.env'),
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      const subGitDir = run(inSub, 'rev-parse', '--absolute-git-dir');
+      mkdirSync(join(subGitDir, 'info'), { recursive: true });
+      writeFileSync(join(subGitDir, 'info', 'exclude'), 'secret.env\n');
+      // A further submodule commit that starts tracking secret.env, bumped
+      // by the PR head.
+      const sub = join(base, 'sub-ip');
+      writeFileSync(join(sub, 'secret.env'), 'REMOTE_BYTES=1');
+      run(sub, 'add', 'secret.env');
+      run(sub, 'commit', '-q', '-m', 'track secret in sub');
+      const s3 = run(sub, 'rev-parse', 'HEAD');
+      const author = join(base, 'author-ip');
+      run(author, 'update-index', '--cacheinfo', `160000,${s3},vendor/sub`);
+      run(author, 'commit', '-q', '-m', 'bump sub to secret-tracking');
+      run(author, 'push', '-q', 'origin', 'HEAD:feat');
+      run(
+        remote,
+        'update-ref',
+        'refs/pull/7/head',
+        run(author, 'rev-parse', 'HEAD'),
+      );
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: secret\.env/);
+      // The user's bytes and the submodule tip both survive.
+      expect(readFileSync(join(inSub, 'secret.env'), 'utf8')).toBe(
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
     it('reads the PR head from the private ref when a concurrent fetch rewrites FETCH_HEAD', () => {
       // A descendant of the PR head on another remote branch: an
       // interleaved fetch of it would fast-forward the user's branch to

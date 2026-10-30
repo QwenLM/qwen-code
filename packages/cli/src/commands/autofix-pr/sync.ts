@@ -21,7 +21,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
@@ -337,8 +337,18 @@ function syncLocked(
         prHead,
       );
     }
-    // In the user's checkout a submodule holding work is left alone.
-    alignSubmodules(worktree, inPlace);
+    // In the user's checkout a submodule holding work is left alone, and
+    // one whose target commit would overwrite an ignored file is reported.
+    const collisions: string[] = [];
+    alignSubmodules(worktree, inPlace, inPlace ? collisions : undefined);
+    if (collisions.length > 0) {
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: submoduleCollisionReason(collisions),
+      };
+    }
   }
 
   if (!discard && (head === prHead || isAncestor(worktree, prHead, head))) {
@@ -346,7 +356,16 @@ function syncLocked(
     // merge moves the gitlinks, not the checked-out submodules. Nothing was
     // checked for uncommitted changes on this path, so a submodule holding
     // work of its own is left for the check below.
-    alignSubmodules(worktree, true);
+    const collisions: string[] = [];
+    alignSubmodules(worktree, true, inPlace ? collisions : undefined);
+    if (collisions.length > 0) {
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: submoduleCollisionReason(collisions),
+      };
+    }
   }
   if (moved || current !== state) {
     writeState(paths.statePath, { ...current, lastKnownHeadSha: prHead });
@@ -387,6 +406,9 @@ interface Alignment {
   /** Leave a submodule that holds work a reset would lose. */
   keepWork: boolean;
   deadline: number;
+  /** When present (an in-place watch), ignored-file collisions are
+   * collected here and the submodule is left untouched instead of reset. */
+  collisions?: string[];
 }
 
 /**
@@ -398,13 +420,18 @@ interface Alignment {
  * after the helper returned. A commit a submodule lacks is fetched from its
  * own remote, under the protocol policy git applies to submodules.
  */
-function alignSubmodules(repository: string, keepWork = false): void {
+function alignSubmodules(
+  repository: string,
+  keepWork = false,
+  collisions?: string[],
+): void {
   alignLevel(
     repository,
     {
       root: realpathSync(repository),
       keepWork,
       deadline: Date.now() + SUBMODULE_FETCH_BUDGET_MS,
+      collisions,
     },
     0,
   );
@@ -453,6 +480,17 @@ function alignLevel(
       fetchSubmoduleCommit(dir, sha, alignment.deadline);
     }
     if (alignment.keepWork && holdsWork(dir, sha)) continue;
+    if (alignment.collisions) {
+      // The dirty gate ignores ignored files on purpose; a reset would
+      // overwrite one the target commit starts tracking. Leave the
+      // submodule as it is and report the collision for the user.
+      const collided = ignoredCollisions(dir, sha);
+      if (collided.length > 0) {
+        const rel = relative(alignment.root, dir);
+        alignment.collisions.push(...collided.map((p) => `${rel}: ${p}`));
+        continue;
+      }
+    }
     if (
       gitOpt(
         '-C',
@@ -499,6 +537,43 @@ function isOwnSubmodule(
   } catch {
     return false;
   }
+}
+
+/** The refusal naming the submodule paths whose reset would overwrite an
+ * ignored file of the user's. */
+function submoduleCollisionReason(collisions: string[]): string {
+  return `the PR head's submodule commit(s) start tracking ignored file(s) in your checkout (${collisions.join('; ')}); move aside or unignore them, then sync again — an in-place watch never overwrites your files`;
+}
+
+/**
+ * Ignored files of a submodule that the target commit starts tracking: a
+ * reset would overwrite them, and the dirty gate cannot see them. Both
+ * listings are NUL-delimited, so a C-quoted path cannot dodge the match.
+ */
+function ignoredCollisions(dir: string, sha: string): string[] {
+  const ignoredRaw = gitOpt(
+    '-C',
+    dir,
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '-z',
+  );
+  if (!ignoredRaw) return [];
+  const ignored = new Set(ignoredRaw.split('\0').filter((p) => p !== ''));
+  if (ignored.size === 0) return [];
+  const trackedRaw = gitOpt(
+    '-C',
+    dir,
+    'ls-tree',
+    '-r',
+    '--name-only',
+    '-z',
+    sha,
+  );
+  if (trackedRaw === null) return [];
+  return trackedRaw.split('\0').filter((p) => p !== '' && ignored.has(p));
 }
 
 /**

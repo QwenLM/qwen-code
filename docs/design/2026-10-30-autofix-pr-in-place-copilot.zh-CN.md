@@ -181,7 +181,10 @@ worktree watch。
   ——持有工作的子模块原样保留；若因此树不干净，回答 `synced: false`。
   merge 带 `--no-overwrite-ignore`：当 PR head 开始跟踪检出里以忽略文件
   形式持有的路径时，git 拒绝，回答 `synced: false` 并点名冲突路径——
-  脏门禁刻意忽略 ignored 文件，merge 就绝不能销毁它们。
+  脏门禁刻意忽略 ignored 文件，merge 就绝不能销毁它们。同样的保护覆盖
+  子模块对齐：已检出的子模块被 reset 到 PR head 记录的提交之前，先把它
+  的 ignored 文件与目标提交跟踪的路径求交；有冲突就原样保留该子模块，
+  回答 `synced: false` 并以 `子模块: 路径` 点名。
 - PR head fetch 进 watch 的私有 ref（`refs/qwen-autofix/pr-<n>/head`，与
   prepare 同一个 ref）并从那里读——绝不读共享的 `FETCH_HEAD`，用户检出
   里的并发 fetch 会在 fetch 与读之间覆写它。
