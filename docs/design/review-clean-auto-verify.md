@@ -23,7 +23,7 @@ session, and cannot create a sub-session. The handoff belongs inside qwen-code.
 agent (Codex, Claude Code), by the CI bot, or by a person. An entrance welded to
 qwen-code's own review pipeline covers none of those, so the event contract has
 to be reachable from outside it, and the consumer has to be able to act on an
-event that names no qwen-code session.
+event that names no owning session.
 
 ## Current state
 
@@ -109,9 +109,9 @@ directory, the writer and the reader.
   "schemaVersion": 1,
   "eventId": "<sha256 of the dedupe key, 16 hex>",
   "createdAt": "<ISO-8601>",
-  // Optional: only qwen-code's own pipeline has a session to name. Without it
-  // the consumer spawns a top-level automation session, not a sub-session.
-  "sessionId": "<QWEN_CODE_SESSION_ID, when exported>",
+  // The session this handoff belongs to. Every spawn is its SUB-SESSION, so
+  // an event without one cannot be acted on and is dropped with a reason.
+  "sessionId": "<the owning session>",
   // Who asserted the head was clean — attribution for a public-comment action.
   "reviewedBy": "qwen-code/save-artifact",
   "target": {
@@ -165,8 +165,9 @@ Offline by construction: it reads no platform and needs no credentials, so a
 producer can hand off without a GitHub token, and the daemon need not be running
 yet — the record is durable and is picked up whenever it next is. `--host` is
 required off GitHub (there is no default host, the same refusal `review meta`
-makes); `--session-id` defaults to `QWEN_CODE_SESSION_ID` and is normally absent
-for an external caller. Usage errors exit 2, a write failure exits 1, and stdout
+makes); `--session-id` defaults to `QWEN_CODE_SESSION_ID` and is REQUIRED: the round
+becomes that session's sub-session, so a caller invoking this from outside a
+session must name the one it wants the round attached to. Usage errors exit 2, a write failure exits 1, and stdout
 carries one JSON object. The caller asserts the two facts it is responsible for:
 which head was read, and that the round found no Critical.
 
@@ -207,13 +208,13 @@ idempotent `stop()`.
 
 Each pass, per pending event:
 
-| Gate                                                                 | Decline reason         |
-| -------------------------------------------------------------------- | ---------------------- |
-| `review.autoVerify` is on (operator scopes only)                     | `disabled`             |
-| `target.platform === 'github'` and `target.host === 'github.com'`    | `unsupported-platform` |
-| `.qwen/skills/verify-pr/SKILL.md` exists in the workspace            | `skill-unavailable`    |
-| `sessionId` present, **or** a bridge is wired for a parentless spawn | `no-session`           |
-| dedupe key absent from `spawned.json`                                | `already-verified`     |
+| Gate                                                                                 | Decline reason           |
+| ------------------------------------------------------------------------------------ | ------------------------ |
+| `review.autoVerify` is on (operator scopes only)                                     | `disabled`               |
+| `target.platform === 'github'` and `target.host === 'github.com'`                    | `unsupported-platform`   |
+| `.qwen/skills/verify-pr/SKILL.md` exists in the workspace                            | `skill-unavailable`      |
+| the owning session still exists (deleted owners are pruned, unknown ones left alone) | `session-gone` / skipped |
+| dedupe key absent from `spawned.json`                                                | `already-verified`       |
 
 A declined event is removed from `pending/` and the reason is logged; it is not
 retried. An event that cannot be acted on now will not become actionable later
@@ -222,18 +223,12 @@ without a new review round, which writes a new event.
 An accepted event is processed write-ahead:
 
 1. Append the dedupe key to `spawned.json` (bounded, FIFO, 200 entries).
-2. Spawn, by which producer wrote the event:
-   - **Names a session** → `launch({ prompt, completion: 'sent',
-callerSessionId, name })`, the workspace's own sub-session launcher, so the
-     per-caller and workspace caps and the depth-1 gate apply and the UI can
-     link the round back to the review.
-   - **Names none** → `spawnReviewVerifySession`, a TOP-LEVEL session through the
-     bridge (`spawnOrAttach` thread scope → name → `sendPrompt`), the same
-     sequence the launcher's own non-standalone path uses minus the parent
-     lineage. The launcher cannot serve this case: `callerSessionId` is required
-     and keys both its concurrency bucket and its nesting gate. Concurrency here
-     is bounded by the bridge's `maxSessions` admission and by the per-head
-     dedupe upstream; a prompt-dispatch rejection is reported, not swallowed.
+2. `launch({ prompt, completion: 'sent', callerSessionId: owner, name })` — the
+   workspace's own sub-session launcher, with the OWNING session as the caller,
+   so the per-caller and workspace caps and the depth-1 gate apply and the round
+   is linked to the session that asked for it. There is no parentless path: an
+   event naming no session is dropped with `no-owner`, because it cannot become
+   anyone's sub-session.
 3. Delete the pending file.
 
 Recording before spawning is deliberate: a daemon that dies between the two
@@ -242,13 +237,13 @@ that a failed spawn is not retried — the failure is logged with its reason and
 the operator can run `/verify-pr` by hand. Never double-publishing outranks
 never missing a round for a feature whose output is a public comment.
 
-The prompt is `/verify-pr <number> --publish --repo <ownerRepo>` on both paths.
+The prompt is `/verify-pr <number> --publish --repo <ownerRepo>`.
 The session runs in the same workspace, so the project skill and the operator's
 `verifyPr.assetsRepo` coordinates apply unchanged, and the daemon's existing
 `/verify-pr` prompt admission binds the PR badge to the new session.
-`completion: 'sent'` (and the parentless path's fire-and-forget dispatch) keeps
-the reviewing session unblocked. The spawn notice names `reviewedBy`, so a
-public comment triggered by another agent's assertion is attributable in the
+`completion: 'sent'` keeps the owning session unblocked. The spawn notice names
+the owner and `reviewedBy`, so a public comment triggered by another agent's
+assertion is attributable in the
 daemon log.
 
 ### 4. The policy
@@ -311,8 +306,9 @@ qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
 ```
 
 The watch list and the observation cursor live beside the events
-(`watches.json`, `observed.json`), host-trusted, keyed by coordinates rather
-than by head — a watch spans heads. The daemon re-reads every watch on a five
+(`watches.json`, `observed.json`), host-trusted, keyed by coordinates AND owning session rather than by head — a
+watch spans heads, and two sessions watching one PR are two watches, each dying
+with its own session. The daemon re-reads every watch on a five
 minute interval (one GraphQL call each), and an emitted event is consumed by the
 same file pass immediately rather than waiting for the next interval.
 
@@ -362,11 +358,14 @@ is adopted into it so the poll stops treating it as a candidate.
   the interface and `review verify-event` is a producer anyone can call, with the
   internal emission demoted to one caller among others. No consumer gate reads
   the producer.
-- **A parentless event spawns a top-level session, not a declined one.** The
-  launcher's `callerSessionId` is required and keys its caps and nesting gate, so
-  an external event cannot use it. Declining such events (the first cut's
-  `no-session`) would have made the open entrance useless. The bridge path is the
-  same spawn sequence the launcher itself uses, minus lineage.
+- **The handoff belongs to a session, and the round is its sub-session.** An
+  earlier cut spawned a top-level session for events with no reviewer session,
+  which left the round unattached to any work. Ownership is now explicit: the
+  event names the session it belongs to (the reviewing session, the session an
+  external producer was invoked from, or the session owning the watch), every
+  spawn goes through the launcher with that session as the caller, and an event
+  with no owner is dropped rather than spawned parentless. Who REVIEWED is
+  attribution (`reviewedBy`); who OWNS the round is the parent.
 - **`save-artifact`, not `compose-review` or `submit`, for the internal
   producer.** compose-review runs before Step 6B may fix findings and re-compose,
   so an event there can describe a verdict the round later changed. `submit` only
@@ -390,11 +389,12 @@ is adopted into it so the poll stops treating it as a candidate.
 
 ## Constraints and risks
 
-- On the sub-session path, the parent session must still be resident when the
-  event is consumed. The internal event is written mid-turn (Step 8), so the
-  watch fires while the review session is active; a replay after a daemon
-  restart can find it reaped, and `launch` then fails and is logged. The
-  parentless path has no such constraint.
+- The owning session must still be RESIDENT when the event is consumed, because
+  the launcher resolves its caller through the bridge. The internal event is
+  written mid-turn (Step 8), so the watch fires while the review session is
+  active; a replay after a daemon restart can find it reaped, and `launch` then
+  fails and is logged. Ownership itself is decided by EXISTENCE, not residency:
+  an idle-reaped session still owns its watches, and only deleting it ends them.
 - The spawned session executes untrusted PR code. It inherits the isolation
   posture of a manually invoked `/verify-pr` round; this change does not weaken
   it and does not add a sandbox of its own. An external producer's assertion of
@@ -437,10 +437,10 @@ Unit tests (collocated, vitest):
   path's write-ahead order (key recorded before `launch`, pending file removed
   after); a failing `launch` leaves the key recorded and drops the event;
   duplicate events for one head spawn once; `stop()` is idempotent and aborts
-  the watch. Parentless path: a sessionless event spawns a TOP-LEVEL session
-  (thread scope, no `parentSessionId`) with the exact prompt and title, never
-  touches the launcher, dedupes like any other head, and surfaces a prompt
-  dispatch rejection; with no bridge wired the same event declines `no-session`.
+  the watch. Ownership: every spawn is the owning session's sub-session through the
+  launcher; an event naming no owner is dropped `no-owner`; a deleted owner's
+  watches and events are pruned and nothing spawns for it; an owner whose
+  liveness cannot be read is neither served nor cleaned up.
 - `review/lib/review-settings.test.ts` — `autoVerify` defaults on, survives only
   as a boolean, degrades off when settings cannot be read, and is read from
   operator scopes.
@@ -459,13 +459,13 @@ Unit tests (collocated, vitest):
   resolved through the shared validator, an Aone watch registered as Aone, and
   every malformed invocation a usage error that writes nothing.
 - `serve/review-verify-automation.test.ts` (observation duty) — the interval
-  observes and spawns for what it finds, through the parentless path; the
+  observes and spawns the owning session's sub-session for what it finds; the
   operator switch stops observation entirely; `stop()` halts it.
 
 Manual/E2E (`.qwen/e2e-tests/review-clean-auto-verify.md`): a real `/review` of a
 clean PR in a daemon session produces the event and a sub-session that runs
-`/verify-pr --publish`; an external `review verify-event` produces a top-level
-session; turning `review.autoVerify` off produces the event and no session.
+`/verify-pr --publish`; an external `review verify-event` produces the named
+session's sub-session; turning `review.autoVerify` off produces the event and no session.
 
 ## Acceptance criteria
 
@@ -477,15 +477,15 @@ session; turning `review.autoVerify` off produces the event and no session.
   gone afterwards.
 - `qwen review verify-event --pr <n> --repo <o/r> --head <sha> --reviewed-by
 <agent>` run by any external producer writes the same record, and the daemon
-  spawns a TOP-LEVEL session with the same prompt — no qwen-code session
-  required, no daemon running at write time required.
+  spawns that session's SUB-SESSION with the same prompt; a handoff naming no
+  session is refused at the entrance rather than recorded.
 - A round with a Critical, a fail-closed cap, a local/file target, or a
   non-github.com platform spawns nothing.
 - Two clean rounds at the same head spawn one verification, whichever producer
   wrote them.
 - A registered watch whose PR reaches `reviewDecision: APPROVED` with no
   unresolved non-outdated thread hands off that head once, with no action from
-  the reviewer, and spawns the same top-level session; a dismissed approval, an
+  the reviewer, and spawns the owning session's sub-session; a dismissed approval, an
   open blocker, a draft, or a cut thread page hands off nothing.
 - `review.autoVerify: false` in User settings stops the spawn without stopping
   the event; a workspace-scoped value of either sign is ignored.

@@ -25,6 +25,7 @@ const watch: ReviewVerifyWatch = {
   host: 'github.com',
   ownerRepo: 'QwenLM/qwen-code',
   number: 15846,
+  sessionId: 'owner-session',
   addedAt: '2026-10-29T00:00:00.000Z',
 };
 
@@ -33,6 +34,7 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'verify-watch-root-')));
   vi.stubEnv('QWEN_HOME', join(home, '.qwen'));
   vi.stubEnv('QWEN_RUNTIME_DIR', '');
+  vi.stubEnv('QWEN_CODE_SESSION_ID', 'owner-session');
 });
 
 afterEach(() => {
@@ -42,7 +44,7 @@ afterEach(() => {
 });
 
 describe('runVerifyWatch', () => {
-  it('registers a watch with resolved coordinates', async () => {
+  it('registers a watch owned by the current session', async () => {
     const result = await runVerifyWatch({
       pr: 15846,
       repo: 'QwenLM/qwen-code',
@@ -55,9 +57,32 @@ describe('runVerifyWatch', () => {
         host: 'github.com',
         ownerRepo: 'QwenLM/qwen-code',
         number: 15846,
+        sessionId: 'owner-session',
       },
     });
     expect(readWatches(root)).toHaveLength(1);
+  });
+
+  it('an explicit session id outranks the environment', async () => {
+    await runVerifyWatch({
+      pr: 15846,
+      repo: 'QwenLM/qwen-code',
+      sessionId: 'named-session',
+      workspaceRoot: root,
+    });
+    expect(readWatches(root)[0]?.sessionId).toBe('named-session');
+  });
+
+  it('refuses to register an ownerless watch', async () => {
+    vi.stubEnv('QWEN_CODE_SESSION_ID', '');
+    await expect(
+      runVerifyWatch({
+        pr: 15846,
+        repo: 'QwenLM/qwen-code',
+        workspaceRoot: root,
+      }),
+    ).rejects.toThrow(/needs a session/);
+    expect(readWatches(root)).toEqual([]);
   });
 
   it('lists and removes', async () => {
@@ -78,6 +103,19 @@ describe('runVerifyWatch', () => {
       removed: true,
     });
     expect(readWatches(root)).toEqual([]);
+  });
+
+  it('removing one session’s watch leaves another session’s intact', async () => {
+    addWatch(root, watch);
+    addWatch(root, { ...watch, sessionId: 'other-session' });
+    await runVerifyWatch({
+      pr: watch.number,
+      repo: watch.ownerRepo,
+      remove: true,
+      workspaceRoot: root,
+    });
+    expect(readWatches(root)).toHaveLength(1);
+    expect(readWatches(root)[0]?.sessionId).toBe('other-session');
   });
 
   it('--once runs the same pass the daemon runs', async () => {

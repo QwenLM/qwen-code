@@ -40,6 +40,7 @@ export interface VerifyWatchArgs {
   remove?: boolean;
   list?: boolean;
   once?: boolean;
+  sessionId?: string;
   workspaceRoot?: string;
 }
 
@@ -62,17 +63,30 @@ export async function runVerifyWatch(
   if (args.repo === undefined) {
     throw new TypeError('verify-watch needs --repo owner/repo');
   }
+  const sessionId =
+    args.sessionId?.trim() ||
+    process.env['QWEN_CODE_SESSION_ID']?.trim() ||
+    undefined;
+  if (!sessionId) {
+    // A watch belongs to a session: the automation runs on its behalf, every
+    // verification it starts is that session's sub-session, and deleting the
+    // session ends the watch. There is no ownerless watch to register.
+    throw new TypeError(
+      'verify-watch needs a session: the watch belongs to it and its verification rounds become its sub-sessions. Run this inside a qwen-code session, or pass --session-id.',
+    );
+  }
   const coordinates = resolvePrCoordinates({
     pr: args.pr,
     repo: args.repo,
     host: args.host,
   });
-  const key = watchKey(coordinates);
+  const key = watchKey({ ...coordinates, sessionId });
   if (args.remove) {
     return { action: 'remove', key, removed: removeWatch(root, key) };
   }
   const watch: ReviewVerifyWatch = {
     ...coordinates,
+    sessionId,
     addedAt: new Date().toISOString(),
   };
   addWatch(root, watch);
@@ -114,6 +128,11 @@ export const verifyWatchCommand: CommandModule = {
         describe:
           'Run one observation pass now and print its outcomes — the same pass the daemon runs on its interval',
       })
+      .option('session-id', {
+        type: 'string',
+        describe:
+          "The session this watch belongs to. Defaults to QWEN_CODE_SESSION_ID; required, because the verification rounds become that session's sub-sessions and the watch ends when the session is deleted.",
+      })
       .option('workspace-root', {
         type: 'string',
         describe:
@@ -128,6 +147,7 @@ export const verifyWatchCommand: CommandModule = {
         remove: argv['remove'] as boolean | undefined,
         list: argv['list'] as boolean | undefined,
         once: argv['once'] as boolean | undefined,
+        sessionId: argv['session-id'] as string | undefined,
         workspaceRoot: argv['workspace-root'] as string | undefined,
       });
       writeStdoutLine(JSON.stringify(result));

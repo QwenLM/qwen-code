@@ -31,6 +31,9 @@ function args(overrides: Record<string, unknown> = {}) {
     pr: 15846,
     repo: 'QwenLM/qwen-code',
     head,
+    // The handoff belongs to a session; the environment is deliberately empty
+    // here so each test states its owner explicitly.
+    sessionId: 'ext-session',
     workspaceRoot: root,
     ...overrides,
   };
@@ -76,14 +79,21 @@ describe('runVerifyEvent', () => {
       },
       verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
     });
-    // An external producer has neither a qwen-code session nor an artifact.
-    expect(events[0]?.event.sessionId).toBeUndefined();
+    // The owner is named, but an external producer has no qwen-code artifact.
+    expect(events[0]?.event.sessionId).toBe('ext-session');
     expect(events[0]?.event.artifactPath).toBeUndefined();
   });
 
-  it('defaults the producer attribution and names the session when one exists', () => {
+  it('refuses a handoff with no owning session', () => {
+    expect(() => runVerifyEvent(args({ sessionId: undefined }))).toThrow(
+      /needs a session/,
+    );
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+  });
+
+  it('defaults the producer attribution and takes the session from the environment', () => {
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'sess-7');
-    runVerifyEvent(args());
+    runVerifyEvent(args({ sessionId: undefined }));
     const { events } = readPendingReviewEvents(root);
     expect(events[0]?.event.reviewedBy).toBe('external-cli');
     expect(events[0]?.event.sessionId).toBe('sess-7');
@@ -198,6 +208,8 @@ describe('verifyEventCommand', () => {
           head,
           '--reviewed-by',
           'claude-code',
+          '--session-id',
+          'cli-session',
           '--workspace-root',
           root,
         ]) as never,

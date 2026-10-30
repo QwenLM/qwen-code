@@ -28,6 +28,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
   emitReviewCleanEvent,
   readSpawnedKeys,
@@ -41,17 +42,24 @@ export interface ReviewVerifyWatch {
   host: string;
   ownerRepo: string;
   number: number;
+  /** The session that owns this watch. The automation runs on its behalf and
+   *  every verification it starts is that session's sub-session; when the
+   *  session is deleted the watch is pruned and the automation stops. */
+  sessionId: string;
   addedAt: string;
 }
 
-/** A watch spans heads; the head belongs to the observation, not the watch. */
+/** A watch spans heads; the head belongs to the observation, not the watch.
+ *  The owner is part of the identity: two sessions watching one PR are two
+ *  watches, each dying with its own session, not a transfer of ownership. */
 export function watchKey(watch: {
   platform: string;
   host: string;
   ownerRepo: string;
   number: number;
+  sessionId: string;
 }): string {
-  return `${watch.platform}:${watch.host}:${watch.ownerRepo}:${watch.number}`;
+  return `${watch.platform}:${watch.host}:${watch.ownerRepo}:${watch.number}:${watch.sessionId}`;
 }
 
 function watchesPath(root: string): string {
@@ -89,6 +97,8 @@ export function readWatches(root: string): ReviewVerifyWatch[] {
       typeof w?.host === 'string' &&
       typeof w?.ownerRepo === 'string' &&
       Number.isInteger(w?.number) &&
+      typeof w?.sessionId === 'string' &&
+      w.sessionId !== '' &&
       typeof w?.addedAt === 'string',
   );
 }
@@ -301,26 +311,67 @@ export const fetchApprovalViaGh: FetchApproval = async (watch) => {
 
 export interface ObservationOutcome {
   key: string;
-  action: 'emitted' | 'skipped' | 'declined' | 'failed';
+  action: 'emitted' | 'skipped' | 'declined' | 'failed' | 'pruned';
   reason: string;
   headSha?: string;
 }
 
+/** Three states, never two: a watch whose owner cannot be read is neither
+ *  observed nor pruned. Collapsing "unknown" into "gone" would delete live
+ *  state on a transient read error; collapsing it into "alive" would keep
+ *  observing for a session that no longer exists. */
+export type SessionLiveness = (sessionId: string) => Promise<boolean | null>;
+
+/** The default probe: the session's transcript location, which is decided by
+ *  file PRESENCE (an empty or damaged transcript still occupies its state) and
+ *  throws on a real read error — so the three states stay distinct.
+ *
+ *  Existence, not residency: an idle-reaped session still owns its watches, and
+ *  only deleting the session ends them. `readCreationMetadata` is deliberately
+ *  NOT used here — it coalesces a missing session to `{}`, which cannot tell
+ *  "gone" from "exists" and would prune live watches. */
+export function sessionLivenessFor(root: string): SessionLiveness {
+  const sessions = new SessionService(root);
+  return async (sessionId) => {
+    try {
+      const location =
+        await sessions.getSessionTranscriptLocationForLifecycle(sessionId);
+      return location !== undefined;
+    } catch {
+      return null;
+    }
+  };
+}
+
 /**
- * One observation pass over every watch. Emits the same clean-review event the
- * other producers write, so every downstream gate, the per-head dedupe and both
- * spawn paths apply unchanged.
+ * One observation pass. Emits the same clean-review event the other producers
+ * write, so every downstream gate and the per-head dedupe apply unchanged.
+ *
+ * `sessionId` scopes the pass to one owner's watches — the daemon runs one
+ * automation per owning session, so each pass must not act on another
+ * session's watches. Omitted (the CLI's `--once`), every watch is considered.
  *
  * A watch is skipped when its head was already handed off (this observer's
  * cursor) or already verified (the consumer's ledger) — the second check is what
  * keeps a head verified through E1 from being re-emitted here every interval.
+ * A watch whose owning session was deleted is pruned: the automation and its
+ * watches live and die with that session.
  */
 export async function observeWatches(
   root: string,
-  opts: { fetch?: FetchApproval; now?: () => Date } = {},
+  opts: {
+    fetch?: FetchApproval;
+    now?: () => Date;
+    sessionId?: string;
+    sessionExists?: SessionLiveness;
+  } = {},
 ): Promise<ObservationOutcome[]> {
   const fetchPr = opts.fetch ?? fetchApprovalViaGh;
-  const watches = readWatches(root);
+  const liveness = opts.sessionExists ?? sessionLivenessFor(root);
+  const all = readWatches(root);
+  const watches = opts.sessionId
+    ? all.filter((w) => w.sessionId === opts.sessionId)
+    : all;
   if (watches.length === 0) return [];
   const observed = readObserved(root);
   let spawned: Set<string>;
@@ -334,6 +385,16 @@ export async function observeWatches(
   const outcomes: ObservationOutcome[] = [];
   for (const watch of watches) {
     const key = watchKey(watch);
+    const alive = await liveness(watch.sessionId);
+    if (alive === false) {
+      removeWatch(root, key);
+      outcomes.push({ key, action: 'pruned', reason: 'session-gone' });
+      continue;
+    }
+    if (alive === null) {
+      outcomes.push({ key, action: 'skipped', reason: 'session-unknown' });
+      continue;
+    }
     if (watch.platform !== 'github') {
       outcomes.push({
         key,
@@ -392,6 +453,9 @@ export async function observeWatches(
         target,
         round: 1,
         verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+        // The watch's owner, not the approver: the verification round becomes
+        // that session's sub-session. Who approved is attribution below.
+        sessionId: watch.sessionId,
         reviewedBy: judgement.approvers.length
           ? `github:${judgement.approvers.join(',')}`
           : 'github:reviewDecision',

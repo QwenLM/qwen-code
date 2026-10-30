@@ -332,11 +332,14 @@ whenever the daemon next reads that workspace. Pass `--workspace-root` when you
 are not invoking it from that checkout, and `--host` for any non-GitHub target
 (there is no default host off GitHub).
 
-Because such a review has no qwen-code session, the daemon starts a **top-level**
-session rather than a sub-session. The caller asserts the two facts it is
-responsible for — which head was read, and that the round found no Critical —
-and `--reviewed-by` records who asserted them, which the daemon log names when
-it starts the round.
+The round becomes a **sub-session of the session you name**, so it stays attached
+to your work. `--session-id` defaults to `QWEN_CODE_SESSION_ID`, so an agent
+running inside a session needs no flag; one invoking this from outside must name
+the session it wants the round attached to, and a handoff with no session is
+refused rather than recorded. The caller asserts the two facts it is responsible
+for — which head was read, and that the round found no Critical — and
+`--reviewed-by` records who asserted them, which the daemon log names alongside
+the owning session when it starts the round.
 
 ### Watching a PR instead of handing off once
 
@@ -364,6 +367,12 @@ The daemon re-reads each watched PR every five minutes and hands off a head when
   as a blocker; the observer does not try to guess which are "only questions";
 - the thread list was read in full. A truncated read hands off nothing, because
   the page it could not read may hold the blocker.
+
+A watch belongs to the session that registers it (`--session-id`, defaulting to
+`QWEN_CODE_SESSION_ID`): the rounds it starts are that session's sub-sessions, and
+deleting the session ends the watch. An idle session keeps its watches — only
+deletion ends them. Two sessions may watch the same PR; each owns its own watch,
+and the shared per-head dedupe still means one verification per head.
 
 This works no matter who reviewed — another agent, the CI bot, or a person — and
 needs nothing from them. Each head is handed off once, and a head already

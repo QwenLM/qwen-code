@@ -46,8 +46,13 @@ const watch: ReviewVerifyWatch = {
   host: 'github.com',
   ownerRepo: 'QwenLM/qwen-code',
   number: 15846,
+  sessionId: 'owner-session',
   addedAt: '2026-10-29T00:00:00.000Z',
 };
+
+/** The default probe reads real transcripts, which a scratch root does not
+ *  have; every pass below states its owner's liveness explicitly. */
+const alive = async () => true;
 
 /** An approved, blocker-free PR at `head` — the clean baseline every negative
  *  case below mutates exactly one field of. */
@@ -232,7 +237,10 @@ describe('observeWatches', () => {
 
   it('hands off a clean approval exactly once per head', async () => {
     addWatch(root, watch);
-    const first = await observeWatches(root, { fetch: fetchClean });
+    const first = await observeWatches(root, {
+      sessionExists: alive,
+      fetch: fetchClean,
+    });
     expect(first).toEqual([
       {
         key: watchKey(watch),
@@ -245,10 +253,14 @@ describe('observeWatches', () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.event.target.headSha).toBe(head);
     expect(events[0]?.event.reviewedBy).toBe('github:reviewer-1');
-    expect(events[0]?.event.sessionId).toBeUndefined();
+    // The owner, not the approver: the round becomes this session's child.
+    expect(events[0]?.event.sessionId).toBe('owner-session');
     expect(readObserved(root)[watchKey(watch)]).toBe(head);
 
-    const second = await observeWatches(root, { fetch: fetchClean });
+    const second = await observeWatches(root, {
+      sessionExists: alive,
+      fetch: fetchClean,
+    });
     expect(second[0]).toMatchObject({
       action: 'skipped',
       reason: 'already-handed-off',
@@ -258,8 +270,9 @@ describe('observeWatches', () => {
 
   it('hands off a NEW head of the same watch', async () => {
     addWatch(root, watch);
-    await observeWatches(root, { fetch: fetchClean });
+    await observeWatches(root, { sessionExists: alive, fetch: fetchClean });
     const next = await observeWatches(root, {
+      sessionExists: alive,
       fetch: async () => approved({ headRefOid: otherHead }),
     });
     expect(next[0]).toMatchObject({ action: 'emitted', headSha: otherHead });
@@ -278,7 +291,10 @@ describe('observeWatches', () => {
         headSha: head,
       }),
     );
-    const outcomes = await observeWatches(root, { fetch: fetchClean });
+    const outcomes = await observeWatches(root, {
+      sessionExists: alive,
+      fetch: fetchClean,
+    });
     expect(outcomes[0]).toMatchObject({
       action: 'skipped',
       reason: 'already-verified',
@@ -292,6 +308,7 @@ describe('observeWatches', () => {
   it('emits nothing for a PR that is not cleanly approved', async () => {
     addWatch(root, watch);
     const outcomes = await observeWatches(root, {
+      sessionExists: alive,
       fetch: async () => approved({ reviewDecision: 'REVIEW_REQUIRED' }),
     });
     expect(outcomes[0]).toMatchObject({
@@ -309,7 +326,10 @@ describe('observeWatches', () => {
       host: 'code.alibaba-inc.com',
     });
     const fetch = vi.fn(async () => approved());
-    const outcomes = await observeWatches(root, { fetch });
+    const outcomes = await observeWatches(root, {
+      sessionExists: alive,
+      fetch,
+    });
     expect(fetch).not.toHaveBeenCalled();
     expect(outcomes[0]).toMatchObject({
       action: 'declined',
@@ -320,6 +340,7 @@ describe('observeWatches', () => {
   it('reports a failed read and keeps watching', async () => {
     addWatch(root, watch);
     const outcomes = await observeWatches(root, {
+      sessionExists: alive,
       fetch: async () => {
         throw new Error('gh: authentication required');
       },
@@ -336,6 +357,7 @@ describe('observeWatches', () => {
     addWatch(root, watch);
     addWatch(root, { ...watch, number: 15847 });
     const outcomes = await observeWatches(root, {
+      sessionExists: alive,
       fetch: async (w) => {
         if (w.number === 15846) throw new Error('boom');
         return approved();
@@ -347,7 +369,9 @@ describe('observeWatches', () => {
 
   it('reads nothing and writes nothing when no watch is registered', async () => {
     const fetch = vi.fn(async () => approved());
-    expect(await observeWatches(root, { fetch })).toEqual([]);
+    expect(await observeWatches(root, { sessionExists: alive, fetch })).toEqual(
+      [],
+    );
     expect(fetch).not.toHaveBeenCalled();
     expect(existsSync(join(reviewEventsDir(root), 'observed.json'))).toBe(
       false,
@@ -356,7 +380,7 @@ describe('observeWatches', () => {
 
   it('a lost observation cursor costs a re-read, never a second spawn', async () => {
     addWatch(root, watch);
-    await observeWatches(root, { fetch: fetchClean });
+    await observeWatches(root, { sessionExists: alive, fetch: fetchClean });
     // Simulate the consumer having verified it, then lose the cursor.
     const { events } = readPendingReviewEvents(root);
     const event = events[0]?.event;
@@ -364,12 +388,72 @@ describe('observeWatches', () => {
     if (!event) return;
     recordSpawnedKey(root, reviewEventDedupeKey(event.target));
     writeFileSync(join(reviewEventsDir(root), 'observed.json'), 'corrupt');
-    const outcomes = await observeWatches(root, { fetch: fetchClean });
+    const outcomes = await observeWatches(root, {
+      sessionExists: alive,
+      fetch: fetchClean,
+    });
     expect(outcomes[0]).toMatchObject({ reason: 'already-verified' });
     expect(
       JSON.parse(
         readFileSync(join(reviewEventsDir(root), 'observed.json'), 'utf8'),
       ).heads,
     ).toBeDefined();
+  });
+});
+
+describe('observeWatches — the watch belongs to a session', () => {
+  const fetchClean = async () => approved();
+
+  it('prunes a watch whose owning session was deleted', async () => {
+    addWatch(root, watch);
+    const outcomes = await observeWatches(root, {
+      fetch: fetchClean,
+      sessionExists: async () => false,
+    });
+    expect(outcomes).toEqual([
+      { key: watchKey(watch), action: 'pruned', reason: 'session-gone' },
+    ]);
+    expect(readWatches(root)).toEqual([]);
+    expect(readPendingReviewEvents(root).events).toEqual([]);
+  });
+
+  it('neither observes nor prunes when the owner cannot be read', async () => {
+    addWatch(root, watch);
+    const fetch = vi.fn(fetchClean);
+    const outcomes = await observeWatches(root, {
+      fetch,
+      sessionExists: async () => null,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(outcomes[0]).toMatchObject({
+      action: 'skipped',
+      reason: 'session-unknown',
+    });
+    expect(readWatches(root)).toHaveLength(1);
+  });
+
+  it('a pass scoped to one owner leaves another owner’s watch alone', async () => {
+    addWatch(root, watch);
+    addWatch(root, { ...watch, number: 15847, sessionId: 'other-session' });
+    const outcomes = await observeWatches(root, {
+      fetch: fetchClean,
+      sessionExists: alive,
+      sessionId: 'owner-session',
+    });
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.key).toBe(watchKey(watch));
+    expect(readWatches(root)).toHaveLength(2);
+    const { events } = readPendingReviewEvents(root);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event.sessionId).toBe('owner-session');
+  });
+
+  it('two sessions watching one PR are two watches, not a transfer', async () => {
+    addWatch(root, watch);
+    addWatch(root, { ...watch, sessionId: 'other-session' });
+    expect(readWatches(root)).toHaveLength(2);
+    // Removing one leaves the other.
+    expect(removeWatch(root, watchKey(watch))).toBe(true);
+    expect(readWatches(root)[0]?.sessionId).toBe('other-session');
   });
 });

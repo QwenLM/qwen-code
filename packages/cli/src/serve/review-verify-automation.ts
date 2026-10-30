@@ -5,22 +5,25 @@
  */
 
 /**
- * Consumes the clean-review handoff and spawns the deep-verification round.
+ * Consumes the clean-review handoff ON BEHALF OF A SESSION, and spawns that
+ * session's sub-session for the deep-verification round.
  *
  * A review round that ended clean writes one durable event
- * (commands/review/lib/review-events.ts). This automation reads it and runs
- * `/verify-pr <n> --publish` in a fresh session, so the maintainer does not have
- * to notice the verdict and start the evidence round by hand.
+ * (commands/review/lib/review-events.ts) naming the session it belongs to:
+ * qwen-code's own review names the reviewing session, an external producer
+ * names the session it was invoked from, and an observed approval names the
+ * session that owns the watch. This module reads those events and asks the
+ * workspace's sub-session launcher to run `/verify-pr <n> --publish` as a CHILD
+ * of that session, so the round is linked to the work that asked for it and
+ * inherits the launcher's concurrency caps and depth-1 gate. There is no
+ * parentless path: an event that names no session cannot become anyone's
+ * sub-session, and is dropped with a reason.
  *
- * The producer is not assumed to be qwen-code. Two spawn paths follow from who
- * did the review:
- *  - Event names a session (qwen-code's own `save-artifact` wrote it) → the
- *    workspace's sub-session launcher, with that session as the parent, so the
- *    per-caller caps and the depth-1 gate apply.
- *  - Event names none (another agent, a human, or CI recorded it through
- *    `qwen review verify-event`) → a top-level automation session via the
- *    bridge. There is no parent to charge a bucket to, so the bridge's own
- *    session admission is the bound.
+ * Ownership is per session, and so is lifetime. A session's watches and pending
+ * events are pruned when that session is deleted, and nothing is spawned for a
+ * session that no longer exists. The loop below is the daemon's scheduling slot
+ * — one set of timers per workspace — while every decision, every spawn and
+ * every cleanup is scoped to one owning session.
  *
  * Shape and lifecycle mirror `scheduled-task-keepalive.ts`: an interval tick as
  * the backstop, an `fs.watch` + debounce on the durable directory for
@@ -39,13 +42,11 @@
 
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
 import {
   pendingEventsDir,
   readPendingReviewEvents,
@@ -53,81 +54,22 @@ import {
   recordSpawnedKey,
   removePendingEvent,
   reviewEventDedupeKey,
+  type PendingReviewEvent,
   type ReviewCleanEventV1,
 } from '../commands/review/lib/review-events.js';
 import { operatorReviewSettings } from '../commands/review/lib/review-settings.js';
 import {
   observeWatches,
+  readWatches,
+  removeWatch,
+  sessionLivenessFor,
+  watchKey,
   type ObservationOutcome,
+  type SessionLiveness,
 } from '../commands/review/lib/review-verify-observe.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 const log = createDebugLogger('REVIEW_VERIFY');
-
-/** The slice of the bridge the parentless path needs. Narrow so the automation
- *  stays testable without a bridge, and so it cannot reach for lifecycle
- *  operations it has no business calling. */
-export type ReviewVerifyBridge = Pick<
-  AcpSessionBridge,
-  'spawnOrAttach' | 'updateSessionMetadata' | 'sendPrompt'
->;
-
-/**
- * Spawn a TOP-LEVEL verification session for an event with no originating
- * qwen-code session — a review performed by another agent, a human, or CI.
- *
- * The sub-session launcher cannot serve this case: its `callerSessionId` is
- * required, and it keys both the per-caller concurrency bucket and the depth-1
- * gate on it. So this goes straight to the bridge, exactly as the launcher's
- * own non-standalone path does (`spawnOrAttach` thread scope → name →
- * `sendPrompt`), minus the parent lineage and the completion await.
- *
- * Fire-and-forget: the turn runs independently and the session is idle-reaped
- * like any other. Concurrency is bounded by the bridge's own `maxSessions`
- * admission, and by the per-head dedupe ledger upstream of this call.
- */
-export async function spawnReviewVerifySession(
-  bridge: ReviewVerifyBridge,
-  info: {
-    prompt: string;
-    /** Built by `reviewVerifyDecision` from a PR number, so inert by
-     *  construction — no model or platform text reaches the session title. */
-    name: string;
-    workspaceCwd: string;
-  },
-  onDispatchError?: (error: unknown) => void,
-): Promise<{ sessionId: string }> {
-  const session = await bridge.spawnOrAttach({
-    workspaceCwd: info.workspaceCwd,
-    sessionScope: 'thread', // a fresh top-level session, never attach
-  });
-  const sessionId = session.sessionId;
-  try {
-    bridge.updateSessionMetadata(sessionId, {
-      displayName: info.name,
-      titleSource: 'auto',
-    });
-  } catch (error) {
-    // Presentation only: a failed rename must not lose the round.
-    log.debug('review-verify: session rename failed', sessionId, error);
-  }
-  const turn = bridge.sendPrompt(
-    sessionId,
-    {
-      sessionId,
-      prompt: [{ type: 'text', text: info.prompt }],
-    } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-    undefined,
-    { promptId: randomUUID() },
-  );
-  // The session exists either way; a dispatch rejection (admission, auth, API)
-  // is reported rather than left as an unhandled rejection or a silent loss.
-  void turn.catch((error: unknown) => {
-    log.debug('review-verify: sendPrompt rejected', sessionId, String(error));
-    onDispatchError?.(error);
-  });
-  return { sessionId };
-}
 
 /** Backstop interval. The watch delivers a new event within its debounce; this
  *  only covers a missed watch event (a platform that drops them, a directory
@@ -155,16 +97,16 @@ export type ReviewVerifyDecision =
   | {
       action: 'spawn';
       prompt: string;
-      /** Absent when the review happened outside qwen-code: the pass then
-       *  spawns a top-level automation session instead of a sub-session. */
-      callerSessionId?: string;
+      callerSessionId: string;
       name: string;
       key: string;
     }
   | { action: 'decline'; reason: string; key: string };
 
 /**
- * The whole policy, as a pure function over one event and the pass's facts.
+ * The whole per-event policy, as a pure function. The owner is resolved by the
+ * caller — the session this event belongs to — and is always present here: an
+ * event with no owner never reaches this function.
  *
  * `github.com` only: `/verify-pr` resolves its coordinates with `gh` and has no
  * `--host` flag, so a GitHub Enterprise or Aone target cannot be expressed in
@@ -173,7 +115,8 @@ export type ReviewVerifyDecision =
  *
  * The producer is irrelevant to every gate below: an event written by another
  * agent through `review verify-event` is judged exactly like one written by
- * qwen-code's own pipeline.
+ * qwen-code's own pipeline. Who reviewed is attribution (`reviewedBy`); who
+ * owns the round is the parent.
  */
 export function reviewVerifyDecision(
   event: ReviewCleanEventV1,
@@ -181,9 +124,7 @@ export function reviewVerifyDecision(
     enabled: boolean;
     skillAvailable: boolean;
     spawnedKeys: ReadonlySet<string>;
-    /** Whether a parentless spawn path exists (a bridge is wired). Without one
-     *  an event that names no session cannot be acted on at all. */
-    canSpawnTopLevel: boolean;
+    ownerSessionId: string;
   },
 ): ReviewVerifyDecision {
   const key = reviewEventDedupeKey(event.target);
@@ -197,16 +138,13 @@ export function reviewVerifyDecision(
   if (!facts.skillAvailable) {
     return { action: 'decline', reason: 'skill-unavailable', key };
   }
-  if (!event.sessionId && !facts.canSpawnTopLevel) {
-    return { action: 'decline', reason: 'no-session', key };
-  }
   if (facts.spawnedKeys.has(key)) {
     return { action: 'decline', reason: 'already-verified', key };
   }
   return {
     action: 'spawn',
     prompt: `/verify-pr ${event.target.number} --publish --repo ${event.target.ownerRepo}`,
-    ...(event.sessionId ? { callerSessionId: event.sessionId } : {}),
+    callerSessionId: facts.ownerSessionId,
     name: `verify PR #${event.target.number}`,
     key,
   };
@@ -214,18 +152,22 @@ export function reviewVerifyDecision(
 
 export interface ReviewVerifyAutomationOptions {
   boundWorkspace: string;
-  /** The workspace's own sub-session launcher (`SubSessionLauncher.launch`). */
+  /** The workspace's own sub-session launcher (`SubSessionLauncher.launch`).
+   *  Every spawn goes through it, with the owning session as the caller. */
   launch: (info: CreateSubSessionInfo) => Promise<CreateSubSessionResult>;
-  /** This runtime's bridge, for events with no originating session. Optional:
-   *  without it such an event is declined with `no-session` rather than
-   *  silently dropped. */
-  getBridge?: () => ReviewVerifyBridge | undefined;
   intervalMs?: number;
-  /** How often to re-read the watched PRs' approval state (E2). Defaults to
-   *  five minutes; each pass spends one GraphQL call per watch. */
+  /** How often to re-read the watched PRs' approval state. Defaults to five
+   *  minutes; each pass spends one GraphQL call per watch. */
   observeIntervalMs?: number;
-  /** The observation pass, injectable for tests. Defaults to the real reader. */
-  observe?: (root: string) => Promise<ObservationOutcome[]>;
+  /** The observation pass, injectable for tests. Defaults to the real reader,
+   *  scoped to one owning session. */
+  observe?: (
+    root: string,
+    opts: { sessionId: string },
+  ) => Promise<ObservationOutcome[]>;
+  /** Session existence probe, injectable for tests. Three states — alive,
+   *  gone, unknown — and an unknown owner is neither served nor cleaned up. */
+  sessionExists?: SessionLiveness;
   /** Re-read each pass that has work, so flipping the setting needs no
    *  restart. Defaults to the operator-scoped `review.autoVerify`. */
   isEnabled?: () => boolean;
@@ -247,66 +189,45 @@ export function startReviewVerifyAutomation(
 ): ReviewVerifyAutomation {
   const { boundWorkspace } = opts;
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
+  const observeIntervalMs =
+    opts.observeIntervalMs ?? DEFAULT_OBSERVE_INTERVAL_MS;
   const isEnabled =
     opts.isEnabled ?? (() => operatorReviewSettings().autoVerify);
   const notice = opts.onNotice ?? writeStderrLineSafe;
+  const observe = opts.observe ?? observeWatches;
+  const liveness = opts.sessionExists ?? sessionLivenessFor(boundWorkspace);
   const skillPath = path.join(boundWorkspace, VERIFY_SKILL_RELATIVE_PATH);
   // An unreadable pending file is reported once, not every pass: it is inert
   // and this module does not delete a file it cannot parse.
   const reportedUnreadable = new Set<string>();
+  // A watch that cannot be read (no gh auth, a deleted PR) fails every interval;
+  // report each distinct failure once rather than filling the log.
+  const reportedObserveFailures = new Set<string>();
 
-  const pass = async (): Promise<void> => {
-    const { events, unreadable } = readPendingReviewEvents(boundWorkspace);
-    for (const item of unreadable) {
-      if (reportedUnreadable.has(item.path)) continue;
-      reportedUnreadable.add(item.path);
-      notice(
-        `review-verify: ignoring unreadable event ${item.path} (${item.reason})`,
-      );
-    }
-    // Nothing pending: do not read settings, do not touch the ledger. A steady
-    // workspace costs one directory read per tick.
-    if (events.length === 0) return;
-
-    let spawnedKeys: Set<string>;
-    try {
-      spawnedKeys = readSpawnedKeys(boundWorkspace);
-    } catch (error) {
-      // Fail closed: a ledger we cannot read cannot prove a head was not
-      // already verified, and a duplicate verification publishes a duplicate
-      // public comment. Leave the events pending and say so.
-      notice(
-        `review-verify: cannot read the spawned ledger; leaving ${events.length} event(s) pending (${
-          error instanceof Error ? error.message : String(error)
-        })`,
-      );
-      return;
-    }
-
-    const enabled = isEnabled();
-    const skillAvailable = fsSync.existsSync(skillPath);
-    const bridge = opts.getBridge?.();
-
+  /** Consume one owner's pending events, spawning that owner's sub-sessions. */
+  const consumeFor = async (
+    owner: string,
+    events: PendingReviewEvent[],
+    spawnedKeys: Set<string>,
+    enabled: boolean,
+    skillAvailable: boolean,
+  ): Promise<void> => {
     for (const { event, path: eventPath } of events) {
+      if (event.sessionId !== owner) continue;
       const decision = reviewVerifyDecision(event, {
         enabled,
         skillAvailable,
         spawnedKeys,
-        canSpawnTopLevel: bridge !== undefined,
+        ownerSessionId: owner,
       });
+      const label = `${event.target.ownerRepo}#${event.target.number}`;
       if (decision.action === 'decline') {
         removePendingEvent(eventPath);
-        notice(
-          `review-verify: not spawning for ${event.target.ownerRepo}#${event.target.number} (${decision.reason})`,
-        );
+        notice(`review-verify: not spawning for ${label} (${decision.reason})`);
         continue;
       }
       try {
-        recordSpawnedKey(
-          boundWorkspace,
-          decision.key,
-          decision.callerSessionId,
-        );
+        recordSpawnedKey(boundWorkspace, decision.key, owner);
       } catch (error) {
         // No spawn happened, so the event stays pending and the next pass
         // retries it — the write-ahead record is what must not be skipped.
@@ -318,45 +239,20 @@ export function startReviewVerifyAutomation(
         continue;
       }
       spawnedKeys.add(decision.key);
-      const label = `${event.target.ownerRepo}#${event.target.number}`;
       const attribution = event.reviewedBy
         ? ` (reviewed by ${event.reviewedBy})`
         : '';
       try {
-        let result: { sessionId: string };
-        if (decision.callerSessionId) {
-          result = await opts.launch({
-            prompt: decision.prompt,
-            completion: 'sent',
-            callerSessionId: decision.callerSessionId,
-            name: decision.name,
-          });
-        } else {
-          // The decision only reaches here without a caller when a bridge was
-          // wired; assert it rather than cast, so a future gate change surfaces
-          // as a logged failure instead of a crash on undefined.
-          if (!bridge) {
-            throw new Error('no bridge available for a parentless event');
-          }
-          result = await spawnReviewVerifySession(
-            bridge,
-            {
-              prompt: decision.prompt,
-              name: decision.name,
-              workspaceCwd: boundWorkspace,
-            },
-            (error) =>
-              notice(
-                `review-verify: prompt dispatch failed for ${label} (${
-                  error instanceof Error ? error.message : String(error)
-                })`,
-              ),
-          );
-        }
+        const result = await opts.launch({
+          prompt: decision.prompt,
+          completion: 'sent',
+          callerSessionId: owner,
+          name: decision.name,
+        });
         notice(
-          `review-verify: spawned ${result.sessionId} for ${label} at ${event.target.headSha}${attribution}`,
+          `review-verify: spawned ${result.sessionId} under ${owner} for ${label} at ${event.target.headSha}${attribution}`,
         );
-        log.debug('spawned verification session', result.sessionId);
+        log.debug('spawned verification sub-session', result.sessionId);
       } catch (error) {
         // The key is already recorded: this head is not retried. A missing
         // round is recoverable by hand; a duplicate published report is not.
@@ -367,6 +263,85 @@ export function startReviewVerifyAutomation(
         );
       }
       removePendingEvent(eventPath);
+    }
+  };
+
+  /** Drop one deleted owner's watches and pending events. */
+  const pruneOwner = (owner: string, events: PendingReviewEvent[]): void => {
+    for (const watch of readWatches(boundWorkspace)) {
+      if (watch.sessionId === owner) {
+        removeWatch(boundWorkspace, watchKey(watch));
+        notice(`review-verify: pruned watch ${watchKey(watch)} (session-gone)`);
+      }
+    }
+    for (const { event, path: eventPath } of events) {
+      if (event.sessionId !== owner) continue;
+      removePendingEvent(eventPath);
+      notice(
+        `review-verify: dropped event for ${event.target.ownerRepo}#${event.target.number} (session-gone)`,
+      );
+    }
+  };
+
+  const pass = async (): Promise<void> => {
+    const { events, unreadable } = readPendingReviewEvents(boundWorkspace);
+    for (const item of unreadable) {
+      if (reportedUnreadable.has(item.path)) continue;
+      reportedUnreadable.add(item.path);
+      notice(
+        `review-verify: ignoring unreadable event ${item.path} (${item.reason})`,
+      );
+    }
+
+    const owners = new Set<string>();
+    for (const { event, path: eventPath } of events) {
+      if (event.sessionId) {
+        owners.add(event.sessionId);
+        continue;
+      }
+      // No owner: it cannot become anyone's sub-session. Drop it with a reason
+      // rather than leave it pending forever.
+      removePendingEvent(eventPath);
+      notice(
+        `review-verify: not spawning for ${event.target.ownerRepo}#${event.target.number} (no-owner)`,
+      );
+    }
+    const watches = readWatches(boundWorkspace);
+    for (const watch of watches) owners.add(watch.sessionId);
+    // Nothing owned: do not read settings, do not touch the ledger. A steady
+    // workspace costs one directory read and one watch-list read per tick.
+    if (owners.size === 0) return;
+
+    let spawnedKeys: Set<string>;
+    try {
+      spawnedKeys = readSpawnedKeys(boundWorkspace);
+    } catch (error) {
+      // Fail closed: a ledger we cannot read cannot prove a head was not
+      // already verified, and a duplicate verification publishes a duplicate
+      // public comment. Leave the events pending and say so.
+      notice(
+        `review-verify: cannot read the spawned ledger; leaving events pending (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+      return;
+    }
+
+    const enabled = isEnabled();
+    const skillAvailable = fsSync.existsSync(skillPath);
+
+    for (const owner of owners) {
+      const alive = await liveness(owner);
+      if (alive === null) {
+        // Unknown is neither alive nor gone: do not serve it, do not clean it.
+        log.debug('review-verify: owner liveness unknown', owner);
+        continue;
+      }
+      if (alive === false) {
+        pruneOwner(owner, events);
+        continue;
+      }
+      await consumeFor(owner, events, spawnedKeys, enabled, skillAvailable);
     }
   };
 
@@ -429,45 +404,57 @@ export function startReviewVerifyAutomation(
 
   let stopped = false;
 
-  // E2: re-read the watched PRs and hand off any head that came back clean.
-  // Separate timer and guard from the file pass: this one spends network calls
-  // and must not delay consuming an event that is already on disk.
-  const observe = opts.observe ?? observeWatches;
-  const observeIntervalMs =
-    opts.observeIntervalMs ?? DEFAULT_OBSERVE_INTERVAL_MS;
+  // Observation: re-read each live owner's watched PRs and hand off any head
+  // that came back clean. Separate timer and guard from the file pass: this one
+  // spends network calls and must not delay consuming an event already on disk.
   let observing = false;
-  // A watch that cannot be read (no gh auth, a deleted PR) fails every interval;
-  // report each distinct failure once rather than filling the log.
-  const reportedObserveFailures = new Set<string>();
+  const reportOutcomes = (outcomes: ObservationOutcome[]): number => {
+    let emitted = 0;
+    for (const outcome of outcomes) {
+      if (outcome.action === 'emitted') {
+        emitted++;
+        notice(
+          `review-verify: observed a clean approval for ${outcome.key} at ${outcome.headSha}`,
+        );
+      } else if (outcome.action === 'pruned') {
+        notice(`review-verify: pruned watch ${outcome.key} (session-gone)`);
+      } else if (outcome.action === 'failed') {
+        const dedupe = `${outcome.key}:${outcome.reason}`;
+        if (!reportedObserveFailures.has(dedupe)) {
+          reportedObserveFailures.add(dedupe);
+          notice(
+            `review-verify: observation failed for ${outcome.key} (${outcome.reason})`,
+          );
+        }
+      } else {
+        log.debug(
+          'review-verify observation',
+          outcome.key,
+          outcome.action,
+          outcome.reason,
+        );
+      }
+    }
+    return emitted;
+  };
   const observeTick = async (): Promise<void> => {
     if (stopped || observing) return;
     observing = true;
     try {
       if (!isEnabled()) return;
-      const outcomes = await observe(boundWorkspace);
+      const owners = new Set(
+        readWatches(boundWorkspace).map((watch) => watch.sessionId),
+      );
       let emitted = 0;
-      for (const outcome of outcomes) {
-        if (outcome.action === 'emitted') {
-          emitted++;
-          notice(
-            `review-verify: observed a clean approval for ${outcome.key} at ${outcome.headSha}`,
-          );
-        } else if (outcome.action === 'failed') {
-          const dedupe = `${outcome.key}:${outcome.reason}`;
-          if (!reportedObserveFailures.has(dedupe)) {
-            reportedObserveFailures.add(dedupe);
-            notice(
-              `review-verify: observation failed for ${outcome.key} (${outcome.reason})`,
-            );
-          }
-        } else {
-          log.debug(
-            'review-verify observation',
-            outcome.key,
-            outcome.action,
-            outcome.reason,
-          );
-        }
+      for (const owner of owners) {
+        const alive = await liveness(owner);
+        // Only a live owner is read. A deleted owner's watches and events are
+        // pruned by the file pass, and an unknown one is left entirely alone —
+        // neither is a reason to spend a platform call.
+        if (alive !== true) continue;
+        emitted += reportOutcomes(
+          await observe(boundWorkspace, { sessionId: owner }),
+        );
       }
       // Consume what this pass just wrote without waiting for the watch or the
       // next file interval.

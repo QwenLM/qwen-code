@@ -19,8 +19,9 @@
 
 **评审者不一定是 qwen-code。** 一个 PR 可能由别的 agent（Codex、Claude Code）、
 CI bot 或人来评审。把入口焊死在 qwen-code 自己的评审管线上，这些情况一个都覆盖
-不到；因此事件契约必须能从管线之外抵达，消费者也必须能处理一条不指向任何
-qwen-code 会话的事件。
+不到；因此事件契约必须能从管线之外抵达。评审者是谁与这一轮归属谁是两件事：
+外部生产者记录事件时点名它想挂载的会话，验证轮成为该会话的子会话，而「谁评审
+的」只作为归因记录。
 
 ## 现状
 
@@ -93,9 +94,9 @@ qwen-code 会话的事件。
   "schemaVersion": 1,
   "eventId": "<去重键的 sha256，16 位十六进制>",
   "createdAt": "<ISO-8601>",
-  // 可选：只有 qwen-code 自己的管线才有会话可指。没有它时，消费者派生的是
-  // 顶层自动化会话，而不是子会话。
-  "sessionId": "<QWEN_CODE_SESSION_ID，若已导出>",
+  // 这次交接归属的会话。每次派生都是它的子会话，因此不带会话的事件
+  // 无法被行动，会以原因丢弃。
+  "sessionId": "<归属会话>",
   // 谁断言这个 head 是干净的——一个会发布公开评论的动作必须可归因。
   "reviewedBy": "qwen-code/save-artifact",
   "target": {
@@ -144,7 +145,8 @@ qwen review verify-event --pr 15846 --repo QwenLM/qwen-code \
 构造上就是离线的：它不读平台、不需要凭据，因此生产者没有 GitHub token 也能交接，
 而且 daemon 当时不必在运行——记录是持久的，等它下次运行时自会被取走。非 GitHub
 目标必须给 `--host`（没有默认 host，与 `review meta` 的拒绝一致）；`--session-id`
-默认取 `QWEN_CODE_SESSION_ID`，对外部调用者通常不存在。用法错误退出 2，写入失败
+默认取 `QWEN_CODE_SESSION_ID`，且是**必需**的：验证轮会成为该会话的子会话，
+因此从会话之外调用的生产者必须点名它想挂载的那个会话。用法错误退出 2，写入失败
 退出 1，stdout 只输出一个 JSON 对象。调用者断言两件它自己负责的事实：读的是哪个
 head，以及本轮没有发现 Critical。
 
@@ -185,7 +187,7 @@ Aone 目标产出的是 Aone 事件。
 | `review.autoVerify` 打开（仅 operator 作用域）                   | `disabled`             |
 | `target.platform === 'github'` 且 `target.host === 'github.com'` | `unsupported-platform` |
 | 工作区内存在 `.qwen/skills/verify-pr/SKILL.md`                   | `skill-unavailable`    |
-| `sessionId` 存在，**或**已接好可用于无父派生的 bridge            | `no-session`           |
+| 归属会话仍然存在（已删除的被剪枝，读不出的不动）                 | `session-gone` / 跳过  |
 | 去重键不在 `spawned.json` 中                                     | `already-verified`     |
 
 被拒绝的事件从 `pending/` 移除并记录原因，不重试。此刻无法行动的事件，不会在没有
@@ -194,28 +196,21 @@ Aone 目标产出的是 Aone 事件。
 被接受的事件按 write-ahead 处理：
 
 1. 把去重键追加进 `spawned.json`（有界、FIFO、200 条）。
-2. 按「是哪个生产者写的事件」派生：
-   - **带会话** → `launch({ prompt, completion: 'sent', callerSessionId, name })`，
-     走该工作区自己的子会话 launcher，因此 per-caller 与工作区两级并发闸、
-     depth-1 闸都生效，UI 也能把这一轮链回评审。
-   - **不带会话** → `spawnReviewVerifySession`，经 bridge 派生一个**顶层**会话
-     （`spawnOrAttach` thread scope → 命名 → `sendPrompt`），与 launcher 自己的
-     非 standalone 路径同一套顺序，只是去掉父 lineage。launcher 服务不了这种
-     情况：`callerSessionId` 是必需的，且它的并发桶与嵌套闸都以它为键。这条路的
-     并发由 bridge 的 `maxSessions` 准入与上游的按 head 去重约束；prompt 派发被拒
-     会被报出来，而不是吞掉。
+2. `launch({ prompt, completion: 'sent', callerSessionId: owner, name })`——走该
+   工作区自己的子会话 launcher，以**归属会话**为 caller，因此 per-caller 与工作区
+   两级并发闸、depth-1 闸都生效，这一轮也链回发起它的那个会话。没有无父路径：
+   不指向会话的事件以 `no-owner` 丢弃，因为它成不了任何人的子会话。
 3. 删除 pending 文件。
 
 先记录再派生是刻意的：在两步之间死掉的 daemon 绝不能重放一轮可能已经发过评论的
 验证。代价是派生失败不重试——失败连同原因一起记日志，操作者可以手工跑
 `/verify-pr`。对于一个输出是公开评论的功能，「绝不重复发布」优先于「绝不错过一轮」。
 
-两条路的 prompt 都是 `/verify-pr <number> --publish --repo <ownerRepo>`。会话在
+prompt 是 `/verify-pr <number> --publish --repo <ownerRepo>`。会话在
 同一工作区运行，因此项目级 skill 与操作者的 `verifyPr.assetsRepo` 坐标原样适用，
 daemon 既有的 `/verify-pr` prompt 准入也会把 PR 徽标绑到新会话上。
-`completion: 'sent'`（以及无父路径的 fire-and-forget 派发）让评审会话不被阻塞。
-派生日志会带上 `reviewedBy`，因此由别的 agent 的断言触发的公开评论在 daemon 日志
-里是可归因的。
+`completion: 'sent'` 让归属会话不被阻塞。派生日志会带上归属会话与 `reviewedBy`，
+因此由别的 agent 的断言触发的公开评论在 daemon 日志里是可归因的。
 
 ### 4. 策略
 
@@ -269,7 +264,8 @@ qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
 ```
 
 watch 列表与观测 cursor 就放在事件旁边（`watches.json`、`observed.json`），同样
-宿主受信，按坐标而非 head 建键——一个 watch 跨多个 head。daemon 每五分钟重读
+宿主受信，按坐标**与归属会话**而非 head 建键——一个 watch 跨多个 head，两个会话
+watch 同一个 PR 是两条 watch，各自随自己的会话消亡。daemon 每五分钟重读
 每个 watch（各一次 GraphQL 调用），产出的事件由同一趟文件消费立即处理，而不必等
 下一个周期。
 
@@ -310,10 +306,11 @@ watch 的 PR 每个周期多一次调用。
   默认评审是 qwen-code 做的。事实并非如此：可能是别的 agent、CI bot 或人。所以
   记录本身才是接口，`review verify-event` 是任何人都能调的生产者，内部产出降级为
   众多调用者之一。消费者的任何闸门都不读生产者是谁。
-- **无父事件派生顶层会话，而不是被拒绝。** launcher 的 `callerSessionId` 是必需
-  的，且它的并发闸与嵌套闸都以它为键，外部事件用不了它。拒绝这类事件（第一版的
-  `no-session`）会让这个开放入口形同虚设。bridge 路径就是 launcher 自己用的那套
-  派生顺序，去掉 lineage。
+- **交接归属一个会话，验证轮是它的子会话。** 早先一版对「没有评审会话」的事件
+  派生顶层会话，结果那一轮不挂在任何工作之下。归属现在是显式的：事件点名它归属
+  的会话（评审会话、外部生产者被调用时所在的会话、或拥有该 watch 的会话），每次
+  派生都经 launcher 以该会话为 caller，不指向会话的事件被丢弃而不是无父派生。
+  谁**评审**是归因（`reviewedBy`）；谁**拥有**这一轮才是父会话。
 - **内部生产者选 `save-artifact`，不选 `compose-review` 或 `submit`。** compose-review 跑在
   Step 6B 可能修发现并重新 compose 之前，那里产出的事件可能描述一个本轮随后改掉的
   裁决。`submit` 只在发布轮次运行。`save-artifact` 是每一轮 medium/high（无论是否
@@ -331,9 +328,10 @@ watch 的 PR 每个周期多一次调用。
 
 ## 约束与风险
 
-- 走子会话那条路时，父会话必须在事件被消费时仍驻留。内部事件在回合中途（Step 8）
-  写出，因此 watch 会在评审会话仍活跃时点火；daemon 重启后的重放可能发现它已被
-  回收，此时 `launch` 失败并记日志。无父那条路没有这个约束。
+- 归属会话必须在事件被消费时仍**驻留**，因为 launcher 要经 bridge 解析它的
+  caller。内部事件在回合中途（Step 8）写出，因此 watch 会在评审会话仍活跃时点火；
+  daemon 重启后的重放可能发现它已被回收，此时 `launch` 失败并记日志。归属本身按
+  **存在性**而非驻留判定：空闲被回收的会话仍拥有它的 watch，只有删除会话才终结它们。
 - 派生的会话执行 untrusted PR 代码。它继承手工调用 `/verify-pr` 轮次的隔离姿态；
   本次改动不削弱它，也不自带沙箱。外部生产者断言的「干净」没有被独立复核——这是
   E1 的信任模型：调用者与操作者同权限，且记录里带 `reviewedBy` 可归因。
@@ -364,9 +362,9 @@ watch 的 PR 每个周期多一次调用。
 - `serve/review-verify-automation.test.ts` —— 每一道拒绝闸门；接受路径的
   write-ahead 顺序（键先于 `launch` 记录，pending 文件在其后移除）；`launch` 失败
   时键仍被记录且事件被丢弃；同一 head 的重复事件只派生一次；`stop()` 幂等并关闭
-  watch。无父路径：一条不带会话的事件派生**顶层**会话（thread scope、无
-  `parentSessionId`），prompt 与标题逐字正确，完全不碰 launcher，去重与其他 head
-  一致，并会报出 prompt 派发被拒；未接 bridge 时同一条事件以 `no-session` 拒绝。
+  watch。归属：每次派生都是归属会话经 launcher 的子会话；不指向会话的事件以
+  `no-owner` 丢弃；已删除归属的 watch 与事件被剪枝且不为它派生；读不出存活性的
+  归属既不服务也不清理。
 - `review/lib/review-settings.test.ts` —— `autoVerify` 默认开、只以布尔存活、
   设置读不出来时降级为关、且从 operator 作用域读取。
 - `commands/review.test.ts` —— 子命令清单与其 `demandCommand` 枚举都包含
@@ -381,11 +379,11 @@ watch 的 PR 每个周期多一次调用。
 - `review/verify-watch.test.ts` —— 登记/查看/删除/`--once`，坐标经共享校验器解析，
   Aone watch 被登记为 Aone，以及每一种畸形调用都是「什么都不写」的用法错误。
 - `serve/review-verify-automation.test.ts`（观测职责）—— 周期到点会观测并为发现
-  的 head 走无父路径派生；operator 开关会完全停止观测；`stop()` 会 halt 它。
+  的 head 派生归属会话的子会话；operator 开关会完全停止观测；`stop()` 会 halt 它。
 
 手工/E2E（`.qwen/e2e-tests/review-clean-auto-verify.md`）：在 daemon 会话里对一个
 干净 PR 跑真实 `/review`，产出事件并派生一个执行 `/verify-pr --publish` 的子会话；
-外部 `review verify-event` 派生一个顶层会话；关掉 `review.autoVerify` 后产出事件
+外部 `review verify-event` 派生所点名会话的子会话；关掉 `review.autoVerify` 后产出事件
 但不派生会话。
 
 ## 验收标准
@@ -396,13 +394,13 @@ watch 的 PR 每个周期多一次调用。
   `/verify-pr <number> --publish --repo <owner>/<repo>`，且事后 pending 文件已消失。
 - 任何外部生产者跑
   `qwen review verify-event --pr <n> --repo <o/r> --head <sha> --reviewed-by <agent>`
-  写出同一条记录，daemon 随之派生一个 prompt 相同的**顶层**会话——不需要
-  qwen-code 会话，也不要求写入时 daemon 正在运行。
+  写出同一条记录，daemon 随之派生该会话 prompt 相同的**子会话**；不点名会话的
+  交接在入口就被拒绝，而不是被记录下来。
 - 带 Critical 的轮次、fail-closed 被 cap 的轮次、local/file 目标、非 github.com
   平台，都不派生。
 - 同一 head 的两轮干净评审只派生一次验证，无论是哪个生产者写的。
 - 已登记的 watch，其 PR 达到 `reviewDecision: APPROVED` 且无未决未过期线程时，
-  在评审者毫不作为的情况下把该 head 交接一次，并派生同样的顶层会话；被 dismiss
+  在评审者毫不作为的情况下把该 head 交接一次，并派生归属会话的子会话；被 dismiss
   的批准、未决阻塞、draft、被截断的线程页都不交接。
 - User 设置里的 `review.autoVerify: false` 停止派生但不停止事件产出；工作区作用域
   里无论 true 还是 false 都被忽略。

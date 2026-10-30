@@ -18,9 +18,11 @@
 // credentials, and the daemon does not need to be running yet (the event is
 // durable and is picked up whenever it next is).
 //
-// With no `--session-id` and no QWEN_CODE_SESSION_ID in the environment, the
-// consumer spawns a top-level automation session instead of a sub-session —
-// an external producer has no qwen-code session to be the parent.
+// The handoff belongs to a session: the verification round becomes that
+// session's sub-session. `--session-id` defaults to QWEN_CODE_SESSION_ID, so an
+// agent running inside a session needs no flag; one invoking this from outside
+// must name the session it wants the round attached to. With neither, the
+// command refuses rather than record an event nobody can own.
 
 import type { CommandModule } from 'yargs';
 import { resolve } from 'node:path';
@@ -126,6 +128,15 @@ export function runVerifyEvent(args: VerifyEventArgs): VerifyEventResult {
     args.sessionId?.trim() ||
     process.env['QWEN_CODE_SESSION_ID']?.trim() ||
     undefined;
+  if (!sessionId) {
+    // The verification round is a SUB-SESSION of the session that owns the
+    // handoff, so an owner is not optional. An external agent invokes this
+    // from inside the session it wants the round attached to (the environment
+    // carries the id), or names one explicitly.
+    throw new TypeError(
+      'verify-event needs a session: the verification round becomes its sub-session. Run this inside a qwen-code session, or pass --session-id.',
+    );
+  }
   const emitted = emitReviewCleanEvent({
     workspaceRoot,
     target: {
@@ -191,7 +202,7 @@ export const verifyEventCommand: CommandModule = {
       .option('session-id', {
         type: 'string',
         describe:
-          'The qwen-code session that ran the review, when there was one. Defaults to QWEN_CODE_SESSION_ID; without it the daemon spawns a top-level automation session.',
+          "The session this handoff belongs to. Defaults to QWEN_CODE_SESSION_ID; required, because the verification round becomes that session's sub-session.",
       })
       .option('workspace-root', {
         type: 'string',

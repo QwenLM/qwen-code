@@ -30,8 +30,12 @@ import {
   reviewVerifyDecision,
   startReviewVerifyAutomation,
   type ReviewVerifyAutomation,
-  type ReviewVerifyBridge,
 } from './review-verify-automation.js';
+import {
+  addWatch,
+  readWatches,
+  type ReviewVerifyWatch,
+} from '../commands/review/lib/review-verify-observe.js';
 
 let home: string;
 let root: string;
@@ -73,49 +77,45 @@ function emit(
   return result.path;
 }
 
-/** A bridge stub for the parentless path: records every call, resolves the
- *  spawn, and lets a test decide whether the prompt dispatch settles. */
-function stubBridge(opts: { dispatch?: Promise<unknown> } = {}) {
-  const calls = {
-    spawn: [] as Array<Record<string, unknown>>,
-    named: [] as Array<{ sessionId: string; displayName?: string }>,
-    prompts: [] as Array<{ sessionId: string; text: string }>,
-  };
-  const bridge: ReviewVerifyBridge = {
-    spawnOrAttach: async (req) => {
-      calls.spawn.push({ ...req });
-      return { sessionId: 'top-1' } as unknown as Awaited<
-        ReturnType<ReviewVerifyBridge['spawnOrAttach']>
-      >;
-    },
-    updateSessionMetadata: (sessionId, meta) => {
-      calls.named.push({ sessionId, displayName: meta.displayName });
-      return meta;
-    },
-    sendPrompt: (sessionId, req) => {
-      const first = req.prompt[0] as { text?: string } | undefined;
-      calls.prompts.push({ sessionId, text: first?.text ?? '' });
-      return (opts.dispatch ??
-        Promise.resolve({ stopReason: 'end_turn' })) as unknown as ReturnType<
-        ReviewVerifyBridge['sendPrompt']
-      >;
-    },
-  };
-  return { bridge, calls };
-}
+/** Every owner is alive unless a test says otherwise; the real probe reads
+ *  transcripts a scratch root does not have. */
+const alive = async () => true;
+
+const watch: ReviewVerifyWatch = {
+  ...target,
+  sessionId: 'sess-1',
+  addedAt: '2026-10-29T00:00:00.000Z',
+};
 
 function start(
-  opts: { enabled?: boolean; bridge?: ReviewVerifyBridge } = {},
+  opts: {
+    enabled?: boolean;
+    sessionExists?: (id: string) => Promise<boolean | null>;
+    observe?: (
+      root: string,
+      o: { sessionId: string },
+    ) => Promise<
+      Array<{
+        key: string;
+        action: 'emitted' | 'skipped' | 'declined' | 'failed' | 'pruned';
+        reason: string;
+        headSha?: string;
+      }>
+    >;
+    observeIntervalMs?: number;
+  } = {},
 ): ReviewVerifyAutomation {
   launch = vi.fn(async () => ({ sessionId: 'child-1' }));
   notices = [];
   automation = startReviewVerifyAutomation({
     boundWorkspace: root,
     launch,
-    ...(opts.bridge ? { getBridge: () => opts.bridge } : {}),
     // Long enough that only the explicit tick() runs during a test; the watch
     // is exercised by writing before start, so it has nothing to deliver.
     intervalMs: 600_000,
+    observeIntervalMs: opts.observeIntervalMs ?? 600_000,
+    sessionExists: opts.sessionExists ?? alive,
+    ...(opts.observe ? { observe: opts.observe } : {}),
     isEnabled: () => opts.enabled ?? true,
     onNotice: (message) => notices.push(message),
   });
@@ -152,14 +152,25 @@ describe('reviewVerifyDecision', () => {
     enabled: true,
     skillAvailable: true,
     spawnedKeys: new Set<string>(),
-    canSpawnTopLevel: true,
+    ownerSessionId: 'sess-1',
   };
 
-  it('builds the maintainer-round prompt for an accepted event', () => {
+  it('builds the maintainer-round prompt as a sub-session of the owner', () => {
     const decision = reviewVerifyDecision(event, facts);
     expect(decision).toMatchObject({
       action: 'spawn',
       prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      callerSessionId: 'sess-1',
+    });
+  });
+
+  it('the parent is the owner, not whoever reviewed', () => {
+    const decision = reviewVerifyDecision(
+      { ...event, sessionId: 'other-session', reviewedBy: 'codex' },
+      facts,
+    );
+    expect(decision).toMatchObject({
+      action: 'spawn',
       callerSessionId: 'sess-1',
     });
   });
@@ -179,11 +190,6 @@ describe('reviewVerifyDecision', () => {
       ],
       ['skill-unavailable', { skillAvailable: false }, event],
       [
-        'no-session',
-        { canSpawnTopLevel: false },
-        { ...event, sessionId: undefined },
-      ],
-      [
         'already-verified',
         { spawnedKeys: new Set([reviewEventDedupeKey(target)]) },
         event,
@@ -194,15 +200,6 @@ describe('reviewVerifyDecision', () => {
         reviewVerifyDecision(subject, { ...facts, ...override }),
       ).toMatchObject({ action: 'decline', reason });
     }
-  });
-
-  it('accepts a sessionless event when a parentless spawn path exists', () => {
-    const decision = reviewVerifyDecision(
-      { ...event, sessionId: undefined },
-      facts,
-    );
-    expect(decision.action).toBe('spawn');
-    expect(decision).not.toHaveProperty('callerSessionId');
   });
 });
 
@@ -237,6 +234,7 @@ describe('startReviewVerifyAutomation', () => {
       boundWorkspace: root,
       launch,
       intervalMs: 600_000,
+      sessionExists: alive,
       isEnabled: () => true,
       onNotice: (message) => notices.push(message),
     });
@@ -255,6 +253,7 @@ describe('startReviewVerifyAutomation', () => {
       boundWorkspace: root,
       launch,
       intervalMs: 600_000,
+      sessionExists: alive,
       isEnabled: () => true,
       onNotice: (message) => notices.push(message),
     });
@@ -307,7 +306,7 @@ describe('startReviewVerifyAutomation', () => {
     expect(notices.join('\n')).toContain('skill-unavailable');
   });
 
-  it('declines a sessionless event when no parentless path is wired', async () => {
+  it('drops an event that names no owner — it cannot be anyone’s sub-session', async () => {
     installSkill();
     const { path } = emitReviewCleanEvent({
       workspaceRoot: root,
@@ -318,77 +317,58 @@ describe('startReviewVerifyAutomation', () => {
     await start().tick();
     expect(launch).not.toHaveBeenCalled();
     expect(existsSync(path)).toBe(false);
-    expect(notices.join('\n')).toContain('no-session');
+    expect(notices.join('\n')).toContain('no-owner');
   });
 
-  it('spawns a TOP-LEVEL session for a review another agent performed', async () => {
+  it('spawns a sub-session of the owner for a review another agent performed', async () => {
     installSkill();
-    const { path } = emitReviewCleanEvent({
-      workspaceRoot: root,
-      target,
-      round: 1,
-      verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
-      reviewedBy: 'codex',
+    const path = emit();
+    await start().tick();
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(launch).toHaveBeenCalledWith({
+      prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      completion: 'sent',
+      callerSessionId: 'sess-1',
+      name: 'verify PR #15846',
     });
-    const { bridge, calls } = stubBridge();
-    await start({ bridge }).tick();
-    // Not a sub-session: there is no qwen-code session to be the parent.
-    expect(launch).not.toHaveBeenCalled();
-    expect(calls.spawn).toEqual([
-      { workspaceCwd: root, sessionScope: 'thread' },
-    ]);
-    expect(calls.prompts).toEqual([
-      {
-        sessionId: 'top-1',
-        text: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
-      },
-    ]);
-    expect(calls.named).toEqual([
-      { sessionId: 'top-1', displayName: 'verify PR #15846' },
-    ]);
     expect(existsSync(path)).toBe(false);
-    expect(readSpawnedKeys(root).has(reviewEventDedupeKey(target))).toBe(true);
-    expect(notices.join('\n')).toContain('spawned top-1');
-    expect(notices.join('\n')).toContain('reviewed by codex');
+    expect(notices.join('\n')).toContain('under sess-1');
   });
 
-  it('verifies a sessionless head once, like any other', async () => {
+  it('never spawns for a deleted owner, and prunes its watches and events', async () => {
     installSkill();
-    const { bridge, calls } = stubBridge();
-    const emitExternal = () =>
-      emitReviewCleanEvent({
-        workspaceRoot: root,
-        target,
-        round: 1,
-        verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
-        reviewedBy: 'codex',
-      });
-    emitExternal();
-    await start({ bridge }).tick();
-    emitExternal();
-    await automation?.tick();
-    expect(calls.spawn).toHaveLength(1);
-    expect(notices.join('\n')).toContain('already-verified');
+    const path = emit();
+    addWatch(root, watch);
+    await start({ sessionExists: async () => false }).tick();
+    expect(launch).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(false);
+    expect(readWatches(root)).toEqual([]);
+    expect(notices.join('\n')).toContain('session-gone');
+    expect(readSpawnedKeys(root).size).toBe(0);
   });
 
-  it('surfaces a prompt dispatch failure without losing the spawned session', async () => {
+  it('neither serves nor cleans an owner whose liveness cannot be read', async () => {
     installSkill();
-    emitReviewCleanEvent({
-      workspaceRoot: root,
-      target,
-      round: 1,
-      verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
-      reviewedBy: 'codex',
-    });
-    const { bridge, calls } = stubBridge({
-      dispatch: Promise.reject(new Error('admission refused')),
-    });
-    await start({ bridge }).tick();
-    expect(calls.spawn).toHaveLength(1);
-    await vi.waitFor(() =>
-      expect(notices.join('\n')).toContain('prompt dispatch failed'),
-    );
-    expect(notices.join('\n')).toContain('admission refused');
+    const path = emit();
+    addWatch(root, watch);
+    await start({ sessionExists: async () => null }).tick();
+    expect(launch).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(true);
+    expect(readWatches(root)).toHaveLength(1);
+  });
+
+  it('serves each owner only its own events', async () => {
+    installSkill();
+    const mine = emit();
+    const theirs = emit({ sessionId: 'sess-2', target: { number: 15847 } });
+    await start().tick();
+    // Both owners are alive, so both are served — each as its own parent.
+    expect(launch).toHaveBeenCalledTimes(2);
+    expect(
+      launch.mock.calls.map((call) => call[0].callerSessionId).sort(),
+    ).toEqual(['sess-1', 'sess-2']);
+    expect(existsSync(mine)).toBe(false);
+    expect(existsSync(theirs)).toBe(false);
   });
 
   it('leaves events pending when the spawned ledger cannot be read', async () => {
@@ -480,19 +460,21 @@ describe('startReviewVerifyAutomation', () => {
 
 describe('startReviewVerifyAutomation — observing watched PRs (E2)', () => {
   /** Stands in for the real reader: writes the event a clean approval would
-   *  write, and reports it, exactly as `observeWatches` does. */
+   *  write, owned by the session whose watch it is, exactly as
+   *  `observeWatches` does. */
   function observingStub() {
-    return async () => {
+    return async (_root: string, o: { sessionId: string }) => {
       emitReviewCleanEvent({
         workspaceRoot: root,
         target,
         round: 1,
         verdict: { event: 'APPROVE', critical: 0, suggestion: 0 },
+        sessionId: o.sessionId,
         reviewedBy: 'github:reviewer-1',
       });
       return [
         {
-          key: 'github:github.com:QwenLM/qwen-code:15846',
+          key: `github:github.com:QwenLM/qwen-code:15846:${o.sessionId}`,
           action: 'emitted' as const,
           reason: 'approved',
           headSha: target.headSha,
@@ -501,67 +483,52 @@ describe('startReviewVerifyAutomation — observing watched PRs (E2)', () => {
     };
   }
 
-  it('observes on its interval and spawns for the head it found', async () => {
+  it('observes the owner’s watches and spawns that owner’s sub-session', async () => {
     installSkill();
-    const { bridge, calls } = stubBridge();
-    launch = vi.fn(async () => ({ sessionId: 'child-1' }));
-    notices = [];
-    automation = startReviewVerifyAutomation({
-      boundWorkspace: root,
-      launch,
-      getBridge: () => bridge,
-      intervalMs: 600_000,
-      observeIntervalMs: 5,
-      observe: observingStub(),
-      isEnabled: () => true,
-      onNotice: (message) => notices.push(message),
-    });
-    await vi.waitFor(() => expect(calls.spawn.length).toBeGreaterThan(0), {
+    addWatch(root, watch);
+    start({ observe: observingStub(), observeIntervalMs: 5 });
+    await vi.waitFor(() => expect(launch).toHaveBeenCalled(), {
       timeout: 5000,
     });
     expect(notices.join('\n')).toContain('observed a clean approval');
-    expect(calls.prompts[0]?.text).toBe(
-      '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
-    );
-    // The observation is not a qwen-code review: no parent, no launcher.
-    expect(launch).not.toHaveBeenCalled();
-    expect(calls.spawn[0]).not.toHaveProperty('parentSessionId');
+    expect(launch).toHaveBeenCalledWith({
+      prompt: '/verify-pr 15846 --publish --repo QwenLM/qwen-code',
+      completion: 'sent',
+      callerSessionId: 'sess-1',
+      name: 'verify PR #15846',
+    });
+    expect(notices.join('\n')).toContain('reviewed by github:reviewer-1');
   }, 10000);
 
   it('does not observe when the operator turned the automation off', async () => {
     installSkill();
+    addWatch(root, watch);
     const observe = vi.fn(observingStub());
-    notices = [];
-    launch = vi.fn(async () => ({ sessionId: 'child-1' }));
-    automation = startReviewVerifyAutomation({
-      boundWorkspace: root,
-      launch,
-      intervalMs: 600_000,
-      observeIntervalMs: 5,
-      observe,
-      isEnabled: () => false,
-      onNotice: (message) => notices.push(message),
-    });
+    start({ enabled: false, observe, observeIntervalMs: 5 });
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(observe).not.toHaveBeenCalled();
     expect(readPendingReviewEvents(root).events).toEqual([]);
   });
 
+  it('does not read the platform for a deleted owner', async () => {
+    installSkill();
+    addWatch(root, watch);
+    const observe = vi.fn(observingStub());
+    start({
+      observe,
+      observeIntervalMs: 5,
+      sessionExists: async () => false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(observe).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
   it('stops observing on stop()', async () => {
     installSkill();
+    addWatch(root, watch);
     const observe = vi.fn(observingStub());
-    notices = [];
-    launch = vi.fn(async () => ({ sessionId: 'child-1' }));
-    const started = startReviewVerifyAutomation({
-      boundWorkspace: root,
-      launch,
-      intervalMs: 600_000,
-      observeIntervalMs: 5,
-      observe,
-      isEnabled: () => true,
-      onNotice: (message) => notices.push(message),
-    });
-    automation = started;
+    const started = start({ observe, observeIntervalMs: 5 });
     await vi.waitFor(() => expect(observe).toHaveBeenCalled(), {
       timeout: 5000,
     });
