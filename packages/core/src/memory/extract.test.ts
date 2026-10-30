@@ -1159,5 +1159,118 @@ describe('auto-memory extraction', () => {
       expect(cursor['coveredCurated']).toBe(history.length);
       expect(cursor['windowEpochId']).toBe('token:0');
     });
+
+    it('does not advance coverage when a completed run made no genuine progress', async () => {
+      // A fork that ran but saved nothing and touched no memory file covered
+      // no turn: moving `coveredCurated` would make the window stop re-sending
+      // turns no run ever extracted.
+      const history = curated(50);
+      await seedCursor({
+        sessionId: 'session-1',
+        processedOffset: 2,
+        updatedAt: new Date(0).toISOString(),
+        epoch: 1,
+        windowStartCurated: 0,
+        coveredCurated: 3,
+        windowHeadHash: hashCuratedEntry(history[0]),
+        windowEpochId: 'token:0',
+      });
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: false,
+        systemMessage: undefined,
+      });
+
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => history,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const cursor = await readCursor();
+      expect(cursor['coveredCurated']).toBe(3);
+      expect(cursor['windowStartCurated']).toBe(0);
+      expect(cursor['epoch']).toBe(1);
+      // The replay cursor is floored at the unprocessed start as well.
+      expect(cursor['processedOffset']).toBe(2);
+    });
+
+    it('preserves the pinned window when a run has nothing new to extract', async () => {
+      // The no-fork early return writes the cursor too. Dropping the window
+      // fields there would slide the next run's start for no reason.
+      const history = curated(50);
+      await seedCursor({
+        sessionId: 'session-1',
+        processedOffset: 50,
+        updatedAt: new Date(0).toISOString(),
+        epoch: 2,
+        windowStartCurated: 7,
+        coveredCurated: 12,
+        windowHeadHash: hashCuratedEntry(history[7]),
+        windowEpochId: 'token:0',
+      });
+
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        // The cursor is already past every turn: the run takes the early
+        // return without forking.
+        history: rawHistory(50),
+        getCuratedHistory: () => history,
+        extractWindowEpochId: 'token:0',
+      });
+
+      expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+      const cursor = await readCursor();
+      expect(cursor).toMatchObject({
+        epoch: 2,
+        windowStartCurated: 7,
+        coveredCurated: 12,
+        windowHeadHash: hashCuratedEntry(history[7]),
+        windowEpochId: 'token:0',
+      });
+      expect(cursor['processedOffset']).toBe(50);
+    });
+
+    it('drops window fields when the flag is off, even with a previous window cursor', async () => {
+      // Flag-off must write exactly main's legacy cursor shape. Leaving the
+      // experiment's fields behind would let a later flag-on run trust an
+      // index its own epoch never resolved.
+      const history = curated(20);
+      await seedCursor({
+        sessionId: 'session-1',
+        processedOffset: 0,
+        updatedAt: new Date(0).toISOString(),
+        epoch: 3,
+        windowStartCurated: 5,
+        coveredCurated: 9,
+        windowHeadHash: hashCuratedEntry(history[5]),
+        windowEpochId: 'token:0',
+      });
+      delete process.env[EXTRACT_STABLE_WINDOW_ENV];
+
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => history,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const cursor = await readCursor();
+      expect(Object.keys(cursor).sort()).toEqual([
+        'processedOffset',
+        'sessionId',
+        'updatedAt',
+      ]);
+      expect(cursor['processedOffset']).toBe(4);
+    });
   });
 });

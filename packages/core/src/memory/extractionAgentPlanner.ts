@@ -415,20 +415,25 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
-  // The stable window already contains every turn any parked #13004 slice
-  // could owe — it starts no later than the last covered curated index — so
-  // the parked slice is redundant there and is not re-derived.
-  const parked = historyWindow
-    ? []
-    : slimCompactionInput(skippedHistory, config.getEffectiveInputModalities())
-        .slimmedHistory;
-  const extraHistory = historyWindow
-    ? buildAgentHistory(
-        slimCompactionInput(
-          historyWindow.curatedHistory.slice(historyWindow.windowStart),
-          config.getEffectiveInputModalities(),
-        ).slimmedHistory,
-      )
+  // With a coverage cursor the window seed is never later than the last
+  // covered curated index, so a parked #13004 slice normally sits inside it.
+  // A first or rebased epoch has no coverage yet and seeds at the last-40
+  // tail, which can sit after the parked turns — so prove coverage with the
+  // existing content proof instead of trusting the window. Only the unproven
+  // residue is appended, after the window entries, so the pinned prefix bytes
+  // stay unchanged.
+  const slimmed = (entries: Content[]) =>
+    slimCompactionInput(entries, config.getEffectiveInputModalities())
+      .slimmedHistory;
+  const windowEntries = historyWindow
+    ? slimmed(historyWindow.curatedHistory.slice(historyWindow.windowStart))
+    : undefined;
+  const parked = skippedHistory.length === 0 ? [] : slimmed(skippedHistory);
+  const extraHistory = windowEntries
+    ? buildAgentHistory([
+        ...windowEntries,
+        ...uncoveredParkedPrefix(parked, windowEntries),
+      ])
     : buildAgentHistory([
         ...uncoveredParkedPrefix(parked, cacheSafe.history),
         ...cacheSafe.history,

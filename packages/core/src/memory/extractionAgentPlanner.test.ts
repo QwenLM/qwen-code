@@ -1009,7 +1009,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(secondExtra.slice(0, firstExtra.length)).toEqual(firstExtra);
   });
 
-  it('slices the stable window at the pinned curated index and ignores parked slices', async () => {
+  it('slices the stable window at the pinned curated index and drops a covered parked slice', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
@@ -1025,7 +1025,9 @@ describe('runAutoMemoryExtractionByAgent', () => {
     await runAutoMemoryExtractionByAgent(
       mockConfig,
       '/tmp',
-      [{ role: 'user', parts: [{ text: 'parked turn' }] }],
+      // The window already holds these turns: re-deriving them would fork
+      // them twice, so the parked slice must be dropped, not appended.
+      curated.slice(2),
       undefined,
       { curatedHistory: curated, windowStart: 2 },
     );
