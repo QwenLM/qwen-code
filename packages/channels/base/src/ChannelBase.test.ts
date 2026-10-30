@@ -24600,7 +24600,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('parks an image from another chat instead of refusing it', async () => {
+    it('refuses an image from another chat instead of silently dropping it on replay', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
       const ch = createChannel({
@@ -24619,11 +24619,9 @@ describe('ChannelBase', () => {
           }),
         );
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-          .calls[0]![0] as string;
 
-        // Ineligible for injection for a reason other than its media: it must
-        // park like text, not be refused and dropped.
+        // The replay envelope strips the inline bytes, so parking this foreign
+        // chat's photo would drop the picture with no notice to its sender.
         await ch.handleInbound(
           envelope({
             chatId: 'chat-b',
@@ -24636,31 +24634,74 @@ describe('ChannelBase', () => {
         );
 
         expect(queueMidTurnMessage).not.toHaveBeenCalled();
-        // No visible refusal: the sender is not told their message was dropped.
-        expect(ch.threadMessages).toEqual([]);
+        expect(ch.threadMessages).toEqual([
+          expect.objectContaining({
+            chatId: 'chat-b',
+            text: expect.stringContaining('text-only'),
+          }),
+        ]);
         const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
-        expect(logged).not.toContain('refusing message with image(s)');
+        expect(logged).toContain('refusing message with image(s)');
         expect(logged).not.toContain('inject: delivered');
-        expect(
-          collectBuffers(ch)
-            .get(sessionId)
-            ?.map((entry) => (entry as { text: string }).text),
-        ).toEqual([expect.stringContaining('cross-chat image')]);
+        expect(collectBuffers(ch).size).toBe(0);
 
+        // The running turn continues unaffected and there is nothing to replay.
         resolvers[0]!('done');
         await running;
-        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
-        expect(bridge.prompt.mock.calls[1]?.[0]).toBe(sessionId);
-        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('cross-chat image');
-        resolvers[1]?.('second done');
-        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(1));
       } finally {
         stderr.mockRestore();
         resolvers.forEach((resolve) => resolve('done'));
       }
     });
 
-    it('parks an image behind a rejected injection instead of refusing it', async () => {
+    it('refuses an image attachment with inline data instead of parking it', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-img-att-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        // How the shipped adapters deliver a photo: an image attachment with
+        // inline bytes and no local path. Without the refusal first, this
+        // reaches the attachments parking arm and its replay loses the picture.
+        await ch.handleInbound(
+          envelope({
+            text: 'look',
+            attachments: [
+              { type: 'image', data: 'AAA', mimeType: 'image/png' },
+            ],
+            messageId: 'm-img-att-2',
+          }),
+        );
+
+        expect(queueMidTurnMessage).not.toHaveBeenCalled();
+        expect(collectBuffers(ch).size).toBe(0);
+        expect(ch.threadMessages).toEqual([
+          expect.objectContaining({
+            chatId: 'chat1',
+            text: expect.stringContaining('text-only'),
+          }),
+        ]);
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).toContain('refusing message with image(s)');
+
+        resolvers[0]!('done');
+        await running;
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(1));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('refuses an image behind a rejected injection instead of parking it', async () => {
       const queueMidTurnMessage = enableInjection();
       // The first injection is REJECTED by the bridge, which flips the session
       // into the degraded fallback for the rest of this turn.
@@ -24685,8 +24726,9 @@ describe('ChannelBase', () => {
             messageId: 'm-img-degraded-2',
           }),
         );
-        // Injectable on its own, but the turn is degraded now: it must park
-        // behind the rejected message, not be refused for its media.
+        // Inline image bytes cannot survive the replay even though the turn is
+        // already in the bounded fallback, so this is refused rather than
+        // parked behind the rejected text.
         await ch.handleInbound(
           envelope({
             text: 'look at this',
@@ -24701,36 +24743,94 @@ describe('ChannelBase', () => {
         expect(String(queueMidTurnMessage.mock.calls[0]?.[1])).toContain(
           'keep this order',
         );
-        // No visible refusal: the sender is not told the image was dropped.
-        expect(ch.threadMessages).toEqual([]);
+        expect(ch.threadMessages).toEqual([
+          expect.objectContaining({
+            chatId: 'chat1',
+            text: expect.stringContaining('text-only'),
+          }),
+        ]);
         const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
-        expect(logged).not.toContain('refusing message with image(s)');
-        expect(logged).toContain(
-          'inject: NOT delivered mid-turn (ordered after a parked message)',
-        );
-        // Parked in the BOUNDED fallback (not plain collect) in arrival order.
+        expect(logged).toContain('refusing message with image(s)');
+        expect(logged).not.toContain('inject: delivered');
+        // The refused image leaves no buffer entry: only the rejected text is
+        // parked (in the bounded fallback) and replayed.
         const parked = collectBuffers(ch).get(sessionId) as Array<{
           text: string;
           injectFallback?: boolean;
         }>;
-        expect(parked.map((entry) => entry.text)).toEqual([
-          'keep this order',
-          'look at this',
-        ]);
-        expect(parked.map((entry) => entry.injectFallback)).toEqual([
-          true,
-          true,
-        ]);
+        expect(parked.map((entry) => entry.text)).toEqual(['keep this order']);
+        expect(parked.map((entry) => entry.injectFallback)).toEqual([true]);
 
         // Replayed as its own turn once the running one ends.
         resolvers[0]!('done');
         await running;
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
-        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('look at this');
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(replay).toContain('keep this order');
+        expect(replay).not.toContain('look at this');
         resolvers[1]?.('second done');
         await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
       } finally {
         stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('parks an image attachment saved to a path behind a rejected injection', async () => {
+      const queueMidTurnMessage = enableInjection();
+      queueMidTurnMessage.mockReturnValueOnce({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-img-path-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({ text: 'keep this order', messageId: 'm-img-path-2' }),
+        );
+        // No inline data, only a local path: the `saved to:` line survives the
+        // replay, so this still parks like text.
+        await ch.handleInbound(
+          envelope({
+            text: 'see the saved image',
+            attachments: [
+              {
+                type: 'image',
+                filePath: '/tmp/chan/x.png',
+                mimeType: 'image/png',
+                fileName: 'x.png',
+              },
+            ],
+            messageId: 'm-img-path-3',
+          }),
+        );
+
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        expect(ch.threadMessages).toEqual([]);
+        const parked = collectBuffers(ch).get(sessionId) as Array<{
+          text: string;
+        }>;
+        expect(parked.map((entry) => entry.text)).toEqual([
+          'keep this order',
+          expect.stringContaining('/tmp/chan/x.png'),
+        ]);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(replay).toContain('x.png');
+        expect(replay).toContain('/tmp/chan/x.png');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
         resolvers.forEach((resolve) => resolve('done'));
       }
     });
