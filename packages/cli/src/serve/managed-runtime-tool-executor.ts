@@ -2955,7 +2955,7 @@ function relativizeRootedText(text: string, root: string): string {
   // The bare-root rewrite needs the same leading boundary: without it a hit
   // whose text merely ends with the root string is truncated mid-token.
   const bareRoot = new RegExp(
-    `(?<![\\w./\\-])${escape(root)}(?![/\\w.-])`,
+    `(?<![\\w./\\\\-])${escape(root)}(?![/\\w\\\\.-])`,
     'g',
   );
   return text.replace(tokenPrefix, '').replace(bareRoot, '.');
