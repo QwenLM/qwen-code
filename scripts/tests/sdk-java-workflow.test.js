@@ -58,9 +58,17 @@ describe('SDK Java self-hosted workflow guards', () => {
       'packages/managed-agent-server',
     );
     expect(embedding.env.MAVEN_ARGS).toBe(verify.env.MAVEN_ARGS);
-    expect(embedding.run).toContain('-pl server -am -DskipTests');
-    expect(embedding.run).toContain('-Dexpression=project.version');
-    const hostRuns = embedding.run
+    expect(embedding.run).toBe(
+      'bash ../../.github/scripts/verify-managed-agent-embedding.sh',
+    );
+    const embeddingScript = readFileSync(
+      '.github/scripts/verify-managed-agent-embedding.sh',
+      'utf8',
+    );
+    expect(embeddingScript).toContain('set -euo pipefail');
+    expect(embeddingScript).toContain('-pl server -am -DskipTests');
+    expect(embeddingScript).toContain('-Dexpression=project.version');
+    const hostRuns = embeddingScript
       .split('\n')
       .filter((line) =>
         line.includes('-f verification/src/test/embedding-host/pom.xml'),
@@ -69,6 +77,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     for (const line of hostRuns) {
       expect(line).toContain('-Dmanaged-agent.version="${managed_version}"');
       expect(line).toContain('-DfailIfNoTests=true');
+      expect(line).not.toContain('-DskipTests');
     }
     expect(hostRuns[0]).toContain('-Dtest=EmbeddingHostTest');
     expect(hostRuns[0]).not.toContain('-Pembedded');
@@ -2040,13 +2049,19 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // multi-hour verify must not sit between the fast tier and its hold.
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
-      (s) => typeof s.run === 'string' && s.run.includes('mvn '),
+      (s) =>
+        typeof s.run === 'string' &&
+        (s.run.includes('mvn ') ||
+          s.run.includes('verify-managed-agent-embedding.sh')),
     );
     expect(mavenSteps.map((s) => s.name)).toEqual([
       'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
       'Verify ordinary and enabled embedding hosts',
     ]);
     expect(mavenSteps[1].run).not.toContain('sdk_java_lock_acquire');
+    expect(
+      readFileSync('.github/scripts/verify-managed-agent-embedding.sh', 'utf8'),
+    ).not.toContain('sdk_java_lock_acquire');
     expect(mavenSteps[1].env.MAVEN_ARGS).toBe(mavenSteps[0].env.MAVEN_ARGS);
     const [step] = mavenSteps;
     expect(step.run).toContain(
