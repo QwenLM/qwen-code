@@ -881,21 +881,42 @@ describe('InProcessBackend', () => {
       expect(mockCreate).not.toHaveBeenCalled();
     });
 
-    it('should fall back to parent ContentGenerator if per-agent creation fails', async () => {
-      mockCreate.mockRejectedValueOnce(new Error('Auth failed'));
-      await backend.init();
+    it.each(['Auth failed', ''])(
+      'does not start an agent on the parent after generator failure (%s)',
+      async (message) => {
+        mockCreate.mockRejectedValueOnce(new Error(message));
+        vi.mocked(AgentCore).mockClear();
+        const registry = createMockToolRegistry();
+        const parent = createMockConfig() as Config;
+        vi.mocked(parent.createToolRegistry).mockResolvedValueOnce(
+          registry as never,
+        );
+        backend = new InProcessBackend(parent);
 
-      // Should not throw — falls back gracefully
-      await expect(
-        backend.spawnAgent(
-          withAuth('agent-1', { authType: 'anthropic', apiKey: 'bad-key' }),
-        ),
-      ).resolves.toBeUndefined();
+        await backend.init();
 
-      // No runtimeView when per-agent creation failed; agent inherits parent.
-      expect(lastCoreCall().runtimeView).toBeUndefined();
-      expect(backend.getAgentContentGenerator('agent-1')).toBeUndefined();
-    });
+        const config = withAuth('agent-1', {
+          authType: 'anthropic',
+          apiKey: 'bad-key',
+        });
+
+        await expect(backend.spawnAgent(config)).rejects.toThrow(message);
+
+        expect(AgentCore).not.toHaveBeenCalled();
+        expect(runReasoningLoopMock).not.toHaveBeenCalled();
+        expect(backend.getAgent('agent-1')).toBeUndefined();
+        expect(backend.getAgentContentGenerator('agent-1')).toBeUndefined();
+        expect(backend.getActiveAgentId()).toBeNull();
+        expect(registry.stop).toHaveBeenCalledTimes(1);
+        expect(backend.getAgentContentGeneratorError('agent-1')).toBe(message);
+
+        await backend.spawnAgent(config);
+        expect(backend.getAgent('agent-1')).toBeDefined();
+        expect(
+          backend.getAgentContentGeneratorError('agent-1'),
+        ).toBeUndefined();
+      },
+    );
 
     it('should give different agents different ContentGenerators', async () => {
       const gen1 = { generateContentStream: vi.fn() };

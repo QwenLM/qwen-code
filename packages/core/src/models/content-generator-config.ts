@@ -27,7 +27,6 @@ import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
-import type { ResolvedModelConfig } from './types.js';
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
@@ -69,13 +68,13 @@ export interface AgentContentGeneratorOptions {
 
 /**
  * Build a ContentGeneratorConfig for a per-agent ContentGenerator.
- * Inherits operational settings (timeout, retries, proxy, sampling, etc.)
- * from the parent's config and overlays the agent-specific auth fields.
+ * Inherits model options only within the same endpoint and auth type, while
+ * retaining process-level options such as proxy and logging.
  *
  * For cross-provider agents the parent's API key / base URL are invalid,
- * so we resolve credentials from the provider-specific environment
- * variables (e.g. ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL). This mirrors
- * what a PTY subprocess does during its own initialization.
+ * so independently configured endpoints require their own credentials.
+ * Default provider environment variables are used only without an explicit
+ * endpoint or credential declaration.
  */
 export function buildAgentContentGeneratorConfig(
   base: Config,
@@ -242,57 +241,101 @@ function buildInheritedAgentContentGeneratorConfig(
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,
-    model: modelId ?? parentConfig.model,
+    model: resolvedModel?.id ?? modelId ?? parentConfig.model,
     authType: authOverrides.authType as AuthType,
+    baseUrl:
+      authOverrides.baseUrl ??
+      resolvedModel?.baseUrl ??
+      resolveCredentialField(
+        undefined,
+        sameProvider ? parentConfig.baseUrl : undefined,
+        authOverrides.authType,
+        'baseUrl',
+      ),
   };
+  const sameEndpoint =
+    sameProvider && nextConfig.baseUrl === parentConfig.baseUrl;
+  const envKey = resolvedModel?.envKey;
 
-  // When switching providers, clear generation config fields so parent
-  // settings (samplingParams, reasoning, extra_body, etc.) don't leak.
-  if (!sameProvider) {
+  // A declared key variable is authoritative. Protocol compatibility alone
+  // must not send a cloud credential to an unrelated (including local) URL.
+  // A cross-provider worker may read its own provider's default variables when
+  // the endpoint is the provider's default one: either no endpoint was declared
+  // or it equals what that provider's base-URL variable already selects.
+  const providerDefaultBaseUrl = resolveCredentialField(
+    undefined,
+    undefined,
+    authOverrides.authType,
+    'baseUrl',
+  );
+  const useDefaultCredentials =
+    sameEndpoint ||
+    (!sameProvider &&
+      ((resolvedModel?.registryBaseUrl === undefined &&
+        (authOverrides.baseUrl === undefined ||
+          authOverrides.baseUrl === resolvedModel?.baseUrl)) ||
+        (providerDefaultBaseUrl !== undefined &&
+          nextConfig.baseUrl === providerDefaultBaseUrl)));
+  nextConfig.apiKey =
+    authOverrides.apiKey ??
+    (envKey
+      ? (process.env[envKey] ??
+        (sameEndpoint && envKey === parentConfig.apiKeyEnvKey
+          ? parentConfig.apiKey
+          : undefined))
+      : useDefaultCredentials
+        ? resolveCredentialField(
+            undefined,
+            sameEndpoint ? parentConfig.apiKey : undefined,
+            authOverrides.authType,
+            'apiKey',
+          )
+        : undefined);
+  nextConfig.apiKeyEnvKey =
+    envKey ?? (sameEndpoint ? parentConfig.apiKeyEnvKey : undefined);
+
+  // Different endpoints may share a protocol but not request options.
+  if (!sameEndpoint) {
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (nextConfig as any)[field] = undefined;
     }
   }
-
-  if (resolvedModel) {
-    applyResolvedModelConfig(
-      nextConfig,
-      resolvedModel,
-      parentConfig,
-      authOverrides,
-    );
-    return nextConfig;
+  if (
+    !sameEndpoint ||
+    (envKey && envKey !== parentConfig.apiKeyEnvKey) ||
+    (authOverrides.apiKey !== undefined &&
+      authOverrides.apiKey !== parentConfig.apiKey)
+  ) {
+    nextConfig.customHeaders = undefined;
   }
 
-  if (modelId && modelId !== parentConfig.model) {
+  if (resolvedModel) {
+    for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      const registryValue = resolvedModel.generationConfig[field];
+      if (
+        registryValue !== undefined ||
+        field === 'thinkingMandatory' ||
+        field === 'enableRequestMetadata'
+      ) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (nextConfig as any)[field] = registryValue;
+      }
+    }
+  } else if (modelId && modelId !== parentConfig.model) {
     nextConfig.thinkingMandatory = undefined;
   }
 
-  nextConfig.apiKey = resolveCredentialField(
-    authOverrides.apiKey,
-    sameProvider ? parentConfig.apiKey : undefined,
-    authOverrides.authType,
-    'apiKey',
-  );
-  if (
+  if (resolvedModel) {
+    nextConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
+  } else if (
     !sameProvider ||
     nextConfig.model !== parentConfig.model ||
     (authOverrides.baseUrl !== undefined &&
       authOverrides.baseUrl !== parentConfig.baseUrl)
-  )
+  ) {
     nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
-  nextConfig.baseUrl =
-    authOverrides.baseUrl ??
-    resolveCredentialField(
-      undefined,
-      sameProvider ? parentConfig.baseUrl : undefined,
-      authOverrides.authType,
-      'baseUrl',
-    );
-  nextConfig.apiKeyEnvKey = sameProvider
-    ? parentConfig.apiKeyEnvKey
-    : undefined;
+  }
 
   return nextConfig;
 }
@@ -332,66 +375,6 @@ export async function createRuntimeContentGeneratorView(
         contentGeneratorOwner,
       );
   return { contentGenerator, contentGeneratorConfig };
-}
-
-function applyResolvedModelConfig(
-  targetConfig: ContentGeneratorConfig,
-  resolvedModel: ResolvedModelConfig,
-  parentConfig: ContentGeneratorConfig,
-  authOverrides: AuthOverrides,
-): void {
-  const sameProvider = authOverrides.authType === parentConfig.authType;
-  const inheritCredentials =
-    sameProvider &&
-    (authOverrides.registryBaseUrl === undefined ||
-      (resolvedModel.baseUrl === parentConfig.baseUrl &&
-        resolvedModel.envKey === parentConfig.apiKeyEnvKey));
-  if (!inheritCredentials) targetConfig.customHeaders = undefined;
-  targetConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
-  targetConfig.model = resolvedModel.id;
-  targetConfig.authType = resolvedModel.authType;
-  targetConfig.baseUrl =
-    authOverrides.baseUrl ??
-    resolvedModel.baseUrl ??
-    (sameProvider ? parentConfig.baseUrl : undefined);
-
-  if (resolvedModel.envKey) {
-    targetConfig.apiKey =
-      authOverrides.apiKey ??
-      process.env[resolvedModel.envKey] ??
-      (inheritCredentials ? parentConfig.apiKey : undefined);
-    targetConfig.apiKeyEnvKey = resolvedModel.envKey;
-  } else {
-    targetConfig.apiKey =
-      authOverrides.registryBaseUrl !== undefined && !inheritCredentials
-        ? authOverrides.apiKey
-        : resolveCredentialField(
-            authOverrides.apiKey,
-            sameProvider ? parentConfig.apiKey : undefined,
-            authOverrides.authType,
-            'apiKey',
-          );
-    targetConfig.apiKeyEnvKey = inheritCredentials
-      ? parentConfig.apiKeyEnvKey
-      : undefined;
-  }
-
-  // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
-  // Same-provider fields inherit unless the registry overrides them, except
-  // model capabilities such as thinkingMandatory, which must not leak, and
-  // enableRequestMetadata, which is a per-model decision: an inherited true
-  // would ship the DashScope tracing object to a vendor-forwarded side model.
-  for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
-    const registryValue = resolvedModel.generationConfig[field];
-    if (
-      registryValue !== undefined ||
-      field === 'thinkingMandatory' ||
-      field === 'enableRequestMetadata'
-    ) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (targetConfig as any)[field] = registryValue;
-    }
-  }
 }
 
 /**
