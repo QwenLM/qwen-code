@@ -69,7 +69,12 @@ const mocks = vi.hoisted(() => {
     streaming: false,
     interrupt: vi.fn(),
     keyboard: [] as Array<
-      (key: { name: string; ctrl: boolean; eventType?: string }) => void
+      (key: {
+        name: string;
+        ctrl: boolean;
+        shift?: boolean;
+        eventType?: string;
+      }) => void
     >,
     items: [] as LiveHistoryItem[],
     isCurrentHistory: vi.fn(),
@@ -146,7 +151,12 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react', () => ({
   createRoot: vi.fn(() => mocks.state.root),
   useKeyboard: (
-    handler: (key: { name: string; ctrl: boolean; eventType?: string }) => void,
+    handler: (key: {
+      name: string;
+      ctrl: boolean;
+      shift?: boolean;
+      eventType?: string;
+    }) => void,
   ) => {
     mocks.state.keyboard.push(handler);
   },
@@ -817,6 +827,37 @@ describe('startOpenTuiUI fallback contract', () => {
       expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
     }, config);
   });
+
+  it.each([false, true])(
+    'does not arm exit or cancel a parked call on Shift+Ctrl+C (parked=%s)',
+    async (parked) => {
+      const config = buildConfig();
+      const confirm = vi.fn(async () => {});
+      if (parked)
+        mocks.state.waitingCalls = [
+          { callId: 'parked', confirmationDetails: { onConfirm: confirm } },
+        ];
+      await withEntryApp(() => {
+        for (let i = 0; i < 2; i++)
+          act(() =>
+            mocks.state.keyboard.at(-1)!({
+              name: 'c',
+              ctrl: true,
+              shift: true,
+            }),
+          );
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(confirm).not.toHaveBeenCalled();
+        expect(mocks.state.interrupt).not.toHaveBeenCalled();
+        act(() => mocks.state.keyboard.at(-1)!({ name: 'c', ctrl: true }));
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(confirm).toHaveBeenCalledTimes(parked ? 1 : 0);
+        act(() => mocks.state.keyboard.at(-1)!({ name: 'c', ctrl: true }));
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+        expect(confirm).toHaveBeenCalledTimes(parked ? 1 : 0);
+      }, config);
+    },
+  );
 
   it.each(['c', 'd'] as const)(
     'exits idle keyboard confirmation with code 0: %s',

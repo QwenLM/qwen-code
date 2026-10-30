@@ -20,6 +20,7 @@
  */
 
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Command, keyMatchers } from '../keyMatchers.js';
 import {
   useKeyboard,
   usePaste,
@@ -412,6 +413,10 @@ function useLineInputKeys(
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
       if (onSubmit(line.text)) line.settle();
+      return;
+    }
+    if (keyMatchers[Command.CLEAR_INPUT](o)) {
+      line.clear();
       return;
     }
     if (!line.handleKey(o) && isPrintableKeyInput(key)) {
@@ -875,6 +880,8 @@ function ModelsStep({
         if (isPainted(0)) setFocus(0);
       } else if (o.name === 'return' || o.name === 'enter') {
         submit();
+      } else if (keyMatchers[Command.CLEAR_INPUT](o)) {
+        search.clear();
       } else if (!search.handleKey(o) && isPrintableKeyInput(key)) {
         search.insert(key.sequence);
       }
@@ -887,6 +894,10 @@ function ModelsStep({
     }
     if (o.name === 'return' || o.name === 'enter') {
       submit();
+      return;
+    }
+    if (keyMatchers[Command.CLEAR_INPUT](o)) {
+      custom.clear();
       return;
     }
     if (!custom.handleKey(o) && isPrintableKeyInput(key)) {
@@ -1048,6 +1059,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     if (o.name === 'return') {
       flow.submitAdvancedConfig();
       ctxField.settle();
+      return;
+    }
+    if (onCtxRow && keyMatchers[Command.CLEAR_INPUT](o)) {
+      ctxField.clear();
       return;
     }
     if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {

@@ -20,10 +20,9 @@
  * is just another code point: ink's "join with the previous line" and its
  * "insert a new line" both reduce to adding or removing that character.
  *
- * Remaining follow-ups are clear-input (ctrl+C) and open-external-editor
- * (ctrl+X), which ink's TextInput binds. The app's exit
- * handler acts on ctrl+C wherever a dialog owns the screen, and
- * ctrl+X is unbound in this renderer. ctrl+D is deliberately absent: the app's
+ * Auth and Permissions explicitly route clear-input (ctrl+C); the app's
+ * exit handler still receives the same key. Open-external-editor (ctrl+X) remains
+ * unbound in dialog fields. ctrl+D is deliberately absent: the app's
  * global EXIT binding acts on it, and this reducer hands it back unhandled, so
  * no field ever edits on that key. Legacy dialog rows still render spans without column
  * windowing; catalog source and setting fields use `windowLineAtCaret`.
@@ -399,6 +398,8 @@ export function useLineEdit(
   handleKey: (
     key: Pick<Key, 'name' | 'ctrl' | 'meta' | 'shift' | 'sequence'>,
   ) => boolean;
+  /** Clears a TextInput-owned field as one edit. */
+  clear: () => void;
   /** Inserts at the caret: a paste, or a printable key. */
   insert: (text: string) => void;
   /**
@@ -492,6 +493,10 @@ export function useLineEdit(
       if (!edited) return false;
       commit(edited);
       return true;
+    },
+    clear: () => {
+      if (settledRef.current || !mirror.current.text) return;
+      commit(endOfLine(''));
     },
     insert: (text) => {
       // Enforced here rather than at each call site: a bracketed paste arrives as

@@ -1039,6 +1039,37 @@ describe('caret editing in dialog text fields (#107)', () => {
     };
   }
 
+  it.each(['URL', 'API key'])(
+    'clears only the %s field and retains local undo without consuming global Ctrl+C',
+    async (fieldName) => {
+      await runToBaseUrlStep();
+      if (fieldName === 'API key') {
+        await typeText('https://api.example.com/v1');
+        await press('return');
+      }
+      const empty = focusedField();
+      await typeText('ab😀');
+      await press('left');
+      const previous = focusedField();
+      const preventDefault = vi.fn();
+      const stopPropagation = vi.fn();
+      await press('c', {
+        ctrl: true,
+        sequence: '\x03',
+        preventDefault,
+        stopPropagation,
+      });
+      expect(focusedField()).toEqual(empty);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField()).toEqual(previous);
+      await press('c', { ctrl: true, shift: true, sequence: '\x03' });
+      await press('d', { ctrl: true, sequence: '\x04' });
+      expect(focusedField()).toEqual(previous);
+    },
+  );
+
   it('inserts at the position the arrows left the caret', async () => {
     await runToBaseUrlStep();
     await typeText('abcdef');
@@ -1217,6 +1248,42 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(event.preventDefault).toHaveBeenCalled();
     await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
     expect(focusedField().text.trimEnd()).toBe('12');
+  });
+
+  it('accepts a numeric clear through the real flow and Undo submits its prior number', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      await press('c', { ctrl: true, sequence: '\x03' });
+      expect(observed.at(-1)).toBe('');
+      expect(contextRow()).toMatch(/Context window: auto$/);
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('does not spend Undo on a numeric Space in the same read before submit', async () => {

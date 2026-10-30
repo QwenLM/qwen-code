@@ -26,6 +26,7 @@ import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
+import { Command, keyMatchers } from '../keyMatchers.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
@@ -633,6 +634,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         setView('add-rule-scope');
         return;
       }
+      if (keyMatchers[Command.CLEAR_INPUT](original)) {
+        ruleLine.clear();
+        return;
+      }
       if (!ruleLine.handleKey(original) && isPrintableKeyInput(key)) {
         ruleLine.insert(key.sequence);
       }
@@ -715,6 +720,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             ];
           dirLine.settle();
           setNewDirInput(selected + '/');
+          setDirInputError('');
           setDirInputEpoch((epoch) => epoch + 1);
           setCompletionIndex(0);
         } else {
@@ -728,6 +734,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               visibleCompletions.length,
           );
         }
+        return;
+      }
+      if (keyMatchers[Command.CLEAR_INPUT](original)) {
+        dirLine.clear();
         return;
       }
       if (!dirLine.handleKey(original) && isPrintableKeyInput(key)) {

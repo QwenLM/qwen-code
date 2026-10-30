@@ -257,6 +257,9 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       generation: 0,
       extensions: {},
     });
+    expect(JSON.parse(sourceStates['pre-add']['state']!).extensions).toEqual(
+      {},
+    );
     expect(JSON.parse(sourceStates['pre-add']['enablement']!)).toEqual({});
     for (const name of ['registry', 'preferences']) {
       expect(sourceStates['pre-add'][name]).toBe(sourceStates['startup'][name]);

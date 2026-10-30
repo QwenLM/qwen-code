@@ -458,6 +458,29 @@ describe('Permissions field ownership across reads', () => {
     );
   });
 
+  it('clears a prior directory error when Tab accepts a real completion', () => {
+    const parent = fs.mkdtempSync(
+      nodePath.join(tmpdir(), 'permission-error-tab-'),
+    );
+    fs.mkdirSync(nodePath.join(parent, 'alpha'));
+    try {
+      const { onAddDirectory } = renderDialog();
+      openDirInput();
+      burst([...(parent + '/alph').split('').map(text), ENTER]);
+      expect(screen.getByText('Directory does not exist.')).toBeTruthy();
+      expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+      burst([TAB, ENTER]);
+      expect(screen.queryByText('Directory does not exist.')).toBeNull();
+      expect(onAddDirectory).not.toHaveBeenCalled();
+      press(ENTER);
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(nodePath.join(parent, 'alpha')),
+      );
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('keeps an invalid directory editable so it can be repaired', () => {
     const parent = fs.mkdtempSync(
       nodePath.join(tmpdir(), 'permission-repair-'),
@@ -512,6 +535,7 @@ describe('Permissions input resize ownership', () => {
     );
     fs.mkdirSync(nodePath.join(parent, 'alpha'));
     try {
+      mocks.state.width = 100;
       const onAddDirectory = vi.fn();
       const props = {
         rules: [],
@@ -526,11 +550,13 @@ describe('Permissions input resize ownership', () => {
       const view = render(<OpenTuiPermissionsDialog {...props} />);
       openDirInput();
       burst((parent + '/').split('').map(text));
-      expect(view.container.textContent).toContain(parent);
+      expect(view.container.textContent).toContain(nodePath.basename(parent));
       expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
       mocks.state.width = 4;
       view.rerender(<OpenTuiPermissionsDialog {...props} />);
-      expect(view.container.textContent).not.toContain(parent);
+      expect(view.container.textContent).not.toContain(
+        nodePath.basename(parent),
+      );
       expect(screen.queryByText(/^alpha\/\s+directory$/)).toBeNull();
       readWithTrailingPaste(
         [{ name: 'down' }, TAB, ENTER, ...'TAINT'.split('').map(text)],
@@ -539,7 +565,7 @@ describe('Permissions input resize ownership', () => {
       expect(onAddDirectory).not.toHaveBeenCalled();
       mocks.state.width = 100;
       view.rerender(<OpenTuiPermissionsDialog {...props} />);
-      expect(view.container.textContent).toContain(parent);
+      expect(view.container.textContent).toContain(nodePath.basename(parent));
       expect(view.container.textContent).not.toContain('TAINT');
       press(ENTER);
       expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
@@ -582,4 +608,76 @@ it('keeps directory editing and Escape available after its save callback throws'
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
+});
+
+describe('Permissions TextInput Ctrl+C ownership', () => {
+  it('submits only replacement rule text after a same-read clear', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    burst([
+      ...'WebFetch'.split('').map(text),
+      { name: 'c', ctrl: true, sequence: '\x03' },
+      ...'Read'.split('').map(text),
+      ENTER,
+    ]);
+    press(ENTER);
+    expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+      'Read',
+      'allow',
+      SettingScope.Workspace,
+    );
+  });
+
+  it('undoes a clear as one edit before a same-read submit', () => {
+    const { onAddRule } = renderDialog();
+    openRuleInput();
+    burst([
+      ...'WebFetch'.split('').map(text),
+      { name: 'c', ctrl: true, sequence: '\x03' },
+      { name: 'z', ctrl: true, sequence: '\x1a' },
+      ENTER,
+    ]);
+    press(ENTER);
+    expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+      'WebFetch',
+      'allow',
+      SettingScope.Workspace,
+    );
+  });
+
+  it('validates the replacement directory after a same-read clear', () => {
+    const { onAddDirectory } = renderDialog();
+    openDirInput();
+    burst([
+      ...'definitely-missing-directory'.split('').map(text),
+      { name: 'c', ctrl: true, sequence: '\x03' },
+      text('.'),
+      ENTER,
+    ]);
+    expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+      fs.realpathSync(nodePath.resolve('.')),
+    );
+  });
+});
+
+it('witnesses accepted, empty and settled rule paste consumption', () => {
+  const { onAddRule } = renderDialog();
+  openRuleInput();
+  const emit = (value: string) => {
+    const event = { bytes: Buffer.from(value), preventDefault: vi.fn() };
+    act(() => {
+      for (const handler of [...mocks.state.pasteHandlers]) handler(event);
+    });
+    return event;
+  };
+  expect(emit('').preventDefault).not.toHaveBeenCalled();
+  expect(emit('WebFetch').preventDefault).toHaveBeenCalledTimes(1);
+  press(ENTER);
+  expect(emit('TAIL').preventDefault).not.toHaveBeenCalled();
+  press(ENTER);
+  expect(onAddRule).toHaveBeenCalledExactlyOnceWith(
+    'WebFetch',
+    'allow',
+    SettingScope.Workspace,
+  );
 });

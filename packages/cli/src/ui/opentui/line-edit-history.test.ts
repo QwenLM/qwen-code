@@ -267,3 +267,52 @@ describe('dialog field undo/redo ownership', () => {
     expect(result.current.value).toBe('xxxxx');
   });
 });
+
+describe('TextInput-owned clear transactions', () => {
+  it('matches Ink setText clear and its Unicode multiline undo/redo in one read', () => {
+    const { result } = renderHook(() => usePlainField('', 0));
+    const field = result.current.line;
+    let ink = inkState();
+    act(() => {
+      field.insert('a😀\nb');
+      ink = textBufferReducer(ink, { type: 'insert', payload: 'a😀\nb' });
+      field.clear();
+      ink = textBufferReducer(ink, { type: 'set_text', payload: '' });
+      expect({ text: field.text, caret: field.caret }).toEqual(inkView(ink));
+      field.handleKey(historyKey());
+      ink = textBufferReducer(ink, { type: 'undo' });
+      expect({ text: field.text, caret: field.caret }).toEqual(inkView(ink));
+      field.handleKey(historyKey(true));
+      ink = textBufferReducer(ink, { type: 'redo' });
+      expect({ text: field.text, caret: field.caret }).toEqual(inkView(ink));
+    });
+    expect(result.current.value).toBe('');
+  });
+
+  it('does not spend history or discard redo when clearing an already empty field', () => {
+    const { result } = renderHook(() => usePlainField('', 0));
+    const field = result.current.line;
+    act(() => {
+      field.insert('kept');
+      field.handleKey(historyKey());
+      field.clear();
+      field.handleKey(historyKey(true));
+    });
+    expect(result.current.value).toBe('kept');
+  });
+
+  it('cannot clear a settled field but re-arms after an actual mount change', () => {
+    const { result, rerender } = renderHook(
+      ({ mountKey }) => usePlainField('kept', mountKey),
+      { initialProps: { mountKey: 0 } },
+    );
+    act(() => {
+      result.current.line.settle();
+      result.current.line.clear();
+    });
+    expect(result.current.value).toBe('kept');
+    rerender({ mountKey: 1 });
+    act(() => result.current.line.clear());
+    expect(result.current.value).toBe('');
+  });
+});
