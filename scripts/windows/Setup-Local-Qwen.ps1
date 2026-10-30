@@ -44,13 +44,14 @@ try {
     Where-Object { $_.Name -match '(?i)qwen' } | Select-Object -First 1
   if (-not $installer) { throw 'Qwen desktop installer not found beside setup script. Extract the entire artifact ZIP first.' }
   Write-Host 'Local model ready. Opening official Qwen Desktop installer...' -ForegroundColor Green
-  Start-Process -FilePath $installer.FullName -Wait
-  Write-Host 'Setup complete. Launch Qwen Code Desktop from the Start menu.' -ForegroundColor Green
+  $installed = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+  if ($installed.ExitCode -ne 0) { throw "Qwen Desktop installer failed (exit $($installed.ExitCode))." }
+  Write-Host 'Setup complete. Qwen Code Desktop is installed.' -ForegroundColor Green
+  $shortcut = Get-ChildItem (Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs') -Filter '*Qwen*.lnk' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($shortcut) { Start-Process -FilePath $shortcut.FullName }
   Write-Host 'In provider settings, select OpenAI-compatible Chat Completions if the saved provider is still Alibaba.'
   Write-Host 'Base URL: http://127.0.0.1:11434/v1 | Model: dolphin3:8b | API key: ollama'
 } catch {
   Write-Host ("Setup failed: " + $_.Exception.Message) -ForegroundColor Red
   exit 1
-} finally {
-  Read-Host 'Press Enter to close'
 }
