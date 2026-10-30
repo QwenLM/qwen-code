@@ -364,6 +364,78 @@ describe('createCronGateRunner', () => {
     });
   });
 
+  it.each([
+    ['timeout', false],
+    ['timeout', true],
+    ['cancelled', false],
+    ['cancelled', true],
+    ['binary', false],
+    ['binary', true],
+    ['startup', true],
+  ] as const)(
+    'preserves %s classification with cleanup diagnostic=%s',
+    async (reason, withDiagnostic) => {
+      const user = new AbortController();
+      const timeout = new AbortController();
+      const timeoutMock = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(timeout.signal);
+      mockRuntimeShell.mockImplementation(
+        async (
+          _config: unknown,
+          _command: string,
+          _cwd: string,
+          onOutput: (event: ShellOutputEvent) => void,
+          combined: AbortSignal,
+        ) => {
+          onOutput({ type: 'data', chunk: 'partial stderr', stream: 'stderr' });
+          if (reason === 'timeout') timeout.abort();
+          else if (reason === 'cancelled') user.abort();
+          else if (reason === 'binary') onOutput({ type: 'binary_detected' });
+          else timeout.abort();
+          return {
+            pid: 4242,
+            result: Promise.resolve({
+              rawOutput: Buffer.alloc(0),
+              output: '',
+              exitCode: null,
+              signal: 15,
+              error: withDiagnostic
+                ? new Error('Cleanup could not be confirmed')
+                : null,
+              aborted: reason !== 'startup' && combined.aborted,
+              pid: 4242,
+              executionMethod: 'child_process',
+            }),
+          };
+        },
+      );
+      try {
+        const result = await createCronGateRunner(
+          makeConfig({ mode: ApprovalMode.YOLO }),
+          { timeoutMs: 1000 },
+        )('./probe.sh', { signal: user.signal, approvedInProcess: false });
+        const detail =
+          reason === 'timeout'
+            ? 'timed out after 1 s'
+            : reason === 'cancelled'
+              ? 'was cancelled'
+              : reason === 'binary'
+                ? 'printed binary output'
+                : 'could not start';
+        expect(result).toMatchObject({
+          kind: 'failed',
+          detail: withDiagnostic
+            ? `${detail}: Cleanup could not be confirmed`
+            : detail,
+          stderr: 'partial stderr',
+        });
+      } finally {
+        timeoutMock.mockRestore();
+      }
+    },
+  );
+
   it('keeps the head of stdout up to the cap and marks the cut', async () => {
     scriptShell({ stdout: 'x'.repeat(CRON_GATE_OUTPUT_CAP_BYTES + 10) });
     const result = await createCronGateRunner(

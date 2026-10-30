@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { matchesRule, parseRule } from '../permissions/rule-parser.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -832,6 +833,69 @@ describe('running a helper', () => {
     setTimeout(() => controller.abort(), 200);
     expect((await cancelled).failure).toBe('cancelled');
   }, 20_000);
+
+  it.each([
+    ['timeout', false],
+    ['timeout', true],
+    ['cancelled', false],
+    ['cancelled', true],
+    ['startup', true],
+  ] as const)(
+    'preserves %s classification with cleanup diagnostic=%s',
+    async (reason, withDiagnostic) => {
+      const timeout = new AbortController();
+      const timeoutMock = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(timeout.signal);
+      const execute = vi
+        .spyOn(ShellExecutionService, 'executeLaunch')
+        .mockImplementation(async (_launch, onOutput) => {
+          onOutput({ type: 'data', chunk: 'partial output', stream: 'stdout' });
+          onOutput({ type: 'data', chunk: 'partial stderr', stream: 'stderr' });
+          if (reason === 'timeout' || reason === 'startup') timeout.abort();
+          return {
+            pid: 4242,
+            result: Promise.resolve({
+              rawOutput: Buffer.alloc(0),
+              output: '',
+              exitCode: reason === 'startup' ? null : 17,
+              signal: null,
+              error: withDiagnostic
+                ? new Error('Cleanup could not be confirmed')
+                : null,
+              aborted: reason !== 'startup',
+              pid: 4242,
+              executionMethod: 'child_process',
+            }),
+          };
+        });
+      try {
+        const result = await runAutofixPrHelper(
+          makeConfig(),
+          ['status'],
+          signal(),
+          60_000,
+        );
+        const failure =
+          reason === 'timeout'
+            ? 'timed out after 1 minutes'
+            : reason === 'cancelled'
+              ? 'cancelled'
+              : 'could not start';
+        expect(result).toMatchObject({
+          exitCode: reason === 'startup' ? null : 17,
+          stdout: 'partial output',
+          stderr: 'partial stderr',
+          failure: withDiagnostic
+            ? `${failure}: Cleanup could not be confirmed`
+            : failure,
+        });
+      } finally {
+        execute.mockRestore();
+        timeoutMock.mockRestore();
+      }
+    },
+  );
 
   it('records the watch a prepare reported, and forgets it at cleanup', async () => {
     await prepare();
