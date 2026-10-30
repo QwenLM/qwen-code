@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { InteractiveSession } from './interactive-session.js';
 import {
   startFakeOpenAIServer,
@@ -135,6 +136,14 @@ async function scenario(
   const editor = join(scratch, 'owned-editor.mjs');
   copyFileSync(join(here, 'fixtures/owned-editor.mjs'), editor);
   chmodSync(editor, 0o700);
+  const managerEditing =
+    name === 'edits-and-deletes-project-subagent-without-model';
+  const editorBin = join(scratch, 'editor-bin');
+  if (managerEditing) {
+    mkdirSync(editorBin);
+    copyFileSync(editor, join(editorBin, 'vim'));
+    chmodSync(join(editorBin, 'vim'), 0o700);
+  }
   const controlFile = join(scratch, 'editor-control.json');
   const editorLog = join(scratch, 'editor.jsonl');
   const sentinel = join(scratch, 'must-not-execute');
@@ -148,7 +157,11 @@ async function scenario(
       auth: { selectedType: 'openai' },
       folderTrust: { enabled: false },
     },
-    general: { enableAutoUpdate: false, showSessionRecap: false },
+    general: {
+      enableAutoUpdate: false,
+      showSessionRecap: false,
+      ...(managerEditing ? { preferredEditor: 'vim' } : {}),
+    },
     ui: { enableFollowupSuggestions: false },
     memory: E2E_MEMORY_SETTINGS_DEFAULTS,
   });
@@ -247,7 +260,9 @@ async function scenario(
         inheritEnv: false,
         args,
         env: {
-          PATH: process.env['PATH'],
+          PATH: managerEditing
+            ? editorBin + ':' + process.env['PATH']
+            : process.env['PATH'],
           HOME: scratch,
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtimeDir,
@@ -1156,7 +1171,7 @@ it(
         const projectRoot = join(workspace, '.qwen', 'agents');
         const userRoot = join(home, 'agents');
         const file = join(projectRoot, name + '.md');
-        const expected = `---\nname: ${name}\ndescription: ${description}\ncolor: Blue\n---\n\n${prompt}\n`;
+        const expected = `---\nname: ${name}\ndescription: ${description}\ncolor: blue\n---\n\n${prompt}\n`;
         const tree = (root: string): Record<string, unknown> => {
           const rows: Record<string, unknown> = {};
           const visit = (path: string, relative: string) => {
@@ -1274,6 +1289,7 @@ it(
             description,
             'System Prompt:',
             prompt,
+            'Color: blue',
           ]);
           await press('\x1b');
           await screen(`${phase}-created-agent-actions-back`, [
@@ -1334,6 +1350,338 @@ it(
         expect(cold.exitResult()?.exitCode).toBe(0);
         expect(cold.exitResult()?.signal ?? 0).toBe(0);
         expect(server.requests).toHaveLength(0);
+      },
+    ),
+  120_000,
+);
+
+it(
+  'edits-and-deletes-project-subagent-without-model',
+  () =>
+    scenario(
+      'edits-and-deletes-project-subagent-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        home,
+        evidence,
+        editorLog,
+        frame,
+        press,
+        type,
+        restart,
+        control,
+      }) => {
+        const name = 'owned-manager-mutation';
+        const description = 'Owned project manager fixture.';
+        const updatedDescription = 'Owned editor manager result.';
+        const prompt =
+          'You are an owned manager fixture. Do not request a model.';
+        const projectRoot = join(workspace, '.qwen', 'agents');
+        const userRoot = join(home, 'agents');
+        mkdirSync(projectRoot, { recursive: true });
+        mkdirSync(userRoot, { recursive: true });
+        const file = join(projectRoot, name + '.md');
+        const userFile = join(userRoot, name + '.md');
+        const content = (desc: string, color: string, restricted = false) =>
+          `---\nname: ${name}\ndescription: ${desc}\n${restricted ? 'tools:\n  - ReadFile\n' : ''}color: ${color}\n---\n\n${prompt}\n`;
+        writeFileSync(file, content(description, 'blue', true));
+        writeFileSync(userFile, content('Owned user sentinel.', 'red'));
+        const tree = (directory: string): Record<string, unknown> => {
+          const rows: Record<string, unknown> = {};
+          const visit = (path: string, relative: string) => {
+            const stat = lstatSync(path);
+            expect(stat.isSymbolicLink()).toBe(false);
+            rows[relative] = stat.isDirectory()
+              ? { type: 'dir', mode: stat.mode & 0o777 }
+              : {
+                  type: 'file',
+                  mode: stat.mode & 0o777,
+                  raw: readFileSync(path, 'utf8'),
+                };
+            if (stat.isDirectory())
+              for (const child of readdirSync(path).sort())
+                visit(
+                  join(path, child),
+                  relative === '.' ? child : relative + '/' + child,
+                );
+          };
+          visit(directory, '.');
+          return rows;
+        };
+        const before = { project: tree(projectRoot), user: tree(userRoot) };
+        const snapshots: Record<string, unknown> = { before };
+        const snapshot = (label: string) => {
+          snapshots[label] = {
+            project: tree(projectRoot),
+            user: tree(userRoot),
+          };
+          json(join(evidence, 'manager-store-states.json'), snapshots);
+        };
+        snapshot('prepared');
+        expect(server.requests).toHaveLength(0);
+        const framesSeen: Record<string, string> = {};
+        const screen = async (label: string, texts: string[]) =>
+          until(async () => {
+            framesSeen[label] = await frame(label);
+            return texts.every((text) => framesSeen[label].includes(text));
+          }, label);
+        const openActions = async (label: string) => {
+          await type('/agents manage');
+          await press('\r');
+          await screen(label + '-list', [name]);
+          await press('\r');
+          await screen(label + '-actions', [
+            'Choose Action',
+            'View Agent',
+            'Edit Agent',
+            'Delete Agent',
+          ]);
+        };
+        const assertProjectAgent = (desc: string, color: string) => {
+          const current = tree(projectRoot);
+          const key = name + '.md';
+          const original = before.project[key] as {
+            type: string;
+            mode: number;
+          };
+          const written = current[key] as {
+            type: string;
+            mode: number;
+            raw: string;
+          };
+          expect(written.type).toBe(original.type);
+          expect(written.mode).toBe(original.mode);
+          expect({ ...current, [key]: before.project[key] }).toEqual(
+            before.project,
+          );
+          const match = written.raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+          expect(match).not.toBeNull();
+          expect(parseYaml(match![1])).toEqual({
+            name,
+            description: desc,
+            color,
+          });
+          expect(match![2]).toBe('\n' + prompt + '\n');
+          expect(tree(userRoot)).toEqual(before.user);
+        };
+        let caseFailed = false;
+        let snapshotFailure: { error: unknown } | undefined;
+        try {
+          await openActions('initial');
+          await press('\x1b[B');
+          await press('\x1b[B');
+          await press('\r');
+          await screen('delete-cancel-confirm', [
+            'Are you sure you want to delete agent',
+            name,
+          ]);
+          await press('n');
+          await screen('delete-cancelled', ['Choose Action', 'Edit Agent']);
+          expect({ project: tree(projectRoot), user: tree(userRoot) }).toEqual(
+            before,
+          );
+          snapshot('after-delete-cancel');
+          // Return to the list and re-enter: the public action selection starts at View.
+          await press('\x1b');
+          await screen('before-tools-list', [name, 'Enter to select']);
+          await press('\r');
+          await screen('before-tools-actions', ['Choose Action']);
+          await press('\x1b[B');
+          await press('\r');
+          await screen('edit-options', [
+            'Open in editor',
+            'Edit tools',
+            'Edit color',
+          ]);
+          await press('\x1b[B');
+          await press('\r');
+          await screen('edit-tools', ['Edit Tools:', name, 'All Tools']);
+          const choices = [
+            'All Tools',
+            'Read-only Tools',
+            'Read & Edit Tools',
+            'Read & Edit & Execution Tools',
+          ];
+          const selectedRow = framesSeen['edit-tools']
+            .split('\n')
+            .find(
+              (row) =>
+                row.includes('›') &&
+                choices.some((choice) => row.includes(choice)),
+            );
+          expect(selectedRow).toBeDefined();
+          const selected = choices.findIndex((choice) =>
+            selectedRow!.includes(choice),
+          );
+          expect(selected).toBeGreaterThanOrEqual(0);
+          for (let index = 0; index < selected; index++) await press('\x1b[A');
+          expect(await frame('all-tools-selected')).toMatch(
+            /›\s+(?:\d+\.\s+)?All Tools/,
+          );
+          await press('\r');
+          await screen('tools-saved-options', ['Open in editor', 'Edit color']);
+          assertProjectAgent(description, 'blue');
+          expect(tree(userRoot)).toEqual(before.user);
+          snapshot('after-tools');
+          await press('\x1b[B');
+          await press('\x1b[B');
+          await press('\r');
+          await screen('edit-color', ['Edit Color:', name, 'Blue', 'Green']);
+          const colors = [
+            'Automatic Color',
+            'Blue',
+            'Green',
+            'Purple',
+            'Orange',
+            'Red',
+            'Cyan',
+          ];
+          const colorRow = framesSeen['edit-color']
+            .split('\n')
+            .find(
+              (row) =>
+                row.includes('›') &&
+                colors.some((color) => row.includes(color)),
+            );
+          expect(colorRow).toBeDefined();
+          const colorIndex = colors.findIndex((color) =>
+            colorRow!.includes(color),
+          );
+          expect(colorIndex).toBeGreaterThanOrEqual(0);
+          for (
+            let index = 0;
+            index < (2 - colorIndex + colors.length) % colors.length;
+            index++
+          )
+            await press('\x1b[B');
+          expect(await frame('green-selected')).toMatch(
+            /›\s+(?:\d+\.\s+)?Green/,
+          );
+          await press('\r');
+          await screen('color-saved-options', ['Open in editor', 'Edit tools']);
+          assertProjectAgent(description, 'green');
+          expect(tree(userRoot)).toEqual(before.user);
+          snapshot('after-color');
+          control({
+            behavior: 'changed',
+            output: content(updatedDescription, 'green'),
+          });
+          await press('\r');
+          await until(
+            () =>
+              existsSync(editorLog) &&
+              readFileSync(editorLog, 'utf8').includes('"phase":"finished"'),
+            'owned editor completed',
+          );
+          const editorRows = readFileSync(editorLog, 'utf8')
+            .trim()
+            .split('\n')
+            .map((row) => JSON.parse(row));
+          expect(editorRows.map((row) => row.phase)).toEqual([
+            'started',
+            'finished',
+          ]);
+          expect(
+            editorRows.every((row) => row.realFile === realpathSync(file)),
+          ).toBe(true);
+          expect(
+            editorRows.every(
+              (row) => row.argv.length === 1 && row.argv[0] === file,
+            ),
+          ).toBe(true);
+          expect(readFileSync(file, 'utf8')).toBe(
+            content(updatedDescription, 'green'),
+          );
+          expect(tree(userRoot)).toEqual(before.user);
+          snapshot('after-editor');
+          await press('\x1b');
+          await screen('editor-actions-back', ['Choose Action']);
+          await press('\x1b');
+          await screen('editor-list-back', [name, 'Enter to select']);
+          await press('\x1b');
+          await screen('editor-composer', ['Type your message']);
+          await openActions('edited');
+          await press('\r');
+          await screen('edited-details', [
+            name,
+            updatedDescription,
+            prompt,
+            'Color: green',
+          ]);
+          await press('\x1b');
+          await screen('delete-actions', ['Choose Action']);
+          // Back navigation preserves the last action (View) here.
+          await press('\x1b[B');
+          await press('\x1b[B');
+          await press('\r');
+          await screen('delete-confirm', [
+            'Are you sure you want to delete agent',
+            name,
+          ]);
+          await press('y');
+          await until(() => !existsSync(file), 'project agent deleted');
+          await screen('user-fallback-list', [name]);
+          expect(tree(userRoot)).toEqual(before.user);
+          expect(readdirSync(projectRoot)).toEqual([]);
+          snapshot('after-delete');
+          await press('\x1b');
+          await screen('hot-composer', ['Type your message']);
+          expect(server.requests).toHaveLength(0);
+          await type('/quit');
+          await press('\r');
+          await until(
+            () => session.exitResult() !== undefined,
+            'first natural quit',
+          );
+          expect(session.exitResult()?.exitCode).toBe(0);
+          expect(session.exitResult()?.signal ?? 0).toBe(0);
+          const cold = await restart();
+          await openActions('cold-user');
+          await press('\r');
+          await screen('cold-user-detail', [
+            name,
+            'Owned user sentinel.',
+            prompt,
+            'Color: red',
+          ]);
+          expect(tree(userRoot)).toEqual(before.user);
+          expect(readdirSync(projectRoot)).toEqual([]);
+          snapshot('cold-after-delete');
+          await press('\x1b');
+          await screen('cold-actions', ['Choose Action']);
+          await press('\x1b');
+          await screen('cold-list', [name, 'Enter to select']);
+          await press('\x1b');
+          await screen('cold-composer', ['Type your message']);
+          await type('/quit');
+          await press('\r');
+          await until(
+            () => cold.exitResult() !== undefined,
+            'cold natural quit',
+          );
+          expect(cold.exitResult()?.exitCode).toBe(0);
+          expect(cold.exitResult()?.signal ?? 0).toBe(0);
+          expect(server.requests).toHaveLength(0);
+        } catch (error) {
+          caseFailed = true;
+          throw error;
+        } finally {
+          try {
+            snapshot('finally-at-case-exit');
+          } catch (error) {
+            if (!caseFailed) snapshotFailure = { error };
+            try {
+              json(join(evidence, 'manager-final-snapshot-error.json'), {
+                error: String(error),
+              });
+            } catch {
+              // Preserve the original case failure if evidence storage also fails.
+            }
+          }
+        }
+        if (snapshotFailure) throw snapshotFailure.error;
       },
     ),
   120_000,

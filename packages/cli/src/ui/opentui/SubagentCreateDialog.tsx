@@ -186,6 +186,7 @@ export function OpenTuiSubagentCreateDialog({
             0,
             COLOR_OPTIONS.findIndex(
               (color) =>
+                color.id === draft.value.color ||
                 color.name === draft.value.color ||
                 color.value === draft.value.color,
             ),
@@ -249,7 +250,7 @@ export function OpenTuiSubagentCreateDialog({
           update(
             {
               type: 'SET_BACKGROUND_COLOR',
-              color: color.id === 'auto' ? 'auto' : color.name,
+              color: color.id,
             },
             { type: 'GO_TO_NEXT_STEP' },
           );

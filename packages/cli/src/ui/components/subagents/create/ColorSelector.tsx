@@ -39,7 +39,7 @@ export function ColorSelector({
       (option) => option.id === selectedValue,
     );
     if (colorOption) {
-      onSelect(colorOption.name);
+      onSelect(colorOption.id);
     }
   };
 
@@ -48,13 +48,14 @@ export function ColorSelector({
       (option) => option.id === selectedValue,
     );
     if (colorOption) {
-      setSelectedColor(colorOption.name);
+      setSelectedColor(colorOption.id);
     }
   };
 
   const currentColor =
-    colorOptions.find((option) => option.name === selectedColor) ||
-    colorOptions[0];
+    colorOptions.find(
+      (option) => option.id === selectedColor || option.name === selectedColor,
+    ) || colorOptions[0];
 
   return (
     <Box flexDirection="column" gap={1}>

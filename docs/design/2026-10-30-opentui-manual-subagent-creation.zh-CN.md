@@ -37,3 +37,7 @@ Ink 的真实 TextEntryStep 复用 shared TextInput 的 CLEAR_INPUT 合同。新
 标签修复随后通过四个整文件单测共 95 例，以及正常 build、typecheck、lint、bundle。Node+Ink、Bun+Ink、strict Bun+OpenTUI 手动创建 case 均已真实通过，包括精确 Markdown、热/冷观察、零模型请求与自然退出。这些证据仅适用于后续管理器详情改动之前的本地手动创建候选，不代表已合入 main 或整体迁移验收。
 
 最终本地组合候选仍是当前依赖基础上的未提交改动。PascalCase 修正后，六个 CLI 整文件单测共 111P，随后正常 build、typecheck、lint、bundle 均通过。Node+Ink、Bun+Ink、strict Bun+OpenTUI 各通过两项 Permissions、Source 获取和包含热/冷管理详情的手动创建 case：共执行 12 次、四个唯一 case，观察到 18 次自然会话退出，模型请求为零。manual case 证明取消不写入、八步 project 创建、精确 Markdown、user store 保持及热/冷只读导航；未在原生运行中执行 manual Ctrl+C、user 级磁盘创建、可选详情字段或长滚动。单测覆盖 manual Ctrl+C、user 级 payload 选择、可选详情字段及基本滚动调用；不代表 user 级磁盘创建或长滚动 E2E。bundle 入口摘要与独立的 1,378 个生成文件有限身份快照分开，两者均不代表完整依赖图或安装证明。所有旧失败保留；这不是合入 main 或整体迁移验收。
+
+## 规范持久化颜色
+
+颜色选项保持既有显示名，但现在把小写 option id 提交给公开 manager。`blue`/`green` 能通过既有 Core 解析，`auto` 仍在序列化时省略。选择器兼读规范 id 与历史显示名，不暗自重写文件。此前精确 `color: Blue` 创建证据不证明 Core 重载后保留颜色。修正后的公开创建整案要求 `color: blue` 及冷热详情颜色。当前规范颜色批次已通过八个 CLI 整文件共 146 项测试、正常完整 build、typecheck、原生布局/resize 和 bundle。Node+Ink、Bun+Ink 与 strict Bun+OpenTUI 已各针对同一本地源码 bundle 通过包含本创建场景和新增编辑/删除场景的完整五项公开 case：15 次执行、五个唯一 case、24 次自然会话退出及零模型请求。独立保存结果审查已确认三个 profile 和 58 个有限输入 pins；最终 typecheck 已通过，最终 lint 也已通过。此前大写颜色的结果保留历史范围，不代表安装后的修改行为、其他平台或最终合入 main 的验收。

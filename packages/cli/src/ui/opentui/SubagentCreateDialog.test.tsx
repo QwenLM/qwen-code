@@ -167,7 +167,7 @@ describe('native manual subagent creation', () => {
       level: 'project',
       filePath: '',
       tools: [],
-      color: 'Blue',
+      color: 'blue',
     });
     expect(options).toEqual({
       level: 'project',
@@ -350,5 +350,15 @@ describe('native manual subagent creation', () => {
     press('return');
     await screen.findByText(/Configuration not available/);
     expect(screen.getByText('Name: owned-proof')).toBeTruthy();
+  });
+  it('keeps the canonical color selected when returning from the summary', async () => {
+    const f = fixture();
+    await finalStep();
+    press('escape');
+    expect(screen.getByText('Step 7: Choose Background Color')).toBeTruthy();
+    press('return');
+    await screen.findByText('Press Enter to save, Esc to go back');
+    await act(async () => press('return'));
+    expect(f.createSubagent.mock.calls[0][0].color).toBe('blue');
   });
 });
