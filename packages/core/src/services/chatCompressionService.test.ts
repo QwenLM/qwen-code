@@ -520,6 +520,28 @@ describe('ChatCompressionService', () => {
     );
   });
 
+  it('compresses when a phantom reasoning span crosses a complete envelope', async () => {
+    // The unterminated <think> pairs with the trailing block's </analysis>
+    // across the envelope, covering its closer. If the sanitizer drops the
+    // envelope here the round reports FAILED_EMPTY and strikes the
+    // consecutive-failure breaker, even though the model produced a valid
+    // snapshot.
+    vi.mocked(mockChat.getHistory).mockReturnValue(
+      turns('do the thing', 'working', 'continue', 'more'),
+    );
+    mockGenerate(
+      '<think>never closed\n' +
+        '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>\n' +
+        '<analysis>draft</analysis>',
+      usage(49_000, 1_500),
+    );
+    const result = await run({ force: true, originalTokenCount: 100_000 });
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory![0].parts![0].text).toContain(
+      'primary_request_and_intent',
+    );
+  });
+
   it('manual /compress strips a trailing orphaned functionCall from the post-compact history', async () => {
     // History ends with model+functionCall and NO functionResponse (an
     // interrupted tool call). Manual /compress has no pending response, so
