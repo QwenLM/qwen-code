@@ -99,7 +99,7 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
 
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
   className?: string;
   style?: React.CSSProperties;
   chatMaxWidth?: number;

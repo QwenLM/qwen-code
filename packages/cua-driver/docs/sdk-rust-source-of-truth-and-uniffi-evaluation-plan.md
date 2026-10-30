@@ -1,5 +1,10 @@
 # Cua Driver SDK Rust source-of-truth and UniFFI evaluation plan
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 Status: superseded by the final package-boundary decision in PR #2341
 
 Applies to: PR #2341 and follow-up SDK/runtime work

@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -64,6 +65,15 @@ class HostedMcpReplyLossIT {
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     private volatile boolean dropControls;
     private final java.util.concurrent.atomic.AtomicBoolean dropArmed =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean dropOwnerRelease;
+    private final java.util.concurrent.atomic.AtomicBoolean ownerDropArmed =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean dropExecutionPrepare;
+    private final java.util.concurrent.atomic.AtomicBoolean prepareDropArmed =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean dropExecutionStart;
+    private final java.util.concurrent.atomic.AtomicBoolean startDropArmed =
             new java.util.concurrent.atomic.AtomicBoolean();
     private final List<Map<String, Object>> wire = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
@@ -163,6 +173,178 @@ class HostedMcpReplyLossIT {
         assertThat(promptResult.path("response").path("messages").get(0)
                 .path("content").path("text").asText())
                 .isEqualTo("EXT_PROMPT_2");
+
+        // FG12a: a lost mcp-cancel reply. The held read keeps the operation
+        // in flight; the first cancel loses its reply, and the client retry
+        // joins the same cancel id without a second invoke.
+        String held = uuid();
+        dropControls = false;
+        dropArmed.set(false);
+        CompletableFuture<HttpResponse<String>> heldFuture =
+                harnessRequestAsync("POST", "/session/" + session.id()
+                        + "/mcp/operations", Map.of("operationId", held,
+                        "serverId", "fixture", "request", Map.of("kind",
+                        "resource_read", "uri", "ext://hold")),
+                        session.clientId());
+        waitFor(() -> assertThat(fixtureEvents("mcp.hold")).isNotEmpty());
+        dropControls = true;
+        dropArmed.set(true);
+        JsonNode refused = harnessRequest("POST", "/session/" + session.id()
+                + "/mcp/operations/" + held + "/cancel", Map.of(),
+                session.clientId(), 503);
+        assertThat(refused.path("code").asText())
+                .isEqualTo("hosted_mcp_cancel_failed");
+        assertThat(controls("mcp-cancel")).hasSize(1);
+        assertThat(controls("mcp-cancel").getFirst().dropped()).isTrue();
+        assertThat(controls("mcp-cancel").getFirst().status()).isEqualTo(200);
+        privateRequest("POST", "/session/" + session.id()
+                + "/mcp/operations/" + held + "/cancel", Map.of(), session,
+                202);
+        assertThat(controls("mcp-cancel")).hasSize(2);
+        assertThat(controls("mcp-cancel").getLast().dropped()).isFalse();
+        assertThat(controls("mcp-invoke")).hasSize(3);
+        Files.writeString(Path.of(evidence + ".release"), "1");
+        HttpResponse<String> heldAnswer = heldFuture.get(60,
+                TimeUnit.SECONDS);
+        assertThat(heldAnswer.statusCode()).isEqualTo(202);
+        JsonNode heldView = json.readTree(heldAnswer.body());
+        assertThat(heldView.path("state").asText()).isEqualTo("settled");
+        assertThat(operations(session.id())).hasSize(3);
+        assertThat(operations(session.id()).getLast().at("/run/state").asText())
+                .isEqualTo("settled");
+        assertThat(operations(session.id()).getLast().path("cancelRequested")
+                .asBoolean()).isTrue();
+        assertThat(effects("resource_read"))
+                .containsExactly("ext://proof", "ext://hold");
+
+        // FG12a: a lost tool-start reply. The model calls the MCP tool; the
+        // execution reservation loses its reply, and the retry reuses the
+        // same idempotency key, so the tool effect happens once.
+        String toolPromptId = uuid();
+        List<Map<String, Object>> toolPrompt = List.of(Map.of("type", "text",
+                "text", "FG12_TOOL"));
+        String toolPayload = json.writeValueAsString(toolPrompt);
+        dropExecutionPrepare = true;
+        prepareDropArmed.set(true);
+        harnessRequest("POST", "/session/" + session.id() + "/prompt",
+                Map.of("promptId", toolPromptId, "prompt", toolPrompt,
+                        "payloadDigest",
+                        "sha256:" + DigestUtils.sha256Hex(toolPayload)),
+                session.clientId(), 202);
+        waitFor(() -> assertThat(harnessRequest("GET", "/session/"
+                + session.id() + "/status", null, session.clientId(), 200)
+                        .path("hasActivePrompt").asBoolean()).isFalse());
+        assertThat(prepareCalls()).hasSize(2);
+        assertThat(prepareCalls().getFirst().dropped()).isTrue();
+        assertThat(prepareCalls().getLast().dropped()).isFalse();
+        assertThat(effects("tool_call")).containsExactly("FG12_TOOL");
+
+        // FG12a: a lost tool-start reply after the tool actually started.
+        // The first :start is forwarded and its reply dropped; the Harness
+        // must read the original execution instead of starting it again.
+        String startPromptId = uuid();
+        List<Map<String, Object>> startPrompt = List.of(Map.of("type",
+                "text", "text", "FG12_TOOL_2"));
+        String startPayload = json.writeValueAsString(startPrompt);
+        int startsBefore = startCalls().size();
+        dropExecutionStart = true;
+        startDropArmed.set(true);
+        harnessRequest("POST", "/session/" + session.id() + "/prompt",
+                Map.of("promptId", startPromptId, "prompt", startPrompt,
+                        "payloadDigest",
+                        "sha256:" + DigestUtils.sha256Hex(startPayload)),
+                session.clientId(), 202);
+        waitFor(() -> assertThat(harnessRequest("GET", "/session/"
+                + session.id() + "/status", null, session.clientId(), 200)
+                        .path("hasActivePrompt").asBoolean()).isFalse());
+        assertThat(startCalls()).hasSize(startsBefore + 1);
+        ProxyCall lostStart = startCalls().getLast();
+        assertThat(lostStart.dropped()).isTrue();
+        assertThat(lostStart.status()).isEqualTo(200);
+        String executionId = lostStart.path().substring(
+                lostStart.path().lastIndexOf("/executions/")
+                        + "/executions/".length(),
+                lostStart.path().length() - ":start".length());
+        assertThat(executionId).isNotBlank();
+        assertThat(startCalls().stream()
+                .filter(call -> call.path().contains(executionId)).count())
+                .isEqualTo(1);
+        int lostStartIndex = -1;
+        for (int index = 0; index < proxyCalls.size(); index++) {
+            if (proxyCalls.get(index) == lostStart) {
+                lostStartIndex = index;
+                break;
+            }
+        }
+        assertThat(lostStartIndex).isGreaterThanOrEqualTo(0);
+        int readIndex = lostStartIndex;
+        for (int index = lostStartIndex + 1; index < proxyCalls.size();
+                index++) {
+            ProxyCall call = proxyCalls.get(index);
+            if ("GET".equals(call.method())
+                    && call.path().contains("/executions/" + executionId)) {
+                readIndex = index;
+                break;
+            }
+        }
+        assertThat(readIndex).isGreaterThan(lostStartIndex);
+        assertThat(effects("tool_call"))
+                .containsExactly("FG12_TOOL", "FG12_TOOL_2");
+
+        // FG12a: a lost mcp-release reply. The close resolves the release
+        // through a status lookup; a same-id release is re-sent only when
+        // that lookup cannot settle it, and the server still exits once.
+        int invokesBeforeClose = controls("mcp-invoke").size();
+        int configuresBeforeClose = controls("mcp-configure").size();
+        dropControls = true;
+        dropArmed.set(true);
+        harnessRequest("DELETE", "/session/" + session.id(), null,
+                session.clientId(), 204);
+        assertThat(controls("mcp-release")).isNotEmpty();
+        assertThat(controls("mcp-release")).allMatch(call ->
+                call.operationId() != null
+                        && call.operationId().endsWith(":release"));
+        assertThat(controls("mcp-release").getFirst().dropped()).isTrue();
+        assertLookupFollows("mcp-release",
+                controls("mcp-release").getFirst().operationId());
+        assertThat(controls("mcp-invoke")).hasSize(invokesBeforeClose);
+        assertThat(controls("mcp-configure")).hasSize(configuresBeforeClose);
+        assertThat(configuration(session.id()).path("releaseState").asText())
+                .isEqualTo("released");
+        waitFor(() -> assertThat(fixtureEvents("mcp.exit"))
+                .hasSameSizeAs(fixtureEvents("mcp.start")));
+
+        // FG12a: a lost owner-release acknowledgement. The release reached
+        // the Broker; only its ack was lost, so the next detach confirms it
+        // without acquiring or sending another control.
+        SessionRef second = createSession();
+        baseline(second);
+        privateRequest("POST", "/session/" + second.id()
+                + "/mcp/configurations", Map.of("operationId", uuid(),
+                "expectedRevision", 1, "server", mcpPin(2)), second, 202);
+        assertThat(configuration(second.id()).path("releaseState").asText())
+                .isEqualTo("active");
+        int ownerReleasesBefore = ownerReleaseCalls().size();
+        dropOwnerRelease = true;
+        ownerDropArmed.set(true);
+        HttpResponse<String> refusedClose = harnessRequestAsync("DELETE",
+                "/session/" + second.id(), null, second.clientId())
+                .get(30, TimeUnit.SECONDS);
+        assertThat(refusedClose.statusCode()).isGreaterThanOrEqualTo(400);
+        assertThat(ownerReleaseCalls()).hasSize(ownerReleasesBefore + 1);
+        assertThat(ownerReleaseCalls().getLast().dropped()).isTrue();
+        assertThat(ownerReleaseCalls().getLast().status()).isEqualTo(200);
+        assertThat(storageHolders(second)).isZero();
+        dropOwnerRelease = false;
+        int callsBeforeRetry = proxyCalls.size();
+        harnessRequest("DELETE", "/session/" + second.id(), null,
+                second.clientId(), 204);
+        assertThat(ownerReleaseCalls()).hasSize(ownerReleasesBefore + 2);
+        assertThat(ownerReleaseCalls().getLast().dropped()).isFalse();
+        assertThat(configuration(second.id()).path("releaseState").asText())
+                .isEqualTo("released");
+        assertThat(proxyCalls.subList(callsBeforeRetry, proxyCalls.size()))
+                .noneMatch(call -> call.kind() != null);
     }
 
     private Map<String, Object> mcpPin(int revision) {
@@ -291,6 +473,36 @@ class HostedMcpReplyLossIT {
                 .toList();
     }
 
+    private List<ProxyCall> startCalls() {
+        return proxyCalls.stream()
+                .filter(call -> "POST".equals(call.method())
+                        && call.path().endsWith(":start"))
+                .toList();
+    }
+
+    private int storageHolders(SessionRef session) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session s"
+                + " JOIN ma_runtime_binding b ON s.binding_id = b.binding_id"
+                + " AND s.runtime_generation = b.runtime_generation"
+                + " WHERE s.tenant_id = ? AND b.tenant_id = ? AND"
+                + " s.harness_session_id = ? AND s.execution_storage_key IS NOT NULL",
+                Integer.class, tenant, tenant, session.id());
+    }
+
+    private List<ProxyCall> prepareCalls() {
+        return proxyCalls.stream()
+                .filter(call -> "POST".equals(call.method())
+                        && call.path().endsWith("/executions:prepare"))
+                .toList();
+    }
+
+    private List<ProxyCall> ownerReleaseCalls() {
+        return proxyCalls.stream()
+                .filter(call -> "POST".equals(call.method())
+                        && call.path().endsWith(":release"))
+                .toList();
+    }
+
     private String uuid() {
         return UUID.randomUUID().toString();
     }
@@ -351,6 +563,27 @@ class HostedMcpReplyLossIT {
                 response.body()).isEqualTo(expected);
         return response.body().isEmpty() ? json.createObjectNode()
                 : json.readTree(response.body());
+    }
+
+    private CompletableFuture<HttpResponse<String>> harnessRequestAsync(
+            String method, String path, Object body, String clientId)
+            throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(
+                "http://127.0.0.1:" + harnessPort + path))
+                .timeout(Duration.ofSeconds(120))
+                .header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", bootId)
+                .header("Content-Type", "application/json")
+                .method(method, body == null
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers
+                                .ofString(json.writeValueAsString(body)));
+        if (clientId != null) {
+            builder.header("X-Qwen-Client-Id", clientId);
+        }
+        return http.sendAsync(builder.build(),
+                HttpResponse.BodyHandlers.ofString());
     }
 
     private void boot() throws Exception {
@@ -482,18 +715,56 @@ class HostedMcpReplyLossIT {
 
     private void modelReply(HttpExchange exchange) throws IOException {
         try {
-            json.readTree(exchange.getRequestBody());
+            JsonNode request = json.readTree(exchange.getRequestBody());
+            boolean toolResult = false;
+            String toolValue = null;
+            for (JsonNode message : request.path("messages")) {
+                if ("tool".equals(message.path("role").asText())) {
+                    toolResult = true;
+                }
+                if ("user".equals(message.path("role").asText())) {
+                    String text = message.path("content").toString();
+                    int marker = text.indexOf("FG12_TOOL");
+                    if (marker >= 0) {
+                        String tail = text.substring(marker);
+                        int end = 0;
+                        while (end < tail.length()
+                                && (Character.isLetterOrDigit(tail.charAt(end))
+                                        || tail.charAt(end) == '_')) {
+                            end++;
+                        }
+                        toolValue = tail.substring(0, end);
+                        toolResult = false;
+                    }
+                }
+            }
+            String mcpName = null;
+            for (JsonNode tool : request.path("tools")) {
+                String name = tool.at("/function/name").asText();
+                if (name.startsWith("mcp_")) {
+                    mcpName = name;
+                }
+            }
+            boolean call = toolValue != null && !toolResult && mcpName != null;
             var chunk = json.createObjectNode().put("id", "fg12a")
                     .put("object", "chat.completion.chunk").put("created", 0)
                     .put("model", "loss-fixture");
             var choice = chunk.putArray("choices").addObject()
                     .put("index", 0);
-            choice.putObject("delta").put("role", "assistant")
-                    .put("content", "FG12_DONE");
+            var delta = choice.putObject("delta").put("role", "assistant");
+            if (call) {
+                delta.putArray("tool_calls").addObject().put("index", 0)
+                        .put("id", "call_fg12_tool").put("type", "function")
+                        .putObject("function").put("name", mcpName)
+                        .put("arguments", json.writeValueAsString(
+                                Map.of("value", toolValue)));
+            } else {
+                delta.put("content", "FG12_DONE");
+            }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
             choice.putObject("delta");
-            choice.put("finish_reason", "stop");
+            choice.put("finish_reason", call ? "tool_calls" : "stop");
             byte[] response = (first + "data: "
                     + json.writeValueAsString(chunk)
                     + "\n\ndata: [DONE]\n\n")
@@ -551,8 +822,22 @@ class HostedMcpReplyLossIT {
         }
         boolean drop = dropControls
                 && ("mcp-configure".equals(kind)
-                        || "mcp-invoke".equals(kind))
+                        || "mcp-invoke".equals(kind)
+                        || "mcp-cancel".equals(kind)
+                        || "mcp-release".equals(kind))
                 && dropArmed.compareAndSet(true, false);
+        drop = drop || (dropOwnerRelease
+                && "POST".equals(exchange.getRequestMethod())
+                && path.endsWith(":release")
+                && ownerDropArmed.compareAndSet(true, false));
+        drop = drop || (dropExecutionPrepare
+                && "POST".equals(exchange.getRequestMethod())
+                && path.endsWith("/executions:prepare")
+                && prepareDropArmed.compareAndSet(true, false));
+        drop = drop || (dropExecutionStart
+                && "POST".equals(exchange.getRequestMethod())
+                && path.endsWith(":start")
+                && startDropArmed.compareAndSet(true, false));
         URI upstream = URI.create("http://127.0.0.1:" + brokerPort + path
                 + (query == null ? "" : "?" + query));
         HttpRequest.Builder builder = HttpRequest.newBuilder(upstream)

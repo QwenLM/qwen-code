@@ -4087,5 +4087,19 @@
       },
       "accepted": true
     }
+  ],
+  "checkpointSizeCases": [
+    {
+      "byteLength": 65537,
+      "valid": true
+    },
+    {
+      "byteLength": 1048576,
+      "valid": true
+    },
+    {
+      "byteLength": 1048577,
+      "valid": false
+    }
   ]
 }

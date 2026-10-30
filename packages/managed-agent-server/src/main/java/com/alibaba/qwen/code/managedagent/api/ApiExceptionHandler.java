@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStorageException;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationStorageException;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -30,7 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-@RestControllerAdvice
+@RestControllerAdvice(basePackageClasses = ManagedSessionStoreController.class)
 public class ApiExceptionHandler {
     private static final Logger LOG = LoggerFactory.getLogger(
             ApiExceptionHandler.class);
@@ -38,8 +40,8 @@ public class ApiExceptionHandler {
     private static final int LOGGED_FRAMES = 6;
     private static final int LOGGED_URI_CHARS = 256;
 
-    @ExceptionHandler(ApiException.class)
-    public ResponseEntity<Map<String, Object>> api(ApiException error,
+    @ExceptionHandler(ManagedAgentException.class)
+    public ResponseEntity<Map<String, Object>> api(ManagedAgentException error,
             HttpServletRequest request, HttpServletResponse response) {
         return response(request, response, error.getStatus(), error.getCode(),
                 error.getMessage(), error.getDetails());

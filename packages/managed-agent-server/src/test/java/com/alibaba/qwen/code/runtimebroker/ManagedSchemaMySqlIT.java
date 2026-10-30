@@ -1,26 +1,25 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
+import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-
-import org.junit.jupiter.api.Test;
-
-import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
-import java.util.HashSet;
-
-import javax.sql.DataSource;
-
-/** Requires a dedicated empty database; never cleans, upgrades or repairs an existing schema. */
+/** Destructive schema checks use their own database; system catalogs remain untouched. */
 class ManagedSchemaMySqlIT {
     @Test
     void refusesSystemCatalogsBeforeChangingAnyTables() throws Exception {
@@ -65,11 +64,12 @@ class ManagedSchemaMySqlIT {
 
     @Test
     void baselineAndConstraintsWorkOnRealMySql() throws Exception {
-        DataSource source =
-                new DriverManagerDataSource(
-                        required("mysql.url"),
-                        required("mysql.user"),
-                        System.getProperty("mysql.password", ""));
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            verifyBaselineAndConstraints(database.source());
+        }
+    }
+
+    private static void verifyBaselineAndConstraints(DataSource source) throws Exception {
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
@@ -243,7 +243,7 @@ class ManagedSchemaMySqlIT {
             }
             ManagedSchema.initialize(source);
             if (mariaDb) {
-                String url = required("mysql.url");
+                String url = connection.getMetaData().getURL();
                 DataSource disabledChecks = new DriverManagerDataSource(
                         url + (url.contains("?") ? "&" : "?")
                                 + "sessionVariables=check_constraint_checks=0",
@@ -260,28 +260,40 @@ class ManagedSchemaMySqlIT {
                             "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind ENFORCED");
                 }
             }
-            String pageCheck =
+            String operationCheck = ManagedSchema.ddl().lines()
+                    .filter(line -> line.contains("CONSTRAINT ck_ma_operation_kind CHECK"))
+                    .findFirst().orElseThrow().trim().replaceFirst(",$", "");
+            statement.execute("ALTER TABLE ma_operation " + dropCheck + "ck_ma_operation_kind");
+            statement.execute("ALTER TABLE ma_operation ADD "
+                    + operationCheck.replace("'CLOSE'", "'BROKE'"));
+            try {
+                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+            } finally {
+                statement.execute("ALTER TABLE ma_operation " + dropCheck + "ck_ma_operation_kind");
+                statement.execute("ALTER TABLE ma_operation ADD " + operationCheck);
+            }
+            String resourceCheck =
                     ManagedSchema.ddl()
                             .lines()
                             .filter(
                                     line ->
                                             line.contains(
-                                                    "CONSTRAINT ck_ma_resource_snapshot_page"
+                                                    "CONSTRAINT ck_ma_resource_length"
                                                             + " CHECK"))
                             .findFirst()
                             .orElseThrow()
                             .trim()
                             .replaceFirst(",$", "");
-            statement.execute("ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_snapshot_page");
+            statement.execute("ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_length");
             statement.execute(
                     "ALTER TABLE ma_resource ADD "
-                            + pageCheck.replace("'MYSQL_INLINE'", "'MYSQL_BROKEN'"));
+                            + resourceCheck.replace("byte_length >= 0", "byte_length >= -1"));
             try {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
             } finally {
                 statement.execute(
-                        "ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_snapshot_page");
-                statement.execute("ALTER TABLE ma_resource ADD " + pageCheck);
+                        "ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_length");
+                statement.execute("ALTER TABLE ma_resource ADD " + resourceCheck);
             }
             statement.execute("ALTER TABLE ma_session_head " + dropCheck + "ck_ma_head_counters");
             statement.execute(

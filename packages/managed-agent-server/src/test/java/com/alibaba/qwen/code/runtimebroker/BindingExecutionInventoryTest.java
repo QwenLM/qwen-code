@@ -67,7 +67,36 @@ class BindingExecutionInventoryTest {
         var harnessReader = new JdbcToolExecutionRepository(source);
         assertEquals(List.of("hold-exact"),
                 harnessReader.findHoldRowsByHarnessSession("harness-case", null, 100)
-                        .stream().map(ToolExecutionRecord::getExecutionCallId).toList());
+                        .stream().map(ToolHoldRow::executionCallId).toList());
+    }
+
+    @Test
+    void holdInventoryScansWithoutDecodingNonHoldPayloads() throws Exception {
+        // #13986 review R1-7: the restart drain inventory reads two fields
+        // off the hold rows. A plain row whose stored call-id digest does not
+        // match its id makes the full ledger mapper throw, so the read can
+        // only succeed if non-hold history is never materialized.
+        DataSource source = dataSource();
+        var writer = new JdbcToolExecutionRepository(source);
+        writer.findOrCreate(holdRow("hold-exact", "harness-case"));
+        writer.findOrCreate(ToolExecutionRecord.prepared("plain", "plain-key",
+                "binding", 1, "harness-case", "runtime-plain", "turn", "plain",
+                "digest", Map.of("sessionId", "runtime-plain", "promptId",
+                        "turn", "callId", "plain", "argsDigest", "digest")));
+        try (var connection = source.getConnection();
+                var statement = connection.prepareStatement(
+                        "UPDATE ma_tool_execution SET execution_call_id_hash = ? "
+                                + "WHERE execution_call_id = ?")) {
+            statement.setString(1, "0".repeat(64));
+            statement.setBytes(2,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                            .identity("plain"));
+            assertEquals(1, statement.executeUpdate());
+        }
+        var harnessReader = new JdbcToolExecutionRepository(source);
+        assertEquals(List.of("hold-exact"),
+                harnessReader.findHoldRowsByHarnessSession("harness-case", null, 100)
+                        .stream().map(ToolHoldRow::executionCallId).toList());
     }
 
     @Test

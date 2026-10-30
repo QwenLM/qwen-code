@@ -953,7 +953,6 @@ describe('migration profile evidence', () => {
     {},
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-shell/1' },
-    { toolProfile: 'hosted-workspace-shell/2' },
     { toolProfile: 'hosted-workspace-team-lead/1' },
     { toolProfile: 'hosted-workspace-files/1', hookCatalog: {} },
     { toolProfile: 'hosted-workspace-files/1', captureBytes: 1024 },
@@ -983,8 +982,28 @@ describe('verifyRecoverySession', () => {
     ],
     ['missing bytes', Buffer.from('[]'), null, 'missing_resource'],
     [
+      'catalog above the previous 48 KiB limit',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'review',
+            description: 'Review',
+            body: 'x'.repeat(48 * 1024),
+          },
+        ]),
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'catalog at the 2 MiB resource limit',
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024)),
+      undefined,
+      undefined,
+    ],
+    [
       'oversized catalog',
-      Buffer.alloc(48 * 1024 + 1, 0x20),
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024 + 1)),
       undefined,
       'Invalid agent skills reference',
     ],
@@ -1814,8 +1833,8 @@ describe('verifyRecoverySession', () => {
   it.each([
     { toolProfile: 'hosted-workspace-files/1' },
     { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
-    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
@@ -1828,7 +1847,8 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each([
-    { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-files/4' },
+    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },
   ])('still refuses an unknown Hosted definition (%j)', async (definition) => {

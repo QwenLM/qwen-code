@@ -27,6 +27,7 @@ import {
   resolveTrustDecision,
   resolveTrustRule,
 } from './trust-precedence.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
@@ -204,25 +205,7 @@ export function createLocalWorkflowAncestorTrustProvider(
 ): WorkflowAncestorTrustProvider {
   return async (ancestorDirs, canonicalTargetDir) => {
     if (!isFolderTrustEnabled(settings)) {
-      return ancestorDirs.map((directory) => {
-        // Windows mode bits do not describe its ACLs.
-        if (process.platform === 'win32') return true;
-        for (const location of [
-          directory,
-          path.join(directory, '.qwen'),
-          path.join(directory, '.qwen', 'workflows'),
-        ]) {
-          try {
-            if ((fs.statSync(location).mode & 0o002) !== 0) return false;
-          } catch (error) {
-            const code = (error as NodeJS.ErrnoException).code;
-            if (location === directory) return false;
-            if (code === 'ENOENT' || code === 'ENOTDIR') break;
-            return false;
-          }
-        }
-        return true;
-      });
+      return ancestorDirs.map(isWorkflowAncestorDirectorySafe);
     }
     if (ideContextStore.get()?.workspaceState?.isTrusted === false) {
       return ancestorDirs.map(() => false);
