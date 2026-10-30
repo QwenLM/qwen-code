@@ -273,19 +273,13 @@ class HostedExtensionsIT {
                 + "; process.env.QWEN_MANAGED_HOOK_CGROUP_ROOT=" + json.writeValueAsString(hookRoot.toString())
                 + "; process.argv[1]=" + json.writeValueAsString(cli.toString())
                 + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
+        spring = (ServletWebServerApplicationContext) HostedGateTestSupport
+                .bootWithFreshPorts(this::probePorts, () -> new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .run("--server.address=127.0.0.1", "--server.port=" + port,
                         "--spring.datasource.url=" + System.getProperty("mysql.url"),
                         "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -316,7 +310,7 @@ class HostedExtensionsIT {
                         "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
-                        "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace.getParent());
+                        "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace.getParent()));
         jdbc = spring.getBean(JdbcTemplate.class);
         spring.getBean(WorkspaceStorageGuard.class).register(tenant, "storage", UUID.randomUUID().toString());
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
@@ -654,6 +648,21 @@ class HostedExtensionsIT {
                             + " e.execution_state, e.execution_status, e.result_json, e.settled_at FROM ma_tool_execution e"
                             + " JOIN ma_runtime_binding b ON b.binding_id = e.binding_id AND b.runtime_generation = e.runtime_generation"
                             + " WHERE b.tenant_id = ?", tenant));
+        }
+    }
+
+    // The advertised ports are probed and then rebound by the application; a
+    // bind conflict there is retried with fresh ports (see
+    // HostedGateTestSupport#bootWithFreshPorts).
+    private void probePorts() {
+        try (var control = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+                var hosted = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+                var runtime = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            port = control.getLocalPort();
+            harnessPort = hosted.getLocalPort();
+            brokerPort = runtime.getLocalPort();
+        } catch (java.io.IOException error) {
+            throw new java.io.UncheckedIOException(error);
         }
     }
 }

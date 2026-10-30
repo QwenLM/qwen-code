@@ -27,7 +27,9 @@ baseline: strict OpenTUI cannot start because its native package is absent.
   status indicator, and user setting; trace each to production OpenTUI wiring.
 - Compare runtime and renderer changes independently and regress final artifacts.
 - Deliver coherent reviewable PRs, normally 2,000–3,000 changed lines including
-  tests and documentation. Do not pad changes or remove tests to meet a quota.
+  tests and documentation. Consolidate related changes when separate PRs add
+  review and dependency overhead, even when the complete batch exceeds that
+  target. Do not pad changes or remove tests to meet a quota.
 - Reuse React, existing bridges, node-pty, Vitest, the interactive PTY harness,
   xterm, fake model server, and existing parity scripts.
 
@@ -47,14 +49,24 @@ manager, or combine default runtime, default renderer, and Ink removal.
 | A1    | Release-artifact regression and documented default rollout gates are enforced                                                               | Depends on R3/U3 and product acceptance; split only at a complete independently testable boundary if it exceeds review capacity   |
 
 The boundaries may move when current-code evidence changes. No artificial
-dependency should serialize independent runtime and UI work. Open at most two
-ready PRs with four locally accepted draft successors: implement the next cohesive batch while
-review proceeds, then rebase onto the actual merged commit and rerun affected
-validation before marking its successor ready.
-The draft limit was raised on 2026-10-21 so independently verified editor and
-status-line batches can enter CI while the first two reviews remain pending.
-Each draft still requires a complete approximately 2–3k-line scope and author
-plus independent local acceptance; the ready limit and merge gates are unchanged.
+dependency should serialize independent runtime and UI work. Keep at most two
+ready review batches while implementing their successors. Rebase onto the
+actual merged commit and rerun affected validation before promoting a successor.
+
+The 2026-10-21 consolidation keeps #14964 as the single review target for input
+ownership (#14946), editing and cancellation (#14966), and status-line parity.
+It preserves all three batches' product, native and unit coverage, plus U1's
+updated isolation and cleanup gates. Close the absorbed PRs with reciprocal
+links only after the combined source and tests are published and validated.
+The complete batch may exceed the usual line target; report its actual net diff
+instead of splitting the same user interaction into separate reviews. Unpublished
+Vim/history and live-output work remains a subsequent cohesive candidate, with
+its unrun checks explicit. Existing U1 review continues independently.
+
+The standalone update stack remains consolidated in R1. Interpreter call-site
+changes excluded from that update scope must be preserved in R3's existing
+runtime/distribution batch before their source PRs can be retired. An absorbed
+PR's unresolved review findings remain tracked by its surviving owner.
 
 Existing #14046 is a size exception because it already has a complete backend
 contract and multiple review rounds. Do not add unrelated work to it. Preserve

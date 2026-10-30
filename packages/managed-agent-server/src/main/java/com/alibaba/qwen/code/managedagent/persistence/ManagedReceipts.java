@@ -139,8 +139,7 @@ final class ManagedReceipts {
     // A command this build records without an attributable actor — a
     // server-keyed command, or an actor id the registry key cannot encode.
     // Zero bytes, which no actor key equals (an actor id has at least one
-    // code point), so NULL stays reserved for receipts recorded before the
-    // recorder stamp existed.
+    // code point).
     static final byte[] UNATTRIBUTED = new byte[0];
 
     // The recording actor rides on the receipt so a replay answers the

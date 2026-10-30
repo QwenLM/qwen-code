@@ -1676,6 +1676,18 @@ describe('ChatPane', () => {
     expect(testid('pane-messages')).not.toBeNull();
   });
 
+  it('threads unavailable models onto its composer', () => {
+    const unavailableModels = [
+      { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+    ];
+    const mountUnavailableModelTooltip = () => null;
+    render({ unavailableModels, mountUnavailableModelTooltip });
+    expect(latestChatEditorProps.unavailableModels).toEqual(unavailableModels);
+    expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
+      mountUnavailableModelTooltip,
+    );
+  });
+
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
     render();
     expect(latestChatEditorProps.visibleToolbarActions).not.toContain('plan');

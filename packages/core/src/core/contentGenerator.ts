@@ -117,10 +117,13 @@ export type ContentGeneratorConfig = {
    * you still want; `false` to never send it.
    */
   enableRequestMetadata?: boolean;
-  // Force `scope: 'global'` on Anthropic cache_control entries even when the
-  // base URL is not an Anthropic-native origin (e.g. proxy providers like
-  // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
-  // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
+  // Opt in to `scope: 'global'` on Anthropic cache_control entries. Off by
+  // default for every base URL, `api.anthropic.com` included: the API only
+  // accepts a global breakpoint when every preceding block is globally scoped
+  // too, which a real tool list cannot satisfy within the four-breakpoint cap
+  // (issue #15039). Kept for backends whose validation differs and that
+  // forward `cache_control` plus the `prompt-caching-scope-2026-01-05` beta.
+  // See issue #6642.
   forceGlobalCacheScope?: boolean;
   /**
    * Default Anthropic `cache_control` retention for every cache anchor
@@ -160,9 +163,10 @@ export type ContentGeneratorConfig = {
         // each provider adapter maps + clamps this tier onto the active model:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
-        //   - Generic OpenAI-compatible endpoints and the DashScope
-        //     qwen3.8-max family cap at 'xhigh' ('max' is a vendor extension,
-        //     not part of the generic ladder); Gemini caps at 'high'.
+        //   - Generic OpenAI-compatible endpoints cap at 'xhigh' ('max' is a
+        //     vendor extension, not part of the generic ladder); DashScope
+        //     qwen3.8 models accept the tiers their preset declares (up to
+        //     'max'); Gemini caps at 'high'.
         //   - Real Anthropic clamps each tier to the active model's supported
         //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
         //     'max'; older models cap at 'high'), logged once per generator via

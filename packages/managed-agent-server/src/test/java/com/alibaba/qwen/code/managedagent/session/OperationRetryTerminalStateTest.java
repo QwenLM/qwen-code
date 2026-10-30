@@ -99,7 +99,7 @@ class OperationRetryTerminalStateTest {
                         1, lifecycleProtocol == 1 ? BOUND_WORKSPACE : null,
                         "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         // Another live Harness keeps the Session's journal writer, so the
         // close cannot settle yet: settle() throws on every attempt.
         when(sessionStore.hasLiveWriter("tenant", "session"))
@@ -161,7 +161,7 @@ class OperationRetryTerminalStateTest {
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
         // The writer is gone, but the Harness call itself still fails.
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -218,7 +218,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenThrow(
+        when(harness.closeSession(any(OperationRecord.class))).thenThrow(
                 mock(HostedHarnessGenerationException.class));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -275,7 +275,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenThrow(
+        when(harness.closeSession(any(OperationRecord.class))).thenThrow(
                 mock(HostedHarnessGenerationException.class));
         // The old boot's writer lease has not expired yet.
         when(sessionStore.hasLiveWriter("tenant", "session"))
@@ -328,7 +328,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenThrow(
+        when(harness.closeSession(any(OperationRecord.class))).thenThrow(
                 mock(HostedHarnessGenerationException.class));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -383,7 +383,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(true);
 
@@ -441,7 +441,7 @@ class OperationRetryTerminalStateTest {
         when(harness.isAvailable()).thenReturn(true);
         // The writer is already gone and the Harness call itself keeps
         // failing — a settle the operation can never complete.
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -608,7 +608,7 @@ class OperationRetryTerminalStateTest {
             verify(store, never()).retryOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyLong());
             // The refused close never reached the Harness.
-            verify(harness, never()).closeSession(anyString(), anyString());
+            verify(harness, never()).closeSession(any(OperationRecord.class));
         } finally {
             coordinator.stopRenewals();
         }
@@ -641,7 +641,7 @@ class OperationRetryTerminalStateTest {
         HostedHarnessCapabilityMismatchException mismatch =
                 mock(HostedHarnessCapabilityMismatchException.class);
         when(mismatch.getCode()).thenReturn("managed_capability_mismatch");
-        when(harness.closeSession("tenant", "session")).thenThrow(mismatch);
+        when(harness.closeSession(any(OperationRecord.class))).thenThrow(mismatch);
         // The Harness was never asked to stop, so it keeps the writer.
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(true);
@@ -702,7 +702,7 @@ class OperationRetryTerminalStateTest {
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(mock(DaemonProtocolException.class));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(true);
@@ -760,7 +760,7 @@ class OperationRetryTerminalStateTest {
         HostedHarnessCapabilityMismatchException mismatch =
                 mock(HostedHarnessCapabilityMismatchException.class);
         when(mismatch.getCode()).thenReturn("managed_capability_mismatch");
-        when(harness.closeSession("tenant", "session")).thenThrow(mismatch);
+        when(harness.closeSession(any(OperationRecord.class))).thenThrow(mismatch);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(true);
 
@@ -814,7 +814,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -938,7 +938,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
@@ -1068,7 +1068,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
@@ -1129,7 +1129,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
@@ -1505,7 +1505,7 @@ class OperationRetryTerminalStateTest {
         HostedHarnessCapabilityMismatchException mismatch =
                 mock(HostedHarnessCapabilityMismatchException.class);
         when(mismatch.getCode()).thenReturn("managed_capability_mismatch");
-        when(harness.closeSession("tenant", "session")).thenThrow(mismatch);
+        when(harness.closeSession(any(OperationRecord.class))).thenThrow(mismatch);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenThrow(new IllegalStateException("lock wait timeout"));
 
@@ -1802,7 +1802,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -1853,7 +1853,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -2093,7 +2093,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenThrow(new IllegalStateException("lock wait timeout"));
@@ -2147,7 +2147,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
@@ -2267,7 +2267,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(harness.closeSession(any(OperationRecord.class))).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(true);
 
@@ -2700,7 +2700,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -2761,7 +2761,7 @@ class OperationRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.closeSession("tenant", "session"))
+        when(harness.closeSession(any(OperationRecord.class)))
                 .thenThrow(new IllegalStateException("harness unreachable"));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);

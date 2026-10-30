@@ -134,13 +134,18 @@ class AgentDefinitionExtensionsTest {
     }
 
     @Test
-    void mcpPinsRequireTheMcpProfileAndPreserveSafeIntegerRevisions() {
+    void mcpPinsSupportOrdinaryShellAndPreserveSafeIntegerRevisions() {
         assertThat(AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.MCP))
                 .containsExactly(Map.of("serverId", "docs", "serverRevision", 1L,
                         "definitionDigest", "a".repeat(64)));
         assertThat(AgentDefinitionExtensions.mcpServers(null, WorkspaceToolProfiles.FILES)).isEmpty();
+        assertThat(AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.SHELL))
+                .isEqualTo(AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.MCP));
+        assertThat(AgentDefinitionExtensions.mcpServers(null, WorkspaceToolProfiles.SHELL)).isEmpty();
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(null, WorkspaceToolProfiles.MCP));
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.FILES));
+        assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.READ));
+        assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), "hosted-workspace-shell/2"));
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP, MCP), WorkspaceToolProfiles.MCP));
         for (Object revision : List.of(0, -1, 1.5, "1", 9007199254740992L)) {
             Map<String, Object> pin = new LinkedHashMap<>(MCP);

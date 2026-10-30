@@ -279,7 +279,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     @ValueSource(strings = {"inline", "transaction", "rows", "total"})
     void refusesFixedCapacityOverflow(String limit) {
         if ("inline".equals(limit)) {
-            byte[] bytes = new byte[ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES + 1];
+            byte[] bytes = new byte[ManagedSessionStoreModels.MAX_EVENT_BYTES + 1];
             jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ?"
                     + " WHERE resource_id = X'636865636b706f696e74'", bytes, bytes.length, hash(bytes));
         } else {

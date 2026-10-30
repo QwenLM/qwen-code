@@ -60,6 +60,60 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('session cd errors', () => {
+  it.each(['directory_not_found', 'containment_violation'])(
+    'maps %s to a path validation response',
+    (errorKind) => {
+      const { response, status, json } = responseMock();
+      const targetPath = '/outside/workspace';
+      sendBridgeError(
+        response,
+        new RequestError(-32004, 'Invalid working directory', {
+          errorKind,
+          path: targetPath,
+        }),
+        { route: 'POST /session/:id/cd', sessionId: 'session-1' },
+      );
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({
+        error: 'Invalid working directory',
+        code: errorKind,
+        path: targetPath,
+      });
+    },
+  );
+
+  it.each([
+    undefined,
+    'POST /session',
+    'POST /session/:id/load',
+    'POST /session/:id/worktree-reset',
+  ])('preserves non-cd containment errors and logging for %s', (route) => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const data = {
+      errorKind: 'containment_violation',
+      path: '/outside/workspace',
+    };
+    const error = new RequestError(-32004, 'Invalid working directory', data);
+    const context = route ? { route, sessionId: 'session-1' } : undefined;
+
+    sendBridgeError(response, error, context, daemonLog);
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid working directory',
+      code: -32004,
+      data,
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      error.message,
+      error,
+      context ?? {},
+    );
+  });
+});
+
 describe('artifact library errors', () => {
   it.each([
     'foreign_project',

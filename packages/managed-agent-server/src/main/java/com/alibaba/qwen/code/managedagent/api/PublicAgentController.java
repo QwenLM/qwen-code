@@ -1,27 +1,32 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CompressSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.RecoveryRecheckRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
+import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.validation.Valid;
 import org.apache.commons.lang3.StringUtils;
@@ -48,16 +53,24 @@ public class PublicAgentController {
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
     private final ManagedTaskCancelService taskCancels;
+    private final SessionRecoveryService recovery;
+    private ContextCompressionService compressions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     public PublicAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
             SessionLifecycleService lifecycle, ManagedTaskService tasks,
-            ManagedTaskCancelService taskCancels) {
+            ManagedTaskCancelService taskCancels, SessionRecoveryService recovery) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
         this.taskCancels = taskCancels;
+        this.recovery = recovery;
     }
 
     @PostMapping
@@ -82,15 +95,25 @@ public class PublicAgentController {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
         }
+        if (selection == null && request.extensionPins() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Extension packages require a bound Workspace.");
+        }
+        var worktree = SessionWorktreeService.parse(request.worktree(), false);
+        if (selection == null && worktree != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Session worktrees require a bound Workspace.");
+        }
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
                         request.agentRevision(), null, request.metadata(),
                         request.input())
-                : service.createWorkspaceSession(tenant.tenantId(),
+                : worktree == null ? service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input(), selection, null, null, request.skills());
+                        request.metadata(), request.input(), selection, null, null, request.skills(), null, request.extensionPins())
+                : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
+                        request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
+                        selection, null, null, request.skills(), null, request.extensionPins(), worktree);
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
@@ -102,9 +125,11 @@ public class PublicAgentController {
     @GetMapping
     public PublicList<PublicSession> list(TenantContext tenant,
             @RequestParam(required = false) String cursor,
-            @RequestParam(defaultValue = "20") int limit) {
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestParam(name = "archive_state", required = false) String archiveState,
+            @RequestParam(name = "title_query", required = false) String titleQuery) {
         return service.listPublicSessions(tenant.tenantId(), tenant.actorId(),
-                cursor, limit);
+                cursor, limit, archiveState, titleQuery);
     }
 
     @GetMapping("/{sessionId}")
@@ -112,6 +137,21 @@ public class PublicAgentController {
             @PathVariable String sessionId) {
         return service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), sessionId);
+    }
+
+    @GetMapping("/{sessionId}/recovery")
+    public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
+            @PathVariable String sessionId) {
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .body(recovery.query(tenant.tenantId(), tenant.actorId(), sessionId));
+    }
+
+    @PostMapping("/{sessionId}/recovery/recheck")
+    public ResponseEntity<SessionRecovery> recheckRecovery(TenantContext tenant,
+            @PathVariable String sessionId,
+            @Valid @RequestBody RecoveryRecheckRequest request) {
+        return ResponseEntity.accepted().body(recovery.recheck(tenant.tenantId(),
+                tenant.actorId(), sessionId, request.turnId()));
     }
 
     @PatchMapping("/{sessionId}")
@@ -163,15 +203,13 @@ public class PublicAgentController {
                 tenant.actorId(), sessionId, operationId);
     }
 
-    @PostMapping("/{sessionId}/cwd")
-    public ResponseEntity<PublicCwdOperation> changeCwd(TenantContext tenant,
-            @PathVariable String sessionId,
+    @PostMapping("/{sessionId}/compress")
+    public ResponseEntity<PublicContextCompressionOperation> compress(
+            TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @Valid @RequestBody ChangeCwdRequest request) {
-        return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
-                tenant.tenantId(), tenant.actorId(), sessionId,
-                idempotencyKey, request.cwdRelative(),
-                request.expectedContextRevision()));
+            @Valid @RequestBody CompressSessionRequest request) {
+        return ResponseEntity.accepted().body(compressions.admitPublic(tenant.tenantId(),
+                tenant.actorId(), sessionId, idempotencyKey, request.expectedCompactionRevision()));
     }
 
     @PostMapping("/{sessionId}/events")
@@ -182,8 +220,7 @@ public class PublicAgentController {
         CommandAdmission admission;
         if ("agent.session.input.message".equals(request.type())) {
             admission = service.submitTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.input(),
-                    request.admissionProfile());
+                    idempotencyKey, sessionId, request.input());
         } else if ("agent.session.cancel".equals(request.type())) {
             if (request.turnId() == null || request.turnId().isBlank()) {
                 throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
@@ -191,8 +228,7 @@ public class PublicAgentController {
                         "Cancellation requires turn_id.");
             }
             admission = service.cancelTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.turnId(),
-                    request.admissionProfile());
+                    idempotencyKey, sessionId, request.turnId());
         } else {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                     "unsupported_event",

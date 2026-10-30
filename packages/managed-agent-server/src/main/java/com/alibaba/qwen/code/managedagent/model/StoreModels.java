@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
 import java.util.Arrays;
@@ -23,7 +24,17 @@ public final class StoreModels {
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
             String approvalMode, String toolProfile,
-            String agentDefinitionDigest) {
+            String agentDefinitionDigest, int publicChildAgentsVersion) {
+        public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
+                String title, String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence, long replayFloorSequence,
+                long createdAt, long updatedAt, Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile, String agentDefinitionDigest) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence, replayFloorSequence,
+                    createdAt, updatedAt, deletedAt, version, workspace, approvalMode, toolProfile,
+                    agentDefinitionDigest, 0);
+        }
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String agentRevision, String title,
                 String status, String harnessBootId, String harnessEventEpoch,
@@ -54,7 +65,7 @@ public final class StoreModels {
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
                     version, workspace, approvalMode, toolProfile,
-                    agentDefinitionDigest);
+                    agentDefinitionDigest, publicChildAgentsVersion);
         }
     }
 
@@ -88,11 +99,9 @@ public final class StoreModels {
     }
 
     /**
-     * Events at or below {@code floorSequence} may be pruned. A client that
-     * falls below it reloads the Snapshot, which covers events through
-     * {@code snapshotThroughSequence}. A stream reconciliation discards the
-     * Snapshot without lowering the floor, so the floor can exceed the
-     * coverage while the Items rebuild; the cursor is still served then.
+     * Events at or below the floor may be pruned. Resynchronization reads the
+     * message projection through snapshotThroughSequence, a retained wire name.
+     * Reads wait when projection rebuild temporarily falls behind the floor.
      */
     public record ReplayWindow(long floorSequence,
             long snapshotThroughSequence) {
@@ -102,22 +111,9 @@ public final class StoreModels {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
             byte[] actorKey, long createdAt, long updatedAt) {
-        /**
-         * The recorder half of every command replay gate. A receipt this
-         * build writes names its recorder or carries
-         * {@code ManagedReceipts.UNATTRIBUTED}, which no actor key equals;
-         * only a receipt recorded before the stamp existed reads back NULL.
-         * Its recorder was never stored, so it keeps the role-gated replay
-         * it was recorded under rather than answering only the creator. A
-         * caller without an actor id never passes, so it stays on the
-         * creator gate.
-         */
         public boolean admitsReplayBy(String actorId) {
-            if (actorId == null) {
+            if (actorId == null || actorKey == null) {
                 return false;
-            }
-            if (actorKey == null) {
-                return true;
             }
             try {
                 return Arrays.equals(actorKey,
@@ -164,6 +160,7 @@ public final class StoreModels {
         DELETE,
         ACTION_RESPONSE,
         CWD_CHANGE,
+        CONTEXT_COMPRESSION,
         TASK_CANCEL,
         SUBMIT_INPUT,
         CANCEL
@@ -281,8 +278,7 @@ public final class StoreModels {
 
     /**
      * {@code operationId} names the durable operation of a Turn input or
-     * cancel command (D7-1); it is null for every other command and for a
-     * command recorded before the operation existed.
+     * cancel command (D7-1); it is null for every other command.
      */
     public record Admission(String sessionId, String turnId,
             boolean replayed, boolean commandEffect, String operationId) {
@@ -293,7 +289,10 @@ public final class StoreModels {
     }
 
     public record SessionPage(List<SessionRecord> sessions,
-            boolean hasMore) {
+            boolean hasMore, Map<String, SessionWorktreeStore.Descriptor> worktrees) {
+        public SessionPage(List<SessionRecord> sessions, boolean hasMore) {
+            this(sessions, hasMore, Map.of());
+        }
     }
 
     /** The fields of a Turn that its public view shows, without its input. */
@@ -319,12 +318,8 @@ public final class StoreModels {
             long updatedAt, long revision, List<ItemPartRecord> content) {
     }
 
-    public record SnapshotPage(List<ItemRecord> items, boolean hasMore, String nextCursor, long coveredSequence) {}
-
-    public record SnapshotRecord(String tenantId, String sessionId,
-            long version, long coveredSequence, List<ItemRecord> items,
-            long createdAt, long updatedAt) {
-    }
+    public record MessagePage(List<ItemRecord> items, List<EventRecord> events,
+            boolean hasMore, String nextCursor, long coveredSequence, long throughSequence) {}
 
     public record MaterializationTarget(String tenantId, String sessionId) {
     }

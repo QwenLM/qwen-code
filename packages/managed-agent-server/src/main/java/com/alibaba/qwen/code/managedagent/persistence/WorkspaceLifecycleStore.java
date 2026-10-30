@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -22,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class WorkspaceLifecycleStore {
     private static final ObjectMapper OCCURRENCE_JSON = new ObjectMapper();
 
@@ -46,7 +48,7 @@ public class WorkspaceLifecycleStore {
     @org.springframework.beans.factory.annotation.Autowired
     void setProfiles(WorkspaceProfileLifecycleVerifier profiles) { this.profiles = profiles; }
 
-    public WorkspaceLifecycleStore(JdbcTemplate jdbc, ObjectMapper json, ObjectProvider<RuntimeBindingRepository> bindings) {
+    public WorkspaceLifecycleStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<RuntimeBindingRepository> bindings) {
         this.jdbc = jdbc;
         this.json = json;
         this.records = new ManagedExtensionRecordStore(jdbc);
