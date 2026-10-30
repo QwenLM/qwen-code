@@ -79,7 +79,7 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 开启 Harness 即开启 Managed Session Store。Store 的 base URL 默认指向本服务的明文 loopback 监听；workspace ID 默认取 Runtime Broker 从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD` 推导出的值，因此开启下文的工具路径后身份保持不变。已经设置过 `QWEN_MANAGED_AGENT_WORKSPACE_ID` 的部署必须保留它：未绑定 Session 从该 ID 解析其 Store 作用域。只有当 Harness 需要通过其他地址访问本服务，或该监听提供 TLS 时，才设置 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL`。
 
-基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
+基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。全部设置及其环境变量和默认值见[配置参考](managed-agent-configuration-reference.zh-CN.md)，随包提供于 `docs/configuration.zh-CN.md`。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
 
 ## 生成凭据
 
