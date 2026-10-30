@@ -366,7 +366,7 @@ export function buildSpringRecipeLines({
       "  $env:SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
       "  $env:SPRING_DATASOURCE_USERNAME='qwen'",
       "  $env:SPRING_DATASOURCE_PASSWORD='replace-me'",
-      '  Set-Location packages\\managed-agent-server; mvn spring-boot:run',
+      '  mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install; mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run',
     );
   } else {
     lines.push(
@@ -374,7 +374,7 @@ export function buildSpringRecipeLines({
       "  export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
       "  export SPRING_DATASOURCE_USERNAME='qwen'",
       "  export SPRING_DATASOURCE_PASSWORD='replace-me'",
-      '  cd packages/managed-agent-server && mvn spring-boot:run',
+      '  mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install && mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run',
     );
   }
   return lines;

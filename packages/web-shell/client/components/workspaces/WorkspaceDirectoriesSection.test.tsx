@@ -50,6 +50,14 @@ beforeEach(() => {
     primaryDirectory: '/ws',
     directories: ['/extra'],
   });
+  // The dialog debounces a suggestion fetch once it mounts; the mock must stay
+  // a promise even when the timer fires before the test closes the dialog.
+  actions.suggestWorkspacePaths.mockResolvedValue({
+    dir: '/ws',
+    sep: '/',
+    suggestions: [],
+    truncated: false,
+  });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);

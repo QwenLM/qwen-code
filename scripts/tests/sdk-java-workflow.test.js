@@ -331,7 +331,17 @@ describe('SDK Java self-hosted workflow guards', () => {
         pruneMarkers.push([jobName, markersOf(prune)]);
       }
     }
-    const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
+    const expected = [
+      'qwen-managed-agent-adapters',
+      'qwen-managed-agent-contracts',
+      'qwen-managed-agent-control-plane',
+      'qwen-managed-agent-parent',
+      'qwen-managed-agent-persistence',
+      'qwen-managed-agent-runtime-broker',
+      'qwen-managed-agent-server',
+      'qwen-managed-agent-verification',
+      'qwencode-sdk',
+    ];
     expect(drops.length).toBeGreaterThan(0);
     expect(prunes.length).toBeGreaterThan(0);
     for (const [jobName, set] of [...drops, ...prunes]) {
@@ -458,6 +468,24 @@ describe('SDK Java self-hosted workflow guards', () => {
         mkdirSync(runnerTemp, { recursive: true });
         const hostRepo = join(home, '.m2', 'repository');
         const hostJars = [
+          ...[
+            'qwen-managed-agent-parent',
+            'qwen-managed-agent-contracts',
+            'qwen-managed-agent-control-plane',
+            'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-persistence',
+            'qwen-managed-agent-adapters',
+            'qwen-managed-agent-server',
+            'qwen-managed-agent-verification',
+          ]
+            .filter((name) => name !== 'qwen-managed-agent-server')
+            .map((name) => [
+              'com',
+              'alibaba',
+              name,
+              '0.1.0-alpha',
+              'module.jar',
+            ]),
           ['com', 'alibaba', 'qwencode-sdk', '0.1.0-alpha', 'sdk.jar'],
           [
             'com',
@@ -497,8 +525,15 @@ describe('SDK Java self-hosted workflow guards', () => {
           expect(result.error, name).toBeUndefined();
           expect(result.status, name + result.stderr).toBe(0);
           for (const coordinate of [
-            'qwencode-sdk',
+            'qwen-managed-agent-parent',
+            'qwen-managed-agent-contracts',
+            'qwen-managed-agent-control-plane',
+            'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-persistence',
+            'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
+            'qwen-managed-agent-verification',
+            'qwencode-sdk',
           ]) {
             expect(
               existsSync(
@@ -1103,20 +1138,19 @@ describe('SDK Java self-hosted workflow guards', () => {
       paths: [
         'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
         'packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream',
-        'packages/managed-agent-server/target/surefire-reports/*.txt',
-        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream',
       ],
       testStep: 'Run Runtime Broker state tests',
     },
     {
       name: 'mysql-integration',
-      artifact:
-        'sdk-java-test-reports-${{ matrix.database }}-integration-java-21',
+      artifact: 'sdk-java-test-reports-mysql-integration-java-21',
       paths: [
-        'packages/managed-agent-server/target/surefire-reports/*.txt',
-        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
-        'packages/managed-agent-server/target/failsafe-reports/*.txt',
-        'packages/managed-agent-server/target/failsafe-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/failsafe-reports/*.txt',
+        'packages/managed-agent-server/verification/target/failsafe-reports/*.dumpstream',
       ],
       testStep:
         'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
@@ -1133,10 +1167,12 @@ describe('SDK Java self-hosted workflow guards', () => {
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       );
       expect(upload.with.name).toBe(artifact);
-      const legs = parse(workflow).jobs[name].strategy?.matrix?.include;
-      if (!Array.isArray(legs) || legs.length > 1) {
-        // Only a literal single-leg matrix can omit matrix interpolation.
+      const matrix = parse(workflow).jobs[name].strategy?.matrix;
+      const legs = matrix?.include;
+      if (matrix && (!Array.isArray(legs) || legs.length > 1)) {
         expect(artifact).toMatch(/\$\{\{\s*matrix\./);
+      } else {
+        expect(artifact).not.toMatch(/\$\{\{\s*matrix\./);
       }
       expect(upload.with.path.trim().split('\n')).toEqual(paths);
       expect(upload.with['if-no-files-found']).toBe('ignore');
@@ -1214,7 +1250,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it('keeps the Broker matrix selector matched to every default test including nested packages', () => {
-    const cwd = 'packages/managed-agent-server/src/test/java';
+    const cwd = 'packages/managed-agent-server/verification/src/test/java';
     const prefix = 'com/alibaba/qwen/code/runtimebroker';
     const selected = [
       ...new Set(
@@ -1236,7 +1272,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       true,
     );
     expect(
-      readFileSync('packages/managed-agent-server/pom.xml', 'utf8'),
+      readFileSync(
+        'packages/managed-agent-server/verification/pom.xml',
+        'utf8',
+      ),
     ).toContain('<failIfNoTests>true</failIfNoTests>');
   });
 
@@ -1662,38 +1701,16 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(block).not.toContain('refs/pull/');
   });
 
-  it('runs the non-Hosted family on a MySQL leg and a MariaDB leg', () => {
+  it('runs the complete non-Hosted family on MySQL only', () => {
     const mysql = parse(workflow).jobs['mysql-integration'];
-    // A MariaDB leg necessarily puts `mariadb` in this job block; what must
-    // stay absent is a service container, because the pool cannot command one.
+    expect(mysql.name).toBe('Runtime Broker and Managed Agent MySQL / Java 21');
     expect(mysql.services).toBeUndefined();
-    expect(mysql.strategy['fail-fast']).toBe(false);
-    // Both legs run the same non-Hosted family. Pinning the include list keeps
-    // the images and the engine-specific startup arguments explicit: #14936
-    // dropped the MariaDB lane, which left the published MariaDB-only V12
-    // repair with no falsifier (#14971).
-    expect(mysql.strategy.matrix.include).toEqual([
-      {
-        database: 'mysql',
-        label: 'MySQL',
-        image: 'mysql:8.4.6',
-        client: 'mysql',
-        engine_args: '--innodb-use-native-aio=0 --skip-log-bin',
-      },
-      {
-        database: 'mariadb',
-        label: 'MariaDB',
-        image: 'mariadb:10.11.18',
-        client: 'mariadb',
-        engine_args: '--innodb-use-native-aio=0',
-      },
-    ]);
-    expect(mysql.env.MYSQL_CONTAINER).toBe(
-      'qwen-code-sdk-java-${{ matrix.database }}-${{ github.run_id }}-${{ github.run_attempt }}',
-    );
-    expect(mysql.env.DATABASE_IMAGE).toBe('${{ matrix.image }}');
-    expect(mysql.env.DATABASE_CLIENT).toBe('${{ matrix.client }}');
-    expect(mysql.env.DATABASE_ENGINE_ARGS).toBe('${{ matrix.engine_args }}');
+    expect(mysql.strategy).toBeUndefined();
+    expect(JSON.stringify(mysql)).not.toMatch(/mariadb|matrix\./i);
+    expect(mysql.env).toEqual({
+      MYSQL_CONTAINER:
+        'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
+    });
     const start = mysql.steps.find(
       (s) => s.name === 'Start the database without native AIO',
     );
@@ -1705,13 +1722,27 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     const verify = mysql.steps.find((s) =>
       s.run?.includes('-Pmysql-integration'),
     );
+    const guard = mysql.steps.find(
+      (step) =>
+        step.name === 'Check that every non-Hosted integration test class ran',
+    );
+    expect(guard.run).toBe(
+      'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server',
+    );
+    const command = verify.run
+      .replace(/\\\n/g, ' ')
+      .match(/^\s*mvn .*-Pmysql-integration.*$/m)[0];
+    expect(command).toContain('clean verify checkstyle:check');
+    expect(command).not.toMatch(
+      /-D(?:skipTests|skipITs|test|it\.test)(?:=|\s)/,
+    );
     const cleanup = mysql.steps.at(-1);
     expect(start.shell).toBe('bash');
-    // The image and its arguments come from the matrix entry, so both legs
-    // share one startup script. `${{ }}` must not reach this `run` body: the
-    // shell tests below execute it verbatim.
+    // The shell tests below execute this body verbatim.
     expect(start.run).not.toContain('${{');
-    expect(start.run).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
+    expect(start.run).toContain(
+      'mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin',
+    );
     expect(start.run).toContain("--publish '127.0.0.1::3306'");
     expect(start.run).toContain(
       '--mount type=tmpfs,destination=/var/lib/mysql',
@@ -1724,14 +1755,6 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(start.run).toContain('for fork in 1 2');
     expect(start.run).toContain('for attempt in {1..60}');
     expect(start.run).toContain('sleep 2');
-    // MariaDB ships healthcheck.sh; MySQL does not. Each leg must wait on
-    // the signal its own image provides instead of assuming one.
-    expect(start.run).toContain(
-      'if [[ "${DATABASE_CLIENT}" == \'mariadb\' ]]; then',
-    );
-    expect(start.run).toContain(
-      'healthcheck.sh --connect --innodb_initialized',
-    );
     expect(start.run).toContain(
       'mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent',
     );
@@ -1743,9 +1766,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(configure.run).toContain(
       'docker exec "${MYSQL_CONTAINER}-${fork}" sh -c',
     );
-    expect(configure.run).toContain(
-      'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" \'"${DATABASE_CLIENT}"\'',
-    );
+    expect(configure.run).toContain('MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql');
     expect(configure.run).toContain('SET GLOBAL max_allowed_packet=134217728');
     expect(verify.env.MYSQL_PORT).toBeUndefined();
     expect(verify.run).toContain(
@@ -1769,34 +1790,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(cleanup.shell).toBe('bash');
   });
 
-  // Derived from the matrix so the shell probe below executes the strings CI
-  // really passes; the `toEqual` pin above stays the one literal copy.
-  // `readiness` has no workflow counterpart (the start step derives it in
-  // shell from DATABASE_CLIENT), so it stays test-side.
-  const READINESS = { mysql: 'mysqladmin', mariadb: 'healthcheck.sh' };
-  const databaseLegs = parse(workflow).jobs[
-    'mysql-integration'
-  ].strategy.matrix.include.map(
-    ({ database, image, client, engine_args: engineArgs }) => ({
-      database,
-      image,
-      client,
-      engineArgs,
-      readiness: READINESS[database],
-    }),
-  );
-
   it
     .skipIf(process.platform === 'win32')
-    .each(
-      databaseLegs.flatMap((leg) =>
-        ['ready', 'dead', 'timeout', 'dead-second', 'timeout-second'].map(
-          (mode) => ({ ...leg, mode }),
-        ),
-      ),
-    )(
-    'executes $database startup and consumers with a $mode container',
-    ({ database, image, client, engineArgs, readiness, mode }) => {
+    .each(['ready', 'dead', 'timeout', 'dead-second', 'timeout-second'])(
+    'executes MySQL startup and consumers with a %s container',
+    (mode) => {
       const mysql = parse(workflow).jobs['mysql-integration'];
       const start = mysql.steps.find(
         (s) => s.name === 'Start the database without native AIO',
@@ -1815,7 +1813,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         .replace(/\\\n/g, ' ')
         .match(/^\s*mvn .*-Pmysql-integration.*$/m)[0];
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-mysql-'));
-      const container = `qwen-code-sdk-java-${database}-123-2`;
+      const container = 'qwen-code-sdk-java-mysql-123-2';
       try {
         const result = spawnSync(
           'bash',
@@ -1832,7 +1830,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             case "$1" in
               run) attempts=0; return 0 ;;
               exec)
-                if [[ "$3" == "$READINESS" ]]; then
+                if [[ "$3" == mysqladmin ]]; then
                   attempts=$((attempts + 1))
                   if [[ ( "$MODE" == ready || ( "$MODE" == *-second && "$2" == *-1 ) ) && "$attempts" -eq 3 ]]; then
                     return 0
@@ -1867,11 +1865,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             env: {
               ...process.env,
               MODE: mode,
-              READINESS: readiness,
               MYSQL_CONTAINER: container,
-              DATABASE_IMAGE: image,
-              DATABASE_CLIENT: client,
-              DATABASE_ENGINE_ARGS: engineArgs,
               GITHUB_ENV: join(dir, 'env'),
               RUNNER_TEMP: dir,
               TRACE: join(dir, 'trace'),
@@ -1881,20 +1875,15 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         expect(result.error).toBeUndefined();
         const trace = readFileSync(join(dir, 'trace'), 'utf8');
         expect(trace).toContain(
-          `run --detach --name ${container}-1 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker ${image} ${engineArgs}`,
+          `run --detach --name ${container}-1 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin`,
         );
-        // `"$*"` joins argv, so the trace above cannot tell N correctly split
-        // engine args from one argument containing spaces. The arg count can:
-        // 11 args precede them in `docker run`, and no other docker call here
-        // reaches that many. A joined element would report one fewer.
-        expect(trace).toContain(`ARGC<${11 + engineArgs.split(' ').length}>`);
-        // Each leg must wait on the readiness signal its own image ships.
-        expect(trace).toContain(`exec ${container}-1 ${readiness}`);
+        expect(trace).toContain('ARGC<13>');
+        expect(trace).toContain(`exec ${container}-1 mysqladmin`);
         if (mode === 'ready' || mode.endsWith('-second')) {
           expect(trace).toContain(
-            `run --detach --name ${container}-2 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker ${image} ${engineArgs}`,
+            `run --detach --name ${container}-2 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin`,
           );
-          expect(trace).toContain(`exec ${container}-2 ${readiness}`);
+          expect(trace).toContain(`exec ${container}-2 mysqladmin`);
         }
         if (mode === 'ready') {
           expect(result.status, result.stderr).toBe(0);
@@ -1928,9 +1917,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
           } else {
             expect(existsSync(join(dir, 'env'))).toBe(false);
           }
-          expect(
-            trace.match(new RegExp(`exec \\S+ ${readiness}`, 'g')),
-          ).toHaveLength((second ? 3 : 0) + (mode.startsWith('dead') ? 1 : 60));
+          expect(trace.match(/exec \S+ mysqladmin/g)).toHaveLength(
+            (second ? 3 : 0) + (mode.startsWith('dead') ? 1 : 60),
+          );
           expect(trace.match(/SLEEP<2>/g) ?? []).toHaveLength(
             (second ? 2 : 0) + (mode.startsWith('dead') ? 0 : 59),
           );
@@ -2123,7 +2112,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(

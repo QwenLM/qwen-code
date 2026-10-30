@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useConnection,
@@ -49,6 +54,8 @@ export function AgentsRoute({
   onOpenDefinitions,
   onMentionAgent,
 }: AgentsRouteProps) {
+  const available = useDaemonAvailability() === 'available';
+  const availability = useDaemonAvailabilityController();
   const workspace = useWorkspace();
   const connection = useConnection();
   const collaborationWorkspaces = useMemo(
@@ -78,9 +85,14 @@ export function AgentsRoute({
   const client = useMemo(
     () =>
       workspaceCwd
-        ? createThreadsHttpApi(workspace.baseUrl, workspace.token, workspaceCwd)
+        ? createThreadsHttpApi(
+            workspace.baseUrl,
+            workspace.token,
+            workspaceCwd,
+            workspace.client,
+          )
         : undefined,
-    [workspace.baseUrl, workspace.token, workspaceCwd],
+    [workspace.baseUrl, workspace.token, workspace.client, workspaceCwd],
   );
   const { t } = useI18n();
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
@@ -109,7 +121,12 @@ export function AgentsRoute({
   }, [initialView]);
 
   const refresh = useCallback(async () => {
-    if (!client) return;
+    if (
+      !available ||
+      !client ||
+      (availability && availability.getSnapshot() !== 'available')
+    )
+      return;
     const sequence = ++refreshSequence.current;
     try {
       const [next, squadList] = await Promise.all([
@@ -133,12 +150,17 @@ export function AgentsRoute({
       else if ('list' in squadList) setSquads(squadList.list?.squads);
       setRefreshError(undefined);
     } catch (cause) {
+      if (
+        isDaemonUnavailableError(cause) ||
+        (availability && availability.getSnapshot() !== 'available')
+      )
+        return;
       if (activeClient.current !== client || sequence < appliedRefresh.current)
         return;
       appliedRefresh.current = sequence;
       setRefreshError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [client]);
+  }, [availability, available, client]);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
@@ -146,10 +168,10 @@ export function AgentsRoute({
     void refresh();
   }, [refresh]);
   useEffect(() => {
-    if (!client) return;
+    if (!available || !client) return;
     const poll = setInterval(() => void refreshRef.current(), REFRESH_MS);
     return () => clearInterval(poll);
-  }, [client]);
+  }, [available, client]);
 
   // A 2xx body can carry `dispatchError`: the record was saved but its runs
   // did not start. Surface it after the refetch, so the saved state shows.

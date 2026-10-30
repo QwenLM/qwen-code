@@ -8289,6 +8289,20 @@ export class Config {
         this.goalRuntime?.dispose();
       }
 
+      // Stop this session's language servers before the rest of the
+      // cleanup. A session Config holds its client before initialization
+      // completes (loadCliConfig starts servers, then installs the client),
+      // so gating on `initialized` would skip teardown exactly for the
+      // sessions that die during startup; the daemon stays up and those
+      // servers are the leak from #14751. Derived Configs never receive a
+      // client, so the guard is the client itself. Kept out of the shared
+      // try below so a stop() rejection can't skip the remaining cleanup.
+      try {
+        await this.lspClient?.stop?.();
+      } catch (lspStopError) {
+        this.debugLogger.error('Error stopping LSP client:', lspStopError);
+      }
+
       if (this.initialized) {
         this.skillManager?.stopWatching();
 
@@ -8802,11 +8816,13 @@ export class Config {
       enabled: this.bundledGeneratedUiActive,
       ...(reason ? { reason } : {}),
     };
-    // A disabled setting or a client without MCP Apps is an expected state.
+    // A disabled setting or a client without MCP Apps is an expected state,
+    // and so is any reason while the feature is only on by default.
     if (
       reason &&
       reason !== 'setting-disabled' &&
-      reason !== 'unsupported-client'
+      reason !== 'unsupported-client' &&
+      this.bundledGeneratedUi.explicit
     ) {
       const warning = `Bundled Generated UI is unavailable (${reason}). Restart the owning session after resolving it.`;
       this.warnings.push(warning);

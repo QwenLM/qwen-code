@@ -3215,6 +3215,8 @@ export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older daemons. */
@@ -3258,6 +3260,7 @@ export interface DaemonSessionContextUsage {
   breakdown: DaemonContextCategoryBreakdown;
   builtinTools: DaemonContextToolDetail[];
   mcpTools: DaemonContextToolDetail[];
+  instructionFiles?: DaemonContextMemoryDetail[];
   memoryFiles: DaemonContextMemoryDetail[];
   skills: DaemonContextSkillDetail[];
   isEstimated?: boolean;
@@ -3743,7 +3746,7 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose output arrived in more than one chunk.
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */

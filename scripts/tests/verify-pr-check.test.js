@@ -437,7 +437,7 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(bad.stdout).toContain('failed: verdict=merge-ready');
   });
 
-  it('reads the verified head from the round snapshot', () => {
+  it('names the legacy snapshot when the round has none', () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-snapshot-'));
     tmpDirs.push(root);
     const artifacts = join(root, 'tmp', 'pr7-verify-20261026-120000');
@@ -464,6 +464,20 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`does not name the verified head ${head}`);
+    expect(result.stdout).toContain(
+      join(root, 'tmp', 'verify-context', 'pr7.json'),
+    );
+
+    for (const snapshot of ['{', '{}']) {
+      writeFileSync(join(artifacts, 'context.json'), snapshot);
+      const unreadable = run(artifacts);
+      expect(unreadable.status).toBe(0);
+      expect(unreadable.stdout).toContain(join(artifacts, 'context.json'));
+      expect(unreadable.stdout).toContain('fell back to presence-only');
+      expect(unreadable.stdout).not.toContain(
+        `does not name the verified head ${head}`,
+      );
+    }
   });
 
   it('exits 2 without a directory and 1 on a missing one', () => {
