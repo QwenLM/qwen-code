@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.96.0",
-    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes."
+    "version": "1.98.0",
+    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
     {
@@ -506,7 +506,7 @@
         "tags": ["Public Sessions"],
         "operationId": "getSessionEvents",
         "x-qwen-implementation-status": "implemented",
-        "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor strictly below replay_floor_sequence gets 409 cursor_expired as JSON; SSE sends one agent.session.resync_required frame and closes. Projection rebuilds preserve the floor and current immutable Snapshot until a replacement is published, and do not make expired positions readable again.",
+        "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor strictly below replay_floor_sequence gets 409 cursor_expired as JSON; SSE sends one agent.session.resync_required frame and closes. Projection rebuilds preserve the floor and invalidate message-page cursors. Reload current Items after the projection catches up; expired event positions do not become readable again.",
         "parameters": [
           {
             "$ref": "#/components/parameters/AfterSequence"
@@ -684,7 +684,7 @@
               ],
               "default": 0
             },
-            "description": "Initial sequence filter, or opaque next_cursor from the preceding Item page."
+            "description": "Exclusive first_sequence boundary on the first page, or an opaque message cursor. Explicit cursor takes precedence."
           },
           {
             "name": "cursor",
@@ -694,7 +694,7 @@
               "type": "string",
               "maxLength": 4096
             },
-            "description": "Opaque next_cursor from the preceding Item page; when supplied, it takes precedence over after."
+            "description": "Opaque current-message continuation cursor bound to scope, direction, membership range and projection generation. Old snapshot cursors are rejected."
           },
           {
             "$ref": "#/components/parameters/ListLimit"
@@ -702,7 +702,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Materialized items and snapshot watermark.",
+            "description": "Current message Items and the initial sequence membership upper bound.",
             "content": {
               "application/json": {
                 "schema": {
@@ -712,7 +712,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -724,10 +724,16 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "413": {
+            "$ref": "#/components/responses/MessagePageTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Items are read from one immutable Snapshot. Pass next_cursor as after or cursor to continue the same snapshot, even while new messages or revisions are committed. Positions are scoped to tenant and Session and expire after 30 minutes with 409 cursor_expired. A numeric after on the first page retains its sequence-filter meaning. snapshot_through_sequence remains fixed across that pagination."
+        "description": "Requires current Session read authorization on every page. Read bounded current message-table pages in chronological order. The first request fixes a sequence membership upper bound; later pages retain that range but read current bodies and statuses. Numeric after excludes every Item with first_sequence at or below that value. Explicit cursor takes precedence; nonnumeric after is an existing cursor alias. Continuation uses the complete (first_sequence,item_id) position. Cursors bind tenant, Session, direction and projection generation, and are rejected after a projection rebuild. Old signed snapshot cursors are invalid. snapshot_through_sequence retains its wire name and denotes the initial membership bound, not immutable content. A lagging initial projection returns retryable message_projection_pending; canonical history and writer ownership are unchanged."
       }
     },
     "/v1/agents/sessions/{sessionId}/artifacts": {
@@ -1232,7 +1238,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1244,10 +1250,16 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
+        "description": "Requires current Session read authorization. Read the most recent limit current message Items and selected bounded Turn control events; olderCursor pages toward older Items. Bodies and statuses remain live. The response coveredSequence and lastSequence both identify actual message projection coverage for SSE continuation, never an unmaterialized event tail. No persisted conversation snapshot or whole-history replay is read. Projection rebuild invalidates cursors. If projection coverage is below the replay floor, return retryable message_projection_pending."
       }
     },
     "/api/agent/web-shell/v1/events/stream": {
@@ -1255,7 +1267,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellStreamEvents",
         "x-qwen-implementation-status": "implemented",
-        "description": "POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and the current immutable Snapshot. On the resync frame, reload the transcript and resume after its lastSequence.",
+        "description": "POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and invalidate message-page cursors. On the resync frame, reload the transcript and resume after its lastSequence.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5236,7 +5248,7 @@
         },
         "responses": {
           "200": {
-            "description": "Immutable public item snapshot page.",
+            "description": "Chronological page of current message Items within the initial sequence membership range; content remains live.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5246,7 +5258,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -5258,14 +5270,17 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
-        "summary": "Read one immutable public Session snapshot page for reading exports"
+        "description": "Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned. A projection-generation change returns 409 message_projection_changed; discard the cursor and restart this read.",
+        "summary": "Read one current Session message page for exports"
       }
     },
     "/v1/agents/sessions/{sessionId}/user-messages": {
@@ -7477,7 +7492,7 @@
         },
         "responses": {
           "200": {
-            "description": "Bounded recent published Item page. Items are chronological within each page.",
+            "description": "Bounded recent current message Item page. Items are chronological within each page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7487,7 +7502,7 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "$ref": "#/components/responses/InvalidMessagePage"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -7499,14 +7514,17 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
+            "$ref": "#/components/responses/MessagePageTooLarge"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/MessageProjectionChanged"
+          },
+          "503": {
+            "$ref": "#/components/responses/MessageProjectionPending"
           }
         },
-        "description": "Requires current Session read authorization on every page. The first page returns at most limit Items from the newest published snapshot, in chronological order. nextCursor pages toward older Items in that same signed, retained snapshot. snapshotThroughSequence identifies its coverage, which may lag the current Session head; an empty page with zero coverage does not certify an empty Session because no published snapshot may be available. This page does not contain live tail events or current approval/task state; use the existing transcript, event and state APIs for those. A newer snapshot does not change an existing cursor. Forward export cursors cannot be used here and backward cursors cannot be used for exports. No journal replay, writer acquisition or local cache is involved.",
-        "summary": "Read recent published Session items and page toward older items"
+        "description": "Requires current Session read authorization on every page. Read at most limit recent current message Items in chronological order; nextCursor continues toward older Items in the initial sequence membership range. snapshotThroughSequence names that fixed membership upper bound, while bodies and statuses remain live. Cursors bind scope, backward direction and projection generation. Rebuild invalidates the cursor. No snapshot copies are generated and no live tail is scanned; transcript reads provide actual projection coverage for SSE handoff. Projection coverage below the replay floor returns retryable message_projection_pending.",
+        "summary": "Read recent current Session Items and page toward older Items"
       }
     }
   },
@@ -7745,6 +7763,46 @@
       },
       "Unavailable": {
         "description": "A dependency such as the Hosted Harness is unavailable; retry later.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessageProjectionChanged": {
+        "description": "409 message_projection_changed: the message projection generation changed. Discard the message cursor and restart this read; this is not replay-floor cursor expiration.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessagePageTooLarge": {
+        "description": "413 message_page_too_large: selected message bodies or Turn control events exceed the response byte budget. Reducing limit can help a multi-Item page, but a single oversized Item cannot be returned even with limit=1. Signed POST requests may also return payload_too_large when their request body exceeds the configured signed-body limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "InvalidMessagePage": {
+        "description": "400 invalid_message_cursor for malformed, wrong-scope, wrong-direction or out-of-range message cursors; invalid_limit outside 1..100; invalid_event_cursor for a negative numeric after.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "MessageProjectionPending": {
+        "description": "503 message_projection_pending: projection coverage is below the replay floor, or the initial forward read is behind committed events. Retry after message projection catches up.",
         "content": {
           "application/json": {
             "schema": {
@@ -8195,13 +8253,14 @@
             "format": "int64",
             "minimum": 0,
             "default": 0,
-            "description": "Events at or below this sequence may be pruned. A replay cursor strictly below this durable floor has expired, including after projection rebuild or removal of every retained event. The current immutable Snapshot remains available until replacement."
+            "description": "Events at or below this sequence may be pruned. A replay cursor strictly below this durable floor has expired, including after projection rebuild or removal of every retained event. Reload current Items to resynchronize; projection coverage below the floor returns retryable message_projection_pending."
           },
           "snapshot_through_sequence": {
             "type": "integer",
             "format": "int64",
             "minimum": 0,
-            "default": 0
+            "default": 0,
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "capabilities": {
             "$ref": "#/components/schemas/SessionCapabilities"
@@ -8260,7 +8319,8 @@
             "type": "boolean"
           },
           "snapshots": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Retained capability name for reading the current message projection. It does not promise persisted fixed-version conversation snapshots."
           },
           "artifacts": {
             "type": "boolean"
@@ -8393,7 +8453,7 @@
       },
       "PublicEvent": {
         "type": "object",
-        "description": "A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no item_id or content_part_id, and that later deltas may name other Parts. Reload the Items until the snapshot_through_sequence they return reaches the sequence of the stream.reconciled event, then resume after that snapshot_through_sequence, not after the stream.reconciled event; the Snapshot is rebuilt meanwhile.",
+        "description": "A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no item_id or content_part_id, and that later deltas may name other Parts. Start a fresh Items query and retry message_projection_pending until the returned snapshot_through_sequence reaches the stream.reconciled sequence. Resume after that returned sequence, which bounds the initial live-message membership range; content is not frozen.",
         "required": [
           "schema_version",
           "projection_version",
@@ -8483,7 +8543,8 @@
           "snapshot_through_sequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "action": {
             "const": "reload_snapshot"
@@ -8841,12 +8902,13 @@
           },
           "next_cursor": {
             "type": ["string", "null"],
-            "description": "Opaque position in the same immutable Snapshot; pass it as after or cursor. Scoped to tenant and Session, with a fixed 30-minute expiry."
+            "description": "Opaque current-message continuation position; pass it as after or cursor. Bound to tenant, Session, forward direction, initial membership range and projection generation. Rebuild invalidates the cursor; no fixed snapshot retention or expiry is promised."
           },
           "snapshot_through_sequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Fixed first-request sequence membership upper bound. Bodies and statuses are read live on every page; this does not identify a retained content version."
           }
         }
       },
@@ -8921,12 +8983,12 @@
           },
           "cursor": {
             "type": ["string", "null"],
-            "maxLength": 512
+            "maxLength": 4096
           },
           "limit": {
             "type": ["integer", "null"],
             "minimum": 1,
-            "maximum": 1000,
+            "maximum": 100,
             "default": 100
           }
         }
@@ -9264,7 +9326,8 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0,
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "planned",
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "approvalMode": {
             "type": "string",
@@ -9465,7 +9528,8 @@
           "coveredSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Actual message projection coverage of this read; resume SSE after this sequence."
           },
           "olderCursor": {
             "type": ["string", "null"]
@@ -9476,7 +9540,8 @@
           "lastSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Actual message projection coverage for SSE handoff, equal to coveredSequence; unmaterialized tail events are delivered by SSE."
           }
         }
       },
@@ -9662,7 +9727,8 @@
           "snapshotThroughSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Retained wire name for current message projection coverage; no persisted conversation snapshot is implied."
           },
           "action": {
             "const": "reload_snapshot"
@@ -15693,7 +15759,8 @@
           "snapshotThroughSequence": {
             "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Fixed first-request sequence membership upper bound. Bodies and statuses are read live on every page; this does not identify a retained content version."
           }
         }
       },

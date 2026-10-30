@@ -560,14 +560,11 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
-    void transcriptContractPromisesTheFullTailPastTheSnapshot() {
-        // The cursor-less transcript serves every event after the Snapshot;
-        // a server-side paging change that leaves this published sentence
-        // stale must turn the suite red, so pin the sentence itself.
+    void transcriptContractPromisesBoundedMessagesAndProjectedStreamHandoff() {
         String description = CONTRACT.operation("webShellTranscript").node()
                 .path("description").asText();
-        assertThat(description).contains("and every event after it");
-        assertThat(description).contains("limit bounds the page of events");
+        assertThat(description).contains("most recent limit current message Items");
+        assertThat(description).contains("actual message projection coverage for SSE continuation");
     }
 
     @Test
@@ -1095,6 +1092,10 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                mvc.perform(get("/v1/agents/sessions/{id}/items", webSessionId)
+                                .header(TENANT, tenant))
+                        .andExpect(status().isOk()));
         exchange(drift, "webShellExportSession", 200,
                 post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId));
@@ -1233,6 +1234,27 @@ class ManagedAgentApiContractTest {
                     .isEqualTo("confirmed");
         }
         awaitMaterialized(tenant, webSessionId);
+        for (var operation : Map.of("webShellTranscript", "/transcript/query",
+                "webShellExportSession", "/sessions/export/query",
+                "webShellRecentTranscriptItems", "/transcript/items/query").entrySet()) {
+            String liveRead = "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId);
+            exchange(drift, operation.getKey(), 200,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant), liveRead);
+            // The removed selector is tolerated by MVC, outside the current request schema.
+            var legacy = mvc.perform(post(WEB_SHELL + operation.getValue()).header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(liveRead.replace("\"limit\":1", "\"view\":\"messages\",\"limit\":1")))
+                    .andReturn().getResponse();
+            assertThat(legacy.getStatus()).isEqualTo(200);
+            collect(drift, "legacy view response " + operation.getKey(), CONTRACT.validate(
+                    CONTRACT.responsePointer(CONTRACT.operation(operation.getKey()), 200),
+                    objectMapper.readTree(legacy.getContentAsString(StandardCharsets.UTF_8))));
+            exchange(drift, operation.getKey(), 404,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, otherTenant), liveRead);
+            exchange(drift, operation.getKey(), 400,
+                    post(WEB_SHELL + operation.getValue()).header(TENANT, tenant),
+                    liveRead.replace("\"limit\":1", "\"limit\":101"));
+        }
         exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));
@@ -1241,7 +1263,7 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId));
         exchange(drift, "webShellTranscript", 200,
                 post(WEB_SHELL + "/transcript/query").header(TENANT, tenant),
-                "{\"sessionId\":\"%s\",\"limit\":1000}"
+                "{\"sessionId\":\"%s\",\"limit\":100}"
                         .formatted(webSessionId));
 
         String webInputId = json(exchange(drift, "webShellCreateSession",

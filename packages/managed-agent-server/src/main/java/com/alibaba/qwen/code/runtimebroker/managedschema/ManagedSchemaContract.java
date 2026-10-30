@@ -17,7 +17,6 @@ public final class ManagedSchemaContract {
                     "ma_event_stream",
                     "ma_public_event",
                     "ma_message",
-                    "ma_snapshot",
                     "ma_session_record",
                     "ma_agent_definition",
                     "ma_extension_package",
@@ -112,7 +111,6 @@ public final class ManagedSchemaContract {
 
     public enum ResourceOwnerKind {
         JOURNAL,
-        SNAPSHOT,
         NATIVE_SNAPSHOT,
         CAPTURE,
         ARTIFACT,

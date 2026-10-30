@@ -213,6 +213,7 @@ export function createJavaManagedAgentProvider(
         { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
+    exportConsistency: 'live',
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -879,6 +880,12 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      if (
+        !Number.isSafeInteger(transcript.coveredSequence) ||
+        transcript.coveredSequence < 0
+      ) {
+        throw new Error('Invalid message transcript coverage.');
+      }
       const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
@@ -889,7 +896,8 @@ export function createJavaManagedAgentProvider(
           (left, right) => left.id - right.id,
         ),
         olderCursor: transcript.olderCursor ?? undefined,
-        lastEventId: transcript.lastSequence,
+        lastEventId: transcript.coveredSequence,
+        history: 'items',
       };
     },
     async createSession(request, command) {

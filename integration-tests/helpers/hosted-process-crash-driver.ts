@@ -50,6 +50,10 @@ const report = {
   promptSubmissions: 0,
   continuationsAfterFailure: 0,
   postFailureLoads: [] as boolean[],
+  postFailureCancellationLoads: 0,
+  // Record non-resuming recovery modes separately from their wire origins.
+  // Both modes target the original prompt; cleanup alone cannot prove takeover.
+  postFailureLoadOrigins: [] as string[],
   lateCancelReplays: 0,
   originalCancelBody: '',
 };
@@ -156,8 +160,44 @@ const proxy = createServer(async (req, res) => {
           `/session/${config.sessionId}/managed-runtime/continue`
       )
         report.continuationsAfterFailure++;
-      if (injected && target.pathname.endsWith('/load'))
-        report.postFailureLoads.push(fields.cancellationTakeover === true);
+      let postFailureLoadIndex: number | undefined;
+      let postFailureCancellationLoad = false;
+      if (injected && target.pathname.endsWith('/load')) {
+        const cancellationOnly =
+          fields.cancellationTakeover === true &&
+          fields.passiveManagedRuntimeRecovery === true &&
+          typeof fields.cancellationPromptId === 'string' &&
+          fields.cancellationPromptId === report.promptId &&
+          fields.recoveryCleanupPromptId === undefined;
+        const cleanupOnly =
+          typeof fields.recoveryCleanupPromptId === 'string' &&
+          fields.recoveryCleanupPromptId === report.promptId &&
+          fields.cancellationTakeover !== true &&
+          fields.passiveManagedRuntimeRecovery !== true &&
+          fields.cancellationPromptId === undefined;
+        const nonDriving =
+          fields.driveRuntimeRecovery !== true &&
+          fields.mcpManagementOnly !== true &&
+          fields.lifecycleAuthority === undefined;
+        postFailureLoadIndex = report.postFailureLoads.length;
+        report.postFailureLoads.push(
+          nonDriving && (cancellationOnly || cleanupOnly),
+        );
+        postFailureCancellationLoad = nonDriving && cancellationOnly;
+        report.postFailureLoadOrigins.push(
+          [
+            `takeover=${fields.cancellationTakeover === true}`,
+            `passive=${fields.passiveManagedRuntimeRecovery === true}`,
+            `drive=${fields.driveRuntimeRecovery === true}`,
+            `mcpOnly=${fields.mcpManagementOnly === true}`,
+            `promptId=${typeof fields.cancellationPromptId === 'string'}`,
+            `promptMatches=${fields.cancellationPromptId === report.promptId}`,
+            `cleanup=${typeof fields.recoveryCleanupPromptId === 'string'}`,
+            `cleanupMatches=${fields.recoveryCleanupPromptId === report.promptId}`,
+            `lifecycle=${fields.lifecycleAuthority !== undefined}`,
+          ].join(' '),
+        );
+      }
       const headers = Object.fromEntries(
         Object.entries(req.headers)
           .filter(
@@ -181,6 +221,12 @@ const proxy = createServer(async (req, res) => {
         headers,
         ...(body.length ? { body } : {}),
       });
+      if (postFailureLoadIndex !== undefined) {
+        report.postFailureLoadOrigins[postFailureLoadIndex] +=
+          ` status=${upstream.status}`;
+        if (postFailureCancellationLoad && upstream.ok)
+          report.postFailureCancellationLoads++;
+      }
       if (target.pathname.endsWith('/events') && upstream.body) {
         res.writeHead(upstream.status, relayedHeaders(upstream.headers));
         const reader = upstream.body.getReader();
@@ -679,10 +725,17 @@ async function runRecoverySettlement() {
   assert.equal(report.modelCalls, 1);
   assert.equal(report.promptSubmissions, 1);
   assert.equal(report.continuationsAfterFailure, 0);
-  assert(report.postFailureLoads.length > 0);
+  assert(
+    report.postFailureLoads.length > 0,
+    `no post-failure loads were recorded at all: ${JSON.stringify(report.postFailureLoadOrigins)}`,
+  );
+  assert(
+    report.postFailureCancellationLoads > 0,
+    'replacement must use a targeted cancellation takeover load',
+  );
   assert(
     report.postFailureLoads.every(Boolean),
-    'replacement must use cancellation-only loads',
+    `replacement must use targeted cancellation or cleanup-only loads: ${report.postFailureLoadOrigins.join(' | ')}`,
   );
   await unlink(`${proof}.read-gate`);
   await waitUntil(async () => {

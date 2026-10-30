@@ -2338,6 +2338,9 @@ const EN: Messages = {
   'update.button': 'Update',
   'update.restarting': 'Restarting…',
   'update.readyTitle': (v) => `Update to v${v?.version} and restart`,
+  'update.manualTitle': (v) => `Update to v${v?.version} (manual)`,
+  'update.manualHint':
+    'This installation cannot be updated from the Web Shell. Update guidance:',
   'update.failed':
     'Update could not finish. Check the service connection and retry.',
 
@@ -6781,6 +6784,8 @@ const ZH: Messages = {
   'update.button': '更新',
   'update.restarting': '重启中…',
   'update.readyTitle': (v) => `更新至 v${v?.version} 并重启`,
+  'update.manualTitle': (v) => `更新至 v${v?.version}（手动）`,
+  'update.manualHint': '当前安装方式无法在 Web Shell 中更新。更新指引：',
   'update.failed': '未能完成更新，请检查服务连接后重试。',
 
   'sidebar.daemonStatus': 'Daemon 状态',

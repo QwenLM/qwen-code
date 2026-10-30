@@ -601,7 +601,11 @@ test('retains the actual App and Worker across virtual row unmounts @smoke', asy
   await view.getByRole('button', { name: 'Apply', exact: true }).click();
   await expect(view.locator('#answer')).toHaveText('1:7');
   await view.getByRole('button', { name: 'Insert controls' }).click();
-  await view.locator('#two').check();
+  // Nested iframe layout can move during pointer dispatch; this case tests
+  // retained input state, so select through the radio's keyboard interaction.
+  await view.locator('#two').focus();
+  await view.locator('#two').press('Space');
+  await expect(view.locator('#two')).toBeChecked();
   await view.locator('#choice').selectOption('b');
   await view.locator('#rate').fill('9');
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'dirty');
