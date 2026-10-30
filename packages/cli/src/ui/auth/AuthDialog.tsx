@@ -185,7 +185,7 @@ function ProviderMenu<T>({
   const errorRows = error ? (truncateError ? 1 : wrappedErrorRows) : 0;
   const showError = !!error && height > chromeRows + errorRows;
   const errorBudget = showError ? errorRows : 0;
-  const compactFooterRows = showTerms ? rows(TERMS_URL) : 1;
+  const compactFooterRows = showTerms ? rows(TERMS_URL) : rows(hint);
   const showFooter =
     !compact || height >= chromeRows + errorBudget + compactFooterRows + 1;
   const gap = compact ? 0 : 1;
@@ -275,10 +275,7 @@ function ProviderMenu<T>({
           </Box>
         ) : (
           <Box marginTop={compact ? 0 : 1} flexShrink={0}>
-            <Text
-              color={theme.text.secondary}
-              wrap={compact ? 'truncate' : 'wrap'}
-            >
+            <Text color={theme.text.secondary} wrap="wrap">
               {hint}
             </Text>
           </Box>
