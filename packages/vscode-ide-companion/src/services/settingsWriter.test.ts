@@ -499,6 +499,28 @@ describe('settingsWriter', () => {
       });
     });
 
+    it('clears a stale model.baseUrl when the plan selects by model id only', async () => {
+      writeCliManagedModelSettings();
+
+      // Subscription installs select by model id alone, so no baseUrl flows
+      // through the plan. The empty-string tombstone must survive JSON
+      // serialization — dropping the key would leave the stale URL in place.
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        modelSelection: { modelId: 'gpt-4o' },
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      expect(readModelSettings()).toEqual({
+        name: 'gpt-4o',
+        baseUrl: '',
+        reasoningEffort: 'high',
+        maxSessionTurns: 40,
+      });
+    });
+
     it('strips a runtime snapshot prefix before persisting model.name', async () => {
       const plan: ProviderInstallPlan = {
         providerId: 'test',
